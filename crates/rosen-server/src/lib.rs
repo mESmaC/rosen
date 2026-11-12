@@ -13,6 +13,7 @@ pub mod import;
 pub mod landing;
 pub mod listener;
 pub mod mirror;
+pub mod receipts;
 pub mod reviews;
 pub mod rpc;
 
@@ -33,6 +34,7 @@ pub struct ServerState {
     pub started: Instant,
     pub events: EventLog,
     pub changes: changes::ChangeService,
+    pub receipts: receipts::ReceiptService,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
 }
@@ -41,6 +43,7 @@ impl ServerState {
     pub fn new(config: ServerConfig) -> Arc<Self> {
         let state = Arc::new(Self {
             changes: changes::ChangeService::new(&config.data_dir),
+            receipts: receipts::ReceiptService::new(config.clone()),
             events: EventLog::open(config.metadata_path()),
             config,
             started: Instant::now(),

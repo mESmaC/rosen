@@ -218,21 +218,39 @@ impl Ledger {
         commit.map(parse_commit).transpose()
     }
 
-    /// Stores a receipt. Submitting the same receipt twice is a no-op.
-    pub fn put_receipt(&self, receipt: &Receipt) -> LandResult<()> {
+    /// Stores a receipt and returns the stored row. Submitting the same
+    /// `(change, head, base, check set)` again is a no-op that keeps the
+    /// first submitter: a stored receipt is never rewritten.
+    pub fn put_receipt(&self, receipt: &Receipt) -> LandResult<Receipt> {
         let connection = self.lock()?;
+        let (change, head, base) = (
+            receipt.change.to_string(),
+            receipt.head.to_string(),
+            receipt.base.to_string(),
+        );
         connection.execute(
             "INSERT OR IGNORE INTO receipts (change_id, head, base, check_set, submitter)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
-                receipt.change.to_string(),
-                receipt.head.to_string(),
-                receipt.base.to_string(),
+                change,
+                head,
+                base,
                 receipt.check_set,
                 receipt.submitter.as_str()
             ],
         )?;
-        Ok(())
+        // Receipts are never deleted, so the row is there whether this call
+        // or an earlier one inserted it.
+        let submitter: String = connection.query_row(
+            "SELECT submitter FROM receipts
+             WHERE change_id = ?1 AND head = ?2 AND base = ?3 AND check_set = ?4",
+            params![change, head, base, receipt.check_set],
+            |row| row.get(0),
+        )?;
+        Ok(Receipt {
+            submitter: AgentId::new(submitter)?,
+            ..receipt.clone()
+        })
     }
 
     /// Finds the receipt for `head` and `check_set` whose base is newest in

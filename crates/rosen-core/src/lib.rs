@@ -1,5 +1,5 @@
 //! Rosen's core data model (SPEC.md §2, §3): git-format objects, changes,
-//! stacks, landed history, conflicts and review threads.
+//! stacks, landed history, conflicts, review threads and receipts.
 //!
 //! This crate is pure logic and performs no I/O, so the store, the server,
 //! the client and the proofs' reference models can all share it.
@@ -10,6 +10,7 @@ pub mod conflict;
 pub mod hash;
 pub mod history;
 pub mod object;
+pub mod receipt;
 pub mod review;
 pub mod stack;
 
@@ -19,6 +20,7 @@ pub use conflict::{Conflict, ConflictId, ConflictSet};
 pub use hash::ObjectId;
 pub use history::{CommitGraph, LandedCommit, LandedTrailers};
 pub use object::{Blob, Commit, FileMode, Object, ObjectKind, Signature, Tree, TreeEntry};
+pub use receipt::{Receipt, ReceiptRefusal, PRE_LAND_CHECK_SET};
 pub use review::ThreadState;
 pub use stack::Stack;
 

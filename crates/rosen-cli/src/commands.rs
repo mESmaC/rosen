@@ -268,18 +268,32 @@ pub enum ReviewCommand {
 pub enum ReceiptCommand {
     /// Record that a check set passed on a change's merge result onto one
     /// base commit.
+    ///
+    /// Checkers run the checks outside Rosen, on the merge result the server
+    /// computed for the change onto base commit BASE, then submit a receipt
+    /// bound to (HEAD, BASE, check set). A land needs one for every change
+    /// that is not prose-only. The server refuses a receipt when HEAD is not
+    /// the change's current head, the check set is not the pre-land one, or
+    /// the base ref never held BASE. If the base moves on before the land,
+    /// the land decides whether the receipt still counts or a new one is
+    /// needed. Submitting the same receipt again changes nothing.
     Submit {
-        /// Change the checks ran for.
+        /// Change the checks ran for: its ID or a unique prefix.
         change: String,
-        /// Change head the checks ran on.
-        #[arg(long)]
+        /// Change head the checks ran on, as `rosen change show` prints it.
+        #[arg(long, value_name = "HEAD")]
         head: String,
-        /// Base commit the change was merged onto.
-        #[arg(long)]
+        /// Base commit the change was merged onto for the checks.
+        #[arg(long, value_name = "BASE")]
         base: String,
-        /// Check set that passed, for example `pre-land`.
+        /// Check set that passed. Only the pre-land check set (build and
+        /// lint) is accepted.
         #[arg(long, default_value = "pre-land")]
         check_set: String,
+        /// Agent that ran the checks, recorded on the receipt and in the
+        /// landed commit. Defaults to $ROSEN_AGENT, then the OS user name.
+        #[arg(long, value_name = "AGENT")]
+        submitter: Option<String>,
     },
 }
 

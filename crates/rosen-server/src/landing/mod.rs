@@ -23,7 +23,9 @@ pub use ledger::{CasResult, InitBase, LandRecord, Ledger};
 pub use restack::RestackReport;
 pub use rules::{LandInput, ReceiptCheck, Refusal, Verdict};
 
-pub use rosen_core::{AgentId, ChangeId, ChangeParent, ChangeState, LandedCommit, ObjectId};
+pub use rosen_core::{
+    AgentId, ChangeId, ChangeParent, ChangeState, LandedCommit, ObjectId, Receipt,
+};
 
 /// A commit object ID. An alias of [`ObjectId`] that names the role.
 pub type CommitId = ObjectId;
@@ -79,19 +81,6 @@ pub struct ChangeFacts {
     pub approved_head: Option<CommitId>,
     /// Who approved the change at `approved_head` (the D15 approval trailers).
     pub approvers: Vec<AgentId>,
-}
-
-/// A record that the pre-land check set passed on one exact merge result
-/// (SPEC §2): bound to `(head, base, check set)`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Receipt {
-    pub change: ChangeId,
-    pub head: CommitId,
-    pub base: CommitId,
-    pub check_set: String,
-    /// A validated identity: it is written into the landed commit's
-    /// `Rosen-Receipt` trailer, so it must not carry a newline (issue #18).
-    pub submitter: AgentId,
 }
 
 /// The result of merging a change onto a base commit.
