@@ -4,6 +4,8 @@
 //! SQLite metadata store, and does every merge, rebase, land and history
 //! query on behalf of thin clients.
 
+pub mod import;
+
 use std::path::PathBuf;
 
 /// Where a server keeps its state.
