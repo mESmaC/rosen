@@ -32,6 +32,14 @@ impl Sparse {
         Ok(Self { paths })
     }
 
+    /// The chosen paths, normalised; empty for the whole tree.
+    pub fn chosen(&self) -> Vec<String> {
+        self.paths
+            .iter()
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect()
+    }
+
     pub fn is_all(&self) -> bool {
         self.paths.is_empty()
     }

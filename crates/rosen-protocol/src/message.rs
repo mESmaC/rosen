@@ -13,6 +13,7 @@ use crate::claim::{
 };
 use crate::receipt::{ReceiptRecord, SubmitReceipt};
 use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
+use crate::snapshot::{ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest};
 use rosen_core::AgentId;
 use serde::{Deserialize, Serialize};
 
@@ -158,6 +159,11 @@ pub enum Request {
         #[serde(default)]
         mirror: Option<String>,
     },
+    /// Stores blobs and trees a snapshot needs (SPEC R2). Idempotent.
+    PutObjects(ObjectUpload),
+    /// Records a snapshot of a workspace's tree on its change: automatic
+    /// from the watcher, or named by `rosen commit` (SPEC R2, D17).
+    Snapshot(SnapshotRequest),
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -176,6 +182,8 @@ pub enum Response {
     Waiting(WaitOutcome),
     Released(ReleaseOutcome),
     PathClaims(Vec<PathClaim>),
+    ObjectsStored(ObjectsStored),
+    Snapshot(SnapshotOutcome),
     EventsAcked(EventCursor),
     /// The answer to `review_comment` and `review_resolve`.
     ReviewThread(ReviewThread),

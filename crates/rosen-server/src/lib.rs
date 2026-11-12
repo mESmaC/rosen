@@ -16,6 +16,7 @@ pub mod mirror;
 pub mod receipts;
 pub mod reviews;
 pub mod rpc;
+pub mod snapshots;
 
 use events::EventLog;
 use rosen_protocol::Endpoint;

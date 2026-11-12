@@ -11,6 +11,7 @@ pub mod frame;
 pub mod message;
 pub mod receipt;
 pub mod review;
+pub mod snapshot;
 pub mod transport;
 
 pub use change::{ChangeFilter, ChangeRecord, NewChange};
@@ -22,5 +23,8 @@ pub use message::*;
 pub use receipt::{ReceiptRecord, SubmitReceipt};
 pub use review::{
     CommentRequest, CommentTarget, ResolveRequest, ReviewComment, ReviewThread, ThreadFilter,
+};
+pub use snapshot::{
+    ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest, UploadKind, UploadObject,
 };
 pub use transport::{connect, BoxStream, Endpoint, Listener};

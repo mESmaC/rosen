@@ -59,12 +59,19 @@ pub enum Command {
     Change(ChangeCommand),
     /// Record a named snapshot of the current workspace.
     ///
-    /// Snapshots happen automatically within 2 s of each write; commit only
-    /// to give a point in the change's history a message.
+    /// While `rosen workspace watch` (or Velocity) watches a workspace, its
+    /// writes are snapshotted within 2 s; commit to give a point in the
+    /// change's history a message. Commit scans the whole workspace and
+    /// sends only files that differ from the last snapshot, skipping paths
+    /// the workspace's .gitignore files ignore unless already tracked.
     Commit {
         /// Message describing the snapshot.
         #[arg(short, long)]
         message: String,
+        /// Workspace to snapshot. Defaults to the one holding the current
+        /// directory.
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
     },
     /// Show the current change, its state, conflicts and unsnapshotted files.
     Status,
@@ -301,6 +308,18 @@ pub enum ReceiptCommand {
 pub enum WorkspaceCommand {
     /// List workspaces and the change each belongs to.
     List,
+    /// Snapshot a local workspace on every write until Ctrl-C.
+    ///
+    /// Each write is on the server within 2 s. The first snapshot covers
+    /// the whole workspace, catching writes made while nothing watched it.
+    /// Writes to ignored paths are skipped and never delay a snapshot. A
+    /// failed snapshot is retried every second, and its files are kept.
+    Watch {
+        /// Workspace to watch. Defaults to the one holding the current
+        /// directory.
+        #[arg(value_name = "DIR")]
+        workspace: Option<PathBuf>,
+    },
     /// Delete a workspace. Refused, naming the files, while any edit in it
     /// is not yet stored on the server.
     Delete {
@@ -364,6 +383,7 @@ impl Command {
             Command::Land { .. } => "land",
             Command::Resolve { .. } => "resolve",
             Command::Workspace(WorkspaceCommand::List) => "workspace list",
+            Command::Workspace(WorkspaceCommand::Watch { .. }) => "workspace watch",
             Command::Workspace(WorkspaceCommand::Delete { .. }) => "workspace delete",
             Command::Server(ServerCommand::Start) => "server start",
             Command::Server(ServerCommand::Status) => "server status",
