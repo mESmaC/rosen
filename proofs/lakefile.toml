@@ -1,4 +1,4 @@
-name = "rosen-proofs"
+name = "proofs"
 defaultTargets = ["ThreeWayMerge"]
 
 # One library per proof-list feature (SPEC §7).
