@@ -174,6 +174,7 @@ theorem correct (os ts : List (Op α)) (h : baseOf os = baseOf ts) :
     simp only [merge, List.getElem_map]
     exact resolve_honest _
 
+-- SPEC.md §R5
 /-- **Cost bound.** Cost model: one unit per recursive step of `chunk`, each of
 which reads at most one op from each script (the Rust partition advances its
 three line cursors the same way). Cutting the chunks costs at most the total
@@ -219,6 +220,7 @@ theorem resolve_conflict_forced (other : Chunk α → Region α)
         · simp [Region.isConflict] at hr
         · simp_all [Honest]
 
+-- SPEC.md §R5
 /-- **Optimality.** Cost model: the number of conflict regions an agent must
 resolve. Class of alternatives: every chunk-wise resolver over the same chunks
 that never picks silently, i.e. whose clean regions are all `Honest`. No such
