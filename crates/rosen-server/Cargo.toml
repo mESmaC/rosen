@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 rosen-core.workspace = true
+rosen-client.workspace = true
 rosen-store.workspace = true
 rosen-merge.workspace = true
 rosen-protocol.workspace = true

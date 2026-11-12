@@ -165,6 +165,15 @@ impl Session {
 
     async fn request(&self, id: u64, request: Request, body: Vec<u8>) {
         match request {
+            Request::PoolSize { size } => {
+                self.reply(id, self.state.pool.set_size(size).await).await;
+            }
+            Request::PoolTake { tree, dest } => self.spawn(id, move |state, _| async move {
+                match state.pool.take(tree, dest).await {
+                    Outcome::Ok(response) => Ok(response),
+                    Outcome::Error(error) => Err(error),
+                }
+            }),
             Request::Ping => self.reply(id, Outcome::Ok(Response::Pong)).await,
             Request::Status => {
                 let status = Response::Status(self.state.status());
