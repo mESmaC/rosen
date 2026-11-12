@@ -8,6 +8,9 @@
 //! A failed push publishes a `mirror` event and is retried with backoff
 //! until it succeeds; nothing about it blocks or undoes a land.
 //!
+//! The remote is the one the base's project configuration names, if it
+//! names one, and otherwise the one `rosen import --mirror` stored.
+//!
 //! The task also syncs once at startup, so a land whose push a crash
 //! interrupted reaches the mirror when the server comes back.
 
@@ -19,6 +22,7 @@ use std::time::Duration;
 
 use rosen_core::ObjectId;
 use rosen_protocol::EventKind;
+use rosen_store::LooseObjectStore;
 use serde_json::json;
 use tokio::sync::watch;
 
@@ -26,6 +30,7 @@ pub use push::{hide_credentials, PushFailure};
 pub use state::{MirrorStore, MirrorTarget};
 
 use crate::landing::Ledger;
+use crate::project_config;
 use crate::{ServerConfig, ServerState};
 
 /// The first retry waits this long; each further failure doubles the wait.
@@ -131,16 +136,37 @@ fn read_target(
         return Ok(None);
     }
     let store = |error: String| SyncError::Store(error);
-    let target = MirrorStore::open(&metadata)
-        .and_then(|mirror| mirror.target())
-        .map_err(|e| store(e.to_string()))?;
-    let Some(target) = target else {
-        return Ok(None);
-    };
     let base = Ledger::open(&metadata)
         .and_then(|ledger| ledger.project_base())
         .map_err(|e| store(e.to_string()))?;
-    Ok(base.map(|(branch, commit)| (target, branch, commit)))
+    let Some((branch, commit)) = base else {
+        return Ok(None);
+    };
+    let mirror = MirrorStore::open(&metadata).map_err(|e| store(e.to_string()))?;
+    adopt_configured_remote(config, &mirror, &commit)?;
+    let target = mirror.target().map_err(|e| store(e.to_string()))?;
+    Ok(target.map(|target| (target, branch, commit)))
+}
+
+/// A remote named by the base's project configuration replaces the stored
+/// one (SPEC R1), so a land that changes `mirror.remote` takes effect with
+/// its own push. Storing it keeps the pushed commit tracked per remote.
+fn adopt_configured_remote(
+    config: &ServerConfig,
+    mirror: &MirrorStore,
+    base: &ObjectId,
+) -> Result<(), SyncError> {
+    let store = |error: String| SyncError::Store(error);
+    let objects = LooseObjectStore::open(config.objects_dir()).map_err(|e| store(e.to_string()))?;
+    let in_force = project_config::resolve(&objects, base).map_err(|e| store(e.to_string()))?;
+    let Some(remote) = &in_force.config.mirror.remote else {
+        return Ok(());
+    };
+    let stored = mirror.target().map_err(|e| store(e.to_string()))?;
+    if stored.is_some_and(|target| target.remote == *remote) {
+        return Ok(());
+    }
+    mirror.set_remote(remote).map_err(|e| store(e.to_string()))
 }
 
 /// Waits until a land is published after `seen`. Returns false when the

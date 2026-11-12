@@ -23,14 +23,29 @@ pub async fn run(
         submitter,
     } = command;
     // Parse arguments before starting a daemon, so a typo costs nothing.
+    let head = object_id("--head", head)?;
+    let base = object_id("--base", base)?;
+    let submitter = resolve_submitter(submitter.as_deref())?;
+    let client = rosen_client::connect_or_start(endpoint).await?;
+    let check_set = match check_set {
+        Some(name) => name.clone(),
+        None => {
+            client
+                .project_config(None)
+                .await?
+                .config
+                .checks
+                .pre_land
+                .name
+        }
+    };
     let request = SubmitReceipt {
         change: change.clone(),
-        head: object_id("--head", head)?,
-        base: object_id("--base", base)?,
-        check_set: check_set.clone(),
-        submitter: resolve_submitter(submitter.as_deref())?,
+        head,
+        base,
+        check_set,
+        submitter,
     };
-    let client = rosen_client::connect_or_start(endpoint).await?;
     print_receipt(json, &client.submit_receipt(request).await?);
     Ok(true)
 }

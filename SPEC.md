@@ -95,6 +95,11 @@ Defaults set during spec writing. These follow from the decisions above, and cha
   - A prose-only change (R7) reaches no unit.
   - A change to a workspace-wide input reaches every unit.
 - **Independent.** Two changes are independent when their reaches share no unit. Then no unit's build sees both changes.
+- **Project configuration.** The file `rosen.toml` at the repository root. The server reads it from the base, never from a change, so a change takes effect only once it lands.
+  - It lists generated files, registration lists and sensitive paths as path globs, the pre-land and post-land check sets (a name and the commands checkers run), the warm pool size and the mirror remote. Each part is optional and has a default: no paths, check sets named `pre-land` and `post-land` with no commands, a pool of 4 and no remote.
+  - Unknown keys are refused, so a misspelt key cannot drop a list silently.
+  - An invalid file never takes effect. The configuration in force is the one in the nearest first-parent ancestor of the base whose file is valid, or the defaults. The change that fixes the file still lands under the last valid configuration.
+  - `rosen config show` prints the configuration in force and why the base's file was refused, if it was.
 
 ---
 
@@ -124,6 +129,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - After each land, the server pushes the base to the configured git remote (for example GitHub). The push runs after the land commits and off its critical path. A failed push is retried and reported as an event, and never blocks or undoes a land.
 - A push to the mirror is a fast-forward and never a force-push.
 - `rosen import --mirror <remote>` names the remote, a URL or a path. It is kept in the metadata store, so it survives restarts.
+- A remote named in the base's project configuration replaces the stored one at the next push. Removing it from the configuration keeps the last remote.
 - One background task on the server does every push. It pushes the base tip, so lands made during a push go out with the next one. It also pushes at server start, so a push a crash interrupted still happens.
 - Each failed push publishes a `mirror` event with the error and the retry delay. Retries back off from 1 s to at most 5 min. A push the remote refused, for example because the mirror has commits the base lacks, is marked `rejected`: only a person can fix that. The first push that succeeds after failures publishes a `mirror` event too.
 - **Accept when:** a repo imported and then landed on shows the same history in `git log` on the mirror, with one commit per change and its trailers.
@@ -234,7 +240,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 - Rosen's events and the channel's events (R13) share one log, one sequence and one cursor per subscriber. A claim release and the land that caused it are always delivered in order, to subscribers on any machine.
 
 ### R10 · CLI
-- The `rosen` commands are `import`, `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve|list`, `receipt submit`, `land`, `resolve`, `workspace list|delete|watch`, `server start|status`, `events`, `machine join|list|approve|revoke` and `machine key create|list|revoke` (R14).
+- The `rosen` commands are `import`, `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve|list`, `receipt submit`, `land`, `resolve`, `workspace list|delete|watch`, `server start|status`, `config show`, `events`, `machine join|list|approve|revoke` and `machine key create|list|revoke` (R14).
 - `--json` on every command, with versioned output schemas.
 - `--help` is complete enough that an agent can learn Rosen from it alone.
 

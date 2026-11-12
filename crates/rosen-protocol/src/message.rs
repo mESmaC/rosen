@@ -11,6 +11,7 @@ use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
 };
+use crate::config::{ConfigQuery, ConfigRecord};
 use crate::receipt::{ReceiptRecord, SubmitReceipt};
 use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
 use crate::snapshot::{ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest};
@@ -164,6 +165,9 @@ pub enum Request {
     /// Records a snapshot of a workspace's tree on its change: automatic
     /// from the watcher, or named by `rosen commit` (SPEC R2, D17).
     Snapshot(SnapshotRequest),
+    /// Reads the project configuration in force at a commit, by default the
+    /// current base (SPEC "Project configuration").
+    ConfigShow(ConfigQuery),
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -189,6 +193,8 @@ pub enum Response {
     ReviewThread(ReviewThread),
     ReviewThreads(Vec<ReviewThread>),
     Receipt(ReceiptRecord),
+    /// Boxed: a configuration is far larger than every other answer.
+    Config(Box<ConfigRecord>),
 }
 
 /// The answer to [`Request::AckEvents`]: the cursor now stored, which is
