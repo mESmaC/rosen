@@ -4,6 +4,7 @@ mod change_cmd;
 mod claim_cmd;
 mod commands;
 mod commit_cmd;
+mod config_cmd;
 mod history_cmd;
 mod import;
 mod receipt_cmd;
@@ -51,6 +52,7 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
             };
             block_on(server::stream_events(json, &endpoint, agent, *after))
         }
+        Command::Config(config) => block_on(config_cmd::run(json, &endpoint, config)),
         Command::Change(change) => block_on(change_cmd::run(json, &endpoint, change)),
         Command::Commit { message, workspace } => block_on(commit_cmd::commit(
             json,

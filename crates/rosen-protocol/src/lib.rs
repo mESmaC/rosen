@@ -7,6 +7,7 @@
 
 pub mod change;
 pub mod claim;
+pub mod config;
 pub mod frame;
 pub mod history;
 pub mod message;
@@ -20,6 +21,7 @@ pub use claim::{
     ClaimFilter, ClaimHolder, ClaimKind, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome,
     ShareOutcome, WaitOutcome, WokenWait,
 };
+pub use config::{ConfigQuery, ConfigRecord};
 pub use history::{
     Blame, BlameRange, BlameRequest, Diff, DiffHunk, DiffLine, DiffRequest, DirEntry, FileDiff,
     FileStatus, FileVersion, LineKind, Log, LogEntry, LogRequest, MergeBaseAnswer,

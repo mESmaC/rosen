@@ -14,6 +14,7 @@ pub mod import;
 pub mod landing;
 pub mod listener;
 pub mod mirror;
+pub mod project_config;
 pub mod receipts;
 pub mod reviews;
 pub mod rpc;
@@ -38,6 +39,7 @@ pub struct ServerState {
     pub changes: changes::ChangeService,
     pub receipts: receipts::ReceiptService,
     pub history: history::HistoryService,
+    pub project_config: project_config::ConfigService,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
 }
@@ -48,6 +50,7 @@ impl ServerState {
             changes: changes::ChangeService::new(&config.data_dir),
             receipts: receipts::ReceiptService::new(config.clone()),
             history: history::HistoryService::new(),
+            project_config: project_config::ConfigService::new(config.clone()),
             events: EventLog::open(config.metadata_path()),
             config,
             started: Instant::now(),

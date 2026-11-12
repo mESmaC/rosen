@@ -11,6 +11,7 @@ use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
 };
+use crate::config::{ConfigQuery, ConfigRecord};
 use crate::history::{
     Blame, BlameRequest, Diff, DiffRequest, Log, LogRequest, MergeBaseAnswer, MergeResultAnswer,
     ReadAnswer, ReadRequest,
@@ -187,6 +188,9 @@ pub enum Request {
     MergeResult {
         change: String,
     },
+    /// Reads the project configuration in force at a commit, by default the
+    /// current base (SPEC "Project configuration").
+    ConfigShow(ConfigQuery),
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -218,6 +222,8 @@ pub enum Response {
     MergeBase(MergeBaseAnswer),
     File(ReadAnswer),
     MergeResult(MergeResultAnswer),
+    /// Boxed: a configuration is far larger than every other answer.
+    Config(Box<ConfigRecord>),
 }
 
 /// The answer to [`Request::AckEvents`]: the cursor now stored, which is

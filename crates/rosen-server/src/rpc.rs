@@ -72,6 +72,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::MergeResult { change } => {
             crate::history::handle(state, HistoryCall::MergeResult { change }).await
         }
+        Request::ConfigShow(query) => crate::project_config::show(state, query).await,
     }
 }
 

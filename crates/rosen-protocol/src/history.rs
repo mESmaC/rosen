@@ -230,4 +230,9 @@ pub struct MergeResultAnswer {
     pub tree: Option<ObjectId>,
     /// Paths that did not merge automatically.
     pub conflicts: Vec<String>,
+    /// Generated files (project configuration) both sides changed. The tree
+    /// holds the base's version; the checker regenerates them on the merge
+    /// result before building, as Rosen runs no generators (R5, D9).
+    #[serde(default)]
+    pub regenerate: Vec<String>,
 }

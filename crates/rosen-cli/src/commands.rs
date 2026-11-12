@@ -152,6 +152,10 @@ pub enum Command {
     /// Start or inspect this machine's Rosen server.
     #[command(subcommand)]
     Server(ServerCommand),
+    /// Read the project configuration: the `rosen.toml` file at the
+    /// repository root, as the base holds it.
+    #[command(subcommand)]
+    Config(ConfigCommand),
     /// Stream the events that concern you: snapshot, landed, rebased,
     /// conflict, updated, review, claim, released, green, reverted and mirror.
     ///
@@ -306,9 +310,10 @@ pub enum ReceiptCommand {
         #[arg(long, value_name = "BASE")]
         base: String,
         /// Check set that passed. Only the pre-land check set (build and
-        /// lint) is accepted.
-        #[arg(long, default_value = "pre-land")]
-        check_set: String,
+        /// lint) is accepted. Defaults to the pre-land check set the base's
+        /// project configuration names; `rosen config show` lists it.
+        #[arg(long, value_name = "NAME")]
+        check_set: Option<String>,
         /// Agent that ran the checks, recorded on the receipt and in the
         /// landed commit. Defaults to $ROSEN_AGENT, then the OS user name.
         #[arg(long, value_name = "AGENT")]
@@ -337,6 +342,25 @@ pub enum WorkspaceCommand {
     Delete {
         /// Workspace to delete.
         workspace: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Show the configuration in force: generated files, registration
+    /// lists, sensitive paths, the pre-land and post-land check sets with
+    /// their commands, the warm pool size and the mirror remote.
+    ///
+    /// The server reads it from the base, never from a change, so editing
+    /// `rosen.toml` takes effect only once the edit lands. An invalid file
+    /// never takes effect: the last valid one stays in force, and this
+    /// command prints why the file was refused. Checkers run the pre-land
+    /// check set's commands on a change's merge result before submitting a
+    /// receipt.
+    Show {
+        /// Read the configuration at this commit instead of the base.
+        #[arg(long, value_name = "COMMIT")]
+        at: Option<String>,
     },
 }
 
@@ -399,6 +423,7 @@ impl Command {
             Command::Workspace(WorkspaceCommand::Delete { .. }) => "workspace delete",
             Command::Server(ServerCommand::Start) => "server start",
             Command::Server(ServerCommand::Status) => "server status",
+            Command::Config(ConfigCommand::Show { .. }) => "config show",
             Command::Events { .. } => "events",
         }
     }
