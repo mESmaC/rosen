@@ -1,0 +1,12 @@
+[package]
+name = "rosen-core"
+description = "Rosen data model: changes, stacks, conflicts, receipts, reviews, claims and regions. Pure logic, no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
