@@ -1,0 +1,14 @@
+[package]
+name = "rosen-client"
+description = "The Rosen client library Velocity links: daemon discovery and start, workspaces, snapshots and the offline journal."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rosen-core.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
