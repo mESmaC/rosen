@@ -5,6 +5,7 @@ mod claim_cmd;
 mod commands;
 mod commit_cmd;
 mod import;
+mod review_cmd;
 mod server;
 
 use std::process::ExitCode;
@@ -51,6 +52,7 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
         Command::Workspace(WorkspaceCommand::Watch { workspace }) => {
             block_on(commit_cmd::watch(json, &endpoint, workspace.as_deref()))
         }
+        Command::Review(review) => block_on(review_cmd::run(json, &endpoint, review)),
         Command::Claim(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Claim, args)),
         Command::Share(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Share, args)),
         Command::Wait(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Wait, args)),

@@ -33,5 +33,6 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          ) WITHOUT ROWID;",
     )?;
     crate::conflicts::ensure_schema(conn)?;
-    crate::claims::ensure_schema(conn)
+    crate::claims::ensure_schema(conn)?;
+    crate::reviews::ensure_schema(conn)
 }

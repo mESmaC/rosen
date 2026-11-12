@@ -1,5 +1,5 @@
 //! Rosen's core data model (SPEC.md §2, §3): git-format objects, changes,
-//! stacks, landed history and conflicts.
+//! stacks, landed history, conflicts and review threads.
 //!
 //! This crate is pure logic and performs no I/O, so the store, the server,
 //! the client and the proofs' reference models can all share it.
@@ -10,6 +10,7 @@ pub mod conflict;
 pub mod hash;
 pub mod history;
 pub mod object;
+pub mod review;
 pub mod stack;
 
 pub use change::{AgentId, Change, ChangeId, ChangeParent, ChangeState, Snapshot, SnapshotKind};
@@ -18,6 +19,7 @@ pub use conflict::{Conflict, ConflictId, ConflictSet};
 pub use hash::ObjectId;
 pub use history::{CommitGraph, LandedCommit, LandedTrailers};
 pub use object::{Blob, Commit, FileMode, Object, ObjectKind, Signature, Tree, TreeEntry};
+pub use review::ThreadState;
 pub use stack::Stack;
 
 use std::fmt;
@@ -50,6 +52,8 @@ pub enum Error {
     MissingCommit(ObjectId),
     /// A claimed path or glob is empty, absolute or leaves the repository.
     InvalidPath(String),
+    /// A review comment's anchor, body or thread state was not acceptable.
+    InvalidReview(String),
 }
 
 impl fmt::Display for Error {
@@ -68,6 +72,7 @@ impl fmt::Display for Error {
             Error::UnknownChange(id) => write!(f, "unknown change {id}"),
             Error::MissingCommit(id) => write!(f, "commit {id} not found"),
             Error::InvalidPath(s) => write!(f, "invalid path {s}"),
+            Error::InvalidReview(s) => write!(f, "{s}"),
         }
     }
 }
