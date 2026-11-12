@@ -10,7 +10,7 @@ use crate::{rpc, ServerState, SERVER_NAME};
 use rosen_core::AgentId;
 use rosen_protocol::frame::{decode_body, read_frame, read_frame_body, write_frame};
 use rosen_protocol::{
-    negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Event, Outcome,
+    negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Event, Outcome, Request,
     RequestEnvelope, ServerFrame, SUPPORTED_VERSIONS,
 };
 use std::io;
@@ -72,6 +72,7 @@ pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, acces
     let writer_task = tokio::spawn(write_frames(writer, inbox));
     let mut session = Session {
         state,
+        access,
         outbox,
         subscription: None,
     };
@@ -132,6 +133,7 @@ async fn write_frames(mut writer: WriteHalf<BoxStream>, mut inbox: mpsc::Receive
 
 struct Session {
     state: Arc<ServerState>,
+    access: Access,
     outbox: Outbox,
     subscription: Option<JoinHandle<()>>,
 }
@@ -161,6 +163,22 @@ impl Session {
     /// the connection should close.
     async fn handle_frame(&mut self, body: &[u8]) -> bool {
         match decode_body::<ClientFrame>(body) {
+            // Only the server's own machine may stop it: a cache answers its
+            // clients' shutdown itself, so this only refuses a stray peer.
+            Ok(ClientFrame::Request {
+                id,
+                request: Request::Shutdown,
+            }) if self.access == Access::Network => {
+                let refused = ErrorBody::new(
+                    ErrorCode::Refused,
+                    "the server can only be stopped from its own machine",
+                );
+                let response = ServerFrame::Response {
+                    id,
+                    outcome: Outcome::Error(refused),
+                };
+                self.outbox.send(response).await.is_ok()
+            }
             Ok(ClientFrame::Request { id, request }) => {
                 let state = Arc::clone(&self.state);
                 let outbox = self.outbox.clone();
