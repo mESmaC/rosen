@@ -144,6 +144,16 @@ pub enum ChangeCommand {
         /// user name.
         #[arg(long, value_name = "AGENT")]
         owner: Option<String>,
+        /// Write the change's files into this new directory. On a ReFS
+        /// volume (a Dev Drive) files are block clones, which cost almost
+        /// nothing; elsewhere they are plain copies. Files are never
+        /// hardlinked, so writing one never affects another workspace.
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<PathBuf>,
+        /// With --workspace, hold only this path and what lies under it.
+        /// Repeat for several paths. Default: the whole tree.
+        #[arg(long, value_name = "PATH", requires = "workspace")]
+        sparse: Vec<String>,
     },
     /// List changes and their states (open, ready, landed, abandoned),
     /// oldest first.

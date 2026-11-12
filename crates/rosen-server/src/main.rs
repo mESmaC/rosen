@@ -32,8 +32,11 @@ const EXIT_ALREADY_RUNNING: u8 = 3;
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
+    // Clients on this machine open the object store at the data dir that
+    // `status` reports (SPEC R3), so it must not depend on the daemon's cwd.
+    let data_dir = std::path::absolute(&args.data_dir).unwrap_or(args.data_dir);
     let config = ServerConfig {
-        data_dir: args.data_dir,
+        data_dir,
         endpoint: args.endpoint.map_or_else(Endpoint::resolve, Endpoint::new),
     };
     // Ctrl-C stops the daemon as a `shutdown` request would.
