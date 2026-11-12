@@ -3,3 +3,5 @@
 //!
 //! This crate is pure logic and performs no I/O, so the server, the client
 //! and the proofs' reference models can all share it.
+
+pub mod conflict;
