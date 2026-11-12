@@ -16,6 +16,7 @@ rosen-store.workspace = true
 rosen-merge.workspace = true
 rosen-protocol.workspace = true
 anyhow.workspace = true
+getrandom.workspace = true
 clap.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true

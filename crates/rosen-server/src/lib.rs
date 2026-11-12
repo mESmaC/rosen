@@ -4,6 +4,7 @@
 //! SQLite metadata store, and does every merge, rebase, land and history
 //! query on behalf of thin clients, over the protocol in `rosen-protocol`.
 
+pub mod changes;
 pub mod conflicts;
 pub mod connection;
 pub mod events;
@@ -26,6 +27,7 @@ pub struct ServerState {
     pub config: ServerConfig,
     pub started: Instant,
     pub events: EventLog,
+    pub changes: changes::ChangeService,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
 }
@@ -33,6 +35,7 @@ pub struct ServerState {
 impl ServerState {
     pub fn new(config: ServerConfig) -> Arc<Self> {
         Arc::new(Self {
+            changes: changes::ChangeService::new(&config.data_dir),
             config,
             started: Instant::now(),
             events: EventLog::default(),

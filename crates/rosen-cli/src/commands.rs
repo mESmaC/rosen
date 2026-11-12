@@ -124,21 +124,38 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum ChangeCommand {
     /// Create a change and its workspace on the current base.
+    ///
+    /// Prints the new change's ID: 32 letters in k-z, fixed for the change's
+    /// whole life (rebases, snapshots and lands never alter it). Any unique
+    /// prefix of an ID works wherever a CHANGE is asked for.
     New {
         /// Stack the new change on this unlanded change instead of the base.
         #[arg(long, value_name = "CHANGE")]
         on: Option<String>,
+        /// Agent that owns the change. Defaults to $ROSEN_AGENT, then the OS
+        /// user name.
+        #[arg(long, value_name = "AGENT")]
+        owner: Option<String>,
     },
-    /// List changes and their states (open, ready, landed, abandoned).
-    List,
-    /// Show one change: owner, parent, head, state, conflicts and claims.
+    /// List changes and their states (open, ready, landed, abandoned),
+    /// oldest first.
+    List {
+        /// Only changes owned by this agent.
+        #[arg(long, value_name = "AGENT")]
+        owner: Option<String>,
+        /// Only changes in this state: open, ready, landed or abandoned.
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Show one change: owner, parent, head, state, snapshots and conflicts.
     Show {
-        /// Change to show.
+        /// Change to show: its ID or a unique prefix.
         change: String,
     },
-    /// Abandon a change. Its claims are released and its workspace deleted.
+    /// Abandon an open or ready change. Its claims are released and its
+    /// workspace deleted.
     Abandon {
-        /// Change to abandon.
+        /// Change to abandon: its ID or a unique prefix.
         change: String,
     },
 }
@@ -270,7 +287,7 @@ impl ChangeCommand {
     fn path(&self) -> &'static str {
         match self {
             ChangeCommand::New { .. } => "change new",
-            ChangeCommand::List => "change list",
+            ChangeCommand::List { .. } => "change list",
             ChangeCommand::Show { .. } => "change show",
             ChangeCommand::Abandon { .. } => "change abandon",
         }

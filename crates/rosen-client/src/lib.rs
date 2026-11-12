@@ -4,6 +4,7 @@
 //! over it. It covers daemon discovery and start, workspace
 //! materialisation, the file watcher and snapshots, and the offline journal.
 
+pub mod changes;
 pub mod connection;
 pub mod daemon;
 
@@ -21,6 +22,9 @@ pub enum Error {
     /// implementation in this build yet.
     #[error("`{operation}` is not implemented yet")]
     NotImplemented { operation: String },
+    /// An argument was rejected before anything was sent to the server.
+    #[error("{0}")]
+    InvalidArgument(String),
     /// No server listens on the endpoint.
     #[error("no rosen server is running on {0}")]
     NotRunning(Endpoint),

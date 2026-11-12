@@ -7,6 +7,7 @@
 //! it chooses, and the server answers each with a response carrying the same id.
 //! Responses may arrive out of order, and event frames are interleaved with them.
 
+use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. Bump it on any incompatible change to
@@ -89,6 +90,16 @@ pub enum Request {
     Status,
     /// Asks the daemon to stop accepting connections and exit.
     Shutdown,
+    /// Creates a change with a new stable ID (R2).
+    ChangeNew(NewChange),
+    ChangeList(ChangeFilter),
+    /// `change` is a full change ID or a unique prefix of one.
+    ChangeShow {
+        change: String,
+    },
+    ChangeAbandon {
+        change: String,
+    },
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -98,6 +109,9 @@ pub enum Response {
     Pong,
     Status(ServerStatus),
     ShuttingDown,
+    /// The answer to `change_new`, `change_show` and `change_abandon`.
+    Change(ChangeRecord),
+    Changes(Vec<ChangeRecord>),
 }
 
 /// The answer to [`Request::Status`].
@@ -153,6 +167,14 @@ pub enum ErrorCode {
     ShuttingDown,
     /// The request was understood but failed inside the server.
     Internal,
+    /// The request named something that does not exist, such as a change.
+    NotFound,
+    /// A parameter is malformed or ambiguous, such as a change ID prefix that
+    /// matches more than one change.
+    InvalidArgument,
+    /// The request is valid but the current state forbids it, such as
+    /// abandoning a landed change.
+    Refused,
 }
 
 /// The event types of SPEC R9.
