@@ -14,6 +14,7 @@
 //! leaves a base that points at a missing object, and a rerun skips objects
 //! that are already stored.
 
+pub mod base;
 mod copy;
 mod git_source;
 pub mod service;

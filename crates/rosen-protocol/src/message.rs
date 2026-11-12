@@ -7,6 +7,7 @@
 //! it chooses, and the server answers each with a response carrying the same id.
 //! Responses may arrive out of order, and event frames are interleaved with them.
 
+use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. Bump it on any incompatible change to
@@ -89,6 +90,16 @@ pub enum Request {
     Status,
     /// Asks the daemon to stop accepting connections and exit.
     Shutdown,
+    /// Creates a change with a new stable ID (R2).
+    ChangeNew(NewChange),
+    ChangeList(ChangeFilter),
+    /// `change` is a full change ID or a unique prefix of one.
+    ChangeShow {
+        change: String,
+    },
+    ChangeAbandon {
+        change: String,
+    },
     /// Loads a git repository's history and makes one of its branches the
     /// project's base (SPEC R1). Refused once the project has a base.
     Import {
@@ -108,6 +119,9 @@ pub enum Response {
     Pong,
     Status(ServerStatus),
     ShuttingDown,
+    /// The answer to `change_new`, `change_show` and `change_abandon`.
+    Change(ChangeRecord),
+    Changes(Vec<ChangeRecord>),
     Imported(ImportSummary),
 }
 
@@ -177,11 +191,14 @@ pub enum ErrorCode {
     ShuttingDown,
     /// The request was understood but failed inside the server.
     Internal,
-    /// The request's arguments name something that does not exist or cannot
-    /// be used, such as an import source that is not a git repository.
+    /// The request named something that does not exist, such as a change.
+    NotFound,
+    /// A parameter is malformed or ambiguous, such as a change ID prefix that
+    /// matches more than one change.
     InvalidArgument,
-    /// The project already has a base, and only a land may move it.
-    BaseAlreadySet,
+    /// The request is valid but the current state forbids it, such as
+    /// abandoning a landed change.
+    Refused,
 }
 
 /// The event types of SPEC R9.

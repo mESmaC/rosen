@@ -100,5 +100,5 @@ fn import_keeps_git_ids_and_never_replaces_the_base() {
     let Outcome::Error(refused) = import(&state, source.path()) else {
         panic!("a second import replaced the base");
     };
-    assert_eq!(refused.code, ErrorCode::BaseAlreadySet);
+    assert_eq!(refused.code, ErrorCode::Refused);
 }

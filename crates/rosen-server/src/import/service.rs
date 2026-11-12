@@ -61,7 +61,7 @@ fn summary(report: ImportReport) -> ImportSummary {
 
 fn error_body(error: &ImportError) -> ErrorBody {
     let code = match error {
-        ImportError::BaseAlreadySet { .. } => ErrorCode::BaseAlreadySet,
+        ImportError::BaseAlreadySet { .. } => ErrorCode::Refused,
         ImportError::Git { .. }
         | ImportError::UnsupportedObjectFormat(_)
         | ImportError::NoDefaultBranch

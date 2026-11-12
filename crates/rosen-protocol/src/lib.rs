@@ -5,9 +5,11 @@
 //! Both `rosen-server` and `rosen-client` depend on this crate, so the client never
 //! links server code and the server never links client code.
 
+pub mod change;
 pub mod frame;
 pub mod message;
 pub mod transport;
 
+pub use change::{ChangeFilter, ChangeRecord, NewChange};
 pub use message::*;
 pub use transport::{connect, BoxStream, Endpoint, Listener};

@@ -1,5 +1,6 @@
 //! Request dispatch. Feature work adds one arm per new [`Request`] variant.
 
+use crate::changes::{ChangeError, ChangeService};
 use crate::{ServerState, SERVER_NAME};
 use rosen_protocol::{
     ErrorBody, ErrorCode, Outcome, Request, Response, ServerStatus, PROTOCOL_VERSION,
@@ -24,6 +25,46 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::Import { source, branch } => {
             crate::import::service::handle(state, source, branch).await
         }
+        Request::ChangeNew(params) => {
+            on_changes(state, move |c| c.create(&params).map(Response::Change)).await
+        }
+        Request::ChangeList(filter) => {
+            on_changes(state, move |c| c.list(&filter).map(Response::Changes)).await
+        }
+        Request::ChangeShow { change } => {
+            on_changes(state, move |c| c.show(&change).map(Response::Change)).await
+        }
+        Request::ChangeAbandon { change } => {
+            on_changes(state, move |c| c.abandon(&change).map(Response::Change)).await
+        }
+    }
+}
+
+/// Runs a change-registry call on the blocking pool: SQLite I/O must not
+/// stall the async workers that carry every other connection.
+async fn on_changes(
+    state: &Arc<ServerState>,
+    work: impl FnOnce(&ChangeService) -> Result<Response, ChangeError> + Send + 'static,
+) -> Outcome {
+    let state = Arc::clone(state);
+    match tokio::task::spawn_blocking(move || work(&state.changes)).await {
+        Ok(Ok(response)) => Outcome::Ok(response),
+        Ok(Err(err)) => Outcome::Error(ErrorBody::new(change_error_code(&err), err.to_string())),
+        Err(join) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, join.to_string())),
+    }
+}
+
+fn change_error_code(err: &ChangeError) -> ErrorCode {
+    match err {
+        ChangeError::NotFound(_) => ErrorCode::NotFound,
+        ChangeError::InvalidId(_) | ChangeError::Ambiguous(_) => ErrorCode::InvalidArgument,
+        ChangeError::ParentClosed { .. } | ChangeError::Refused(_) | ChangeError::Base(_) => {
+            ErrorCode::Refused
+        }
+        ChangeError::Randomness(_)
+        | ChangeError::Corrupt(_)
+        | ChangeError::Io(_)
+        | ChangeError::Store(_) => ErrorCode::Internal,
     }
 }
 
