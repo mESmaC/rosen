@@ -117,6 +117,18 @@ impl Landing {
                 receipt.head, facts.head, facts.id
             )));
         }
+        // The check set name goes into the landed commit's trailer, so a
+        // name with whitespace could forge trailers there (issue #18).
+        if receipt
+            .check_set
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(LandError::InvalidReceipt(format!(
+                "check set {:?} contains whitespace",
+                receipt.check_set
+            )));
+        }
         if receipt.check_set != self.config.pre_land_check_set {
             return Err(LandError::InvalidReceipt(format!(
                 "check set {} is not the pre-land check set {}",

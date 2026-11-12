@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::conflicts::{self, ConflictStoreError};
 
-use super::{ChangeId, CommitId, LandError, LandResult, ObjectId, Receipt, Tier};
+use super::{AgentId, ChangeId, CommitId, LandError, LandResult, ObjectId, Receipt, Tier};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS base_refs (
@@ -216,7 +216,7 @@ impl Ledger {
                 receipt.head.to_string(),
                 receipt.base.to_string(),
                 receipt.check_set,
-                receipt.submitter
+                receipt.submitter.as_str()
             ],
         )?;
         Ok(())
@@ -254,7 +254,7 @@ impl Ledger {
                 head: *head,
                 base: parse_commit(base)?,
                 check_set: check_set.to_owned(),
-                submitter,
+                submitter: AgentId::new(submitter)?,
             };
             return Ok(ReceiptLookup::Valid { receipt, base_seq });
         }

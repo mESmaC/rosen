@@ -188,7 +188,7 @@ fn receipt_counts_only_across_prose_lands() {
         head: oid(HEAD, n),
         base,
         check_set: "pre-land".into(),
-        submitter: "checker".into(),
+        submitter: AgentId::new("checker").unwrap(),
     };
     for n in [a, b, on_a] {
         landing.submit_receipt(receipt(n, root())).unwrap();

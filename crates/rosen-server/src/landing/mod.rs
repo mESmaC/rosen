@@ -89,7 +89,9 @@ pub struct Receipt {
     pub head: CommitId,
     pub base: CommitId,
     pub check_set: String,
-    pub submitter: String,
+    /// A validated identity: it is written into the landed commit's
+    /// `Rosen-Receipt` trailer, so it must not carry a newline (issue #18).
+    pub submitter: AgentId,
 }
 
 /// The result of merging a change onto a base commit.
