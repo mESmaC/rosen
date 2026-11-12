@@ -1,6 +1,13 @@
 name = "proofs"
 defaultTargets = ["ThreeWayMerge"]
 
-# One library per proof-list feature (SPEC §7).
+# One library per proof-list feature (SPEC.md §7). Its root imports every
+# module, so `lake build` checks the fixture exporter too.
 [[lean_lib]]
 name = "ThreeWayMerge"
+
+# Prints the fixture table:
+# `lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv`
+[[lean_exe]]
+name = "three-way-merge-fixtures"
+root = "ThreeWayMerge.Fixtures"

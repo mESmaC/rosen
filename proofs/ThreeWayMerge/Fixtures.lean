@@ -3,7 +3,7 @@ import ThreeWayMerge.Design
 /-!
 Exports `proofs/fixtures/three-way-merge.tsv` from the model:
 
-    lake env lean ThreeWayMerge/Fixtures.lean > fixtures/three-way-merge.tsv
+    lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv
 
 Each character is one line. Columns: base, ours, theirs, merged; a conflict
 is written `<ours|base|theirs>`. Cases are chosen so the longest common
@@ -67,6 +67,8 @@ def fixtureCases : List (String × String × String) := [
   ("abcabc", "abcXabc", "abcabc")
 ]
 
-#eval IO.print (String.intercalate "\n" (fixtureCases.map fun (b, o, t) => fixtureRow b o t) ++ "\n")
-
 end ThreeWayMerge
+
+def main : IO Unit :=
+  IO.print (String.intercalate "\n"
+    (ThreeWayMerge.fixtureCases.map fun (b, o, t) => ThreeWayMerge.fixtureRow b o t) ++ "\n")

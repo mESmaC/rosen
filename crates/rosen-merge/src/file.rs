@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::lines::split_lines;
-use crate::merge::{merge_text, Hunk, MarkerLabels, TextMerge};
+use crate::merge::{merge_text, ConflictRegion, Hunk, MarkerLabels, TextMerge};
 
 /// How a path merges, from project configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -133,26 +133,34 @@ fn is_binary(text: &[u8]) -> bool {
 
 fn keep_both_additions(merged: TextMerge) -> TextMerge {
     let hunks = merged.hunks.into_iter().map(|hunk| match hunk {
-        Hunk::Conflict(region) => {
-            let ours_lines = split_lines(&region.ours);
-            let mut text = region.ours.clone();
-            for line in split_lines(&region.theirs)
-                .into_iter()
-                .filter(|line| !ours_lines.contains(line))
-            {
-                // Keep each kept line terminated, so two entries never fuse.
-                if text.last().is_some_and(|&byte| byte != b'\n') {
-                    text.push(b'\n');
-                }
-                text.extend_from_slice(line);
-            }
-            Hunk::Clean(text)
-        }
+        Hunk::Conflict(region) => Hunk::Clean(union_of_additions(&region)),
         clean => clean,
     });
     TextMerge {
         hunks: hunks.collect(),
     }
+}
+
+/// Ours' lines that theirs did not delete, then the lines theirs added that
+/// ours lacks. A base line either side deleted stays deleted, so the union
+/// never brings back a removed entry (issue #19).
+fn union_of_additions(region: &ConflictRegion) -> Vec<u8> {
+    let [base, ours, theirs] =
+        [&region.base, &region.ours, &region.theirs].map(|text| split_lines(text));
+    let deleted_by_theirs = |line: &&[u8]| base.contains(line) && !theirs.contains(line);
+    let kept_ours = ours.iter().filter(|line| !deleted_by_theirs(line));
+    let added_by_theirs = theirs
+        .iter()
+        .filter(|line| !base.contains(line) && !ours.contains(line));
+    let mut text = Vec::new();
+    for line in kept_ours.chain(added_by_theirs) {
+        // Keep each kept line terminated, so two entries never fuse.
+        if text.last().is_some_and(|&byte| byte != b'\n') {
+            text.push(b'\n');
+        }
+        text.extend_from_slice(line);
+    }
+    text
 }
 
 /// The result of merging every path of two trees against their merge base.
