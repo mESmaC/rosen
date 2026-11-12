@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+pub mod conflicts;
+
 /// Where a server keeps its state.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
