@@ -2,6 +2,7 @@
 
 use crate::changes::{ChangeError, ChangeService};
 use crate::claims::ClaimCall;
+use crate::history::HistoryCall;
 use crate::reviews::ReviewCall;
 use crate::{ServerState, SERVER_NAME};
 use rosen_protocol::{
@@ -61,6 +62,16 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
             crate::reviews::handle(state, ReviewCall::List(filter)).await
         }
         Request::ReceiptSubmit(req) => crate::receipts::submit(state, req).await,
+        Request::Log(req) => crate::history::handle(state, HistoryCall::Log(req)).await,
+        Request::Blame(req) => crate::history::handle(state, HistoryCall::Blame(req)).await,
+        Request::Diff(req) => crate::history::handle(state, HistoryCall::Diff(req)).await,
+        Request::MergeBase { a, b } => {
+            crate::history::handle(state, HistoryCall::MergeBase { a, b }).await
+        }
+        Request::ReadFile(req) => crate::history::handle(state, HistoryCall::ReadFile(req)).await,
+        Request::MergeResult { change } => {
+            crate::history::handle(state, HistoryCall::MergeResult { change }).await
+        }
         Request::ConfigShow(query) => crate::project_config::show(state, query).await,
     }
 }

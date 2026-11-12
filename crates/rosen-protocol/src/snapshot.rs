@@ -73,7 +73,7 @@ pub struct SnapshotOutcome {
 }
 
 /// Serde adapter writing bytes as standard padded base64.
-mod base64_bytes {
+pub(crate) mod base64_bytes {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
     use serde::de::Error as _;
