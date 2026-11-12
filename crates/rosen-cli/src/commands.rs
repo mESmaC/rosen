@@ -75,16 +75,28 @@ pub enum Command {
     },
     /// Show the current change, its state, conflicts and unsnapshotted files.
     Status,
-    /// Show a change's diff against its parent.
+    /// Show a change's diff against its parent, as the server holds it.
+    ///
+    /// The server diffs the change's head, the tree of its latest snapshot
+    /// (or of its merge onto a new base after a rebase), against the base
+    /// commit or change it sits on. Edits made in the last 2 s may not be
+    /// snapshotted yet. Needs no workspace: `--change` diffs any change.
     Diff(ChangePaths),
-    /// Show history of the base, a change, or a path.
+    /// Show history of the base, a commit or a change, or of some paths.
+    ///
+    /// One line per commit, newest first: commit ID, date (UTC), summary,
+    /// and the change it landed or belongs to. History follows first
+    /// parents. A change's log is its own snapshots, then the history of
+    /// what it sits on. With paths, only commits that changed a file at or
+    /// under one of them are shown (path history).
     Log {
-        /// Change to show; defaults to the base.
+        /// Change ID or prefix, a 40-hex commit ID, or `base`; defaults to
+        /// the base.
         #[arg(long)]
         change: Option<String>,
-        /// Limit history to these paths.
+        /// Limit history to these files or directories.
         paths: Vec<PathBuf>,
-        /// Show at most this many entries.
+        /// Show at most this many entries (default 100).
         #[arg(short = 'n', long)]
         limit: Option<usize>,
     },

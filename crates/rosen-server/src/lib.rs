@@ -9,6 +9,7 @@ pub mod claims;
 pub mod conflicts;
 pub mod connection;
 pub mod events;
+pub mod history;
 pub mod import;
 pub mod landing;
 pub mod listener;
@@ -36,6 +37,7 @@ pub struct ServerState {
     pub events: EventLog,
     pub changes: changes::ChangeService,
     pub receipts: receipts::ReceiptService,
+    pub history: history::HistoryService,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
 }
@@ -45,6 +47,7 @@ impl ServerState {
         let state = Arc::new(Self {
             changes: changes::ChangeService::new(&config.data_dir),
             receipts: receipts::ReceiptService::new(config.clone()),
+            history: history::HistoryService::new(),
             events: EventLog::open(config.metadata_path()),
             config,
             started: Instant::now(),

@@ -8,6 +8,7 @@
 pub mod change;
 pub mod claim;
 pub mod frame;
+pub mod history;
 pub mod message;
 pub mod receipt;
 pub mod review;
@@ -18,6 +19,11 @@ pub use change::{ChangeFilter, ChangeRecord, NewChange};
 pub use claim::{
     ClaimFilter, ClaimHolder, ClaimKind, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome,
     ShareOutcome, WaitOutcome, WokenWait,
+};
+pub use history::{
+    Blame, BlameRange, BlameRequest, Diff, DiffHunk, DiffLine, DiffRequest, DirEntry, FileDiff,
+    FileStatus, FileVersion, LineKind, Log, LogEntry, LogRequest, MergeBaseAnswer,
+    MergeResultAnswer, ReadAnswer, ReadRequest,
 };
 pub use message::*;
 pub use receipt::{ReceiptRecord, SubmitReceipt};

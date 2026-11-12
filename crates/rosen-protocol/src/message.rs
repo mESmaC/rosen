@@ -11,6 +11,10 @@ use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
 };
+use crate::history::{
+    Blame, BlameRequest, Diff, DiffRequest, Log, LogRequest, MergeBaseAnswer, MergeResultAnswer,
+    ReadAnswer, ReadRequest,
+};
 use crate::receipt::{ReceiptRecord, SubmitReceipt};
 use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
 use crate::snapshot::{ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest};
@@ -164,6 +168,25 @@ pub enum Request {
     /// Records a snapshot of a workspace's tree on its change: automatic
     /// from the watcher, or named by `rosen commit` (SPEC R2, D17).
     Snapshot(SnapshotRequest),
+    /// The log of the base, a commit or a change, optionally limited to
+    /// paths: path history (R11).
+    Log(LogRequest),
+    /// Which commit or change last changed each line of a file (R11).
+    Blame(BlameRequest),
+    /// A line diff between two revisions, or a revision and its parent (R11).
+    Diff(DiffRequest),
+    /// The merge base of two revisions (R11).
+    MergeBase {
+        a: String,
+        b: String,
+    },
+    /// A file's bytes or a directory's listing at a revision (R11).
+    ReadFile(ReadRequest),
+    /// Merges a change onto the current base and stores the result, so a
+    /// checker can read it without a workspace (R11, R8 step 1).
+    MergeResult {
+        change: String,
+    },
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -189,6 +212,12 @@ pub enum Response {
     ReviewThread(ReviewThread),
     ReviewThreads(Vec<ReviewThread>),
     Receipt(ReceiptRecord),
+    Log(Log),
+    Blame(Blame),
+    Diff(Diff),
+    MergeBase(MergeBaseAnswer),
+    File(ReadAnswer),
+    MergeResult(MergeResultAnswer),
 }
 
 /// The answer to [`Request::AckEvents`]: the cursor now stored, which is

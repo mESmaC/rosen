@@ -9,6 +9,7 @@ pub mod claims;
 pub mod connection;
 pub mod daemon;
 pub mod events;
+pub mod history;
 mod import;
 pub mod receipts;
 pub mod reviews;
