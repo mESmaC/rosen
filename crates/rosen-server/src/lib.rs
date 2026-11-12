@@ -95,6 +95,26 @@ pub struct ServerConfig {
     pub endpoint: Endpoint,
 }
 
+impl ServerConfig {
+    /// The loose object store (SPEC D5): every imported, snapshotted and
+    /// landed object.
+    pub fn objects_dir(&self) -> PathBuf {
+        self.data_dir.join("objects")
+    }
+
+    /// The SQLite metadata store (SPEC D13): the base ref, changes, claims,
+    /// receipts, reviews and conflicts.
+    pub fn metadata_path(&self) -> PathBuf {
+        self.data_dir.join("metadata.sqlite")
+    }
+
+    /// Temporary clones of URL import sources. On the same volume as the
+    /// store, and removed when each import ends.
+    pub fn import_scratch_dir(&self) -> PathBuf {
+        self.data_dir.join("import-tmp")
+    }
+}
+
 /// Binds the endpoint and serves until shutdown is requested. Fails with
 /// [`std::io::ErrorKind::AddrInUse`] when another server owns the endpoint.
 pub async fn serve(config: &ServerConfig) -> std::io::Result<()> {

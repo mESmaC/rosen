@@ -16,51 +16,15 @@
 
 mod copy;
 mod git_source;
+pub mod service;
 
 use std::fmt;
 use std::path::PathBuf;
 
+use rosen_core::ObjectId;
+use rosen_store::ObjectStore;
+
 pub use git_source::GitSource;
-
-/// The four git object types, as named in git's object headers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ObjectKind {
-    Commit,
-    Tree,
-    Blob,
-    Tag,
-}
-
-impl ObjectKind {
-    /// Parses the type name git prints in `cat-file --batch` headers.
-    pub fn from_git_name(name: &str) -> Option<Self> {
-        match name {
-            "commit" => Some(Self::Commit),
-            "tree" => Some(Self::Tree),
-            "blob" => Some(Self::Blob),
-            "tag" => Some(Self::Tag),
-            _ => None,
-        }
-    }
-
-    pub fn git_name(self) -> &'static str {
-        match self {
-            Self::Commit => "commit",
-            Self::Tree => "tree",
-            Self::Blob => "blob",
-            Self::Tag => "tag",
-        }
-    }
-}
-
-/// Where imported objects go. The server's object store implements this; it
-/// is a trait so import does not depend on one storage backend (SPEC D5).
-pub trait ObjectSink: Sync {
-    /// Whether an object with this lowercase hex id is already stored.
-    fn contains(&self, id: &str) -> Result<bool, String>;
-    /// Stores one object and returns the lowercase hex id it hashed to.
-    fn put(&self, kind: ObjectKind, payload: &[u8]) -> Result<String, String>;
-}
 
 /// What to import.
 #[derive(Clone, Debug)]
@@ -78,8 +42,8 @@ pub struct ImportRequest {
 pub struct ImportReport {
     /// The branch name the base takes, for example `main`.
     pub branch: String,
-    /// Hex id of the branch's tip commit: the new base commit.
-    pub base_commit: String,
+    /// The branch's tip commit: the new base commit.
+    pub base_commit: ObjectId,
     /// Objects reachable from the base commit.
     pub objects_reachable: usize,
     /// Objects newly written; the rest were already stored.
@@ -100,14 +64,20 @@ pub enum ImportError {
     /// Git's output did not match its documented format.
     Protocol(String),
     /// The store re-hashed an object to a different id than git reported.
-    IdMismatch { expected: String, stored: String },
+    IdMismatch {
+        expected: ObjectId,
+        stored: ObjectId,
+    },
     /// The object store refused a read or write.
     Store(String),
     /// Local file system work, such as the temporary clone, failed.
     Io(std::io::Error),
     /// The import target already has a base. Only a land moves the base
     /// (SPEC §2 Project), so import never replaces one.
-    BaseAlreadySet { base_commit: String },
+    BaseAlreadySet {
+        branch: String,
+        base_commit: ObjectId,
+    },
 }
 
 impl fmt::Display for ImportError {
@@ -132,9 +102,9 @@ impl fmt::Display for ImportError {
             ),
             Self::Store(message) => write!(f, "object store error: {message}"),
             Self::Io(error) => write!(f, "{error}"),
-            Self::BaseAlreadySet { base_commit } => write!(
+            Self::BaseAlreadySet { branch, base_commit } => write!(
                 f,
-                "this project already has a base ({base_commit}); import only into an empty project"
+                "this project already has a base ({branch} at {base_commit});                  import only into a project with no base"
             ),
         }
     }
@@ -148,14 +118,14 @@ impl From<std::io::Error> for ImportError {
     }
 }
 
-/// Imports the history of one branch of a git repository into `sink`.
+/// Imports the history of one branch of a git repository into `store`.
 ///
 /// `scratch_dir` holds a temporary bare clone when `request.source` is a URL;
 /// the clone is removed before returning.
 pub fn import_repository(
     request: &ImportRequest,
     scratch_dir: PathBuf,
-    sink: &dyn ObjectSink,
+    store: &dyn ObjectStore,
 ) -> Result<ImportReport, ImportError> {
     let source = GitSource::open(&request.source, scratch_dir)?;
     source.require_sha1()?;
@@ -165,8 +135,8 @@ pub fn import_repository(
     };
     let base_commit = source.branch_tip(&branch)?;
     let reachable = source.reachable_objects(&base_commit)?;
-    let missing = copy::filter_missing(&reachable, sink)?;
-    copy::copy_objects(&source, &missing, sink)?;
+    let missing = copy::filter_missing(&reachable, store)?;
+    copy::copy_objects(&source, &missing, store)?;
     Ok(ImportReport {
         branch,
         base_commit,

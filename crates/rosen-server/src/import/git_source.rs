@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{ImportError, ObjectKind};
+use rosen_core::{ObjectId, ObjectKind};
+
+use super::ImportError;
 
 /// Environment variables that would make git read a different repository
 /// than the one named, for example when the server was started from a git
@@ -20,8 +22,9 @@ const REPOSITORY_OVERRIDES: &[&str] = &[
     "GIT_NAMESPACE",
 ];
 
-/// Receives each object read from git: its hex id, type and content.
-pub type ObjectVisitor<'a> = dyn FnMut(&str, ObjectKind, Vec<u8>) -> Result<(), ImportError> + 'a;
+/// Receives each object read from git: its id, type and content.
+pub type ObjectVisitor<'a> =
+    dyn FnMut(ObjectId, ObjectKind, Vec<u8>) -> Result<(), ImportError> + 'a;
 
 /// A git repository opened for reading.
 pub struct GitSource {
@@ -37,7 +40,10 @@ impl GitSource {
         let local = Path::new(source);
         if local.exists() {
             let repository = std::fs::canonicalize(local)?;
-            let opened = Self { repository, temporary_clone: None };
+            let opened = Self {
+                repository,
+                temporary_clone: None,
+            };
             opened.git(["rev-parse", "--git-dir"])?;
             return Ok(opened);
         }
@@ -46,13 +52,21 @@ impl GitSource {
 
     fn clone_url(url: &str, scratch_dir: PathBuf) -> Result<Self, ImportError> {
         std::fs::create_dir_all(&scratch_dir)?;
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
         let clone = scratch_dir.join(format!("import-{}-{nanos}.git", std::process::id()));
         // The `--` stops a URL that starts with `-` from being read as an option.
         let mut command = git_command(&scratch_dir);
-        command.args(["clone", "--bare", "--quiet", "--"]).arg(url).arg(&clone);
+        command
+            .args(["clone", "--bare", "--quiet", "--"])
+            .arg(url)
+            .arg(&clone);
         run_to_string(command, "git clone")?;
-        Ok(Self { repository: clone.clone(), temporary_clone: Some(clone) })
+        Ok(Self {
+            repository: clone.clone(),
+            temporary_clone: Some(clone),
+        })
     }
 
     /// Refuses sources whose object ids the sha1 store cannot keep, and
@@ -82,21 +96,29 @@ impl GitSource {
             .ok_or(ImportError::NoDefaultBranch)
     }
 
-    /// The hex id of the commit at the tip of `branch`.
-    pub fn branch_tip(&self, branch: &str) -> Result<String, ImportError> {
+    /// The commit at the tip of `branch`.
+    pub fn branch_tip(&self, branch: &str) -> Result<ObjectId, ImportError> {
         let short = branch.strip_prefix("refs/heads/").unwrap_or(branch);
         // A full ref name keeps a branch called like an option or a commit
         // id from being read as one.
         let spec = format!("refs/heads/{short}^{{commit}}");
-        self.git(["rev-parse", "--verify", "--quiet", spec.as_str()])
-            .map_err(|_| ImportError::BranchNotFound(short.to_owned()))
+        let tip = self
+            .git(["rev-parse", "--verify", "--quiet", spec.as_str()])
+            .map_err(|_| ImportError::BranchNotFound(short.to_owned()))?;
+        parse_id(&tip)
     }
 
     /// Ids of every object reachable from `commit`: its commits, trees and
     /// blobs.
-    pub fn reachable_objects(&self, commit: &str) -> Result<Vec<String>, ImportError> {
-        let listing = self.git(["rev-list", "--objects", "--no-object-names", commit])?;
-        Ok(listing.lines().map(str::to_owned).collect())
+    pub fn reachable_objects(&self, commit: &ObjectId) -> Result<Vec<ObjectId>, ImportError> {
+        let commit = commit.to_hex();
+        let listing = self.git([
+            "rev-list",
+            "--objects",
+            "--no-object-names",
+            commit.as_str(),
+        ])?;
+        listing.lines().map(parse_id).collect()
     }
 
     /// Streams the objects named by `ids` to `each`, in order, through one
@@ -104,13 +126,18 @@ impl GitSource {
     /// returns.
     pub fn read_objects(
         &self,
-        ids: &[String],
+        ids: &[ObjectId],
         each: &mut ObjectVisitor<'_>,
     ) -> Result<(), ImportError> {
         let mut command = self.command();
         command.args(["cat-file", "--batch"]);
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|e| spawn_error("git cat-file", e))?;
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| spawn_error("git cat-file", e))?;
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
@@ -175,13 +202,16 @@ fn run_to_string(mut command: Command, label: &str) -> Result<String, ImportErro
 }
 
 fn spawn_error(label: &str, error: std::io::Error) -> ImportError {
-    ImportError::Git { command: label.to_owned(), message: format!("could not run git: {error}") }
+    ImportError::Git {
+        command: label.to_owned(),
+        message: format!("could not run git: {error}"),
+    }
 }
 
-fn feed_ids(mut stdin: impl Write, ids: &[String]) -> std::io::Result<()> {
+fn feed_ids(mut stdin: impl Write, ids: &[ObjectId]) -> std::io::Result<()> {
     let mut buffered = std::io::BufWriter::new(&mut stdin);
     for id in ids {
-        buffered.write_all(id.as_bytes())?;
+        buffered.write_all(id.to_hex().as_bytes())?;
         buffered.write_all(b"\n")?;
     }
     buffered.flush()
@@ -214,22 +244,30 @@ fn read_batch(
     Ok(())
 }
 
-fn parse_header(header: &str) -> Result<(&str, ObjectKind, usize), ImportError> {
+fn parse_header(header: &str) -> Result<(ObjectId, ObjectKind, usize), ImportError> {
     if let Some(id) = header.strip_suffix(" missing") {
-        return Err(ImportError::Protocol(format!("object {id} is missing from the source")));
+        return Err(ImportError::Protocol(format!(
+            "object {id} is missing from the source"
+        )));
     }
     let mut fields = header.split(' ');
     let (Some(id), Some(kind), Some(size), None) =
         (fields.next(), fields.next(), fields.next(), fields.next())
     else {
-        return Err(ImportError::Protocol(format!("bad cat-file header `{header}`")));
+        return Err(ImportError::Protocol(format!(
+            "bad cat-file header `{header}`"
+        )));
     };
-    let kind = ObjectKind::from_git_name(kind)
-        .ok_or_else(|| ImportError::Protocol(format!("unknown object type `{kind}`")))?;
+    let kind = ObjectKind::parse(kind.as_bytes())
+        .map_err(|_| ImportError::Protocol(format!("unexpected object type `{kind}`")))?;
     let size = size
         .parse()
         .map_err(|_| ImportError::Protocol(format!("bad object size in `{header}`")))?;
-    Ok((id, kind, size))
+    Ok((parse_id(id)?, kind, size))
+}
+
+fn parse_id(hex: &str) -> Result<ObjectId, ImportError> {
+    ObjectId::from_hex(hex).map_err(|_| ImportError::Protocol(format!("bad object id `{hex}`")))
 }
 
 /// Ends the cat-file process and picks the most useful error to report.
@@ -244,7 +282,10 @@ fn finish_cat_file(
         let _ = child.kill();
     }
     let status = child.wait()?;
-    let git_failed = |message: String| ImportError::Git { command: "git cat-file --batch".into(), message };
+    let git_failed = |message: String| ImportError::Git {
+        command: "git cat-file --batch".into(),
+        message,
+    };
     if !status.success() && read.is_ok() {
         return Err(git_failed(stderr.unwrap_or_default().trim().to_owned()));
     }

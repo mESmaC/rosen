@@ -1,6 +1,7 @@
 //! `rosen`: the Rosen command-line tool, a thin layer over `rosen-client`.
 
 mod commands;
+mod import;
 mod server;
 
 use std::process::ExitCode;
@@ -36,6 +37,9 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
         Command::Server(ServerCommand::Start) => block_on(server::start(json, &endpoint)),
         Command::Server(ServerCommand::Status) => block_on(server::status(json, &endpoint)),
         Command::Events { after } => block_on(server::stream_events(json, &endpoint, *after)),
+        Command::Import { repo, branch } => {
+            block_on(import::import(json, &endpoint, repo, branch.as_deref()))
+        }
         other => rosen_client::run_operation(other.path()).map(|()| true),
     }
 }

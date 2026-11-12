@@ -21,6 +21,9 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
             state.request_shutdown();
             Outcome::Ok(Response::ShuttingDown)
         }
+        Request::Import { source, branch } => {
+            crate::import::service::handle(state, source, branch).await
+        }
     }
 }
 
