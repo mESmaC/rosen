@@ -203,6 +203,8 @@ pub enum Request {
     /// Reads the project configuration in force at a commit, by default the
     /// current base (SPEC "Project configuration").
     ConfigShow(ConfigQuery),
+    /// Edits a server-side file and returns its stored snapshot (R3).
+    WorkspaceWrite(crate::WorkspaceWrite),
     /// Machine-local warm pool size; zero disables it.
     PoolSize {
         size: usize,
