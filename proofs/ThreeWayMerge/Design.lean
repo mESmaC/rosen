@@ -152,7 +152,7 @@ theorem resolve_honest (c : Chunk α) : Honest c (resolve c) := by
 
 /-! ### Theorems -/
 
--- SPEC.md R5
+-- SPEC.md §R5
 /-- **Correctness (SPEC.md R5, "Automatic merge and conflicts").** For any two
 edit scripts from one base: the chunks partition base, ours and theirs exactly
 (no line dropped or duplicated), and each output region is `Honest` for its
