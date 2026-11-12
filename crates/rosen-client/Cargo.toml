@@ -11,6 +11,7 @@ rosen-core.workspace = true
 rosen-protocol.workspace = true
 rosen-store.workspace = true
 reflink-copy.workspace = true
+atomicwrites.workspace = true
 ignore.workspace = true
 notify.workspace = true
 serde.workspace = true

@@ -104,8 +104,22 @@ pub(crate) struct Ctx<'a> {
 /// Runs a query on the blocking pool: object and SQLite reads must not stall
 /// the async workers that carry every other connection.
 pub async fn handle(state: &Arc<ServerState>, call: HistoryCall) -> Outcome {
+    let permit = match Arc::clone(&state.workspace_io).acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Outcome::Error(ErrorBody::new(
+                ErrorCode::ShuttingDown,
+                "workspace I/O closed",
+            ))
+        }
+    };
     let state = Arc::clone(state);
-    match tokio::task::spawn_blocking(move || run(&state, call)).await {
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        run(&state, call)
+    })
+    .await
+    {
         Ok(Ok(response)) => Outcome::Ok(response),
         Ok(Err(err)) => Outcome::Error(ErrorBody::new(err.code(), err.to_string())),
         Err(join) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, join.to_string())),
