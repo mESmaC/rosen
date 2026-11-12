@@ -670,6 +670,7 @@ name = "rosen-merge"
 version = "0.1.0"
 dependencies = [
  "rosen-core",
+ "tempfile",
 ]
 
 [[package]]

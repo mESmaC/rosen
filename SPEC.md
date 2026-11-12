@@ -176,7 +176,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 ### R5 · Automatic merge and conflicts
 - The server merges three ways at file level and line level, against the merge base.
 - Generated files listed in project configuration are regenerated, never merged. Registration lists keep both sides' additions.
-- A region that does not merge automatically becomes a stored conflict on the change, which records base, ours and theirs. A local workspace shows conflict markers once the rebase is applied (R2). `rosen resolve` clears a conflict.
+- A region that does not merge automatically becomes a stored conflict on the change, which records base, ours and theirs. A local workspace shows conflict markers once the rebase is applied (R2). The markers are written as `git merge-file --diff3` writes them, in the file's line endings. `rosen resolve` clears a conflict.
 - **Accept when:** a clean merge never drops or duplicates a line that either side kept, and every non-clean region becomes a conflict instead of a silent pick.
 
 ### R6 · Path claims and edit tracking
