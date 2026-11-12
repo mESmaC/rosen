@@ -1,0 +1,8 @@
+[package]
+name = "rosen-merge"
+description = "Three-way file merge for Rosen: line-level diff3 and path-level file merge."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
