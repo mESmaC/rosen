@@ -9,6 +9,7 @@ pub mod change;
 pub mod claim;
 pub mod frame;
 pub mod message;
+pub mod objects;
 pub mod receipt;
 pub mod review;
 pub mod snapshot;
@@ -20,6 +21,7 @@ pub use claim::{
     ShareOutcome, WaitOutcome, WokenWait,
 };
 pub use message::*;
+pub use objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal, WireKind, WireObject};
 pub use receipt::{ReceiptRecord, SubmitReceipt};
 pub use review::{
     CommentRequest, CommentTarget, ResolveRequest, ReviewComment, ReviewThread, ThreadFilter,

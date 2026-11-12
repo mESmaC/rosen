@@ -11,6 +11,7 @@ use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
 };
+use crate::objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal};
 use crate::receipt::{ReceiptRecord, SubmitReceipt};
 use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
 use crate::snapshot::{ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest};
@@ -43,6 +44,11 @@ pub enum ClientFrame {
         versions: Vec<u32>,
         /// Free-form client name for diagnostics, for example `rosen-cli 0.1.0`.
         client: String,
+        /// The machine credential a daemon on another machine presents to the
+        /// server's network listener (R14). Local clients send none: the local
+        /// transport is already limited to the OS user.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<String>,
     },
     /// A request; the server answers with a [`ServerFrame::Response`] with the same id.
     Request { id: u64, request: Request },
@@ -164,6 +170,12 @@ pub enum Request {
     /// Records a snapshot of a workspace's tree on its change: automatic
     /// from the watcher, or named by `rosen commit` (SPEC R2, D17).
     Snapshot(SnapshotRequest),
+    /// Reads stored objects (D8). A machine's cache fills its store with it.
+    GetObjects(ObjectQuery),
+    /// Makes every object reachable from a root readable from this daemon's
+    /// local store, fetching what a cache lacks from the server (D8, R3).
+    /// Clients ask before reading a tree from the local store.
+    EnsureObjects(EnsureObjects),
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -189,6 +201,8 @@ pub enum Response {
     ReviewThread(ReviewThread),
     ReviewThreads(Vec<ReviewThread>),
     Receipt(ReceiptRecord),
+    Objects(ObjectBatch),
+    ObjectsLocal(ObjectsLocal),
 }
 
 /// The answer to [`Request::AckEvents`]: the cursor now stored, which is
@@ -225,8 +239,19 @@ pub struct ServerStatus {
     pub data_dir: String,
     pub uptime_ms: u64,
     pub open_connections: u64,
-    /// The sequence number of the newest event, 0 when there is none.
+    /// The sequence number of the newest event, 0 when there is none. A
+    /// cache daemon reports 0: the event log is on the server.
     pub last_event: u64,
+    /// The network listener's bound address, when the server has one (R14).
+    #[serde(default)]
+    pub listen: Option<String>,
+    /// SHA-256 of the server's TLS certificate, lowercase hex. Daemons on
+    /// other machines pin it. Absent on a cache daemon.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    /// The server a cache daemon forwards to; absent on the server itself.
+    #[serde(default)]
+    pub upstream: Option<String>,
 }
 
 /// Why a request failed.
@@ -273,6 +298,9 @@ pub enum ErrorCode {
     /// The request is valid but the current state forbids it, such as
     /// abandoning a landed change.
     Refused,
+    /// A cache daemon could not reach the server, so it could not forward
+    /// the request (D8). Retrying later may succeed.
+    Unavailable,
 }
 
 /// The event types of SPEC R9.

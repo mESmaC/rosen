@@ -1,9 +1,13 @@
 //! The Rosen daemon (SPEC.md D8, §3).
 //!
-//! One server runs per machine. It holds the authoritative object store and
-//! SQLite metadata store, and does every merge, rebase, land and history
-//! query on behalf of thin clients, over the protocol in `rosen-protocol`.
+//! One daemon runs per machine. On the project's server machine it holds
+//! the authoritative object store and SQLite metadata store, and does every
+//! merge, rebase, land and history query on behalf of thin clients, over the
+//! protocol in `rosen-protocol`, on the local transport and on a TLS network
+//! listener (R14). On every other machine it runs as the tier-1 object cache
+//! in [`cache`], forwarding every other request to the server.
 
+pub mod cache;
 pub mod changes;
 pub mod claims;
 pub mod conflicts;
@@ -13,16 +17,20 @@ pub mod import;
 pub mod landing;
 pub mod listener;
 pub mod mirror;
+pub mod network;
+pub mod objects;
 pub mod receipts;
 pub mod reviews;
 pub mod rpc;
 pub mod snapshots;
 
 use events::EventLog;
+use network::{Identity, NetworkOptions};
 use rosen_protocol::Endpoint;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -36,6 +44,8 @@ pub struct ServerState {
     pub events: EventLog,
     pub changes: changes::ChangeService,
     pub receipts: receipts::ReceiptService,
+    /// The TLS identity and bound address, once the network listener is up.
+    network: OnceLock<NetworkInfo>,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
 }
@@ -48,12 +58,35 @@ impl ServerState {
             events: EventLog::open(config.metadata_path()),
             config,
             started: Instant::now(),
+            network: OnceLock::new(),
             open_connections: AtomicU64::new(0),
             shutdown: watch::Sender::new(false),
         });
         let base = import::base::LedgerBase::new(state.config.clone());
         state.changes.set_base_source(Arc::new(base));
         state
+    }
+
+    /// Records the network listener once it is bound.
+    pub fn set_network(&self, identity: Identity, address: SocketAddr) {
+        let _ = self.network.set(NetworkInfo { identity, address });
+    }
+
+    /// The network listener's address and certificate fingerprint (R14).
+    pub fn network_status(&self) -> Option<(SocketAddr, String)> {
+        let info = self.network.get()?;
+        Some((
+            info.address,
+            network::identity::hex(&info.identity.fingerprint()),
+        ))
+    }
+
+    /// True when `given` is the project's machine credential. Always false
+    /// before the network listener is up.
+    pub fn credential_matches(&self, given: &str) -> bool {
+        self.network
+            .get()
+            .is_some_and(|info| info.identity.credential_matches(given))
     }
 
     pub fn open_connections(&self) -> u64 {
@@ -90,6 +123,11 @@ impl ServerState {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
+}
+
+struct NetworkInfo {
+    identity: Identity,
+    address: SocketAddr,
 }
 
 pub(crate) struct ConnectionGuard(Arc<ServerState>);
@@ -138,13 +176,50 @@ impl ServerConfig {
 /// Binds the endpoint and serves until shutdown is requested. Fails with
 /// [`std::io::ErrorKind::AddrInUse`] when another server owns the endpoint.
 pub async fn serve(config: &ServerConfig) -> std::io::Result<()> {
+    serve_with(config, NetworkOptions::default()).await
+}
+
+/// [`serve`], also listening on the network or running as a cache in front
+/// of another machine's server, as `options` say.
+pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::io::Result<()> {
+    if let Some(upstream) = options.upstream {
+        return cache::serve(config, upstream).await;
+    }
     let listener = rosen_protocol::Listener::bind(&config.endpoint)?;
+    // Created with the project's first server start (R14), so the
+    // fingerprint daemons pin never changes.
+    let identity = Identity::load_or_create(&config.data_dir)?;
+    let network = match &options.listen {
+        Some(address) => Some(bind_network(address, identity).await?),
+        None => None,
+    };
     let state = ServerState::new(config.clone());
     let mirror = tokio::spawn(mirror::run(Arc::clone(&state)));
+    let network_task = network.map(|(tcp, acceptor, identity, address)| {
+        state.set_network(identity, address);
+        tokio::spawn(network::serve(tcp, acceptor, Arc::clone(&state)))
+    });
     listener::serve(listener, Arc::clone(&state)).await;
+    if let Some(task) = network_task {
+        let _ = task.await;
+    }
     state.drain_connections(Duration::from_secs(2)).await;
     // A push cut short here is retried at the next start: the mirror's
     // pushed commit is only recorded once the remote accepts it.
     mirror.abort();
     Ok(())
+}
+
+type BoundNetwork = (
+    tokio::net::TcpListener,
+    tokio_rustls::TlsAcceptor,
+    Identity,
+    SocketAddr,
+);
+
+async fn bind_network(address: &str, identity: Identity) -> std::io::Result<BoundNetwork> {
+    let acceptor = network::tls::acceptor(&identity)?;
+    let tcp = tokio::net::TcpListener::bind(address).await?;
+    let bound = tcp.local_addr()?;
+    Ok((tcp, acceptor, identity, bound))
 }

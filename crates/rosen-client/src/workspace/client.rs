@@ -3,10 +3,11 @@
 use std::path::{Path, PathBuf};
 
 use rosen_core::ObjectId;
-use rosen_protocol::ChangeRecord;
+use rosen_protocol::{ChangeRecord, EnsureObjects, Request, Response};
 use rosen_store::LooseObjectStore;
 
 use super::{materialise, Options, Report};
+use crate::connection::unexpected;
 use crate::snapshot::WorkspaceMarker;
 use crate::{Client, Error};
 
@@ -17,6 +18,17 @@ impl Client {
         let status = self.status().await?;
         let objects = PathBuf::from(status.data_dir).join("objects");
         LooseObjectStore::open(objects).map_err(|error| Error::Workspace(error.into()))
+    }
+
+    /// Makes every object reachable from `root` readable from the local
+    /// store. On the server's machine this only checks the root is there.
+    /// Returns how many objects the daemon fetched.
+    pub async fn ensure_local(&self, root: ObjectId) -> Result<u64, Error> {
+        let request = Request::EnsureObjects(EnsureObjects { root });
+        match self.request(request).await? {
+            Response::ObjectsLocal(local) => Ok(local.fetched),
+            other => Err(unexpected(other)),
+        }
     }
 
     /// Materialises `change`'s head tree into the new directory `dest`, and
@@ -46,6 +58,9 @@ impl Client {
         dest: &Path,
         options: Options,
     ) -> Result<Report, Error> {
+        // On a machine that is not the server, the daemon first fetches what
+        // its cache lacks (D8).
+        self.ensure_local(tree).await?;
         let store = self.local_store().await?;
         let dest = dest.to_path_buf();
         tokio::task::spawn_blocking(move || materialise(&store, tree, &dest, &options))

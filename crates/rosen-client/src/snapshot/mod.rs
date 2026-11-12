@@ -304,6 +304,11 @@ impl Client {
 
     /// Opens the workspace at `root` for snapshots.
     pub async fn open_snapshotter(&self, root: &Path) -> Result<Snapshotter, Error> {
+        // The last stored tree may have been uploaded from another machine's
+        // workspace or rebased on the server, so make it local first (D8).
+        if let Ok(marker) = WorkspaceMarker::read(root) {
+            self.ensure_local(marker.tree).await?;
+        }
         let store = self.local_store().await?;
         let root = root.to_path_buf();
         tokio::task::spawn_blocking(move || Snapshotter::open(&store, &root))

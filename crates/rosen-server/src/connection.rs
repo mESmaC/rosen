@@ -37,11 +37,30 @@ const READ_RETRY: Duration = Duration::from_secs(1);
 
 type Outbox = mpsc::Sender<ServerFrame>;
 
-/// Serves one client until it disconnects, breaks the protocol, or the server stops.
+/// How a peer reached the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// The local transport, already limited to the OS user.
+    Local,
+    /// The network listener (R14): the hello must carry a valid credential.
+    Network,
+}
+
+/// Serves one local client until it disconnects, breaks the protocol, or
+/// the server stops.
 pub async fn serve_connection(stream: BoxStream, state: Arc<ServerState>) {
+    serve_with_access(stream, state, Access::Local).await;
+}
+
+/// Serves one peer that arrived by `access`.
+pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, access: Access) {
     let _open = state.track_connection();
     let (mut reader, mut writer) = tokio::io::split(stream);
-    match handshake(&mut reader, &mut writer).await {
+    let admit = |credential: Option<&str>| match access {
+        Access::Local => true,
+        Access::Network => credential.is_some_and(|given| state.credential_matches(given)),
+    };
+    match handshake(&mut reader, &mut writer, admit).await {
         Ok(true) => {}
         Ok(false) => return,
         Err(err) => {
@@ -63,17 +82,22 @@ pub async fn serve_connection(stream: BoxStream, state: Arc<ServerState>) {
     let _ = writer_task.await;
 }
 
-/// Reads the client's hello and answers it. Returns false when the client was
+/// Reads the client's hello and answers it. `admit` decides whether the
+/// hello's credential lets the peer in. Returns false when the client was
 /// refused or left before saying hello.
-async fn handshake(
+pub(crate) async fn handshake(
     reader: &mut ReadHalf<BoxStream>,
     writer: &mut WriteHalf<BoxStream>,
+    admit: impl FnOnce(Option<&str>) -> bool,
 ) -> io::Result<bool> {
     let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame::<_, ClientFrame>(reader))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no hello within the timeout"))??;
     let reply = match hello {
         None => return Ok(false),
+        Some(ClientFrame::Hello { credential, .. }) if !admit(credential.as_deref()) => {
+            reject("the machine credential is missing or not accepted".to_owned())
+        }
         Some(ClientFrame::Hello { versions, .. }) => match negotiate_version(&versions) {
             Some(version) => ServerFrame::Welcome {
                 version,

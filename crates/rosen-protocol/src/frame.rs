@@ -36,6 +36,21 @@ where
     writer.flush().await
 }
 
+/// Writes an already-encoded frame body and flushes it. A forwarding daemon
+/// relays bodies this way, so frames its own build cannot decode still pass.
+pub async fn write_frame_body<W>(writer: &mut W, body: &[u8]) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let len = u32::try_from(body.len())
+        .ok()
+        .filter(|len| *len <= MAX_FRAME_LEN)
+        .ok_or_else(|| too_large(body.len() as u64))?;
+    writer.write_all(&len.to_be_bytes()).await?;
+    writer.write_all(body).await?;
+    writer.flush().await
+}
+
 /// Reads one frame body. Returns `None` when the peer closed the stream cleanly
 /// between frames; a stream that ends inside a frame is an error.
 pub async fn read_frame_body<R>(reader: &mut R) -> io::Result<Option<Vec<u8>>>
