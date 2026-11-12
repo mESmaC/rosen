@@ -31,6 +31,9 @@ pub struct ConflictRegion {
     pub base_lines: Range<usize>,
     pub ours_lines: Range<usize>,
     pub theirs_lines: Range<usize>,
+    /// Whether this region's conflict markers end in CRLF rather than LF, so
+    /// a workspace copy of a CRLF file does not gain LF-only lines.
+    pub crlf_markers: bool,
 }
 
 /// The result of merging three versions of one text file, as an ordered list
@@ -92,20 +95,47 @@ impl TextMerge {
 }
 
 fn write_conflict(out: &mut Vec<u8>, region: &ConflictRegion, labels: MarkerLabels) {
-    write_marker_section(out, &format!("<<<<<<< {}\n", labels.ours), &region.ours);
-    write_marker_section(out, &format!("||||||| {}\n", labels.base), &region.base);
-    write_marker_section(out, "=======\n", &region.theirs);
-    out.extend_from_slice(format!(">>>>>>> {}\n", labels.theirs).as_bytes());
+    let newline = if region.crlf_markers { "\r\n" } else { "\n" };
+    let sections = [
+        (format!("<<<<<<< {}", labels.ours), &region.ours),
+        (format!("||||||| {}", labels.base), &region.base),
+        ("=======".to_owned(), &region.theirs),
+    ];
+    for (marker, text) in sections {
+        out.extend_from_slice(format!("{marker}{newline}").as_bytes());
+        out.extend_from_slice(text);
+        // Markers must start a line, so a side whose region ends the file
+        // without a newline gets one here.
+        if text.last().is_some_and(|&byte| byte != b'\n') {
+            out.extend_from_slice(newline.as_bytes());
+        }
+    }
+    out.extend_from_slice(format!(">>>>>>> {}{newline}", labels.theirs).as_bytes());
 }
 
-fn write_marker_section(out: &mut Vec<u8>, marker: &str, text: &[u8]) {
-    out.extend_from_slice(marker.as_bytes());
-    out.extend_from_slice(text);
-    // Markers must start a line, so a side whose region ends the file
-    // without a newline gets one here.
-    if text.last().is_some_and(|&byte| byte != b'\n') {
-        out.push(b'\n');
+/// Whether a conflict's markers end in CRLF, decided as `git merge-file`
+/// decides it (xdiff's `is_cr_needed`), so Rosen's markers match git's byte
+/// for byte: LF if the line before the region in ours or in theirs ends in
+/// LF, otherwise whatever the base's first line ends in, and LF when that is
+/// undecided.
+fn markers_use_crlf(files: &[Vec<&[u8]>; 3], ours_start: usize, theirs_start: usize) -> bool {
+    let preceding = |lines: &[&[u8]], start: usize| line_is_crlf(lines, start.saturating_sub(1));
+    preceding(&files[1], ours_start) != Some(false)
+        && preceding(&files[2], theirs_start) != Some(false)
+        && line_is_crlf(&files[0], 0) == Some(true)
+}
+
+/// Whether line `index` ends in CRLF. A last line with no newline is judged
+/// by the line before it; `None` when there is no line to judge by.
+fn line_is_crlf(lines: &[&[u8]], index: usize) -> Option<bool> {
+    let ends_crlf = |line: &[u8]| line.ends_with(b"\r\n");
+    let line = lines.get(index)?;
+    if line.ends_with(b"\n") {
+        return Some(ends_crlf(line));
     }
+    index
+        .checked_sub(1)
+        .map(|previous| ends_crlf(lines[previous]))
 }
 
 /// One chunk of the diff3 partition, as line ranges into each file.
@@ -198,6 +228,7 @@ fn resolve_chunk(chunk: &Chunk, files: &[Vec<&[u8]>; 3], ids: &[Vec<u32>; 3]) ->
             base_lines: base.clone(),
             ours_lines: ours.clone(),
             theirs_lines: theirs.clone(),
+            crlf_markers: markers_use_crlf(files, ours.start, theirs.start),
         })
     }
 }
