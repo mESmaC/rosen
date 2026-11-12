@@ -5,6 +5,7 @@
 //! materialisation, the file watcher and snapshots, and the offline journal.
 
 pub mod changes;
+pub mod claims;
 pub mod connection;
 pub mod daemon;
 mod import;

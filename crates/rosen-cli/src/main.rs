@@ -1,12 +1,14 @@
 //! `rosen`: the Rosen command-line tool, a thin layer over `rosen-client`.
 
 mod change_cmd;
+mod claim_cmd;
 mod commands;
 mod import;
 mod server;
 
 use std::process::ExitCode;
 
+use claim_cmd::ClaimVerb;
 use clap::Parser;
 use commands::{Cli, Command, ServerCommand};
 use rosen_client::Endpoint;
@@ -39,6 +41,12 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
         Command::Server(ServerCommand::Status) => block_on(server::status(json, &endpoint)),
         Command::Events { after } => block_on(server::stream_events(json, &endpoint, *after)),
         Command::Change(change) => block_on(change_cmd::run(json, &endpoint, change)),
+        Command::Claim(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Claim, args)),
+        Command::Share(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Share, args)),
+        Command::Wait(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Wait, args)),
+        Command::Release(args) => {
+            block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Release, args))
+        }
         Command::Import {
             repo,
             branch,

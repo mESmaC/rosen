@@ -5,6 +5,7 @@
 //! the client and the proofs' reference models can all share it.
 
 pub mod change;
+pub mod claim;
 pub mod conflict;
 pub mod hash;
 pub mod history;
@@ -12,6 +13,7 @@ pub mod object;
 pub mod stack;
 
 pub use change::{AgentId, Change, ChangeId, ChangeParent, ChangeState, Snapshot, SnapshotKind};
+pub use claim::{blockers, Blocker, HeldClaim, PathPattern};
 pub use conflict::{Conflict, ConflictId, ConflictSet};
 pub use hash::ObjectId;
 pub use history::{CommitGraph, LandedCommit, LandedTrailers};
@@ -46,6 +48,8 @@ pub enum Error {
     UnknownChange(ChangeId),
     /// A commit needed by a history walk is missing from the graph.
     MissingCommit(ObjectId),
+    /// A claimed path or glob is empty, absolute or leaves the repository.
+    InvalidPath(String),
 }
 
 impl fmt::Display for Error {
@@ -63,6 +67,7 @@ impl fmt::Display for Error {
             Error::StackCycle(id) => write!(f, "stack cycle through change {id}"),
             Error::UnknownChange(id) => write!(f, "unknown change {id}"),
             Error::MissingCommit(id) => write!(f, "commit {id} not found"),
+            Error::InvalidPath(s) => write!(f, "invalid path {s}"),
         }
     }
 }

@@ -1,6 +1,7 @@
 //! Request dispatch. Feature work adds one arm per new [`Request`] variant.
 
 use crate::changes::{ChangeError, ChangeService};
+use crate::claims::ClaimCall;
 use crate::{ServerState, SERVER_NAME};
 use rosen_protocol::{
     ErrorBody, ErrorCode, Outcome, Request, Response, ServerStatus, PROTOCOL_VERSION,
@@ -36,8 +37,13 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::ChangeShow { change } => {
             on_changes(state, move |c| c.show(&change).map(Response::Change)).await
         }
-        Request::ChangeAbandon { change } => {
-            on_changes(state, move |c| c.abandon(&change).map(Response::Change)).await
+        Request::ChangeAbandon { change } => crate::claims::abandon(state, change).await,
+        Request::ClaimPaths(req) => crate::claims::handle(state, ClaimCall::Claim(req)).await,
+        Request::SharePaths(req) => crate::claims::handle(state, ClaimCall::Share(req)).await,
+        Request::WaitPaths(req) => crate::claims::handle(state, ClaimCall::Wait(req)).await,
+        Request::ReleasePaths(req) => crate::claims::handle(state, ClaimCall::Release(req)).await,
+        Request::ClaimList(filter) => {
+            crate::claims::handle(state, ClaimCall::List(filter.change)).await
         }
     }
 }
@@ -56,8 +62,9 @@ async fn on_changes(
     }
 }
 
-fn change_error_code(err: &ChangeError) -> ErrorCode {
+pub(crate) fn change_error_code(err: &ChangeError) -> ErrorCode {
     match err {
+        ChangeError::Refused(rosen_core::Error::InvalidPath(_)) => ErrorCode::InvalidArgument,
         ChangeError::NotFound(_) => ErrorCode::NotFound,
         ChangeError::InvalidId(_) | ChangeError::Ambiguous(_) => ErrorCode::InvalidArgument,
         ChangeError::ParentClosed { .. } | ChangeError::Refused(_) | ChangeError::Base(_) => {
