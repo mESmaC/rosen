@@ -56,7 +56,7 @@ fn import(state: &Arc<ServerState>, source: &Path) -> Outcome {
         .build()
         .unwrap();
     let source = source.to_string_lossy().into_owned();
-    runtime.block_on(service::handle(state, source, None))
+    runtime.block_on(service::handle(state, source, None, None))
 }
 
 #[test]

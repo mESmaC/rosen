@@ -8,15 +8,22 @@ use rosen_store::LooseObjectStore;
 
 use super::{import_repository, ImportError, ImportReport, ImportRequest};
 use crate::landing::{InitBase, Ledger};
+use crate::mirror::MirrorStore;
 use crate::ServerState;
 
 /// Answers `Request::Import`. Import blocks on git and disk for as long as
 /// the repository takes to copy, so it runs on a blocking thread and never
 /// stalls the connections the async runtime serves.
-pub async fn handle(state: &Arc<ServerState>, source: String, branch: Option<String>) -> Outcome {
+pub async fn handle(
+    state: &Arc<ServerState>,
+    source: String,
+    branch: Option<String>,
+    mirror: Option<String>,
+) -> Outcome {
     let state = Arc::clone(state);
     let request = ImportRequest { source, branch };
-    let joined = tokio::task::spawn_blocking(move || run(&state, &request)).await;
+    let joined =
+        tokio::task::spawn_blocking(move || run(&state, &request, mirror.as_deref())).await;
     match joined {
         Ok(Ok(report)) => Outcome::Ok(Response::Imported(summary(report))),
         Ok(Err(error)) => Outcome::Error(error_body(&error)),
@@ -27,7 +34,11 @@ pub async fn handle(state: &Arc<ServerState>, source: String, branch: Option<Str
     }
 }
 
-fn run(state: &ServerState, request: &ImportRequest) -> Result<ImportReport, ImportError> {
+fn run(
+    state: &ServerState,
+    request: &ImportRequest,
+    mirror: Option<&str>,
+) -> Result<ImportReport, ImportError> {
     std::fs::create_dir_all(&state.config.data_dir)?;
     let ledger = Ledger::open(&state.config.metadata_path())
         .map_err(|error| ImportError::Store(error.to_string()))?;
@@ -42,7 +53,17 @@ fn run(state: &ServerState, request: &ImportRequest) -> Result<ImportReport, Imp
         .init_base(&report.branch, &report.base_commit)
         .map_err(|error| ImportError::Store(error.to_string()))?;
     match outcome {
-        InitBase::Created => Ok(report),
+        InitBase::Created => {
+            // Named only once this import owns the base, so a refused
+            // import never redirects an existing project's mirror. The
+            // first push follows the next land or server start (R1).
+            if let Some(remote) = mirror {
+                MirrorStore::open(&state.config.metadata_path())
+                    .and_then(|store| store.set_remote(remote))
+                    .map_err(|error| ImportError::Store(error.to_string()))?;
+            }
+            Ok(report)
+        }
         InitBase::Exists { name, commit } => Err(ImportError::BaseAlreadySet {
             branch: name,
             base_commit: commit,

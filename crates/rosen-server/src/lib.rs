@@ -11,6 +11,7 @@ pub mod events;
 pub mod import;
 pub mod landing;
 pub mod listener;
+pub mod mirror;
 pub mod rpc;
 
 use events::EventLog;
@@ -120,6 +121,12 @@ impl ServerConfig {
     pub fn import_scratch_dir(&self) -> PathBuf {
         self.data_dir.join("import-tmp")
     }
+
+    /// The bare repository the mirror pushes from (SPEC R1). It holds no
+    /// objects of its own: git reads them from the object store.
+    pub fn mirror_staging_dir(&self) -> PathBuf {
+        self.data_dir.join("mirror.git")
+    }
 }
 
 /// Binds the endpoint and serves until shutdown is requested. Fails with
@@ -127,7 +134,11 @@ impl ServerConfig {
 pub async fn serve(config: &ServerConfig) -> std::io::Result<()> {
     let listener = rosen_protocol::Listener::bind(&config.endpoint)?;
     let state = ServerState::new(config.clone());
+    let mirror = tokio::spawn(mirror::run(Arc::clone(&state)));
     listener::serve(listener, Arc::clone(&state)).await;
     state.drain_connections(Duration::from_secs(2)).await;
+    // A push cut short here is retried at the next start: the mirror's
+    // pushed commit is only recorded once the remote accepts it.
+    mirror.abort();
     Ok(())
 }

@@ -22,9 +22,11 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
             state.request_shutdown();
             Outcome::Ok(Response::ShuttingDown)
         }
-        Request::Import { source, branch } => {
-            crate::import::service::handle(state, source, branch).await
-        }
+        Request::Import {
+            source,
+            branch,
+            mirror,
+        } => crate::import::service::handle(state, source, branch, mirror).await,
         Request::ChangeNew(params) => {
             on_changes(state, move |c| c.create(&params).map(Response::Change)).await
         }
