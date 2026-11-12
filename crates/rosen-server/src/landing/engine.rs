@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rosen_core::history::LandedTrailers;
-use rosen_core::Signature;
+use rosen_core::{ReceiptRefusal, Signature, PRE_LAND_CHECK_SET};
 
 use super::ledger::ReceiptLookup;
 use super::restack::Restacker;
@@ -33,7 +33,7 @@ impl Default for LandingConfig {
     fn default() -> Self {
         LandingConfig {
             base_ref: "main".into(),
-            pre_land_check_set: "pre-land".into(),
+            pre_land_check_set: PRE_LAND_CHECK_SET.into(),
             // A land must commit in under 200 ms (R8); these bounds keep the
             // worst-case backoff total well inside that.
             max_attempts: 12,
@@ -109,41 +109,20 @@ impl Landing {
 
     /// Stores a receipt after checking it is bound to the change's current
     /// head, the configured check set, and a commit the base has held.
-    pub fn submit_receipt(&self, receipt: Receipt) -> LandResult<()> {
+    /// Returns the stored receipt, which keeps the first submitter when the
+    /// same receipt was already stored.
+    pub fn submit_receipt(&self, receipt: Receipt) -> LandResult<Receipt> {
         let facts = self.facts(&receipt.change)?;
-        if receipt.head != facts.head {
-            return Err(LandError::InvalidReceipt(format!(
-                "head {} is not the current head {} of {}",
-                receipt.head, facts.head, facts.id
-            )));
-        }
-        // The check set name goes into the landed commit's trailer, so a
-        // name with whitespace could forge trailers there (issue #18).
-        if receipt
-            .check_set
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control())
-        {
-            return Err(LandError::InvalidReceipt(format!(
-                "check set {:?} contains whitespace",
-                receipt.check_set
-            )));
-        }
-        if receipt.check_set != self.config.pre_land_check_set {
-            return Err(LandError::InvalidReceipt(format!(
-                "check set {} is not the pre-land check set {}",
-                receipt.check_set, self.config.pre_land_check_set
-            )));
-        }
-        if self
-            .ledger
-            .base_seq(&self.config.base_ref, &receipt.base)?
-            .is_none()
-        {
-            return Err(LandError::InvalidReceipt(format!(
-                "base {} was never held by {}",
-                receipt.base, self.config.base_ref
-            )));
+        receipt
+            .check_binding(&facts.head, facts.state, &self.config.pre_land_check_set)
+            .map_err(|refusal| LandError::InvalidReceipt(refusal.to_string()))?;
+        let base_ref = &self.config.base_ref;
+        if self.ledger.base_seq(base_ref, &receipt.base)?.is_none() {
+            let refusal = ReceiptRefusal::UnknownBase {
+                base: receipt.base,
+                base_ref: base_ref.clone(),
+            };
+            return Err(LandError::InvalidReceipt(refusal.to_string()));
         }
         self.ledger.put_receipt(&receipt)
     }

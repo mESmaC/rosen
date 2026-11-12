@@ -9,6 +9,7 @@ pub mod change;
 pub mod claim;
 pub mod frame;
 pub mod message;
+pub mod receipt;
 pub mod review;
 pub mod transport;
 
@@ -18,6 +19,7 @@ pub use claim::{
     ShareOutcome, WaitOutcome, WokenWait,
 };
 pub use message::*;
+pub use receipt::{ReceiptRecord, SubmitReceipt};
 pub use review::{
     CommentRequest, CommentTarget, ResolveRequest, ReviewComment, ReviewThread, ThreadFilter,
 };

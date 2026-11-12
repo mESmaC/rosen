@@ -11,6 +11,7 @@ use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
 };
+use crate::receipt::{ReceiptRecord, SubmitReceipt};
 use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +123,10 @@ pub enum Request {
     ReviewResolve(ResolveRequest),
     /// Lists a change's review threads with their comments, oldest first.
     ReviewList(ThreadFilter),
+    /// Records that a check set passed on a change's merge result onto one
+    /// base commit (R8 step 1). Refused unless it names the change's current
+    /// head, the pre-land check set and a commit the base ref has held.
+    ReceiptSubmit(SubmitReceipt),
     /// Loads a git repository's history and makes one of its branches the
     /// project's base (SPEC R1). Refused once the project has a base.
     Import {
@@ -158,6 +163,7 @@ pub enum Response {
     /// The answer to `review_comment` and `review_resolve`.
     ReviewThread(ReviewThread),
     ReviewThreads(Vec<ReviewThread>),
+    Receipt(ReceiptRecord),
 }
 
 /// The answer to [`Request::Import`].
