@@ -9,11 +9,18 @@ use crate::{Client, Error};
 
 impl Client {
     /// Imports `source`, a local repository path or a URL git can clone.
-    /// `branch` defaults to the branch the source's HEAD names.
-    pub async fn import(&self, source: &str, branch: Option<&str>) -> Result<ImportSummary, Error> {
+    /// `branch` defaults to the branch the source's HEAD names. `mirror`
+    /// names the git remote the server pushes the base to after each land.
+    pub async fn import(
+        &self,
+        source: &str,
+        branch: Option<&str>,
+        mirror: Option<&str>,
+    ) -> Result<ImportSummary, Error> {
         let request = Request::Import {
             source: absolute_source(source)?,
             branch: branch.map(str::to_owned),
+            mirror: mirror.map(absolute_source).transpose()?,
         };
         match self.request(request).await? {
             Response::Imported(summary) => Ok(summary),

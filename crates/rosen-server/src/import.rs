@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use rosen_core::ObjectId;
 use rosen_store::ObjectStore;
 
+pub(crate) use git_source::git_command;
 pub use git_source::GitSource;
 
 /// What to import.

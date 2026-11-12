@@ -173,7 +173,7 @@ impl Drop for GitSource {
     }
 }
 
-fn git_command(directory: &Path) -> Command {
+pub(crate) fn git_command(directory: &Path) -> Command {
     let mut command = Command::new("git");
     command.arg("-C").arg(directory);
     for name in REPOSITORY_OVERRIDES {

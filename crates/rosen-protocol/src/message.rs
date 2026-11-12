@@ -109,6 +109,11 @@ pub enum Request {
         source: String,
         /// The branch to import; `None` takes the one the source's HEAD names.
         branch: Option<String>,
+        /// The git remote the server pushes the base to after each land
+        /// (SPEC R1): a URL, or an absolute path for the same reason as
+        /// `source`. `None` leaves the project without a mirror.
+        #[serde(default)]
+        mirror: Option<String>,
     },
 }
 

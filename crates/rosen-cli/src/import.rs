@@ -14,9 +14,10 @@ pub async fn import(
     endpoint: &Endpoint,
     repo: &str,
     branch: Option<&str>,
+    mirror: Option<&str>,
 ) -> Result<Succeeded, Error> {
     let client = rosen_client::connect_or_start(endpoint).await?;
-    let summary = client.import(repo, branch).await?;
+    let summary = client.import(repo, branch, mirror).await?;
     if json {
         let body = json!({
             "schema": IMPORT_SCHEMA,
