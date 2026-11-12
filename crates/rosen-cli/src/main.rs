@@ -3,6 +3,7 @@
 mod change_cmd;
 mod claim_cmd;
 mod commands;
+mod commit_cmd;
 mod import;
 mod server;
 
@@ -10,7 +11,7 @@ use std::process::ExitCode;
 
 use claim_cmd::ClaimVerb;
 use clap::Parser;
-use commands::{Cli, Command, ServerCommand};
+use commands::{Cli, Command, ServerCommand, WorkspaceCommand};
 use rosen_client::Endpoint;
 
 /// Schema tag for `--json` error output. Bump it when the shape changes, so
@@ -41,6 +42,15 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
         Command::Server(ServerCommand::Status) => block_on(server::status(json, &endpoint)),
         Command::Events { after } => block_on(server::stream_events(json, &endpoint, *after)),
         Command::Change(change) => block_on(change_cmd::run(json, &endpoint, change)),
+        Command::Commit { message, workspace } => block_on(commit_cmd::commit(
+            json,
+            &endpoint,
+            message,
+            workspace.as_deref(),
+        )),
+        Command::Workspace(WorkspaceCommand::Watch { workspace }) => {
+            block_on(commit_cmd::watch(json, &endpoint, workspace.as_deref()))
+        }
         Command::Claim(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Claim, args)),
         Command::Share(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Share, args)),
         Command::Wait(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Wait, args)),

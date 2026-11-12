@@ -11,6 +11,7 @@ use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
 };
+use crate::snapshot::{ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest};
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. Bump it on any incompatible change to
@@ -129,6 +130,11 @@ pub enum Request {
         #[serde(default)]
         mirror: Option<String>,
     },
+    /// Stores blobs and trees a snapshot needs (SPEC R2). Idempotent.
+    PutObjects(ObjectUpload),
+    /// Records a snapshot of a workspace's tree on its change: automatic
+    /// from the watcher, or named by `rosen commit` (SPEC R2, D17).
+    Snapshot(SnapshotRequest),
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -147,6 +153,8 @@ pub enum Response {
     Waiting(WaitOutcome),
     Released(ReleaseOutcome),
     PathClaims(Vec<PathClaim>),
+    ObjectsStored(ObjectsStored),
+    Snapshot(SnapshotOutcome),
 }
 
 /// The answer to [`Request::Import`].

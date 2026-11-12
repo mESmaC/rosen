@@ -14,6 +14,7 @@ pub mod landing;
 pub mod listener;
 pub mod mirror;
 pub mod rpc;
+pub mod snapshots;
 
 use events::EventLog;
 use rosen_protocol::Endpoint;

@@ -9,6 +9,7 @@ pub mod claims;
 pub mod connection;
 pub mod daemon;
 mod import;
+pub mod snapshot;
 pub mod workspace;
 
 pub use connection::Client;
@@ -51,6 +52,9 @@ pub enum Error {
     /// A local workspace could not be materialised.
     #[error(transparent)]
     Workspace(workspace::MaterialiseError),
+    /// A workspace could not be scanned or snapshotted.
+    #[error(transparent)]
+    Snapshot(#[from] snapshot::SnapshotError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

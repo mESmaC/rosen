@@ -9,6 +9,7 @@ pub mod change;
 pub mod claim;
 pub mod frame;
 pub mod message;
+pub mod snapshot;
 pub mod transport;
 
 pub use change::{ChangeFilter, ChangeRecord, NewChange};
@@ -17,4 +18,7 @@ pub use claim::{
     ShareOutcome, WaitOutcome, WokenWait,
 };
 pub use message::*;
+pub use snapshot::{
+    ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest, UploadKind, UploadObject,
+};
 pub use transport::{connect, BoxStream, Endpoint, Listener};

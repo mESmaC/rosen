@@ -45,6 +45,8 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::ClaimList(filter) => {
             crate::claims::handle(state, ClaimCall::List(filter.change)).await
         }
+        Request::PutObjects(upload) => crate::snapshots::put_objects(state, upload).await,
+        Request::Snapshot(request) => crate::snapshots::snapshot(state, request).await,
     }
 }
 

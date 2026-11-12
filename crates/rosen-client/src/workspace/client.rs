@@ -7,6 +7,7 @@ use rosen_protocol::ChangeRecord;
 use rosen_store::LooseObjectStore;
 
 use super::{materialise, Options, Report};
+use crate::snapshot::WorkspaceMarker;
 use crate::{Client, Error};
 
 impl Client {
@@ -18,15 +19,22 @@ impl Client {
         LooseObjectStore::open(objects).map_err(|error| Error::Workspace(error.into()))
     }
 
-    /// Materialises `change`'s head tree into the new directory `dest`.
+    /// Materialises `change`'s head tree into the new directory `dest`, and
+    /// marks it as the change's workspace so its writes become snapshots.
     pub async fn materialise_change(
         &self,
         change: &ChangeRecord,
         dest: &Path,
         options: Options,
     ) -> Result<Report, Error> {
-        self.materialise_tree(change.change.head, dest, options)
-            .await
+        let sparse = options.sparse.chosen();
+        let report = self
+            .materialise_tree(change.change.head, dest, options)
+            .await?;
+        WorkspaceMarker::new(change.change.id, change.change.head, sparse)
+            .write(dest)
+            .map_err(Error::Io)?;
+        Ok(report)
     }
 
     /// Materialises any tree in the local store into the new directory

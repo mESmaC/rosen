@@ -229,7 +229,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 - Rosen's events and the channel's events (R13) share one log, one sequence and one cursor per subscriber. A claim release and the land that caused it are always delivered in order, to subscribers on any machine.
 
 ### R10 · CLI
-- The `rosen` commands are `import`, `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve`, `receipt submit`, `land`, `resolve`, `workspace list|delete`, `server start|status`, `events`, `machine join|list|approve|revoke` and `machine key create|list|revoke` (R14).
+- The `rosen` commands are `import`, `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve`, `receipt submit`, `land`, `resolve`, `workspace list|delete|watch`, `server start|status`, `events`, `machine join|list|approve|revoke` and `machine key create|list|revoke` (R14).
 - `--json` on every command, with versioned output schemas.
 - `--help` is complete enough that an agent can learn Rosen from it alone.
 
