@@ -127,7 +127,9 @@ pub fn hide_credentials(remote: &str, text: &str) -> String {
     match rest[..host_start].rfind('@') {
         Some(at) if at > 0 => {
             let safe = format!("{scheme}://***@{}", &rest[at + 1..]);
-            text.replace(remote, &safe).replace(&rest[..at], "***")
+            // Matched with its `@`, so a plain user name such as `git` in
+            // `ssh://git@host` does not blank out every `git` in the text.
+            text.replace(remote, &safe).replace(&rest[..=at], "***@")
         }
         _ => text.to_owned(),
     }
