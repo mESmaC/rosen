@@ -87,7 +87,6 @@ async fn refresh_ready(
     let mut retained = Vec::new();
     for mut slot in ready.drain(..) {
         let store = store.clone();
-        let tree = tree;
         let updated = tokio::task::spawn_blocking(move || {
             if slot.tree == tree || refresh(&store, &mut slot, tree).is_ok() {
                 Some(slot)
