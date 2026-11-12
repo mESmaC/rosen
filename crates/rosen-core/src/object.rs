@@ -6,6 +6,7 @@
 
 use crate::hash::ObjectId;
 use crate::{Error, Result};
+use std::borrow::Cow;
 
 /// The three object kinds Rosen stores. Git tags are not used: the base is
 /// the only ref (D18), and release refs point at commits.
@@ -53,18 +54,22 @@ pub enum FileMode {
     Directory,
     /// A gitlink. Rosen keeps them so imported trees hash the same.
     Submodule,
+    /// A mode old git versions wrote, such as `100664`. Kept verbatim so
+    /// imported history keeps its IDs; Rosen never writes one itself.
+    Legacy(u32),
 }
 
 impl FileMode {
     /// The octal form git writes inside tree objects (no leading zero).
-    pub fn as_octal(self) -> &'static str {
-        match self {
+    pub fn as_octal(self) -> Cow<'static, str> {
+        Cow::Borrowed(match self {
             FileMode::Regular => "100644",
             FileMode::Executable => "100755",
             FileMode::Symlink => "120000",
             FileMode::Directory => "40000",
             FileMode::Submodule => "160000",
-        }
+            FileMode::Legacy(mode) => return Cow::Owned(format!("{mode:o}")),
+        })
     }
 
     pub fn parse(octal: &[u8]) -> Result<Self> {
@@ -74,15 +79,28 @@ impl FileMode {
             b"120000" => Ok(FileMode::Symlink),
             b"40000" => Ok(FileMode::Directory),
             b"160000" => Ok(FileMode::Submodule),
-            other => Err(Error::InvalidTreeEntry(format!(
-                "mode {:?}",
-                String::from_utf8_lossy(other)
-            ))),
+            other => Self::parse_legacy(other).ok_or_else(|| {
+                Error::InvalidTreeEntry(format!("mode {:?}", String::from_utf8_lossy(other)))
+            }),
         }
     }
 
+    /// Accepts any octal mode without a leading zero; a zero-padded mode
+    /// could not be written back byte for byte.
+    fn parse_legacy(octal: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(octal).ok()?;
+        if text.starts_with('0') || text.len() > 7 {
+            return None;
+        }
+        u32::from_str_radix(text, 8).ok().map(FileMode::Legacy)
+    }
+
     pub fn is_tree(self) -> bool {
-        self == FileMode::Directory
+        match self {
+            FileMode::Directory => true,
+            FileMode::Legacy(mode) => mode & 0o170000 == 0o040000,
+            _ => false,
+        }
     }
 }
 
@@ -395,14 +413,26 @@ impl Object {
         out
     }
 
+    /// Parses an object body. A tree or commit that would not re-encode to
+    /// the same bytes (odd spacing, reordered headers) is refused: accepting
+    /// it would silently give it, and every descendant, a new ID.
     pub fn decode_body(kind: ObjectKind, body: &[u8]) -> Result<Self> {
-        Ok(match kind {
-            ObjectKind::Blob => Object::Blob(Blob {
-                data: body.to_vec(),
-            }),
+        let object = match kind {
+            ObjectKind::Blob => {
+                return Ok(Object::Blob(Blob {
+                    data: body.to_vec(),
+                }))
+            }
             ObjectKind::Tree => Object::Tree(Tree::decode(body)?),
             ObjectKind::Commit => Object::Commit(Box::new(Commit::decode(body)?)),
-        })
+        };
+        if object.encode_body() != body {
+            return Err(malformed(format!(
+                "{} does not re-encode to the same bytes",
+                kind.as_str()
+            )));
+        }
+        Ok(object)
     }
 
     /// Parses decompressed loose-object bytes and checks the declared length.
