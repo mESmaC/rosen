@@ -68,7 +68,7 @@ pub enum ImportError {
         expected: ObjectId,
         stored: ObjectId,
     },
-    /// The object store refused a read or write.
+    /// The object store or the metadata store refused a read or write.
     Store(String),
     /// Local file system work, such as the temporary clone, failed.
     Io(std::io::Error),
@@ -100,11 +100,11 @@ impl fmt::Display for ImportError {
                 f,
                 "object {expected} was stored as {stored}; the source repository may be corrupt"
             ),
-            Self::Store(message) => write!(f, "object store error: {message}"),
+            Self::Store(message) => write!(f, "storage error: {message}"),
             Self::Io(error) => write!(f, "{error}"),
             Self::BaseAlreadySet { branch, base_commit } => write!(
                 f,
-                "this project already has a base ({branch} at {base_commit});                  import only into a project with no base"
+                "this project already has a base ({branch} at {base_commit}); import only into a project with no base"
             ),
         }
     }

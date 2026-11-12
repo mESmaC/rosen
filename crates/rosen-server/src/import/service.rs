@@ -3,25 +3,12 @@
 
 use std::sync::Arc;
 
-use rosen_core::ObjectId;
 use rosen_protocol::{ErrorBody, ErrorCode, ImportSummary, Outcome, Response};
 use rosen_store::LooseObjectStore;
 
 use super::{import_repository, ImportError, ImportReport, ImportRequest};
+use crate::landing::{InitBase, Ledger};
 use crate::ServerState;
-
-/// The project's base ref, as import needs it.
-pub trait BaseRef {
-    /// The base's name and commit, if the project has one.
-    fn current(&self) -> Result<Option<(String, ObjectId)>, String>;
-    /// Sets the base in one transaction, only if the project has none yet.
-    /// Returns the base that already exists when it refuses.
-    fn initialise(
-        &self,
-        branch: &str,
-        commit: &ObjectId,
-    ) -> Result<Option<(String, ObjectId)>, String>;
-}
 
 /// Answers `Request::Import`. Import blocks on git and disk for as long as
 /// the repository takes to copy, so it runs on a blocking thread and never
@@ -41,27 +28,25 @@ pub async fn handle(state: &Arc<ServerState>, source: String, branch: Option<Str
 }
 
 fn run(state: &ServerState, request: &ImportRequest) -> Result<ImportReport, ImportError> {
-    let base = open_base_ref(state)?;
-    // Checked first so a project with a base is refused before any copying;
-    // `initialise` checks again, atomically, in case another import won.
-    refuse_if_set(base.current().map_err(ImportError::Store)?)?;
+    std::fs::create_dir_all(&state.config.data_dir)?;
+    let ledger = Ledger::open(&state.config.metadata_path())
+        .map_err(|error| ImportError::Store(error.to_string()))?;
     let store = LooseObjectStore::open(state.config.objects_dir())
         .map_err(|error| ImportError::Store(error.to_string()))?;
     let report = import_repository(request, state.config.import_scratch_dir(), &store)?;
-    let existing = base
-        .initialise(&report.branch, &report.base_commit)
-        .map_err(ImportError::Store)?;
-    refuse_if_set(existing)?;
-    Ok(report)
-}
-
-fn refuse_if_set(base: Option<(String, ObjectId)>) -> Result<(), ImportError> {
-    match base {
-        Some((branch, base_commit)) => Err(ImportError::BaseAlreadySet {
-            branch,
-            base_commit,
+    // Set only after every object is stored, so the base never names a
+    // missing commit. A project that already has a base refuses here; the
+    // objects copied meanwhile are harmless, since the store is immutable
+    // and a rerun of the same import finds them already stored.
+    let outcome = ledger
+        .init_base(&report.branch, &report.base_commit)
+        .map_err(|error| ImportError::Store(error.to_string()))?;
+    match outcome {
+        InitBase::Created => Ok(report),
+        InitBase::Exists { name, commit } => Err(ImportError::BaseAlreadySet {
+            branch: name,
+            base_commit: commit,
         }),
-        None => Ok(()),
     }
 }
 
