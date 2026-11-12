@@ -88,6 +88,11 @@ async fn offline_versions_survive_restart_and_replay_in_order() {
             .len(),
         3
     );
+    let lease = Snapshotter::open_offline(&workspace).unwrap();
+    let deleting = dir.path().join("deleting");
+    std::fs::rename(&workspace, &deleting).unwrap();
+    std::fs::remove_dir_all(deleting).unwrap();
+    drop(lease);
 }
 
 /// An in-process server whose base holds `main.rs` and a `.gitignore`
