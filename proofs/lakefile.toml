@@ -1,0 +1,11 @@
+name = "proofs"
+defaultTargets = ["Landing"]
+
+[[lean_lib]]
+name = "Landing"
+globs = ["Landing.Design"]
+
+# Prints the landing fixture table: `lake exe landing-fixtures > fixtures/landing.tsv`
+[[lean_exe]]
+name = "landing-fixtures"
+root = "Landing.Export"
