@@ -1,18 +1,25 @@
 /-!
 # Workspace deletion guard (SPEC.md R4)
 
-An edit is a version, not merely a path: storing an earlier version does not
-make a later write durable. Evidence is collected after the final flush and
-ordered journal replay. The complete-evidence assumption says every relevant
-local version is either authoritative-server stored or represented among
-watcher writes, journal records or final content-hash observations.
-Stability from this observation through removal is an explicit model
-precondition. The snapshot writer lease does not exclude arbitrary tools
-writing files. Ignored disk output is outside the durability contract.
+An Edit identifies both a filesystem object and its content version; a path
+alone cannot distinguish a replacement from the object previously verified.
+Evidence contains watcher writes, pending journal records and observations
+from final content verification against acknowledged authoritative snapshots.
+Ignored status is fixed at that guard observation; ignored output lies
+outside the durability contract.
 
-The model does not prove the OS watcher, hash function, transport, locking or
-filesystem traversal correct. Its server list must describe acknowledged
-snapshots on the authoritative server, not a cache or a workspace marker.
+The removal primitive must keep held bytes stable through verification and
+object disposal, delete only that exact verified object, and retain objects
+outside its verified set. Nonrecursive directory removal preserves later
+additions. `removed` is any completed prefix of such object removals; `later`
+represents concurrent additions and replacements retained by the primitive.
+No whole-directory stability or absence of concurrent writers is assumed.
+The theorem covers partial cleanup, refusal and interruption, not just success.
+
+The model does not verify the OS handle API, hash function, transport or
+filesystem traversal. Object identity, held-byte exclusion and preservation
+of unverified objects are implementation obligations. Its server list means
+acknowledged authoritative snapshots, never a cache or workspace marker.
 -/
 namespace WorkspaceDeletion
 
@@ -29,37 +36,51 @@ def observations (e : Evidence Edit) : List Edit := e.dirty ++ e.journal ++ e.di
 def pending [DecidableEq Edit] (e : Evidence Edit) (server : List Edit) : List Edit :=
   (observations e).filter fun edit => !e.ignored edit && decide (edit ∉ server)
 
-/-- Deletion keeps server objects forever and removes local files only on success. -/
-def remaining [DecidableEq Edit] (e : Evidence Edit) (server workspaceEdits : List Edit) : List Edit :=
-  if pending e server = [] then [] else workspaceEdits
+/-- Only verified originals can be removed. Every completed removal prefix
+keeps unselected originals and concurrent later versions; refusals keep both. -/
+def remaining [DecidableEq Edit] (e : Evidence Edit)
+    (server originals removed later : List Edit) : List Edit :=
+  if pending e server = [] then
+    originals.filter (fun edit => decide (edit ∉ removed)) ++ later
+  else originals ++ later
 
-/-- SPEC.md R4: after any accepted or refused deletion, every relevant edit
-that existed locally remains either on the server or in the workspace.
-The evidence must cover every unstored local version after the final flush;
-crashes and offline periods may leave any distribution between these lists.
-Every reported refusal is a relevant version absent from the server. -/
-theorem correct [DecidableEq Edit] (e : Evidence Edit) (server workspaceEdits : List Edit)
-    (complete : ∀ edit ∈ workspaceEdits, e.ignored edit = false →
-      edit ∈ server ∨ edit ∈ observations e) :
-    (∀ edit ∈ workspaceEdits, e.ignored edit = false →
-      edit ∈ server ∨ edit ∈ remaining e server workspaceEdits) ∧
+/-- SPEC.md R4: for any prefix of removals of verified object versions,
+every relevant original or later concurrent version stays server-stored or
+local. Only observed objects may enter that prefix; unobserved objects and
+later additions/replacements are retained. Thus complete workspace evidence
+is required for full cleanup, but not for safety of partial cleanup.
+Every named refusal identifies a relevant version absent from the server. -/
+theorem correct [DecidableEq Edit] (e : Evidence Edit)
+    (server originals removed later : List Edit)
+    (verified : ∀ edit ∈ removed, edit ∈ observations e) :
+    (∀ edit ∈ originals ++ later, e.ignored edit = false →
+      edit ∈ server ∨ edit ∈ remaining e server originals removed later) ∧
+    (∀ edit ∈ later, edit ∈ remaining e server originals removed later) ∧
     (∀ edit ∈ pending e server, edit ∈ observations e ∧
       e.ignored edit = false ∧ edit ∉ server) := by
-  constructor
-  · intro edit hl hi
-    by_cases accepted : pending e server = []
-    · by_cases hs : edit ∈ server
-      · exact Or.inl hs
-      · have ho := (complete edit hl hi).resolve_left hs
-        have hp : edit ∈ pending e server := by simp [pending, ho, hi, hs]
-        have impossible : False := by simp [accepted] at hp
-        exact False.elim impossible
-    · exact Or.inr (by simp [remaining, accepted, hl])
+  refine ⟨?_, ?_, ?_⟩
+  · intro edit held hi
+    rcases List.mem_append.mp held with original | added
+    · by_cases accepted : pending e server = []
+      · by_cases hs : edit ∈ server
+        · exact Or.inl hs
+        · have notRemoved : edit ∉ removed := by
+            intro hr
+            have ho := verified edit hr
+            have hp : edit ∈ pending e server := by simp [pending, ho, hi, hs]
+            simp [accepted] at hp
+          exact Or.inr (by simp [remaining, accepted, original, notRemoved])
+      · exact Or.inr (by simp [remaining, accepted, original])
+    · apply Or.inr
+      by_cases accepted : pending e server = [] <;> simp [remaining, accepted, added]
+  · intro edit added
+    by_cases accepted : pending e server = [] <;> simp [remaining, accepted, added]
   · intro edit hp
     simpa [pending, List.mem_filter, Bool.and_eq_true] using hp
-
 /-- One unit per dirty/journal record checked; one unit plus its bytes per
-hash-scanned file. This excludes network flush latency and filesystem calls. -/
+hash-scanned file, for one evidence-validation pass. This primitive model
+excludes set/list lookup, traversal, OS metadata/handle operations, actual
+object/directory disposal, network flushes, retries and their latency. -/
 def scanCost (e : Evidence Edit) (bytes : Edit → Nat) : Nat :=
   e.dirty.length + e.journal.length + (e.disk.map fun edit => bytes edit + 1).sum
 
@@ -74,16 +95,22 @@ private theorem hash_cost_le (disk : List Edit) (bytes : Edit → Nat) (limit : 
     simp only [List.map_cons, List.sum_cons, List.length_cons, Nat.succ_mul]
     omega
 
-/-- Under the record-and-byte cost model stated in `scanCost`, a final guard
-costs at most d+j+n(B+1), where d watcher records, j journal records and n
-files are examined and each file contains at most B bytes. -/
+/-- Under scanCost's evidence-validation model (record probes plus hash bytes,
+excluding traversal, lookup, OS metadata/handles, disposal and network I/O),
+one pass costs at most d+j+n(B+1), with d dirty records, j journal records
+and n files of at most B bytes. Repeating that same validation p times costs
+at most p times this bound; this is not a bound on whole cleanup runtime. -/
 theorem cost_bound (e : Evidence Edit) (bytes : Edit → Nat) (maxBytes : Nat)
     (bounded : ∀ edit ∈ e.disk, bytes edit ≤ maxBytes) :
-    scanCost e bytes ≤ e.dirty.length + e.journal.length + e.disk.length * (maxBytes + 1) := by
-  have := hash_cost_le e.disk bytes maxBytes bounded
-  unfold scanCost
-  omega
-
+    (scanCost e bytes ≤ e.dirty.length + e.journal.length + e.disk.length * (maxBytes + 1)) ∧
+    (∀ passes : Nat, passes * scanCost e bytes ≤
+      passes * (e.dirty.length + e.journal.length + e.disk.length * (maxBytes + 1))) := by
+  have hashes := hash_cost_le e.disk bytes maxBytes bounded
+  have bound : scanCost e bytes ≤
+      e.dirty.length + e.journal.length + e.disk.length * (maxBytes + 1) := by
+    unfold scanCost
+    omega
+  exact ⟨bound, fun passes => Nat.mul_le_mul_left passes bound⟩
 /-- Three independent black-box evidence categories after filtering ignored output. -/
 structure Flags where
   dirty : Bool
@@ -147,8 +174,4 @@ theorem optimal :
 #print axioms optimal
 
 end WorkspaceDeletion
-
-
-
-
 

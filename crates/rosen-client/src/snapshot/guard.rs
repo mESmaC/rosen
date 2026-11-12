@@ -120,3 +120,56 @@ fn check_nested_workspace(dir: &Path) -> Result<(), SnapshotError> {
 fn invalid(path: &Path, reason: &str) -> SnapshotError {
     SnapshotError::io(path, io::Error::new(io::ErrorKind::InvalidData, reason))
 }
+
+impl Snapshotter {
+    /// Files whose versions remain only in immutable journal records.
+    /// Call while holding this snapshotter's exclusive journal lease.
+    pub fn unuploaded_paths(&self) -> Result<Vec<String>, SnapshotError> {
+        let cache = super::journal::cache(&self.root)?;
+        let mut before = Index::from_tree(&cache, self.marker.tree)?;
+        let mut paths = BTreeSet::new();
+        for (id, record) in self
+            .journal
+            .records()
+            .map_err(|err| SnapshotError::io(&self.root, err))?
+        {
+            let after = Index::from_tree(&cache, record.prepared.root)?;
+            if !self.journal.acknowledged(id) {
+                for path in before.files.keys().chain(after.files.keys()) {
+                    if file_identity(&before, path) != file_identity(&after, path) {
+                        paths.insert(path.clone());
+                    }
+                }
+                // Named snapshots can hold only a message. Name their durable
+                // record too, so an empty diff cannot hide an unuploaded entry.
+                paths.insert(format!(".rosen/journal/{id}.json"));
+            }
+            before = after;
+        }
+        Ok(paths.into_iter().collect())
+    }
+}
+
+impl Snapshotter {
+    /// Deletes only objects verified through write-excluded handles. The
+    /// path-based scan above is advisory; this phase rechecks held bytes.
+    pub(crate) fn remove_verified(&mut self) -> Result<(), SnapshotError> {
+        if !self.index.gitlinks.is_empty() {
+            return Err(invalid(&self.root, "workspace contains submodules"));
+        }
+        let expected = self
+            .index
+            .files
+            .iter()
+            .map(|(path, entry)| (path.clone(), entry.blob))
+            .collect();
+        let mut ignore = IgnoreRules::new(self.root.clone());
+        crate::workspace::delete::remove_verified(&self.root, &expected, |rel, is_dir| {
+            always_ignored(rel)
+                || (!self.index.tracks(rel)
+                    && !self.index.tracks_under(rel)
+                    && ignore.is_ignored(rel, is_dir))
+        })
+        .map_err(|err| SnapshotError::io(&self.root, err))
+    }
+}

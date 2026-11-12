@@ -3,14 +3,16 @@
 //! Risk: the snapshot window and a closed change can leave bytes only on
 //! disk. Cleanup must store them first or name them and keep the workspace.
 use rosen_client::protocol::{ChangeRecord, Listener, NewChange, Request};
-use rosen_client::workspace::{deletion_permitted, Options};
-use rosen_client::{Client, Endpoint};
+use rosen_client::snapshot::{journal_snapshot, pending_journal, Dirty, Snapshotter};
+use rosen_client::workspace::{deletion_permitted, pool::WarmPool, Options};
+use rosen_client::{Client, Endpoint, Error};
 use rosen_core::{AgentId, FileMode, ObjectId, Tree, TreeEntry};
 use rosen_server::changes::{BaseSource, BaseTip};
 use rosen_server::{ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn deletion_stores_edits_or_keeps_and_names_them() {
@@ -20,8 +22,17 @@ async fn deletion_stores_edits_or_keeps_and_names_them() {
     let store = LooseObjectStore::open(data.join("objects")).unwrap();
     let endpoint = start_server(&data, &store);
     let client = Client::connect(&endpoint).await.unwrap();
-    let workspace = dir.path().join("workspace");
-    let change = new_workspace(&client, &workspace).await;
+    abandon_stores_edits(&client, &store, &dir.path().join("workspace")).await;
+    closed_edits_survive(&client, dir.path()).await;
+    active_lease_keeps_workspace(&client, &dir.path().join("leased")).await;
+    offline_journal_keeps_workspace(&client, &dir.path().join("journalled")).await;
+    #[cfg(windows)]
+    writable_handle_keeps_workspace(&client, &dir.path().join("writable")).await;
+    daemon_cleans_closed_workspace(&client, &endpoint, &data, &dir.path().join("automatic")).await;
+}
+
+async fn abandon_stores_edits(client: &Client, store: &dyn ObjectStore, workspace: &Path) {
+    let change = new_workspace(client, workspace).await;
     std::fs::write(workspace.join("main.rs"), b"durable edit\n").unwrap();
     std::fs::create_dir(workspace.join("build")).unwrap();
     std::fs::write(workspace.join("build/output"), b"ignored").unwrap();
@@ -37,19 +48,15 @@ async fn deletion_stores_edits_or_keeps_and_names_them() {
     let edited = tree.get(b"main.rs").unwrap();
     assert_eq!(store.read_blob(&edited.id).unwrap().data, b"durable edit\n");
     assert!(tree.get(b"build").is_none(), "ignored output was uploaded");
+}
 
-    let kept = dir.path().join("kept");
-    let sibling = dir.path().join("sibling");
-    let closed = new_workspace(&client, &kept).await;
-    let _sibling_change = new_workspace(&client, &sibling).await;
-    std::fs::write(kept.join("main.rs"), b"after close\n").unwrap();
-    client
-        .request(Request::ChangeAbandon {
-            change: closed.change.id.to_string(),
-        })
-        .await
-        .unwrap();
-    std::fs::write(kept.join("main.rs"), b"after close\n").unwrap();
+async fn closed_edits_survive(client: &Client, root: &Path) {
+    let kept = root.join("kept");
+    let sibling = root.join("sibling");
+    let closed = new_workspace(client, &kept).await;
+    let _sibling_change = new_workspace(client, &sibling).await;
+    std::fs::write(kept.join("main.rs"), b"unsaved edit\n").unwrap();
+    close_without_snapshot(client, &closed).await;
     let refusal = client
         .workspace_delete(&kept)
         .await
@@ -61,12 +68,120 @@ async fn deletion_stores_edits_or_keeps_and_names_them() {
     );
     assert_eq!(
         std::fs::read(kept.join("main.rs")).unwrap(),
-        b"after close\n"
+        b"unsaved edit\n"
     );
     assert!(
         sibling.join("main.rs").exists(),
         "cleanup touched another workspace"
     );
+}
+
+async fn active_lease_keeps_workspace(client: &Client, workspace: &Path) {
+    new_workspace(client, workspace).await;
+    let lease = Snapshotter::open_offline(workspace).unwrap();
+    client.workspace_delete(workspace).await.unwrap_err();
+    assert!(
+        workspace.join("main.rs").exists(),
+        "active watcher lease was ignored"
+    );
+    drop(lease);
+}
+
+async fn offline_journal_keeps_workspace(client: &Client, workspace: &Path) {
+    let change = new_workspace(client, workspace).await;
+    let original = std::fs::read(workspace.join("main.rs")).unwrap();
+    let state = Snapshotter::open_offline(workspace).unwrap();
+    std::fs::write(workspace.join("main.rs"), b"intermediate offline edit\n").unwrap();
+    let (state, result) = journal_snapshot(state, Dirty::Full).await;
+    assert!(matches!(result, Err(Error::Disconnected)));
+    drop(state);
+    assert_eq!(pending_journal(workspace).unwrap(), 1);
+    // A matching disk hash does not make the overwritten intermediate edit
+    // durable: its unacknowledged journal entry must still keep the workspace.
+    std::fs::write(workspace.join("main.rs"), &original).unwrap();
+    close_without_snapshot(client, &change).await;
+    let refusal = client
+        .workspace_delete(workspace)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("main.rs"),
+        "journal refusal did not name the file: {refusal}"
+    );
+    assert_eq!(pending_journal(workspace).unwrap(), 1);
+    assert_eq!(std::fs::read(workspace.join("main.rs")).unwrap(), original);
+}
+
+#[cfg(windows)]
+async fn writable_handle_keeps_workspace(client: &Client, workspace: &Path) {
+    let change = new_workspace(client, workspace).await;
+    let original = std::fs::read(workspace.join("main.rs")).unwrap();
+    // Keep disk identical to the snapshot: only the live writable handle
+    // should prevent deletion, even after the directory has been staged.
+    let writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(workspace.join("main.rs"))
+        .unwrap();
+    close_without_snapshot(client, &change).await;
+    client.workspace_delete(workspace).await.unwrap_err();
+    let parent = workspace.parent().unwrap();
+    let stage_prefix = format!(".rosen-delete-{}-", change.change.id);
+    let kept = std::iter::once(workspace.to_path_buf())
+        .chain(
+            std::fs::read_dir(parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path()),
+        )
+        .find(|path| {
+            (path == workspace
+                || path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(&stage_prefix)))
+                && path.join("main.rs").exists()
+        })
+        .expect("deletion removed a file with a live writable handle");
+    assert_eq!(std::fs::read(kept.join("main.rs")).unwrap(), original);
+    drop(writer);
+}
+async fn daemon_cleans_closed_workspace(
+    client: &Client,
+    endpoint: &Endpoint,
+    data: &Path,
+    path: &Path,
+) {
+    let baseline = client.status().await.unwrap().open_connections;
+    let pool = WarmPool::new(data);
+    pool.set_size(0).await;
+    let worker = pool.start(endpoint.clone());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.status().await.unwrap().open_connections <= baseline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("daemon worker never connected");
+    let change = new_workspace(client, path).await;
+    close_without_snapshot(client, &change).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("daemon did not clean the closed workspace after its event");
+    worker.abort();
+    let _ = worker.await;
+}
+
+async fn close_without_snapshot(client: &Client, change: &ChangeRecord) {
+    client
+        .request(Request::ChangeAbandon {
+            change: change.change.id.to_string(),
+        })
+        .await
+        .unwrap();
 }
 
 fn check_design_fixtures() {

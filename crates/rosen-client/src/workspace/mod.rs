@@ -17,6 +17,7 @@
 
 mod client;
 mod clone;
+pub(crate) mod delete;
 mod layout;
 mod lifecycle;
 mod registry;

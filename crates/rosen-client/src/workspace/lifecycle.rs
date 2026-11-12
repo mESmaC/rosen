@@ -51,8 +51,8 @@ impl Client {
                 staged.display()
             )));
         }
-        let _staged_lease = staged_result?;
-        std::fs::remove_dir_all(&staged)?;
+        let mut staged_lease = staged_result?;
+        staged_lease.remove_verified()?;
         self.unregister_workspace(&record).await?;
         Ok(())
     }
@@ -78,6 +78,13 @@ impl Client {
         self.ensure_local(marker.tree).await?;
         let store = self.local_store().await?;
         let mut scan = Snapshotter::open(&store, root)?;
+        let journal = crate::snapshot::pending_journal(root)?;
+        if !deletion_permitted(0, journal, 0) {
+            return Err(kept(format!(
+                "unuploaded files: {}",
+                scan.unuploaded_paths()?.join(", ")
+            )));
+        }
         let paths = scan.unstored_paths()?;
         if !deletion_permitted(0, 0, paths.len()) {
             return Err(kept(format!("unstored files: {}", paths.join(", "))));
@@ -138,8 +145,8 @@ impl Client {
             verify_registration(&staged, record)?;
             self.check_workspace_boundary(&record.path).await?;
             self.check_workspace_boundary(&staged).await?;
-            let _staged_lease = self.verify_workspace_durable(&staged).await?;
-            std::fs::remove_dir_all(&staged)?;
+            let mut staged_lease = self.verify_workspace_durable(&staged).await?;
+            staged_lease.remove_verified()?;
             self.unregister_workspace(record).await?;
         } else {
             verify_registration(&record.path, record)?;

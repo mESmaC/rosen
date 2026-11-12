@@ -109,6 +109,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 |---|---|
 | `rosen-core` | Data model: changes, stacks, conflicts, receipts, reviews, claims, regions. Pure logic, with no I/O. |
 | `rosen-store` | The storage backend interface and the git-format loose-object backend. |
+| `rosen-platform` | Narrow OS primitives with safe handle interfaces, including verified Windows file disposition. |
 | `rosen-merge` | Three-way file merge, conflict objects and overlap detection. |
 | `rosen-server` | The daemon: protocol, the SQLite metadata store, snapshots, server-side rebase, landing, claims, review, events, the AIRC channel, history queries, server-side workspaces, the git mirror push, the network listener and enrollment. On a machine that is not the server, the same daemon runs as the object cache that forwards to the server. |
 | `rosen-client` | The public library API Velocity links: daemon discovery and start, joining a project, workspace materialisation, the file watcher and snapshotting, applying server rebases, and the offline journal. |
@@ -175,6 +176,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
   - a file whose content differs from the last stored snapshot, found by a final hash scan. Ignored paths (R2) are not scanned.
 
   The refusal names the files and keeps the workspace.
+- On Windows, final removal hashes write-excluded file handles and deletes those exact objects while excluding concurrent renames. Directories are removed only when empty; newly created files are retained. Cleanup interrupted after removing durable files keeps the remaining directory for recovery. Platforms without an equivalent verified-removal primitive retain the workspace with an unsupported-operation reason.
 - A workspace whose change is closed or failed is kept until the change is explicitly deleted.
 - Deleting a workspace removes only that workspace. Local workspace registrations survive daemon restart; the daemon retries guarded cleanup of landed and abandoned workspaces on startup and change events. A refused cleanup retains the registration and reports the reason.
 - **Accept when:** no sequence of crashes, deletions, offline periods and reconnects loses an edit that was written to a workspace.
