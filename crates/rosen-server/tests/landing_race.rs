@@ -24,8 +24,8 @@ impl ChangeBook for Shared {
     }
     fn stacked_on(&self, id: &ChangeId) -> LandResult<Vec<ChangeId>> {
         let changes = self.0.changes.lock().unwrap();
-        let on = |f: &&ChangeFacts| f.parent == Parent::Change(id.clone());
-        Ok(changes.values().filter(on).map(|f| f.id.clone()).collect())
+        let on = |f: &&ChangeFacts| f.parent == ChangeParent::Change(*id);
+        Ok(changes.values().filter(on).map(|f| f.id).collect())
     }
     fn overlapping(&self, _: &ChangeId) -> LandResult<Vec<ChangeId>> {
         Ok(Vec::new())
@@ -39,7 +39,7 @@ impl ChangeBook for Shared {
     }
     fn reparent(&self, id: &ChangeId, onto: &CommitId, _: Option<&TreeId>) -> LandResult<()> {
         let mut changes = self.0.changes.lock().unwrap();
-        changes.get_mut(id).unwrap().parent = Parent::Base(onto.clone());
+        changes.get_mut(id).unwrap().parent = ChangeParent::Base(*onto);
         Ok(())
     }
     fn release_claims(&self, _: &ChangeId) -> LandResult<()> {
@@ -49,18 +49,20 @@ impl ChangeBook for Shared {
 
 impl Merger for Shared {
     fn merge(&self, _: &CommitId, onto: &CommitId, head: &CommitId) -> LandResult<MergeOutcome> {
-        Ok(MergeOutcome::Clean(TreeId(format!("{onto}+{head}"))))
+        Ok(MergeOutcome::Clean(oid(
+            TREE,
+            onto.as_bytes()[1] ^ head.as_bytes()[1],
+        )))
     }
 }
 
 impl CommitWriter for Shared {
     fn write_landed(&self, commit: &LandedCommit) -> LandResult<CommitId> {
-        let id = CommitId(format!("c{}", self.0.next.fetch_add(1, Ordering::SeqCst)));
-        self.0
-            .parents
-            .lock()
-            .unwrap()
-            .insert(id.clone(), commit.parent.clone());
+        let n = self.0.next.fetch_add(1, Ordering::SeqCst).to_be_bytes();
+        let mut bytes = [LANDED; 20];
+        bytes[12..].copy_from_slice(&n);
+        let id = ObjectId::from_bytes(bytes);
+        self.0.parents.lock().unwrap().insert(id, commit.base);
         Ok(id)
     }
 }
@@ -74,11 +76,7 @@ impl EventSink for Shared {
 fn setup(changes: Vec<ChangeFacts>) -> (Arc<World>, Arc<Landing>) {
     let world = Arc::new(World::default());
     for facts in changes {
-        world
-            .changes
-            .lock()
-            .unwrap()
-            .insert(facts.id.clone(), facts);
+        world.changes.lock().unwrap().insert(facts.id, facts);
     }
     let deps = LandingDeps {
         book: Box::new(Shared(world.clone())),
@@ -87,34 +85,56 @@ fn setup(changes: Vec<ChangeFacts>) -> (Arc<World>, Arc<Landing>) {
         events: Box::new(Shared(world.clone())),
     };
     let ledger = Ledger::open_in_memory().unwrap();
-    ledger.init_base("main", &"c-root".into()).unwrap();
+    ledger.init_base("main", &root()).unwrap();
     (
         world,
         Arc::new(Landing::new(ledger, deps, LandingConfig::default())),
     )
 }
 
-fn change(id: &str, tier: Tier, parent: Parent) -> ChangeFacts {
+const ROOT: u8 = 1;
+const HEAD: u8 = 2;
+const TREE: u8 = 3;
+const LANDED: u8 = 4;
+
+/// A distinct object ID per (kind, number).
+fn oid(kind: u8, n: u8) -> ObjectId {
+    let mut bytes = [0; 20];
+    bytes[0] = kind;
+    bytes[1] = n;
+    ObjectId::from_bytes(bytes)
+}
+
+fn root() -> CommitId {
+    oid(ROOT, 0)
+}
+
+fn cid(n: u8) -> ChangeId {
+    ChangeId::from_bytes([n; 16])
+}
+
+fn change(n: u8, tier: Tier, parent: ChangeParent) -> ChangeFacts {
     ChangeFacts {
-        id: id.into(),
-        owner: format!("agent-{id}"),
+        id: cid(n),
+        owner: AgentId::new(format!("agent-{n}")).unwrap(),
+        description: format!("change {n}"),
         state: ChangeState::Ready,
         parent,
-        head: format!("h-{id}").as_str().into(),
-        merge_base: "c-root".into(),
+        head: oid(HEAD, n),
+        merge_base: root(),
         tier,
         has_conflicts: false,
-        approved_head: Some(format!("h-{id}").as_str().into()),
+        approved_head: Some(oid(HEAD, n)),
+        approvers: vec![AgentId::new("reviewer").unwrap()],
     }
 }
 
 #[test]
 fn concurrent_lands_apply_once_on_a_linear_base() {
-    let root = Parent::Base("c-root".into());
-    let ids: Vec<String> = (0..100).map(|n| format!("p{n}")).collect();
+    let ids: Vec<u8> = (0..100).collect();
     let (world, landing) = setup(
         ids.iter()
-            .map(|id| change(id, Tier::ProseOnly, root.clone()))
+            .map(|&n| change(n, Tier::ProseOnly, ChangeParent::Base(root())))
             .collect(),
     );
     // Every change is requested twice at once, as a retrying client would.
@@ -122,7 +142,7 @@ fn concurrent_lands_apply_once_on_a_linear_base() {
         .iter()
         .chain(ids.iter())
         .map(|id| {
-            let (landing, id) = (landing.clone(), ChangeId(id.clone()));
+            let (landing, id) = (landing.clone(), cid(*id));
             thread::spawn(move || landing.land(&id).unwrap())
         })
         .collect();
@@ -136,8 +156,8 @@ fn concurrent_lands_apply_once_on_a_linear_base() {
     let parents = world.parents.lock().unwrap();
     let mut tip = landing.ledger().base("main").unwrap().unwrap();
     let mut chain = 0;
-    while tip.0 != "c-root" {
-        tip = parents[&tip].clone();
+    while tip != root() {
+        tip = parents[&tip];
         chain += 1;
     }
     assert_eq!(chain, 100);
@@ -145,47 +165,45 @@ fn concurrent_lands_apply_once_on_a_linear_base() {
 
 #[test]
 fn receipt_counts_only_across_prose_lands() {
-    let root = Parent::Base("c-root".into());
+    let (doc, a, b, on_a) = (1, 2, 3, 4);
     let (world, landing) = setup(vec![
-        change("doc", Tier::ProseOnly, root.clone()),
-        change("a", Tier::Normal, root.clone()),
-        change("b", Tier::Normal, root),
-        change("on-a", Tier::Normal, Parent::Change("a".into())),
+        change(doc, Tier::ProseOnly, ChangeParent::Base(root())),
+        change(a, Tier::Normal, ChangeParent::Base(root())),
+        change(b, Tier::Normal, ChangeParent::Base(root())),
+        change(on_a, Tier::Normal, ChangeParent::Change(cid(a))),
     ]);
-    let receipt = |id: &str, base: CommitId| Receipt {
-        change: id.into(),
-        head: format!("h-{id}").as_str().into(),
+    let receipt = |n: u8, base: CommitId| Receipt {
+        change: cid(n),
+        head: oid(HEAD, n),
         base,
         check_set: "pre-land".into(),
         submitter: "checker".into(),
     };
-    for id in ["a", "b", "on-a"] {
-        landing
-            .submit_receipt(receipt(id, "c-root".into()))
-            .unwrap();
+    for n in [a, b, on_a] {
+        landing.submit_receipt(receipt(n, root())).unwrap();
     }
     let refused = LandOutcome::Refused(Refusal::ParentUnlanded);
-    assert_eq!(landing.land(&"on-a".into()).unwrap(), refused);
+    assert_eq!(landing.land(&cid(on_a)).unwrap(), refused);
     assert!(matches!(
-        landing.land(&"doc".into()).unwrap(),
+        landing.land(&cid(doc)).unwrap(),
         LandOutcome::Landed { .. }
     ));
     // Only prose landed since a's receipt base, so the receipt still counts.
     assert!(matches!(
-        landing.land(&"a".into()).unwrap(),
+        landing.land(&cid(a)).unwrap(),
         LandOutcome::Landed { .. }
     ));
     let refused = LandOutcome::Refused(Refusal::NeedsRecheck);
-    assert_eq!(landing.land(&"b".into()).unwrap(), refused);
+    assert_eq!(landing.land(&cid(b)).unwrap(), refused);
     let base = landing.ledger().base("main").unwrap().unwrap();
-    landing.submit_receipt(receipt("b", base.clone())).unwrap();
+    landing.submit_receipt(receipt(b, base)).unwrap();
     assert!(matches!(
-        landing.land(&"b".into()).unwrap(),
+        landing.land(&cid(b)).unwrap(),
         LandOutcome::Landed { .. }
     ));
     // The change stacked on `a` was moved onto the base `a` landed as.
     let events = world.events.lock().unwrap();
     assert!(events
         .iter()
-        .any(|e| matches!(e, LandingEvent::Rebased { change, .. } if change.0 == "on-a")));
+        .any(|e| matches!(e, LandingEvent::Rebased { change, .. } if *change == cid(on_a))));
 }

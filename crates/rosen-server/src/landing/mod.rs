@@ -23,38 +23,12 @@ pub use ledger::{CasResult, LandRecord, Ledger};
 pub use restack::RestackReport;
 pub use rules::{LandInput, ReceiptCheck, Refusal, Verdict};
 
-macro_rules! id_type {
-    ($(#[$doc:meta])* $name:ident) => {
-        $(#[$doc])*
-        #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-        pub struct $name(pub String);
+pub use rosen_core::{AgentId, ChangeId, ChangeParent, ChangeState, LandedCommit, ObjectId};
 
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(&self.0)
-            }
-        }
-
-        impl From<&str> for $name {
-            fn from(value: &str) -> Self {
-                Self(value.to_owned())
-            }
-        }
-    };
-}
-
-id_type!(
-    /// A change's stable ID (SPEC §2).
-    ChangeId
-);
-id_type!(
-    /// A git-format commit object ID.
-    CommitId
-);
-id_type!(
-    /// A git-format tree object ID.
-    TreeId
-);
+/// A commit object ID. An alias of [`ObjectId`] that names the role.
+pub type CommitId = ObjectId;
+/// A tree object ID. An alias of [`ObjectId`] that names the role.
+pub type TreeId = ObjectId;
 
 /// Review tier computed by the server from a change's diff (SPEC R7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,29 +57,15 @@ impl Tier {
     }
 }
 
-/// Change states (SPEC §2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChangeState {
-    Open,
-    Ready,
-    Landed,
-    Abandoned,
-}
-
-/// What a change sits on: a base commit, or another change (a stack, D19).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Parent {
-    Base(CommitId),
-    Change(ChangeId),
-}
-
 /// The facts landing reads about one change from the change model.
 #[derive(Clone, Debug)]
 pub struct ChangeFacts {
     pub id: ChangeId,
-    pub owner: String,
+    pub owner: AgentId,
+    /// The change's description, which becomes the landed commit's message.
+    pub description: String,
     pub state: ChangeState,
-    pub parent: Parent,
+    pub parent: ChangeParent,
     /// The change's current head commit.
     pub head: CommitId,
     /// The commit the change's edits are measured against: its base commit,
@@ -117,6 +77,8 @@ pub struct ChangeFacts {
     pub has_conflicts: bool,
     /// The head the change's latest approval was given at (SPEC R7).
     pub approved_head: Option<CommitId>,
+    /// Who approved the change at `approved_head` (the D15 approval trailers).
+    pub approvers: Vec<AgentId>,
 }
 
 /// A record that the pre-land check set passed on one exact merge result
@@ -135,36 +97,6 @@ pub struct Receipt {
 pub enum MergeOutcome {
     Clean(TreeId),
     Conflicted(Vec<String>),
-}
-
-/// The single commit a land writes onto the base (SPEC D15).
-#[derive(Clone, Debug)]
-pub struct LandedCommit {
-    pub tree: TreeId,
-    pub parent: CommitId,
-    pub change: ChangeId,
-    pub owner: String,
-    pub head: CommitId,
-    pub receipt: Option<Receipt>,
-    pub approved_head: CommitId,
-}
-
-impl LandedCommit {
-    /// Commit message with the change, receipt and approval trailers (D15).
-    pub fn message(&self) -> String {
-        let mut text = format!(
-            "Land change {}\n\nRosen-Change: {}\nRosen-Owner: {}\nRosen-Head: {}\n",
-            self.change, self.change, self.owner, self.head
-        );
-        if let Some(receipt) = &self.receipt {
-            text.push_str(&format!(
-                "Rosen-Receipt: {} {} {}\n",
-                receipt.check_set, receipt.base, receipt.submitter
-            ));
-        }
-        text.push_str(&format!("Rosen-Approval: {}\n", self.approved_head));
-        text
-    }
 }
 
 /// Events landing emits (SPEC R9). Routing to subscribers is the event bus's job.
@@ -217,6 +149,12 @@ impl fmt::Display for LandError {
 }
 
 impl std::error::Error for LandError {}
+
+impl From<rosen_core::Error> for LandError {
+    fn from(error: rosen_core::Error) -> Self {
+        LandError::Store(error.to_string())
+    }
+}
 
 impl From<rusqlite::Error> for LandError {
     fn from(error: rusqlite::Error) -> Self {

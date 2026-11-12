@@ -1,10 +1,10 @@
 /-!
-# Design proof: optimistic landing (SPEC R8)
+# Design proof: optimistic landing (SPEC.md R8)
 
 Models the land decision (`crates/rosen-server/src/landing/rules.rs`) and the
 compare-and-swap of the base ref (`ledger.rs`), and proves:
 
-* `correct`: a land moves the base exactly when SPEC R8 step 2 allows it,
+* `correct`: a land moves the base exactly when SPEC.md R8 step 2 allows it,
   from the old base to the landed commit, and never twice for one change;
 * `cost_bound`: under the stated cost model, a land costs at most one attempt
   per competing land that beat it, plus one, and never more than the cap;
@@ -75,10 +75,11 @@ def decideLand (i : Input) : Verdict :=
     else if i.tier = .prose ∨ !i.baseMoved ∨ i.landedSinceAllProse then .land
     else .refuse .needsRecheck
 
-/-- SPEC R8 step 2 (with R7 approval and R8 step 3 stack order): the change
-is live, its parent has landed, it has no stored conflicts, its current head
-is approved, it merges cleanly onto the current base, and it is prose-only or
-holds a valid receipt that the re-check rules let count on this base. -/
+/-- SPEC.md R8 step 2, with SPEC.md R7 approval and SPEC.md R8 step 3 stack
+order: the change is live, its parent has landed, it has no stored
+conflicts, its current head is approved, it merges cleanly onto the current
+base, and it is prose-only or holds a valid receipt that the re-check rules
+let count on this base. -/
 def Authorized (i : Input) : Prop :=
   i.state = .active ∧ i.parentLanded = true ∧ i.hasConflicts = false ∧
   i.approved = true ∧ i.mergeClean = true ∧
@@ -114,7 +115,8 @@ private theorem decideLand_eq_land (i : Input) : decideLand i = .land ↔ Author
   cases s <;> cases p <;> cases c <;> cases a <;> cases t <;> cases r <;>
     cases b <;> cases q <;> cases m <;> decide
 
-/-- **correct** (SPEC R8 "Optimistic landing", step 2): a land step succeeds
+-- SPEC.md R8 (step 2, with R7 approval and R8 step 3 stack order)
+/-- **correct** (SPEC.md R8 "Optimistic landing", step 2): a land step succeeds
 only when the land is authorized, the base still equals the expected commit,
 and the change has not landed; it then moves the base to the landed commit
 and records the land. Conversely every such land succeeds. -/

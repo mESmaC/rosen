@@ -3,7 +3,8 @@ defaultTargets = ["Landing"]
 
 [[lean_lib]]
 name = "Landing"
-globs = ["Landing.Design"]
+# Export is in the lib so `lake build` type-checks the fixture exporter too.
+globs = ["Landing.Design", "Landing.Export"]
 
 # Prints the landing fixture table: `lake exe landing-fixtures > fixtures/landing.tsv`
 [[lean_exe]]

@@ -4,14 +4,17 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rosen_core::history::LandedTrailers;
+use rosen_core::Signature;
 
 use super::ledger::ReceiptLookup;
 use super::restack::Restacker;
 use super::rules::{self, LandInput, ReceiptCheck, Refusal, Verdict};
 use super::{
-    CasResult, ChangeBook, ChangeFacts, ChangeId, CommitId, CommitWriter, EventSink, LandError,
-    LandRecord, LandResult, LandedCommit, LandingEvent, Ledger, MergeOutcome, Merger, Parent,
+    CasResult, ChangeBook, ChangeFacts, ChangeId, ChangeParent, CommitId, CommitWriter, EventSink,
+    LandError, LandRecord, LandResult, LandedCommit, LandingEvent, Ledger, MergeOutcome, Merger,
     Receipt, RestackReport, Tier, TreeId,
 };
 
@@ -192,7 +195,7 @@ impl Landing {
             (Verdict::Refuse(Refusal::MergeConflict), MergeOutcome::Conflicted(paths)) => {
                 self.deps.book.record_conflicts(change, &paths)?;
                 self.deps.events.emit(LandingEvent::Conflict {
-                    change: change.clone(),
+                    change: *change,
                     paths,
                 });
                 Ok(Attempt::Done(LandOutcome::Refused(Refusal::MergeConflict)))
@@ -203,14 +206,14 @@ impl Landing {
 
     fn gather(&self, facts: &ChangeFacts, base: &CommitId) -> LandResult<Gathered> {
         let parent_landed = match &facts.parent {
-            Parent::Base(_) => true,
-            Parent::Change(parent) => self.ledger.landing_of(parent)?.is_some(),
+            ChangeParent::Base(_) => true,
+            ChangeParent::Change(parent) => self.ledger.landing_of(parent)?.is_some(),
         };
         let mut input = LandInput {
             state: facts.state,
             parent_landed,
             has_conflicts: facts.has_conflicts,
-            approved: facts.approved_head.as_ref() == Some(&facts.head),
+            approved: facts.approved_head == Some(facts.head),
             tier: facts.tier,
             receipt: ReceiptCheck::Missing,
             base_moved: false,
@@ -256,23 +259,15 @@ impl Landing {
         receipt: Option<Receipt>,
         attempts: u32,
     ) -> LandResult<Attempt> {
-        let landed = LandedCommit {
-            tree,
-            parent: base.clone(),
-            change: facts.id.clone(),
-            owner: facts.owner.clone(),
-            head: facts.head.clone(),
-            receipt,
-            approved_head: facts.head.clone(),
-        };
+        let landed = landed_commit(facts, base, tree, receipt.as_ref());
         // Written before the swap: if the swap loses, the object is an
         // unreferenced orphan, which is harmless because objects are immutable.
         let commit = self.deps.writer.write_landed(&landed)?;
         let record = LandRecord {
             ref_name: self.config.base_ref.clone(),
-            change: facts.id.clone(),
-            head: facts.head.clone(),
-            commit: commit.clone(),
+            change: facts.id,
+            head: facts.head,
+            commit,
             tier: facts.tier,
         };
         match self.ledger.compare_and_swap(&base, &record)? {
@@ -294,8 +289,8 @@ impl Landing {
 
     fn post_land(&self, record: &LandRecord) -> LandResult<RestackReport> {
         self.deps.events.emit(LandingEvent::Landed {
-            change: record.change.clone(),
-            commit: record.commit.clone(),
+            change: record.change,
+            commit: record.commit,
         });
         let restacker = Restacker {
             book: self.deps.book.as_ref(),
@@ -311,13 +306,39 @@ impl Landing {
         self.deps
             .book
             .facts(change)?
-            .ok_or_else(|| LandError::UnknownChange(change.clone()))
+            .ok_or(LandError::UnknownChange(*change))
     }
 
     fn current_base(&self) -> LandResult<CommitId> {
         self.ledger
             .base(&self.config.base_ref)?
             .ok_or_else(|| LandError::NoBase(self.config.base_ref.clone()))
+    }
+}
+
+/// The single landed commit (D15): the merged tree on top of `base`, authored
+/// by the change's owner and committed by the server.
+fn landed_commit(
+    facts: &ChangeFacts,
+    base: CommitId,
+    tree: TreeId,
+    receipt: Option<&Receipt>,
+) -> LandedCommit {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    let owner = facts.owner.as_str();
+    LandedCommit {
+        base,
+        tree,
+        author: Signature::new(owner, format!("{owner}@rosen"), now),
+        committer: Signature::new("rosen-server", "rosen-server@rosen", now),
+        description: facts.description.clone(),
+        trailers: LandedTrailers {
+            change: facts.id,
+            receipt: receipt.map(|r| format!("{} {} {}", r.check_set, r.base, r.submitter)),
+            approvers: facts.approvers.clone(),
+        },
     }
 }
 

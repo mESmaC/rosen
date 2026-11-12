@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::conflicts::{self, ConflictStoreError};
 
-use super::{ChangeId, CommitId, LandError, LandResult, Receipt, Tier};
+use super::{ChangeId, CommitId, LandError, LandResult, ObjectId, Receipt, Tier};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS base_refs (
@@ -125,12 +125,12 @@ impl Ledger {
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO base_refs (name, target) VALUES (?1, ?2)",
-            params![ref_name, commit.0],
+            params![ref_name, commit.to_string()],
         )?;
         if inserted == 1 {
             tx.execute(
                 "INSERT INTO base_history (ref_name, commit_id, tier) VALUES (?1, ?2, ?3)",
-                params![ref_name, commit.0, INITIAL_TIER],
+                params![ref_name, commit.to_string(), INITIAL_TIER],
             )?;
         }
         tx.commit()?;
@@ -146,7 +146,7 @@ impl Ledger {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        Ok(target.map(CommitId))
+        target.map(parse_commit).transpose()
     }
 
     /// Position of `commit` in the ref's history, if the ref ever held it.
@@ -155,7 +155,7 @@ impl Ledger {
         let seq = connection
             .query_row(
                 "SELECT seq FROM base_history WHERE ref_name = ?1 AND commit_id = ?2",
-                params![ref_name, commit.0],
+                params![ref_name, commit.to_string()],
                 |row| row.get(0),
             )
             .optional()?;
@@ -179,11 +179,11 @@ impl Ledger {
         let commit = connection
             .query_row(
                 "SELECT commit_id FROM base_history WHERE change_id = ?1",
-                params![change.0],
+                params![change.to_string()],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        Ok(commit.map(CommitId))
+        commit.map(parse_commit).transpose()
     }
 
     /// Stores a receipt. Submitting the same receipt twice is a no-op.
@@ -193,9 +193,9 @@ impl Ledger {
             "INSERT OR IGNORE INTO receipts (change_id, head, base, check_set, submitter)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
-                receipt.change.0,
-                receipt.head.0,
-                receipt.base.0,
+                receipt.change.to_string(),
+                receipt.head.to_string(),
+                receipt.base.to_string(),
                 receipt.check_set,
                 receipt.submitter
             ],
@@ -219,7 +219,7 @@ impl Ledger {
                  JOIN base_history h ON h.ref_name = ?1 AND h.commit_id = r.base
                  WHERE r.change_id = ?2 AND r.head = ?3 AND r.check_set = ?4
                  ORDER BY h.seq DESC LIMIT 1",
-                params![ref_name, change.0, head.0, check_set],
+                params![ref_name, change.to_string(), head.to_string(), check_set],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -231,9 +231,9 @@ impl Ledger {
             .optional()?;
         if let Some((base, submitter, base_seq)) = valid {
             let receipt = Receipt {
-                change: change.clone(),
-                head: head.clone(),
-                base: CommitId(base),
+                change: *change,
+                head: *head,
+                base: parse_commit(base)?,
                 check_set: check_set.to_owned(),
                 submitter,
             };
@@ -241,7 +241,7 @@ impl Ledger {
         }
         let any: i64 = connection.query_row(
             "SELECT COUNT(*) FROM receipts WHERE change_id = ?1",
-            params![change.0],
+            params![change.to_string()],
             |row| row.get(0),
         )?;
         Ok(if any == 0 {
@@ -263,16 +263,16 @@ impl Ledger {
         let landed: Option<String> = tx
             .query_row(
                 "SELECT commit_id FROM base_history WHERE change_id = ?1",
-                params![record.change.0],
+                params![record.change.to_string()],
                 |row| row.get(0),
             )
             .optional()?;
         if let Some(commit) = landed {
             return Ok(CasResult::AlreadyLanded {
-                commit: CommitId(commit),
+                commit: parse_commit(commit)?,
             });
         }
-        match conflicts::check_landable(&tx, &record.change.0) {
+        match conflicts::check_landable(&tx, &record.change.to_string()) {
             Ok(()) => {}
             Err(ConflictStoreError::Conflict(_)) => return Ok(CasResult::OpenConflicts),
             Err(ConflictStoreError::Sql(error)) => return Err(error.into()),
@@ -285,9 +285,9 @@ impl Ledger {
             )
             .optional()?
             .ok_or_else(|| LandError::NoBase(record.ref_name.clone()))?;
-        if current != expected.0 {
+        if current != expected.to_string() {
             return Ok(CasResult::BaseMoved {
-                current: CommitId(current),
+                current: parse_commit(current)?,
             });
         }
         tx.execute(
@@ -295,16 +295,16 @@ impl Ledger {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 record.ref_name,
-                record.commit.0,
-                record.change.0,
-                record.head.0,
+                record.commit.to_string(),
+                record.change.to_string(),
+                record.head.to_string(),
                 record.tier.as_str()
             ],
         )?;
         let seq = tx.last_insert_rowid();
         tx.execute(
             "UPDATE base_refs SET target = ?1 WHERE name = ?2",
-            params![record.commit.0, record.ref_name],
+            params![record.commit.to_string(), record.ref_name],
         )?;
         tx.commit()?;
         Ok(CasResult::Swapped { seq })
@@ -334,9 +334,9 @@ impl Ledger {
                 .ok_or_else(|| LandError::Store(format!("unknown tier {tier}")))?;
             records.push(LandRecord {
                 ref_name: ref_name.to_owned(),
-                change: ChangeId(change),
-                head: CommitId(head),
-                commit: CommitId(commit),
+                change: change.parse()?,
+                head: parse_commit(head)?,
+                commit: parse_commit(commit)?,
                 tier,
             });
         }
@@ -347,8 +347,13 @@ impl Ledger {
         let connection = self.lock()?;
         connection.execute(
             "UPDATE base_history SET post_land_done = 1 WHERE change_id = ?1",
-            params![change.0],
+            params![change.to_string()],
         )?;
         Ok(())
     }
+}
+
+/// Reads a commit ID the ledger stored as hex.
+fn parse_commit(hex: String) -> LandResult<CommitId> {
+    Ok(ObjectId::from_hex(&hex)?)
 }

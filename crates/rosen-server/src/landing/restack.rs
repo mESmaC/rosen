@@ -26,9 +26,7 @@ impl Restacker<'_> {
     pub fn after_land(&self, landed: &ChangeId, commit: &CommitId) -> LandResult<RestackReport> {
         self.book.mark_landed(landed, commit)?;
         self.book.release_claims(landed)?;
-        self.events.emit(LandingEvent::Released {
-            change: landed.clone(),
-        });
+        self.events.emit(LandingEvent::Released { change: *landed });
         let mut report = RestackReport::default();
         for target in self.targets(landed)? {
             self.rebase_one(&target, commit, &mut report)?;
@@ -66,10 +64,10 @@ impl Restacker<'_> {
             MergeOutcome::Clean(tree) => {
                 self.book.reparent(change, onto, Some(&tree))?;
                 self.events.emit(LandingEvent::Rebased {
-                    change: change.clone(),
-                    onto: onto.clone(),
+                    change: *change,
+                    onto: *onto,
                 });
-                report.rebased.push(change.clone());
+                report.rebased.push(*change);
             }
             MergeOutcome::Conflicted(paths) => {
                 // Conflicts are stored on the change, never raised as errors
@@ -77,10 +75,10 @@ impl Restacker<'_> {
                 self.book.reparent(change, onto, None)?;
                 self.book.record_conflicts(change, &paths)?;
                 self.events.emit(LandingEvent::Conflict {
-                    change: change.clone(),
+                    change: *change,
                     paths,
                 });
-                report.conflicted.push(change.clone());
+                report.conflicted.push(*change);
             }
         }
         Ok(())
