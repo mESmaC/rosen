@@ -32,5 +32,6 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              PRIMARY KEY (change_id, seq)
          ) WITHOUT ROWID;",
     )?;
-    crate::conflicts::ensure_schema(conn)
+    crate::conflicts::ensure_schema(conn)?;
+    crate::claims::ensure_schema(conn)
 }

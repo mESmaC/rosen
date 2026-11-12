@@ -82,14 +82,24 @@ pub enum Command {
         limit: Option<usize>,
     },
     /// Claim paths or globs for a change. The first claim wins; a refusal
-    /// names the holder.
+    /// names the holder and exits with status 1.
+    ///
+    /// Two claims conflict when some path matches both, so `src/*.rs`
+    /// conflicts with `src/lib.rs` but not with `src/*.md`. All paths are
+    /// granted or none. Claims are released when the change lands or is
+    /// abandoned, or by `rosen release`.
     Claim(ClaimArgs),
-    /// Record that a change edits paths another change has claimed.
+    /// Record that a change edits paths another change has claimed. A share
+    /// is never refused; it tells the holder its path is edited knowingly.
     Share(ClaimArgs),
-    /// Hold off on paths until their claim is released; a `released` event
-    /// wakes the waiter.
+    /// Wait until no other change claims the paths, then exit.
+    ///
+    /// Records the wait and blocks. A `released` event for your change wakes
+    /// it when the holder lands, is abandoned or releases the paths. Exits at
+    /// once for paths nobody claims.
     Wait(ClaimArgs),
-    /// Release a change's claims on paths.
+    /// Drop a change's claims, shares and waits on paths, waking any change
+    /// waiting on them.
     Release(ClaimArgs),
     /// List changes that overlap a change or a set of paths.
     ///
@@ -260,10 +270,13 @@ pub enum ServerCommand {
 /// Paths an operation applies to, for one change.
 #[derive(Debug, Args)]
 pub struct ClaimArgs {
-    /// Change the claim belongs to; defaults to the current workspace's.
+    /// Change the claim belongs to: its ID or a unique prefix. Defaults to
+    /// $ROSEN_CHANGE.
     #[arg(long)]
     pub change: Option<String>,
-    /// Paths or globs.
+    /// Repository-relative paths or globs: `?` and `*` match within one
+    /// directory, a `**` segment any number of directories, and a trailing
+    /// `/` everything under a directory.
     #[arg(required = true)]
     pub paths: Vec<String>,
 }

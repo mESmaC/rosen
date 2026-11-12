@@ -5,6 +5,7 @@
 //! query on behalf of thin clients, over the protocol in `rosen-protocol`.
 
 pub mod changes;
+pub mod claims;
 pub mod conflicts;
 pub mod connection;
 pub mod events;

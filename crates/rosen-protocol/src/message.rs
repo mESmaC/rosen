@@ -8,6 +8,9 @@
 //! Responses may arrive out of order, and event frames are interleaved with them.
 
 use crate::change::{ChangeFilter, ChangeRecord, NewChange};
+use crate::claim::{
+    ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
+};
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. Bump it on any incompatible change to
@@ -100,6 +103,17 @@ pub enum Request {
     ChangeAbandon {
         change: String,
     },
+    /// Claims paths or globs for a change, first claim wins (R6). A refusal
+    /// is an ordinary answer naming the holders, not an error.
+    ClaimPaths(ClaimRequest),
+    /// Records that a change edits paths another change may have claimed.
+    SharePaths(ClaimRequest),
+    /// Records a wait on claimed paths; a `released` event ends it.
+    WaitPaths(ClaimRequest),
+    /// Drops a change's claims, shares and waits on paths and wakes waiters.
+    ReleasePaths(ClaimRequest),
+    /// Lists claims, shares and waits on live changes.
+    ClaimList(ClaimFilter),
     /// Loads a git repository's history and makes one of its branches the
     /// project's base (SPEC R1). Refused once the project has a base.
     Import {
@@ -128,6 +142,11 @@ pub enum Response {
     Change(ChangeRecord),
     Changes(Vec<ChangeRecord>),
     Imported(ImportSummary),
+    Claimed(ClaimOutcome),
+    Shared(ShareOutcome),
+    Waiting(WaitOutcome),
+    Released(ReleaseOutcome),
+    PathClaims(Vec<PathClaim>),
 }
 
 /// The answer to [`Request::Import`].

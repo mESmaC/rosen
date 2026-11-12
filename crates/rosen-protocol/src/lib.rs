@@ -6,10 +6,15 @@
 //! links server code and the server never links client code.
 
 pub mod change;
+pub mod claim;
 pub mod frame;
 pub mod message;
 pub mod transport;
 
 pub use change::{ChangeFilter, ChangeRecord, NewChange};
+pub use claim::{
+    ClaimFilter, ClaimHolder, ClaimKind, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome,
+    ShareOutcome, WaitOutcome, WokenWait,
+};
 pub use message::*;
 pub use transport::{connect, BoxStream, Endpoint, Listener};
