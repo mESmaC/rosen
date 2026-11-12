@@ -62,6 +62,8 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
             crate::reviews::handle(state, ReviewCall::List(filter)).await
         }
         Request::ReceiptSubmit(req) => crate::receipts::submit(state, req).await,
+        Request::GetObjects(query) => crate::objects::get(state, query).await,
+        Request::EnsureObjects(ensure) => crate::objects::ensure(state, ensure).await,
         Request::Log(req) => crate::history::handle(state, HistoryCall::Log(req)).await,
         Request::Blame(req) => crate::history::handle(state, HistoryCall::Blame(req)).await,
         Request::Diff(req) => crate::history::handle(state, HistoryCall::Diff(req)).await,
@@ -106,6 +108,7 @@ pub(crate) fn change_error_code(err: &ChangeError) -> ErrorCode {
 }
 
 fn status(state: &ServerState) -> ServerStatus {
+    let network = state.network_status();
     ServerStatus {
         server: SERVER_NAME.to_owned(),
         protocol_version: PROTOCOL_VERSION,
@@ -115,5 +118,8 @@ fn status(state: &ServerState) -> ServerStatus {
         uptime_ms: u64::try_from(state.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         open_connections: state.open_connections(),
         last_event: state.events.last_seq(),
+        listen: network.as_ref().map(|(address, _)| address.to_string()),
+        fingerprint: network.map(|(_, fingerprint)| fingerprint),
+        upstream: None,
     }
 }

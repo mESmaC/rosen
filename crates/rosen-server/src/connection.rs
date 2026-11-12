@@ -10,7 +10,7 @@ use crate::{rpc, ServerState, SERVER_NAME};
 use rosen_core::AgentId;
 use rosen_protocol::frame::{decode_body, read_frame, read_frame_body, write_frame};
 use rosen_protocol::{
-    negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Event, Outcome,
+    negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Event, Outcome, Request,
     RequestEnvelope, ServerFrame, SUPPORTED_VERSIONS,
 };
 use std::io;
@@ -37,11 +37,30 @@ const READ_RETRY: Duration = Duration::from_secs(1);
 
 type Outbox = mpsc::Sender<ServerFrame>;
 
-/// Serves one client until it disconnects, breaks the protocol, or the server stops.
+/// How a peer reached the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// The local transport, already limited to the OS user.
+    Local,
+    /// The network listener (R14): the hello must carry a valid credential.
+    Network,
+}
+
+/// Serves one local client until it disconnects, breaks the protocol, or
+/// the server stops.
 pub async fn serve_connection(stream: BoxStream, state: Arc<ServerState>) {
+    serve_with_access(stream, state, Access::Local).await;
+}
+
+/// Serves one peer that arrived by `access`.
+pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, access: Access) {
     let _open = state.track_connection();
     let (mut reader, mut writer) = tokio::io::split(stream);
-    match handshake(&mut reader, &mut writer).await {
+    let admit = |credential: Option<&str>| match access {
+        Access::Local => true,
+        Access::Network => credential.is_some_and(|given| state.credential_matches(given)),
+    };
+    match handshake(&mut reader, &mut writer, admit).await {
         Ok(true) => {}
         Ok(false) => return,
         Err(err) => {
@@ -53,6 +72,7 @@ pub async fn serve_connection(stream: BoxStream, state: Arc<ServerState>) {
     let writer_task = tokio::spawn(write_frames(writer, inbox));
     let mut session = Session {
         state,
+        access,
         outbox,
         subscription: None,
     };
@@ -63,17 +83,22 @@ pub async fn serve_connection(stream: BoxStream, state: Arc<ServerState>) {
     let _ = writer_task.await;
 }
 
-/// Reads the client's hello and answers it. Returns false when the client was
+/// Reads the client's hello and answers it. `admit` decides whether the
+/// hello's credential lets the peer in. Returns false when the client was
 /// refused or left before saying hello.
-async fn handshake(
+pub(crate) async fn handshake(
     reader: &mut ReadHalf<BoxStream>,
     writer: &mut WriteHalf<BoxStream>,
+    admit: impl FnOnce(Option<&str>) -> bool,
 ) -> io::Result<bool> {
     let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame::<_, ClientFrame>(reader))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no hello within the timeout"))??;
     let reply = match hello {
         None => return Ok(false),
+        Some(ClientFrame::Hello { credential, .. }) if !admit(credential.as_deref()) => {
+            reject("the machine credential is missing or not accepted".to_owned())
+        }
         Some(ClientFrame::Hello { versions, .. }) => match negotiate_version(&versions) {
             Some(version) => ServerFrame::Welcome {
                 version,
@@ -108,6 +133,7 @@ async fn write_frames(mut writer: WriteHalf<BoxStream>, mut inbox: mpsc::Receive
 
 struct Session {
     state: Arc<ServerState>,
+    access: Access,
     outbox: Outbox,
     subscription: Option<JoinHandle<()>>,
 }
@@ -137,6 +163,22 @@ impl Session {
     /// the connection should close.
     async fn handle_frame(&mut self, body: &[u8]) -> bool {
         match decode_body::<ClientFrame>(body) {
+            // Only the server's own machine may stop it: a cache answers its
+            // clients' shutdown itself, so this only refuses a stray peer.
+            Ok(ClientFrame::Request {
+                id,
+                request: Request::Shutdown,
+            }) if self.access == Access::Network => {
+                let refused = ErrorBody::new(
+                    ErrorCode::Refused,
+                    "the server can only be stopped from its own machine",
+                );
+                let response = ServerFrame::Response {
+                    id,
+                    outcome: Outcome::Error(refused),
+                };
+                self.outbox.send(response).await.is_ok()
+            }
             Ok(ClientFrame::Request { id, request }) => {
                 let state = Arc::clone(&self.state);
                 let outbox = self.outbox.clone();

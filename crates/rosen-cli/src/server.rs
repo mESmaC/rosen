@@ -54,6 +54,9 @@ fn print_status(json: bool, status: &ServerStatus) {
             "uptime_ms": status.uptime_ms,
             "open_connections": status.open_connections,
             "last_event": status.last_event,
+            "listen": status.listen,
+            "fingerprint": status.fingerprint,
+            "upstream": status.upstream,
         });
         println!("{body}");
     } else {
@@ -64,6 +67,15 @@ fn print_status(json: bool, status: &ServerStatus) {
         println!("uptime: {:.1}s", status.uptime_ms as f64 / 1000.0);
         println!("connections: {}", status.open_connections);
         println!("last event: {}", status.last_event);
+        if let Some(listen) = &status.listen {
+            println!("network: {listen}");
+        }
+        if let Some(fingerprint) = &status.fingerprint {
+            println!("fingerprint: {fingerprint}");
+        }
+        if let Some(upstream) = &status.upstream {
+            println!("cache for: {upstream}");
+        }
     }
 }
 

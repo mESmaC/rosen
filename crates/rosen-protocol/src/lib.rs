@@ -11,6 +11,7 @@ pub mod config;
 pub mod frame;
 pub mod history;
 pub mod message;
+pub mod objects;
 pub mod receipt;
 pub mod review;
 pub mod snapshot;
@@ -28,6 +29,7 @@ pub use history::{
     MergeResultAnswer, ReadAnswer, ReadRequest,
 };
 pub use message::*;
+pub use objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal, WireKind, WireObject};
 pub use receipt::{ReceiptRecord, SubmitReceipt};
 pub use review::{
     CommentRequest, CommentTarget, ResolveRequest, ReviewComment, ReviewThread, ThreadFilter,

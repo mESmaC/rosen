@@ -163,6 +163,7 @@ async fn handshake(
     let hello = ClientFrame::Hello {
         versions: SUPPORTED_VERSIONS.to_vec(),
         client: CLIENT_NAME.to_owned(),
+        credential: None,
     };
     write_frame(writer, &hello).await.map_err(Error::Io)?;
     match read_frame::<_, ServerFrame>(reader)

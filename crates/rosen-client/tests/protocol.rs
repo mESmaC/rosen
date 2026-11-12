@@ -48,6 +48,7 @@ async fn unsupported_version_is_rejected_not_hung() {
     let hello = ClientFrame::Hello {
         versions: vec![999],
         client: "future".into(),
+        credential: None,
     };
     write_frame(&mut writer, &hello).await.unwrap();
     let reply: Option<ServerFrame> = read_frame(&mut reader).await.unwrap();
@@ -62,6 +63,7 @@ async fn unknown_method_gets_an_error_under_its_id() {
     let hello = ClientFrame::Hello {
         versions: vec![1],
         client: "test".into(),
+        credential: None,
     };
     write_frame(&mut writer, &hello).await.unwrap();
     let _welcome: Option<ServerFrame> = read_frame(&mut reader).await.unwrap();
