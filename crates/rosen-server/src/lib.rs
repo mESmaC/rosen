@@ -1,5 +1,8 @@
-//! The Rosen daemon (SPEC §3): one per machine, holding the project and answering
-//! the protocol in `rosen-protocol` over the local transport.
+//! The Rosen daemon (SPEC.md D8, §3).
+//!
+//! One server runs per machine. It holds the authoritative object store and
+//! SQLite metadata store, and does every merge, rebase, land and history
+//! query on behalf of thin clients, over the protocol in `rosen-protocol`.
 
 pub mod conflicts;
 pub mod connection;
