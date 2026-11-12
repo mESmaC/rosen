@@ -12,6 +12,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Rust lint, zero warnings: `cargo clippy --workspace --all-targets -- -D warnings`. For one crate, use `-p <crate>` in place of `--workspace`.
 - Rust tests: `cargo test --workspace`. For one crate, use `cargo test -p <crate>`.
 - Proofs: `lake build` in `proofs/`.
+- Workspace deletion fixtures: `lake exe workspace-deletion-fixtures > fixtures/workspace-deletion.tsv` in `proofs/`.
 - Fixture tables, regenerated from `proofs/` after a model changes: `lake exe landing-fixtures > fixtures/landing.tsv` and `lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv`.
 - CI runs the Rust build, lint and tests on Windows, and the Rust build on Linux.
 
@@ -90,6 +91,9 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - `crates/rosen-server/src/landing/`: decides when the base moves; a bug lands unchecked code or applies a land twice (SPEC.md R8).
 - `crates/rosen-server/src/changes/schema.rs`: SQLite schema and migration for changes and snapshots; a bad migration corrupts or loses metadata.
 - `crates/rosen-server/src/conflicts.rs`: SQLite schema and storage for stored conflicts; a bug lets a conflicted change land (SPEC.md R5).
+- `crates/rosen-client/src/workspace/lifecycle.rs`: guarded workspace deletion; an unsafe deletion loses local edits (SPEC.md R4).
+- `crates/rosen-client/src/workspace/delete.rs`: holds verified files and removes exact objects; a pathname race can lose another workspace's edits.
+- `crates/rosen-platform/`: the audited Windows file-disposition boundary; its handle and ABI contract protects verified deletion.
 - `crates/rosen-store/`: the authoritative object store; a bug loses or corrupts objects, and objects are never deleted (SPEC.md D5).
 - `crates/rosen-protocol/src/transport_windows.rs`: restricts the named pipe to the current user; a bug exposes the server to other users.
 - `crates/rosen-merge/`: every land and rebase merges through it; a bug silently drops or duplicates lines (SPEC.md R5).

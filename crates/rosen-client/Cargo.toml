@@ -19,6 +19,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+rosen-platform.workspace = true
+
 [dev-dependencies]
 rosen-server.workspace = true
 tempfile.workspace = true

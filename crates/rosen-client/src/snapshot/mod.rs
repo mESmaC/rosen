@@ -9,13 +9,16 @@
 //! events (`ReadDirectoryChangesW` on Windows); `rosen commit` runs it once
 //! with a message.
 
+mod guard;
 mod ignore;
 mod index;
+mod journal;
 mod marker;
 mod scan;
 mod upload;
 pub mod watch;
 
+pub use journal::pending_journal;
 pub use marker::{WorkspaceMarker, STATE_DIR};
 pub use upload::{Sent, MAX_FILE_BYTES};
 pub use watch::{watch, WatchEvent};
@@ -89,6 +92,7 @@ pub struct SnapshotReport {
 /// A local workspace's snapshot state.
 pub struct Snapshotter {
     root: PathBuf,
+    journal: journal::Journal,
     marker: WorkspaceMarker,
     index: Index,
     ignore: ignore::IgnoreRules,
@@ -101,6 +105,7 @@ pub struct Snapshotter {
 }
 
 /// A snapshot read from disk and ready to send.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Prepared {
     blobs: Vec<ChangedBlob>,
     trees: Vec<(ObjectId, Vec<u8>)>,
@@ -118,23 +123,48 @@ impl Snapshotter {
             std::io::ErrorKind::NotFound => SnapshotError::NoWorkspace(root.clone()),
             _ => SnapshotError::io(&WorkspaceMarker::path(&root), err),
         })?;
-        let index = Index::from_tree(store, marker.tree)?;
+        let journal = journal::Journal::open(&root).map_err(|e| SnapshotError::io(&root, e))?;
+        let mut index = Index::from_tree(store, marker.tree)?;
+        for (_, body) in index.build_trees()?.trees {
+            journal::cache(&root)?.put_raw(rosen_core::ObjectKind::Tree, &body)?;
+        }
+        let known_trees = index
+            .build_trees()?
+            .trees
+            .into_iter()
+            .map(|(id, _)| id)
+            .chain([marker.tree])
+            .collect();
+        if let Some((_, last)) = journal
+            .records()
+            .map_err(|e| SnapshotError::io(&root, e))?
+            .into_iter()
+            .rfind(|(id, _)| !journal.acknowledged(*id))
+        {
+            journal::save_trees(&root, &last.prepared)?;
+            index = Index::from_tree(&journal::cache(&root)?, last.prepared.root)?;
+        }
         let sparse = Sparse::paths(&marker.sparse).map_err(|err| {
             SnapshotError::io(
                 &WorkspaceMarker::path(&root),
                 std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()),
             )
         })?;
-        let known_trees = index.build_trees()?.trees.into_iter().map(|(id, _)| id);
         Ok(Self {
             ignore: ignore::IgnoreRules::new(root.clone()),
             sparse,
-            known_trees: known_trees.chain([marker.tree]).collect(),
+            known_trees,
             root,
+            journal,
             marker,
             index,
             unconfirmed: BTreeSet::new(),
         })
+    }
+
+    /// Opens a previously materialised workspace without contacting the server.
+    pub fn open_offline(root: &Path) -> Result<Self, SnapshotError> {
+        Self::open(&journal::cache(root)?, root)
     }
 
     pub fn root(&self) -> &Path {
@@ -180,11 +210,7 @@ impl Snapshotter {
         )?;
         let built = self.index.build_trees()?;
         let all_trees = built.trees.iter().map(|(id, _)| *id).collect();
-        let trees = built
-            .trees
-            .into_iter()
-            .filter(|(id, _)| !self.known_trees.contains(id))
-            .collect();
+        let trees = built.trees.into_iter().collect();
         Ok(Prepared {
             blobs,
             trees,
@@ -249,11 +275,61 @@ pub async fn take_snapshot(
         Ok(prepared) => prepared,
         Err(err) => return (snapshotter, Err(err.into())),
     };
-    let result = send(client, &mut snapshotter, &prepared, message).await;
-    if result.is_err() {
-        snapshotter.fail(&prepared);
-    }
+    let result = queue_and_replay(Some(client), &mut snapshotter, prepared, message).await;
     (snapshotter, result)
+}
+
+/// Captures a snapshot durably while no connection is available.
+pub async fn journal_snapshot(
+    mut snapshotter: Snapshotter,
+    dirty: Dirty,
+) -> (Snapshotter, Result<SnapshotReport, Error>) {
+    let prepared = snapshotter.prepare(&dirty);
+    let result = match prepared {
+        Ok(prepared) => queue_and_replay(None, &mut snapshotter, prepared, None).await,
+        Err(err) => Err(err.into()),
+    };
+    (snapshotter, result)
+}
+
+async fn queue_and_replay(
+    client: Option<&Client>,
+    state: &mut Snapshotter,
+    prepared: Prepared,
+    message: Option<String>,
+) -> Result<SnapshotReport, Error> {
+    state.fail(&prepared);
+    let records = state.journal.records()?;
+    let previous = records
+        .iter()
+        .rfind(|(id, _)| !state.journal.acknowledged(*id))
+        .map_or(state.marker.tree, |(_, r)| r.prepared.root);
+    if prepared.root != previous || message.is_some() {
+        journal::save_trees(&state.root, &prepared)?;
+        let record = journal::Record { prepared, message };
+        if let Err(err) = state.journal.append(&record) {
+            state.fail(&record.prepared);
+            return Err(err.into());
+        }
+    }
+    let client = client.ok_or(Error::Disconnected)?;
+    let mut report = SnapshotReport {
+        change: state.change(),
+        tree: state.marker.tree,
+        commit: None,
+        recorded: false,
+        changed_files: Vec::new(),
+        removed: 0,
+        sent: Sent::default(),
+    };
+    for (id, record) in state.journal.records()? {
+        if state.journal.acknowledged(id) {
+            continue;
+        }
+        report = send(client, state, &record.prepared, record.message).await?;
+        state.journal.acknowledge(id)?;
+    }
+    Ok(report)
 }
 
 async fn send(
@@ -279,7 +355,13 @@ async fn send(
     if unchanged && message.is_none() {
         return Ok(report);
     }
-    report.sent = upload::send_objects(client, &prepared.blobs, &prepared.trees).await?;
+    let trees = prepared
+        .trees
+        .iter()
+        .filter(|(id, _)| !snapshotter.known_trees.contains(id))
+        .cloned()
+        .collect::<Vec<_>>();
+    report.sent = upload::send_objects(client, &prepared.blobs, &trees).await?;
     let outcome = client
         .snapshot(SnapshotRequest {
             change: snapshotter.change().to_string(),

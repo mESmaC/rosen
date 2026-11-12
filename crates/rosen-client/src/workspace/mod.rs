@@ -17,7 +17,12 @@
 
 mod client;
 mod clone;
+pub(crate) mod delete;
 mod layout;
+mod lifecycle;
+mod registry;
+pub use lifecycle::{deletion_permitted, CleanupReport};
+pub use registry::WorkspaceRecord;
 pub mod limits;
 mod parallel;
 pub mod pool;
