@@ -1,0 +1,4 @@
+# Proof sources and fixture tables stay LF on every checkout, so line-anchored
+# checks (such as the SPEC.md section marker) and byte comparisons hold on Windows.
+*.lean text eol=lf
+*.tsv text eol=lf
