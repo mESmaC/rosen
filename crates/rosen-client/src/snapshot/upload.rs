@@ -24,6 +24,7 @@ pub const MAX_FILE_BYTES: u64 = 40 * 1024 * 1024;
 const RACY_WINDOW: Duration = Duration::from_secs(2);
 
 /// A blob to send, with the file it came from.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ChangedBlob {
     pub path: String,
     pub data: Vec<u8>,

@@ -46,6 +46,9 @@ impl Client {
         WorkspaceMarker::new(change.change.id, change.change.head, sparse)
             .write(dest)
             .map_err(Error::Io)?;
+        let store = self.local_store().await?;
+        // Seed tree metadata so a watcher can start during a server outage.
+        crate::snapshot::Snapshotter::open(&store, dest)?;
         self.register_workspace(change.change.id, dest).await?;
         Ok(report)
     }
