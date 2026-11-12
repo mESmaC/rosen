@@ -24,6 +24,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Server pipe name (Windows) or socket path. Defaults to $ROSEN_ENDPOINT,
+    /// then the per-user default, so normally you never set it.
+    #[arg(long, global = true, value_name = "ENDPOINT")]
+    pub endpoint: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -106,10 +111,13 @@ pub enum Command {
     Server(ServerCommand),
     /// Stream events for your changes: snapshot, landed, rebased, conflict,
     /// updated, review, claim, released, green, reverted and mirror.
+    ///
+    /// Each event carries a sequence number. After a disconnect, pass the last
+    /// one you saw to --after to resume without missing or repeating events.
     Events {
-        /// Resume after this cursor instead of from now.
-        #[arg(long)]
-        after: Option<String>,
+        /// Resume after this sequence number instead of from now.
+        #[arg(long, value_name = "SEQ")]
+        after: Option<u64>,
     },
 }
 
@@ -200,9 +208,11 @@ pub enum WorkspaceCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ServerCommand {
-    /// Start this machine's server if it is not already running.
+    /// Start this machine's server in the background if it is not already
+    /// running, then show its status. Safe to run when it is already up.
     Start,
-    /// Show whether the server is running and which project it holds.
+    /// Show whether the server is running and which project it holds. Exits
+    /// with status 1, without starting a server, when none is running.
     Status,
 }
 
