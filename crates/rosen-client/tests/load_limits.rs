@@ -32,6 +32,9 @@ fn disk_admission_queues_and_resumes_without_touching_existing_workspaces() {
     .unwrap();
     let first = root.path().join("first");
     materialise_with_budget(&store, tree, &first, &Options::default(), Some(&budget)).unwrap();
+    let taken = root.path().join("taken");
+    budget.rename_workspace(&first, &taken).unwrap();
+    let first = taken;
     let second = root.path().join("second");
     let second_copy = second.clone();
     let (tx, rx) = mpsc::channel();
@@ -54,4 +57,53 @@ fn disk_admission_queues_and_resumes_without_touching_existing_workspaces() {
     rx.recv_timeout(Duration::from_secs(10)).unwrap();
     worker.join().unwrap();
     assert_eq!(fs::read(second.join("file")).unwrap(), b"four");
+}
+
+// SPEC R3: workspace I/O must queue while ordinary requests stay responsive.
+// Risk: a handler that bypasses admission can exhaust server resources.
+#[tokio::test]
+async fn server_writes_wait_for_io_capacity_while_ping_still_answers() {
+    use rosen_client::protocol::{Endpoint, Outcome, Request, Response, WorkspaceWrite};
+    use rosen_server::{rpc::dispatch, ServerConfig, ServerState};
+    use std::{num::NonZeroUsize, sync::Arc};
+    let root = tempfile::tempdir().unwrap();
+    let state = ServerState::with_workspace_io(
+        ServerConfig {
+            data_dir: root.path().into(),
+            endpoint: Endpoint::new("load-contract"),
+        },
+        NonZeroUsize::new(1).unwrap(),
+    );
+    let held = Arc::clone(&state.workspace_io)
+        .acquire_owned()
+        .await
+        .unwrap();
+    let writer = Arc::clone(&state);
+    let mut pending = tokio::spawn(async move {
+        dispatch(
+            &writer,
+            Request::WorkspaceWrite(WorkspaceWrite {
+                change: "missing".into(),
+                path: "file".into(),
+                data: None,
+            }),
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut pending)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        dispatch(&state, Request::Ping).await,
+        Outcome::Ok(Response::Pong)
+    );
+    drop(held);
+    let answer = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    // The missing change is examined only after admission, then fails normally.
+    assert!(matches!(answer, Outcome::Error(_)));
 }

@@ -7,8 +7,22 @@ use rosen_store::{LooseObjectStore, ObjectStore};
 use std::sync::Arc;
 
 pub async fn write(state: &Arc<ServerState>, request: WorkspaceWrite) -> Outcome {
+    let permit = match Arc::clone(&state.workspace_io).acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Outcome::Error(ErrorBody::new(
+                ErrorCode::ShuttingDown,
+                "workspace I/O closed",
+            ))
+        }
+    };
     let state = Arc::clone(state);
-    match tokio::task::spawn_blocking(move || edit(&state, request)).await {
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        edit(&state, request)
+    })
+    .await
+    {
         Ok(Ok(answer)) => Outcome::Ok(Response::Snapshot(answer)),
         Ok(Err(err)) => Outcome::Error(ErrorBody::new(
             crate::rpc::change_error_code(&err),
