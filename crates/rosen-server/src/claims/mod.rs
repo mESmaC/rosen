@@ -11,6 +11,7 @@ mod store;
 pub use store::ensure_schema;
 
 use crate::changes::ChangeError;
+use crate::events::Concern;
 use crate::ServerState;
 use rosen_core::ChangeId;
 use rosen_protocol::{
@@ -44,6 +45,11 @@ pub async fn abandon(state: &Arc<ServerState>, change: String) -> Outcome {
     let state = Arc::clone(state);
     let work = move || {
         let record = state.changes.abandon(&change)?;
+        // Published before the release, while the change still holds its
+        // claims, so the holders of overlapping claims hear of it too.
+        let detail = json!({ "state": record.change.state });
+        let id = Some(record.change.id.to_string());
+        state.events.publish(EventKind::Updated, id, detail);
         let released = state
             .changes
             .with_conn(|conn| store::release_all(conn, record.change.id))?;
@@ -110,11 +116,20 @@ fn run(state: &ServerState, call: ClaimCall) -> Result<Response, ChangeError> {
 fn publish_release(state: &ServerState, released: &ReleaseOutcome, include_releaser: bool) {
     let releaser = released.change.to_string();
     if include_releaser && !released.released.is_empty() {
-        let paths: Vec<&str> = released.released.iter().map(|r| r.path.as_str()).collect();
+        let paths: Vec<String> = released.released.iter().map(|r| r.path.clone()).collect();
         let detail = json!({ "paths": paths, "woken": released.woken });
-        state
-            .events
-            .publish(EventKind::Released, Some(releaser.clone()), detail);
+        // The change no longer holds these paths, so name them: holders of
+        // overlapping shares and waits are concerned by the release (R9).
+        let concern = Concern {
+            paths,
+            ..Concern::default()
+        };
+        state.events.publish_to(
+            EventKind::Released,
+            Some(releaser.clone()),
+            detail,
+            &concern,
+        );
     }
     for woken in &released.woken {
         let detail = json!({ "path": woken.path, "released_by": releaser, "wake": true });

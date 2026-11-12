@@ -8,6 +8,7 @@ pub mod changes;
 pub mod claims;
 pub mod connection;
 pub mod daemon;
+pub mod events;
 mod import;
 pub mod reviews;
 pub mod snapshot;

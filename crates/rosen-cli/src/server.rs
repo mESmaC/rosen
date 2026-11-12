@@ -3,6 +3,7 @@
 
 use rosen_client::protocol::{Event, ServerStatus};
 use rosen_client::{Client, Endpoint, Error};
+use rosen_core::AgentId;
 use serde_json::json;
 
 /// Schema tags for `--json` output (SPEC.md R10).
@@ -66,16 +67,31 @@ fn print_status(json: bool, status: &ServerStatus) {
     }
 }
 
-/// Prints events as they arrive until the server goes away.
+/// Prints events as they arrive until the server goes away. For an agent,
+/// each batch is acknowledged once printed, so the next run resumes after it.
 pub async fn stream_events(
     json: bool,
     endpoint: &Endpoint,
+    agent: Option<AgentId>,
     after: Option<u64>,
 ) -> Result<Succeeded, Error> {
     let client = rosen_client::connect_or_start(endpoint).await?;
-    let mut events = client.subscribe(after).await?;
+    let mut events = match &agent {
+        Some(agent) => client.subscribe_as(agent.clone(), after).await?,
+        None => client.subscribe(after).await?,
+    };
     while let Some(event) = events.recv().await {
+        let mut last = event.seq;
         print_event(json, &event);
+        // Print everything already buffered before acknowledging, so a busy
+        // stream costs one acknowledgement per batch, not per event.
+        while let Ok(event) = events.try_recv() {
+            last = event.seq;
+            print_event(json, &event);
+        }
+        if let Some(agent) = &agent {
+            client.ack_events(agent.clone(), last).await?;
+        }
     }
     Err(Error::Disconnected)
 }

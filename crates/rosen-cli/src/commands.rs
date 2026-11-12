@@ -140,15 +140,27 @@ pub enum Command {
     /// Start or inspect this machine's Rosen server.
     #[command(subcommand)]
     Server(ServerCommand),
-    /// Stream events for your changes: snapshot, landed, rebased, conflict,
-    /// updated, review, claim, released, green, reverted and mirror.
+    /// Stream the events that concern you: snapshot, landed, rebased,
+    /// conflict, updated, review, claim, released, green, reverted and mirror.
     ///
-    /// Each event carries a sequence number. After a disconnect, pass the last
-    /// one you saw to --after to resume without missing or repeating events.
+    /// You get an event when it is about a change you own, review, or stack
+    /// on, or one whose claims overlap yours; `mirror` events go to everyone.
+    /// Each event carries a sequence number. The server stores how far you
+    /// have read, once each event is printed, so rerunning `rosen events`
+    /// resumes where you stopped, even after a server restart. Delivery is at
+    /// least once: after a crash you may see an event again, never miss one.
     Events {
-        /// Resume after this sequence number instead of from now.
+        /// Resume after this sequence number instead of your stored cursor.
         #[arg(long, value_name = "SEQ")]
         after: Option<u64>,
+        /// The agent to stream for. Defaults to $ROSEN_AGENT, then the OS
+        /// user name.
+        #[arg(long = "as", value_name = "AGENT", conflicts_with = "all")]
+        agent: Option<String>,
+        /// Stream every event in the project from now (or --after), without
+        /// storing a cursor. For dashboards and the Velocity view.
+        #[arg(long)]
+        all: bool,
     },
 }
 

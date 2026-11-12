@@ -5,11 +5,13 @@
 //! the client matches answers by id. A single writer task owns the write half,
 //! so frames from requests and events never interleave mid-frame.
 
+use crate::events::EventError;
 use crate::{rpc, ServerState, SERVER_NAME};
+use rosen_core::AgentId;
 use rosen_protocol::frame::{decode_body, read_frame, read_frame_body, write_frame};
 use rosen_protocol::{
-    negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Outcome, RequestEnvelope,
-    ServerFrame, SUPPORTED_VERSIONS,
+    negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Event, Outcome,
+    RequestEnvelope, ServerFrame, SUPPORTED_VERSIONS,
 };
 use std::io;
 use std::sync::Arc;
@@ -25,6 +27,13 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Frames queued for the writer. Bounded so a client that stops reading slows
 /// its own requests and events instead of growing server memory.
 const OUTBOX_CAPACITY: usize = 256;
+
+/// Events read from the log per query, so a subscriber far behind catches
+/// up in bounded steps instead of loading its whole backlog at once.
+const EVENT_PAGE: u64 = 256;
+
+/// Pause before retrying a failed event-log read.
+const READ_RETRY: Duration = Duration::from_secs(1);
 
 type Outbox = mpsc::Sender<ServerFrame>;
 
@@ -137,8 +146,8 @@ impl Session {
                 });
                 true
             }
-            Ok(ClientFrame::Subscribe { after }) => {
-                self.subscribe(after);
+            Ok(ClientFrame::Subscribe { after, subscriber }) => {
+                self.subscribe(after, subscriber);
                 true
             }
             Ok(ClientFrame::Hello { .. }) => false,
@@ -171,14 +180,14 @@ impl Session {
     }
 
     /// Starts (or restarts from a new cursor) this connection's event stream.
-    fn subscribe(&mut self, after: Option<u64>) {
+    fn subscribe(&mut self, after: Option<u64>, subscriber: Option<AgentId>) {
         if let Some(previous) = self.subscription.take() {
             previous.abort();
         }
         let state = Arc::clone(&self.state);
         let outbox = self.outbox.clone();
-        let cursor = after.unwrap_or_else(|| state.events.last_seq());
-        self.subscription = Some(tokio::spawn(forward_events(state, outbox, cursor)));
+        let stream = forward_events(state, outbox, after, subscriber);
+        self.subscription = Some(tokio::spawn(stream));
     }
 
     fn close(mut self) {
@@ -188,21 +197,89 @@ impl Session {
     }
 }
 
-/// Sends every event after `cursor`, then each new one as it is published.
-async fn forward_events(state: Arc<ServerState>, outbox: Outbox, mut cursor: u64) {
+/// Sends every event after the starting cursor that the subscriber should
+/// see, then each new one as it is published.
+async fn forward_events(
+    state: Arc<ServerState>,
+    outbox: Outbox,
+    after: Option<u64>,
+    subscriber: Option<AgentId>,
+) {
     let mut published = state.events.watch();
+    let mut cursor = starting_cursor(&state, after, subscriber.clone()).await;
     loop {
         // Mark the current value seen before reading the log, so an event
         // published between the read and the wait still wakes this loop.
         published.borrow_and_update();
-        for event in state.events.after(cursor) {
+        let page = read_page(&state, cursor, subscriber.clone()).await;
+        let full = page.len() as u64 == EVENT_PAGE;
+        for event in page {
             cursor = event.seq;
             if outbox.send(ServerFrame::Event(event)).await.is_err() {
                 return;
             }
         }
-        if published.changed().await.is_err() {
+        // A full page means more may be waiting; read on without sleeping.
+        if !full && published.changed().await.is_err() {
             return;
         }
+    }
+}
+
+/// An explicit cursor wins. Otherwise a named subscriber resumes after the
+/// last event it acknowledged, and anyone else starts from now.
+async fn starting_cursor(
+    state: &Arc<ServerState>,
+    after: Option<u64>,
+    subscriber: Option<AgentId>,
+) -> u64 {
+    if let Some(after) = after {
+        return after;
+    }
+    retrying(|| {
+        let state = Arc::clone(state);
+        let subscriber = subscriber.clone();
+        tokio::task::spawn_blocking(move || {
+            let stored = match &subscriber {
+                Some(agent) => state.events.cursor(agent)?,
+                None => None,
+            };
+            Ok::<_, EventError>(stored.unwrap_or_else(|| state.events.last_seq()))
+        })
+    })
+    .await
+}
+
+/// Reads the next page on the blocking pool: SQLite I/O must not stall the
+/// async workers that carry every other connection.
+async fn read_page(
+    state: &Arc<ServerState>,
+    cursor: u64,
+    subscriber: Option<AgentId>,
+) -> Vec<Event> {
+    retrying(|| {
+        let state = Arc::clone(state);
+        let subscriber = subscriber.clone();
+        tokio::task::spawn_blocking(move || {
+            state.events.page(cursor, subscriber.as_ref(), EVENT_PAGE)
+        })
+    })
+    .await
+}
+
+/// Runs a log read until it succeeds. A failed read (a locked or briefly
+/// unavailable database) is retried rather than ending the stream, because
+/// the client would only see silence, never an end it could resume from.
+/// The loop stops when the connection closes and aborts this task.
+async fn retrying<T>(
+    mut read: impl FnMut() -> tokio::task::JoinHandle<Result<T, EventError>>,
+) -> T {
+    loop {
+        match read().await {
+            Ok(Ok(value)) => return value,
+            Ok(Err(err)) => eprintln!("rosen-server: retrying an event read: {err}"),
+            Err(join) => eprintln!("rosen-server: retrying an event read: {join}"),
+        }
+        tokio::time::sleep(READ_RETRY).await;
     }
 }
