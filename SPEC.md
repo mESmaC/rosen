@@ -2,7 +2,7 @@
 
 Rosen is a version control system built so that many coding agents can work on one project at the same time: 100 agents in v1 and up to 1000 later. Rosen is two programs: a **server** that holds the project and does the expensive work, and a thin **client** that agents and humans use. Rosen is the source-control layer under [Velocity](https://github.com/mESmaC/velocity), the parallel agentic IDE. Where a cleaner or faster Rosen design needs Velocity to change, Velocity changes (§9).
 
-- **Status:** draft, 2026-11-11. Written from the spec interview, then revised after reviewing the prior art below. Revised 2026-11-12: one server for agents on many machines, with AIRC served by Rosen and zero-touch enrollment (#25); snapshot ignore rules (#28); rebases applied when the workspace owner asks (#29).
+- **Status:** draft, 2026-11-11. Written from the spec interview, then revised after reviewing the prior art below. Revised 2026-11-12: one server for agents on many machines, with AIRC served by Rosen and zero-touch enrollment (#25); snapshot ignore rules (#28); rebases applied when the workspace owner asks (#29); receipts reused across independent lands (#26); Rosen prepares pool workspaces (#31).
 - **Optimizing for:** development velocity. Landing must be fast and must never lose work.
 
 ## 0. Prior art and what Rosen takes from it
@@ -84,6 +84,17 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - **Path claim.** A change's declared intent to edit a path or glob. The first claim wins. Other changes record a **share** (they edit it too, knowingly) or a **wait** (they hold off until the claim is released).
 - **Edit regions.** The paths and line ranges a change has modified relative to its parent. The server computes them from snapshots.
 - **Overlap.** Two changes overlap when they claim the same path, or their edit regions in one file touch or sit within 3 lines of each other. Per-project configuration lists **generated files** and **registration lists**, which never count as an overlap.
+- **Build unit.** A part of the project that builds on its own, together with the units it depends on. By default each package of a Cargo workspace is a unit, read from the workspace's manifests. Project configuration can list units instead, as path globs with their dependencies.
+- **Workspace-wide inputs.** Paths every unit's build reads:
+  - the root manifest and lockfile;
+  - toolchain files and build configuration (such as `.cargo/`);
+  - CI config;
+  - the project configuration itself;
+  - any other path that lies in no unit and is not prose.
+- **Reach.** The units a change can affect: the units holding the paths it changed, plus every unit that depends on one of them, directly or through others.
+  - A prose-only change (R7) reaches no unit.
+  - A change to a workspace-wide input reaches every unit.
+- **Independent.** Two changes are independent when their reaches share no unit. Then no unit's build sees both changes.
 
 ---
 
@@ -133,9 +144,15 @@ Defaults set during spec writing. These follow from the decisions above, and cha
   - **Hardlinks are never used** for files in a workspace. Agents' tools often write files in place, so a hardlink would let one workspace's write corrupt the shared object and every other workspace that links to it.
   - Sparse checkout lets a workspace hold only chosen paths.
 - **Server-side workspaces.** Files live on the server, and clients read, write, list and diff them through the API, with no checkout. Writes become snapshots directly. Rosen recommends them for jobs that touch few files, such as reviewers, check runners and doc edits.
-- **Warm pool.** Each machine's daemon keeps N ready local workspaces at the tip of the base (default 4, 0 turns the pool off). After each land it brings them up to the new tip by rewriting only the changed files. Taking one is atomic, so two changes never get the same workspace.
+- **Warm pool.** Each machine's daemon keeps N ready local workspaces at the tip of the base (default 4, 0 turns the pool off). Velocity can raise N for a launch. After each land the daemon brings ready workspaces up to the new tip by rewriting only the changed files. Taking one is atomic, so two changes never get the same workspace. A take prefers a prepared workspace and reports whether it is prepared.
+- **Prepared workspaces.** Project configuration lists **prepare commands**. These are steps whose results don't depend on the workspace's path or its agent, such as installing pinned toolchains, fetching dependency caches (`lake exe cache get`) and a prebuild (`cargo build --workspace`). The daemon runs them in each ready workspace, so an agent's first build compiles only what it changes.
+  - Prepare commands run for one workspace at a time per machine, at below-normal priority, so agents' own builds go first.
+  - After a land, the daemon runs them again in each ready workspace unless every change landed since it was prepared is prose-only (R7).
+  - A workspace whose prepare failed is retried when the base next moves. It can still be taken, and the take reports it unprepared.
+- **Template on ReFS.** On a ReFS volume the daemon keeps one prepared **template** workspace at the base tip. It makes ready workspaces, and any workspace beyond the pool, as block clones of the template, including its ignored build output (R2). Each starts prepared at almost no copy cost. Without ReFS, each ready workspace is prepared on its own.
+- **Per-agent setup stays with the owner.** Steps that depend on the agent, its credentials or its final path run after the take, by whoever took the workspace. Velocity copies untracked files such as `.env`, links skills and runs its after-take setup command (§9). Rosen never stores those files.
 - **Load limits.** Each daemon caps its machine's concurrent materialisations, and the server caps server-side workspace I/O; both queue the rest. The client caps local disk use. A request over a cap waits; it never fails or degrades another workspace.
-- **Accept when:** with the warm pool filled, a new workspace is ready in under 2 s, and two changes never share a workspace.
+- **Accept when:** with the warm pool filled, a new prepared workspace is ready in under 2 s; an agent's first build in it compiles only what the agent changed; and two changes never share a workspace.
 
 ### R4 · Workspace lifecycle and deletion
 - Rosen is the only thing that creates or deletes workspaces. Velocity calls `rosen-client` instead of `git worktree`.
@@ -182,8 +199,9 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
    - the change has no conflicts, an approval for its current head, and a valid receipt;
    - **base unchanged** (the base still equals the receipt's B): it writes the single landed commit and compare-and-swaps the base ref from B to it;
    - **base moved**: the server merges again onto the new base and applies the **re-check rules**:
-     - every change landed since B is prose-only, and the merge is clean → the existing receipt still counts;
-     - otherwise, with a clean merge → a new pre-land receipt on the new merge result is required. A clean textual merge can still break the build, for example when a field one change adds breaks another change's struct literal in a file the first never touched;
+     - every change landed since B is **independent** of this change (§2), and the merge is clean → the existing receipt still counts. Each unit this change reaches has the same inputs the receipt checked, and every other unit is as the landed changes' own receipts left it;
+     - otherwise, with a clean merge → a new pre-land receipt on the new merge result is required. A clean textual merge can still break the build. For example, a field one change adds can break another change's struct literal in a file the first never touched. Those two changes are not independent, because the second change's unit depends on the first's;
+     - build units and workspace-wide inputs are read from the current base, so a change cannot widen its own independence. A change that edits them reaches every unit. A dependency the configuration misses is caught after landing by post-land verification and reverted (R12);
      - conflict → the change gets a stored conflict and a `conflict` event naming the files, and the land is refused.
    - If the compare-and-swap loses a race, the server retries the land itself with backoff, as long as no new receipt is needed. A land is never applied twice.
 3. A **stack** lands bottom first. A change cannot land before its parent change.
@@ -196,7 +214,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
    - every other change rebases only at its own landing time;
    - the mirror push is scheduled.
 - **Order** is set only between changes that overlap each other, or are stacked.
-- **Accept when:** a land with a valid receipt commits in under 200 ms; the base only ever moves by a land whose receipt and approval match; and a crash at any point leaves the base at either the old or the new commit.
+- **Accept when:** a land with a valid receipt commits in under 200 ms; the base only ever moves by a land whose receipt and approval match; a receipt is reused on a moved base only when every change landed since its base is independent of the change; and a crash at any point leaves the base at either the old or the new commit.
 
 ### R9 · Events
 - The event types are `snapshot`, `landed`, `rebased`, `conflict`, `updated`, `review`, `claim`, `released`, `green`, `reverted` and `mirror`.
@@ -303,9 +321,9 @@ Lean proofs are written only for these features (AGENTS.md "Proofs"):
 
 ## 8. Open questions
 
-None at spec lock. Raised since, and tracked as GitHub issues:
-- **#26.** Whether a receipt stays valid on a moved base when the changes landed since share no build unit with it (R8 step 2).
-- **#31.** Who runs the warm pool's setup, skills and prebuild once the pool moves into Rosen: Velocity's pool worker over Rosen's pool, or a setup step in Rosen (R3, §9).
+None open. Questions raised since spec lock were decided on 2026-11-12:
+- **#26.** A receipt stays valid on a moved base when every change landed since is independent of it (§2, R8 step 2). Batch receipts are not adopted.
+- **#31.** Rosen prepares pool workspaces, and Velocity keeps the per-agent steps after a take (R3, §9).
 
 ---
 
@@ -313,7 +331,7 @@ None at spec lock. Raised since, and tracked as GitHub issues:
 
 Rosen depends on these changes to Velocity. They are built in Velocity's repository, not here.
 
-- **Worktrees.** Threads get workspaces from `rosen-client`. The worktree warm pool (F5) and `git worktree` calls go.
+- **Worktrees.** Threads get workspaces from `rosen-client`. The worktree warm pool (F5), its prebuild worker and `git worktree` calls go. Rosen prepares pool workspaces (R3). The project's prepare commands take over Velocity's toolchain, Lean cache and prebuild steps. Velocity keeps the per-agent steps after a take: copying untracked files, linking skills and its after-take setup command. A swarm launch raises the pool size on the machines it uses.
 - **PR watcher.** GitHub polling every 15 s (F6) is replaced by the Rosen event stream.
 - **PR duty.** Duty agents review, approve, submit receipts and land through `rosen-client`. Branch updates (F6) become server-side rebases.
 - **AIRC.** Velocity's AIRC tools and view call the Rosen server (R13) instead of local files. File claims, shares, waits and overlap notices become Rosen path claims (R6). Task claims, events, messages, presence and ledgers become channel state on the server.
