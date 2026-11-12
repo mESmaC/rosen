@@ -85,7 +85,18 @@ fn setup(changes: Vec<ChangeFacts>) -> (Arc<World>, Arc<Landing>) {
         events: Box::new(Shared(world.clone())),
     };
     let ledger = Ledger::open_in_memory().unwrap();
-    ledger.init_base("main", &root()).unwrap();
+    assert_eq!(
+        ledger.init_base("main", &root()).unwrap(),
+        InitBase::Created
+    );
+    // A project has one base (SPEC.md §2): a second import under another
+    // branch name must not create a second base.
+    let again = ledger.init_base("master", &oid(ROOT, 9)).unwrap();
+    let existing = InitBase::Exists {
+        name: "main".into(),
+        commit: root(),
+    };
+    assert_eq!(again, existing);
     (
         world,
         Arc::new(Landing::new(ledger, deps, LandingConfig::default())),

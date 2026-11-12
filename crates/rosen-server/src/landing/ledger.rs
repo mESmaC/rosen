@@ -72,6 +72,17 @@ pub enum CasResult {
     OpenConflicts,
 }
 
+/// What [`Ledger::init_base`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InitBase {
+    Created,
+    /// The project already has a base, under this name and at this commit.
+    Exists {
+        name: String,
+        commit: CommitId,
+    },
+}
+
 /// The best stored receipt for a change's current head and check set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReceiptLookup {
@@ -118,23 +129,31 @@ impl Ledger {
             .map_err(|_| LandError::Store("ledger mutex poisoned".into()))
     }
 
-    /// Points a new base ref at its first commit (import, R1). Returns false
-    /// and changes nothing when the ref already exists.
-    pub fn init_base(&self, ref_name: &str, commit: &CommitId) -> LandResult<bool> {
+    /// Creates the project's base ref at its first commit (import, R1).
+    /// A project has exactly one base (SPEC.md §2), so this refuses, changing
+    /// nothing, when any base ref already exists, and names that base.
+    pub fn init_base(&self, ref_name: &str, commit: &CommitId) -> LandResult<InitBase> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let inserted = tx.execute(
-            "INSERT OR IGNORE INTO base_refs (name, target) VALUES (?1, ?2)",
+        let existing: Option<(String, String)> = tx
+            .query_row("SELECT name, target FROM base_refs LIMIT 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()?;
+        if let Some((name, target)) = existing {
+            let commit = parse_commit(target)?;
+            return Ok(InitBase::Exists { name, commit });
+        }
+        tx.execute(
+            "INSERT INTO base_refs (name, target) VALUES (?1, ?2)",
             params![ref_name, commit.to_string()],
         )?;
-        if inserted == 1 {
-            tx.execute(
-                "INSERT INTO base_history (ref_name, commit_id, tier) VALUES (?1, ?2, ?3)",
-                params![ref_name, commit.to_string(), INITIAL_TIER],
-            )?;
-        }
+        tx.execute(
+            "INSERT INTO base_history (ref_name, commit_id, tier) VALUES (?1, ?2, ?3)",
+            params![ref_name, commit.to_string(), INITIAL_TIER],
+        )?;
         tx.commit()?;
-        Ok(inserted == 1)
+        Ok(InitBase::Created)
     }
 
     pub fn base(&self, ref_name: &str) -> LandResult<Option<CommitId>> {

@@ -19,7 +19,7 @@ pub mod rules;
 use std::fmt;
 
 pub use engine::{LandOutcome, Landing, LandingConfig, LandingDeps, MergePreview};
-pub use ledger::{CasResult, LandRecord, Ledger};
+pub use ledger::{CasResult, InitBase, LandRecord, Ledger};
 pub use restack::RestackReport;
 pub use rules::{LandInput, ReceiptCheck, Refusal, Verdict};
 
