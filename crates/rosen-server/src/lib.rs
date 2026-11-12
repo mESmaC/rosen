@@ -26,6 +26,7 @@ pub mod receipts;
 pub mod reviews;
 pub mod rpc;
 pub mod snapshots;
+pub mod workspaces;
 
 use events::EventLog;
 use network::{Identity, NetworkOptions};

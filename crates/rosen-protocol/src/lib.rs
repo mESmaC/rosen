@@ -16,6 +16,8 @@ pub mod receipt;
 pub mod review;
 pub mod snapshot;
 pub mod transport;
+pub mod workspace;
+pub use workspace::{WorkspaceBytes, WorkspaceWrite};
 
 pub use change::{ChangeFilter, ChangeRecord, NewChange};
 pub use claim::{
