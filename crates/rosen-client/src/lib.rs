@@ -9,6 +9,7 @@ pub mod claims;
 pub mod connection;
 pub mod daemon;
 mod import;
+pub mod workspace;
 
 pub use connection::Client;
 pub use daemon::connect_or_start;
@@ -47,6 +48,9 @@ pub enum Error {
     /// The server sent something the protocol does not allow here.
     #[error("protocol error: {0}")]
     Unexpected(String),
+    /// A local workspace could not be materialised.
+    #[error(transparent)]
+    Workspace(workspace::MaterialiseError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

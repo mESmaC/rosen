@@ -9,12 +9,15 @@ repository.workspace = true
 [dependencies]
 rosen-core.workspace = true
 rosen-protocol.workspace = true
+rosen-store.workspace = true
+reflink-copy.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 rosen-server.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
