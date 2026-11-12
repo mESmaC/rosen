@@ -60,7 +60,14 @@ impl UpstreamLink {
     ) -> io::Result<Self> {
         let stream = tls::connect(&config.address, config.fingerprint).await?;
         let (mut reader, mut writer) = tokio::io::split(stream);
-        hello(&mut reader, &mut writer, &config.credential).await?;
+        // Bounded like the TLS handshake: LinkSlot holds its lock while
+        // connecting, so a server that stalls here would hang the client.
+        tokio::time::timeout(
+            tls::HANDSHAKE_TIMEOUT,
+            hello(&mut reader, &mut writer, &config.credential),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no welcome from the server"))??;
         let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
         let subscribed = Arc::new(AtomicBool::new(false));
         let (closed_tx, closed) = watch::channel(false);

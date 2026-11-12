@@ -4,7 +4,7 @@
 //! The cache keeps one invariant, the same one the server's store keeps: a
 //! tree or commit in the store has everything it reaches in the store too.
 //! So a fill stops at any object already held, and writes the trees and
-//! commits it fetched only after their children, deepest first. A fill cut
+//! commits it fetched only after every fetched object they name. A fill cut
 //! short leaves only blobs and complete trees behind, never a tree with a
 //! hole, and the next fill finishes the job.
 
@@ -15,7 +15,7 @@ use rosen_protocol::{
     ErrorBody, ErrorCode, ObjectBatch, ObjectQuery, Outcome, Request, Response, WireObject,
 };
 use rosen_store::{LooseObjectStore, ObjectStore, StoreError};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// IDs per fetch request. Small enough that the request frame stays small;
 /// the server also defers objects past its byte budget.
@@ -87,8 +87,8 @@ struct Walk {
     seen: HashSet<ObjectId>,
     /// IDs to fetch next.
     next: Vec<ObjectId>,
-    /// Trees and commits fetched, parents before children.
-    deferred: Vec<(ObjectKind, Vec<u8>)>,
+    /// Trees and commits fetched, written once the fetch is complete.
+    deferred: Vec<Deferred>,
     fetched: u64,
 }
 
@@ -141,20 +141,64 @@ impl Walk {
                     return Err(StoreError::Malformed(id, err));
                 }
             };
-            self.want(children);
-            self.deferred.push((kind, object.data));
+            self.want(children.clone());
+            self.deferred.push(Deferred {
+                id: ObjectId::hash_object(kind.as_str(), &object.data),
+                kind,
+                data: object.data,
+                children,
+            });
         }
         self.drop_held(store)
     }
 
-    /// Writes deferred trees and commits deepest first, so each is written
-    /// only after everything it names.
+    /// Writes deferred trees and commits in post-order: each only after
+    /// every deferred object it names. Reverse fetch order is not enough,
+    /// because a subtree shared by a parent and its sibling is fetched in the
+    /// parent's round but named by the sibling too. Objects are content
+    /// addressed, so the graph has no cycles.
     fn write_deferred(&mut self, store: &LooseObjectStore) -> Result<(), StoreError> {
-        for (kind, data) in self.deferred.iter().rev() {
-            store.put_raw(*kind, data)?;
+        let deferred = &self.deferred;
+        let index: HashMap<ObjectId, usize> = deferred
+            .iter()
+            .enumerate()
+            .map(|(at, object)| (object.id, at))
+            .collect();
+        let mut written = vec![false; deferred.len()];
+        for start in 0..deferred.len() {
+            // Each frame is an object and how many of its children are done.
+            let mut stack = vec![(start, 0usize)];
+            while let Some(frame) = stack.last_mut() {
+                let (at, next_child) = *frame;
+                if written[at] {
+                    stack.pop();
+                    continue;
+                }
+                if let Some(child) = deferred[at].children.get(next_child) {
+                    frame.1 += 1;
+                    if let Some(&child_at) = index.get(child) {
+                        if !written[child_at] {
+                            stack.push((child_at, 0));
+                        }
+                    }
+                    continue;
+                }
+                store.put_raw(deferred[at].kind, &deferred[at].data)?;
+                written[at] = true;
+                stack.pop();
+            }
         }
         Ok(())
     }
+}
+
+/// A fetched tree or commit waiting for its children to be written.
+struct Deferred {
+    id: ObjectId,
+    kind: ObjectKind,
+    data: Vec<u8>,
+    /// Objects it names that the store lacked when it was fetched.
+    children: Vec<ObjectId>,
 }
 
 /// Fetches every object in `ids`, asking again for any the server deferred.
