@@ -138,8 +138,7 @@ impl Snapshotter {
             .records()
             .map_err(|e| SnapshotError::io(&root, e))?
             .into_iter()
-            .filter(|(id, _)| !journal.acknowledged(*id))
-            .next_back()
+            .rfind(|(id, _)| !journal.acknowledged(*id))
         {
             journal::save_trees(&root, &last.prepared)?;
             index = Index::from_tree(&journal::cache(&root)?, last.prepared.root)?;
@@ -302,8 +301,7 @@ async fn queue_and_replay(
     let records = state.journal.records()?;
     let previous = records
         .iter()
-        .filter(|(id, _)| !state.journal.acknowledged(*id))
-        .next_back()
+        .rfind(|(id, _)| !state.journal.acknowledged(*id))
         .map_or(state.marker.tree, |(_, r)| r.prepared.root);
     if prepared.root != previous || message.is_some() {
         journal::save_trees(&state.root, &prepared)?;
