@@ -1,0 +1,16 @@
+[package]
+name = "rosen-server"
+description = "The Rosen daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rosen-server"
+path = "src/main.rs"
+
+[dependencies]
+rosen-protocol.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+clap.workspace = true
