@@ -56,6 +56,7 @@ async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<(), Error> {
     if state.size == 0 {
         return Ok(());
     }
+    drop(state);
     let log = client
         .log(LogRequest {
             limit: Some(1),
@@ -67,8 +68,14 @@ async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<(), Error> {
     };
     client.ensure_local(base.tree).await?;
     let store = client.local_store().await?;
+    let mut state = pool.state.lock().await;
     refresh_ready(&store, &mut state.ready, base.tree).await?;
-    while state.ready.len() < state.size {
+    // Bound one refill pass so a busy launch cannot starve landed events.
+    let missing = state.size.saturating_sub(state.ready.len());
+    for _ in 0..missing {
+        if state.ready.len() >= state.size {
+            break;
+        }
         state.next += 1;
         let path = state
             .root
@@ -76,9 +83,12 @@ async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<(), Error> {
         if path.exists() {
             continue;
         }
+        // Existing ready slots remain available while a replacement copies.
+        drop(state);
         let report = client
             .materialise_tree(base.tree, &path, Options::default())
             .await?;
+        state = pool.state.lock().await;
         state.ready.push(Slot {
             path,
             tree: base.tree,

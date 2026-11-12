@@ -64,6 +64,9 @@ impl WarmPool {
                 "a pool destination must be absolute and outside the ready pool",
             ));
         }
+        if state.size == 0 {
+            return Outcome::Ok(Response::PoolTaken(None));
+        }
         let Some(index) = state.ready.iter().position(|slot| slot.tree == tree) else {
             return Outcome::Ok(Response::PoolTaken(None));
         };
