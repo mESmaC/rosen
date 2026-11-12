@@ -2,6 +2,7 @@
 
 mod change_cmd;
 mod commands;
+mod import;
 mod server;
 
 use std::process::ExitCode;
@@ -38,6 +39,9 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
         Command::Server(ServerCommand::Status) => block_on(server::status(json, &endpoint)),
         Command::Events { after } => block_on(server::stream_events(json, &endpoint, *after)),
         Command::Change(change) => block_on(change_cmd::run(json, &endpoint, change)),
+        Command::Import { repo, branch } => {
+            block_on(import::import(json, &endpoint, repo, branch.as_deref()))
+        }
         other => rosen_client::run_operation(other.path()).map(|()| true),
     }
 }

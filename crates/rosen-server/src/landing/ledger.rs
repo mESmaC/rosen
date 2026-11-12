@@ -156,6 +156,19 @@ impl Ledger {
         Ok(InitBase::Created)
     }
 
+    /// The project's one base ref (SPEC.md §2), as name and commit, if
+    /// import has created it.
+    pub fn project_base(&self) -> LandResult<Option<(String, CommitId)>> {
+        let connection = self.lock()?;
+        let row: Option<(String, String)> = connection
+            .query_row("SELECT name, target FROM base_refs LIMIT 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()?;
+        row.map(|(name, target)| Ok((name, parse_commit(target)?)))
+            .transpose()
+    }
+
     pub fn base(&self, ref_name: &str) -> LandResult<Option<CommitId>> {
         let connection = self.lock()?;
         let target = connection

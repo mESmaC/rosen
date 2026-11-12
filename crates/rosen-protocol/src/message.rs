@@ -100,6 +100,16 @@ pub enum Request {
     ChangeAbandon {
         change: String,
     },
+    /// Loads a git repository's history and makes one of its branches the
+    /// project's base (SPEC R1). Refused once the project has a base.
+    Import {
+        /// An absolute local repository path, or a URL git can clone. The
+        /// server resolves relative paths against its own directory, so
+        /// clients send absolute ones.
+        source: String,
+        /// The branch to import; `None` takes the one the source's HEAD names.
+        branch: Option<String>,
+    },
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -112,6 +122,20 @@ pub enum Response {
     /// The answer to `change_new`, `change_show` and `change_abandon`.
     Change(ChangeRecord),
     Changes(Vec<ChangeRecord>),
+    Imported(ImportSummary),
+}
+
+/// The answer to [`Request::Import`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportSummary {
+    /// The base's name: the imported branch, for example `main`.
+    pub branch: String,
+    /// Hex id of the base commit: the branch's tip.
+    pub base_commit: String,
+    /// Objects reachable from the base commit, all now in the store.
+    pub objects_reachable: u64,
+    /// Objects this import wrote; the rest were already stored.
+    pub objects_written: u64,
 }
 
 /// The answer to [`Request::Status`].

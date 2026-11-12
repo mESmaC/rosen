@@ -36,9 +36,17 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Import a git repository; its default branch becomes the base.
+    ///
+    /// Copies every commit, tree and blob reachable from the branch into the
+    /// server's store with their git ids unchanged, then sets the base. Works
+    /// only on a project with no base yet; rerunning after an interrupted
+    /// import skips the objects already stored.
     Import {
-        /// Path or URL of the git repository to import.
+        /// Path (bare or with a working tree) or URL of the git repository.
         repo: String,
+        /// Branch to import instead of the one the repository's HEAD names.
+        #[arg(long)]
+        branch: Option<String>,
     },
     /// Create, list, inspect or abandon changes.
     #[command(subcommand)]

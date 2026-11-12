@@ -7,6 +7,7 @@
 pub mod changes;
 pub mod connection;
 pub mod daemon;
+mod import;
 
 pub use connection::Client;
 pub use daemon::connect_or_start;

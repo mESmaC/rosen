@@ -8,6 +8,7 @@ pub mod changes;
 pub mod conflicts;
 pub mod connection;
 pub mod events;
+pub mod import;
 pub mod landing;
 pub mod listener;
 pub mod rpc;
@@ -35,14 +36,17 @@ pub struct ServerState {
 
 impl ServerState {
     pub fn new(config: ServerConfig) -> Arc<Self> {
-        Arc::new(Self {
+        let state = Arc::new(Self {
             changes: changes::ChangeService::new(&config.data_dir),
             config,
             started: Instant::now(),
             events: EventLog::default(),
             open_connections: AtomicU64::new(0),
             shutdown: watch::Sender::new(false),
-        })
+        });
+        let base = import::base::LedgerBase::new(state.config.clone());
+        state.changes.set_base_source(Arc::new(base));
+        state
     }
 
     pub fn open_connections(&self) -> u64 {
@@ -96,6 +100,26 @@ pub struct ServerConfig {
     pub data_dir: PathBuf,
     /// The pipe or socket clients connect to.
     pub endpoint: Endpoint,
+}
+
+impl ServerConfig {
+    /// The loose object store (SPEC D5): every imported, snapshotted and
+    /// landed object.
+    pub fn objects_dir(&self) -> PathBuf {
+        self.data_dir.join("objects")
+    }
+
+    /// The SQLite metadata store (SPEC D13): the base ref, changes, claims,
+    /// receipts, reviews and conflicts.
+    pub fn metadata_path(&self) -> PathBuf {
+        self.data_dir.join("metadata.sqlite")
+    }
+
+    /// Temporary clones of URL import sources. On the same volume as the
+    /// store, and removed when each import ends.
+    pub fn import_scratch_dir(&self) -> PathBuf {
+        self.data_dir.join("import-tmp")
+    }
 }
 
 /// Binds the endpoint and serves until shutdown is requested. Fails with
