@@ -7,6 +7,7 @@
 
 pub mod change;
 pub mod claim;
+pub mod config;
 pub mod frame;
 pub mod message;
 pub mod receipt;
@@ -19,6 +20,7 @@ pub use claim::{
     ClaimFilter, ClaimHolder, ClaimKind, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome,
     ShareOutcome, WaitOutcome, WokenWait,
 };
+pub use config::{ConfigQuery, ConfigRecord};
 pub use message::*;
 pub use receipt::{ReceiptRecord, SubmitReceipt};
 pub use review::{
