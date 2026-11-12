@@ -16,6 +16,8 @@ rosen-store.workspace = true
 rosen-merge.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

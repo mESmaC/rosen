@@ -2,6 +2,7 @@
 //! a record, not a ref. Its commits belong to it and are never rewritten; a
 //! server rebase moves only its parent and its merged head tree.
 
+use crate::conflict::ConflictId;
 use crate::hash::ObjectId;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -126,11 +127,6 @@ impl TryFrom<String> for AgentId {
     }
 }
 
-/// Refers to a stored conflict object (R5). The conflict's contents are
-/// defined with the merge code; a change only needs to know which it holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ConflictId(pub u64);
-
 /// What a change sits on: a base commit, or another unlanded change (D19).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -229,7 +225,27 @@ pub struct Change {
     /// the merge of that snapshot onto the new parent.
     pub head: ObjectId,
     pub state: ChangeState,
+    #[serde(with = "conflict_ids_as_text")]
     pub conflicts: Vec<ConflictId>,
+}
+
+/// Serializes conflict IDs in their 16-hex-digit text form, matching how
+/// every other ID in the protocol is written.
+mod conflict_ids_as_text {
+    use super::ConflictId;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(ids: &[ConflictId], out: S) -> Result<S::Ok, S::Error> {
+        out.collect_seq(ids.iter().map(ConflictId::to_string))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(input: D) -> Result<Vec<ConflictId>, D::Error> {
+        Vec::<String>::deserialize(input)?
+            .iter()
+            .map(|text| text.parse().map_err(D::Error::custom))
+            .collect()
+    }
 }
 
 impl Change {
