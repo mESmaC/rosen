@@ -8,7 +8,9 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+
+use crate::conflicts::{self, ConflictStoreError};
 
 use super::{ChangeId, CommitId, LandError, LandResult, Receipt, Tier};
 
@@ -66,6 +68,8 @@ pub enum CasResult {
     AlreadyLanded {
         commit: CommitId,
     },
+    /// The change gained an open conflict after the land read it.
+    OpenConflicts,
 }
 
 /// The best stored receipt for a change's current head and check set.
@@ -100,6 +104,9 @@ impl Ledger {
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(SCHEMA)?;
+        // The land transaction reads the conflict gate, so its table must be
+        // in this same database.
+        conflicts::ensure_schema(&connection)?;
         Ok(Ledger {
             connection: Mutex::new(connection),
         })
@@ -264,6 +271,11 @@ impl Ledger {
             return Ok(CasResult::AlreadyLanded {
                 commit: CommitId(commit),
             });
+        }
+        match conflicts::check_landable(&tx, &record.change.0) {
+            Ok(()) => {}
+            Err(ConflictStoreError::Conflict(_)) => return Ok(CasResult::OpenConflicts),
+            Err(ConflictStoreError::Sql(error)) => return Err(error.into()),
         }
         let current: String = tx
             .query_row(

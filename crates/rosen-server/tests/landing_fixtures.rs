@@ -2,7 +2,7 @@
 //! the server land unbuilt or unapproved code (SPEC R8). Every row of the
 //! table exported from `proofs/Landing/Design.lean` must match `decide`.
 
-use rosen_server::landing::rules::{LandInput, ReceiptCheck, decide};
+use rosen_server::landing::rules::{decide, LandInput, ReceiptCheck};
 use rosen_server::landing::{ChangeState, Tier};
 
 fn bit(cell: &str) -> bool {

@@ -185,9 +185,7 @@ fn receipt_counts_only_across_prose_lands() {
     ));
     // The change stacked on `a` was moved onto the base `a` landed as.
     let events = world.events.lock().unwrap();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, LandingEvent::Rebased { change, .. } if change.0 == "on-a"))
-    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, LandingEvent::Rebased { change, .. } if change.0 == "on-a")));
 }

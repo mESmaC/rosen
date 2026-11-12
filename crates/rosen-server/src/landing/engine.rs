@@ -285,6 +285,7 @@ impl Landing {
                 }))
             }
             CasResult::BaseMoved { .. } => Ok(Attempt::BaseMoved),
+            CasResult::OpenConflicts => Ok(Attempt::Done(LandOutcome::Refused(Refusal::Conflicts))),
             CasResult::AlreadyLanded { commit } => {
                 Ok(Attempt::Done(LandOutcome::AlreadyLanded { commit }))
             }
