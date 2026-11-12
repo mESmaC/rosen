@@ -2,18 +2,18 @@
 //!
 //! A change is a row in the metadata store, not a ref. Its ID is minted once,
 //! from OS randomness, when the change is created, and nothing ever rewrites
-//! it: rebases move the parent and head tree, snapshots append commits, state
-//! moves along `open → ready → landed | abandoned`, and the ID stays put.
+//! it: rebases move the parent and head, snapshots append commits, the state
+//! moves along `open → ready → landed | abandoned`, and the ID stays put. The
+//! rules themselves live in `rosen_core::Change`; this module persists them.
 
-mod api;
 mod error;
 mod registry;
 mod schema;
+mod service;
 
-pub use api::{handle, BaseSource, BaseTip, ChangeRequest, ChangeResponse};
 pub use error::ChangeError;
 pub use registry::{
-    abandon, append_commit, create, get, list, rebase, resolve, transition, ChangeRecord,
-    ListFilter, NewParent,
+    abandon, create, get, list, rebase, record_snapshot, resolve, update, NewParent,
 };
 pub use schema::migrate;
+pub use service::{BaseSource, BaseTip, ChangeService, NoBase, METADATA_DB};

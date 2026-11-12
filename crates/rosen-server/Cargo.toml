@@ -14,11 +14,14 @@ path = "src/main.rs"
 rosen-core.workspace = true
 rosen-store.workspace = true
 rosen-merge.workspace = true
+rosen-protocol.workspace = true
 anyhow.workspace = true
-clap.workspace = true
-serde.workspace = true
-rusqlite.workspace = true
 getrandom.workspace = true
+clap.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

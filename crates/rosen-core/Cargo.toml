@@ -1,6 +1,6 @@
 [package]
 name = "rosen-core"
-description = "Rosen data model: changes, stacks, conflicts, receipts, reviews, claims and regions. Pure logic, no I/O."
+description = "Rosen data model: git-format objects, changes, stacks, landed history, conflicts, receipts, reviews, claims and regions. Pure logic, no I/O."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
+sha1.workspace = true
 
 [lints]
 workspace = true

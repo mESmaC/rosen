@@ -1,74 +1,34 @@
-use rosen_core::change::{ChangeId, ChangeState};
-use std::fmt;
+use rosen_core::{ChangeId, ChangeState};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ChangeError {
-    /// The text is not a change ID or a prefix of one.
+    #[error("{0:?} is not a change ID (change IDs use only the letters k-z)")]
     InvalidId(String),
+    #[error("no change matches {0:?}")]
     NotFound(String),
     /// A prefix matched more than one change; the caller must type more of it.
+    #[error("{0:?} matches more than one change; give more of the ID")]
     Ambiguous(String),
-    InvalidTransition {
-        change: ChangeId,
-        from: ChangeState,
-        to: ChangeState,
-    },
-    /// The change is landed or abandoned, so its work can no longer move.
-    Closed {
-        change: ChangeId,
+    /// A change cannot be stacked on one that is landed or abandoned.
+    #[error("cannot stack on change {parent}: it is {state}")]
+    ParentClosed {
+        parent: ChangeId,
         state: ChangeState,
     },
-    /// A stack would loop back on itself.
-    Cycle {
-        change: ChangeId,
-        parent: ChangeId,
-    },
+    /// The change model refused the operation (state machine, closed change,
+    /// stack cycle).
+    #[error(transparent)]
+    Refused(#[from] rosen_core::Error),
     /// The base ref could not be read when creating a change on it.
+    #[error("cannot read the base: {0}")]
     Base(String),
-    /// The OS could not supply random bytes for a new change ID.
+    #[error("cannot mint a change ID: {0}")]
     Randomness(String),
-    Store(rusqlite::Error),
-}
-
-impl fmt::Display for ChangeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ChangeError::InvalidId(text) => {
-                write!(
-                    f,
-                    "{text:?} is not a change ID (IDs use only the letters k-z)"
-                )
-            }
-            ChangeError::NotFound(text) => write!(f, "no change matches {text:?}"),
-            ChangeError::Ambiguous(text) => {
-                write!(
-                    f,
-                    "{text:?} matches more than one change; give more of the ID"
-                )
-            }
-            ChangeError::InvalidTransition { change, from, to } => write!(
-                f,
-                "change {change} is {} and cannot become {}",
-                from.as_str(),
-                to.as_str()
-            ),
-            ChangeError::Closed { change, state } => {
-                write!(f, "change {change} is {}", state.as_str())
-            }
-            ChangeError::Cycle { change, parent } => {
-                write!(f, "stacking {change} on {parent} would make a cycle")
-            }
-            ChangeError::Base(reason) => write!(f, "cannot read the base: {reason}"),
-            ChangeError::Randomness(reason) => write!(f, "cannot mint a change ID: {reason}"),
-            ChangeError::Store(err) => write!(f, "metadata store: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for ChangeError {}
-
-impl From<rusqlite::Error> for ChangeError {
-    fn from(err: rusqlite::Error) -> Self {
-        ChangeError::Store(err)
-    }
+    /// A stored row does not parse; only a damaged or hand-edited store does this.
+    #[error("metadata store holds an unreadable {0}")]
+    Corrupt(String),
+    #[error("metadata store directory: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("metadata store: {0}")]
+    Store(#[from] rusqlite::Error),
 }

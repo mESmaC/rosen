@@ -1,11 +1,14 @@
 //! `rosen`: the Rosen command-line tool, a thin layer over `rosen-client`.
 
+mod change_cmd;
 mod commands;
+mod server;
 
 use std::process::ExitCode;
 
 use clap::Parser;
-use commands::Cli;
+use commands::{Cli, Command, ServerCommand};
+use rosen_client::Endpoint;
 
 /// Schema tag for `--json` error output. Bump it when the shape changes, so
 /// agents parsing the output can detect the change (SPEC.md R10).
@@ -14,13 +17,38 @@ const ERROR_SCHEMA: &str = "rosen.error/v1";
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let operation = cli.command.path();
-    match rosen_client::run_operation(operation) {
-        Ok(()) => ExitCode::SUCCESS,
+    match run(&cli) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
         Err(error) => {
             report_error(cli.json, operation, &error);
             ExitCode::FAILURE
         }
     }
+}
+
+fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
+    let endpoint = cli
+        .endpoint
+        .clone()
+        .map_or_else(Endpoint::resolve, Endpoint::new);
+    let json = cli.json;
+    match &cli.command {
+        Command::Server(ServerCommand::Start) => block_on(server::start(json, &endpoint)),
+        Command::Server(ServerCommand::Status) => block_on(server::status(json, &endpoint)),
+        Command::Events { after } => block_on(server::stream_events(json, &endpoint, *after)),
+        Command::Change(change) => block_on(change_cmd::run(json, &endpoint, change)),
+        other => rosen_client::run_operation(other.path()).map(|()| true),
+    }
+}
+
+fn block_on<T>(
+    work: impl std::future::Future<Output = rosen_client::Result<T>>,
+) -> rosen_client::Result<T> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(work)
 }
 
 fn report_error(json: bool, operation: &str, error: &rosen_client::Error) {
