@@ -108,9 +108,9 @@ fn rewrite(
         .cloned()
         .collect();
     entries.extend(replacement);
-    Ok(store
+    store
         .put_tree(&Tree::new(entries).map_err(ChangeError::Refused)?)
-        .map_err(store_error)?)
+        .map_err(store_error)
 }
 
 fn invalid(path: &str) -> ChangeError {
