@@ -135,12 +135,23 @@ pub fn update(
     apply: impl FnOnce(&mut Change) -> rosen_core::Result<()>,
 ) -> Result<ChangeRecord, ChangeError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let mut record = load(&tx, id)?;
+    let record = apply_and_save(&tx, id, apply)?;
+    tx.commit()?;
+    Ok(record)
+}
+
+/// The body of [`update`], for callers that must check more inside the same
+/// write transaction first.
+fn apply_and_save(
+    tx: &Connection,
+    id: ChangeId,
+    apply: impl FnOnce(&mut Change) -> rosen_core::Result<()>,
+) -> Result<ChangeRecord, ChangeError> {
+    let mut record = load(tx, id)?;
     let stored_snapshots = record.change.snapshots.len();
     apply(&mut record.change)?;
     record.updated_at = now_millis();
-    save(&tx, &record, stored_snapshots)?;
-    tx.commit()?;
+    save(tx, &record, stored_snapshots)?;
     Ok(record)
 }
 
@@ -159,24 +170,32 @@ pub fn record_snapshot(
 
 /// Records a server-side rebase (R8, D19): a new parent and the merged head.
 /// The ID and the snapshots stay exactly as they were.
+///
+/// The cycle check runs inside the write transaction: checked outside it, two
+/// opposing rebases on separate connections could both pass and store a loop.
 pub fn rebase(
     conn: &mut Connection,
     id: ChangeId,
     parent: ChangeParent,
     merged_head: ObjectId,
 ) -> Result<ChangeRecord, ChangeError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let ChangeParent::Change(below) = parent {
-        ensure_not_above(conn, id, below)?;
+        ensure_not_above(&tx, id, below)?;
     }
-    update(conn, id, |change| change.rebase(parent, merged_head))
+    let record = apply_and_save(&tx, id, |change| change.rebase(parent, merged_head))?;
+    tx.commit()?;
+    Ok(record)
 }
 
 /// Walks down from `below` to the base; meeting `id` on the way means stacking
-/// `id` on `below` would close a loop.
+/// `id` on `below` would close a loop. The visited set makes the walk end even
+/// if a damaged store already holds a loop.
 fn ensure_not_above(conn: &Connection, id: ChangeId, below: ChangeId) -> Result<(), ChangeError> {
+    let mut visited = std::collections::HashSet::new();
     let mut cursor = Some(below);
     while let Some(current) = cursor {
-        if current == id {
+        if current == id || !visited.insert(current) {
             return Err(rosen_core::Error::StackCycle(id).into());
         }
         cursor = match load(conn, current)?.change.parent {
