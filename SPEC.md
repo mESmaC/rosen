@@ -145,7 +145,10 @@ Defaults set during spec writing. These follow from the decisions above, and cha
   - **ReFS block clone** (Windows Dev Drive, or any ReFS volume) is the fast path, and true copy-on-write. Rosen recommends putting workspaces on a Dev Drive.
   - Otherwise a **parallel plain copy**.
   - **Hardlinks are never used** for files in a workspace. Agents' tools often write files in place, so a hardlink would let one workspace's write corrupt the shared object and every other workspace that links to it.
-  - Sparse checkout lets a workspace hold only chosen paths.
+  - Sparse checkout lets a workspace hold only chosen paths. A chosen path holds itself and everything under it.
+  - A workspace is built in a hidden directory beside its destination and renamed into place when complete, so a crash never leaves a partial workspace.
+  - A block clone is checked by hashing one cloned file against its blob before the rest are cloned. On a mismatch, or any clone failure, the workspace is written by plain copy instead.
+  - On Windows a symlink in the tree is written as a plain file holding its target, as git does by default there.
 - **Server-side workspaces.** Files live on the server, and clients read, write, list and diff them through the API, with no checkout. Writes become snapshots directly. Rosen recommends them for jobs that touch few files, such as reviewers, check runners and doc edits.
 - **Warm pool.** Each machine's daemon keeps N ready local workspaces at the tip of the base (default 4, 0 turns the pool off). Velocity can raise N for a launch. After each land the daemon brings ready workspaces up to the new tip by rewriting only the changed files. Taking one is atomic, so two changes never get the same workspace. A take prefers a prepared workspace and reports whether it is prepared.
 - **Prepared workspaces.** Project configuration lists **prepare commands**. These are steps whose results don't depend on the workspace's path or its agent, such as installing pinned toolchains, fetching dependency caches (`lake exe cache get`) and a prebuild (`cargo build --workspace`). The daemon runs them in each ready workspace, so an agent's first build compiles only what it changes.
