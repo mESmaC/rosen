@@ -9,7 +9,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use rosen_core::{Receipt, ReceiptRefusal, PRE_LAND_CHECK_SET};
+use rosen_core::{Receipt, ReceiptRefusal};
 use rosen_protocol::{ErrorBody, ErrorCode, Outcome, ReceiptRecord, Response, SubmitReceipt};
 
 use crate::landing::{LandError, Ledger};
@@ -61,16 +61,24 @@ impl ReceiptService {
             check_set: request.check_set,
             submitter: request.submitter,
         };
+        // The check set is the one the base's configuration names, so a
+        // change cannot rename the check set its own receipt must cover.
+        let (base_ref, in_force) = state
+            .project_config
+            .at_base()
+            .map_err(|why| ErrorBody::new(ErrorCode::Internal, why))?
+            .ok_or_else(|| {
+                ErrorBody::new(
+                    ErrorCode::Refused,
+                    "the project has no base yet; import a repository with `rosen import`",
+                )
+            })?;
+        let current = in_force.commit;
+        let required = &in_force.config.checks.pre_land.name;
         receipt
-            .check_binding(&change.head, change.state, PRE_LAND_CHECK_SET)
+            .check_binding(&change.head, change.state, required)
             .map_err(refusal_body)?;
         let ledger = self.ledger()?;
-        let (base_ref, current) = ledger.project_base().map_err(land_body)?.ok_or_else(|| {
-            ErrorBody::new(
-                ErrorCode::Refused,
-                "the project has no base yet; import a repository with `rosen import`",
-            )
-        })?;
         if ledger
             .base_seq(&base_ref, &receipt.base)
             .map_err(land_body)?
