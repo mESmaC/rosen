@@ -44,6 +44,7 @@ pub const SERVER_NAME: &str = concat!("rosen-server ", env!("CARGO_PKG_VERSION")
 /// State shared by every connection.
 pub struct ServerState {
     pub config: ServerConfig,
+    pub pool: Arc<rosen_client::workspace::pool::WarmPool>,
     pub started: Instant,
     pub events: EventLog,
     pub changes: changes::ChangeService,
@@ -69,6 +70,7 @@ impl ServerState {
     /// Creates a server with an explicit positive workspace I/O cap.
     pub fn with_workspace_io(config: ServerConfig, cap: std::num::NonZeroUsize) -> Arc<Self> {
         let state = Arc::new(Self {
+            pool: rosen_client::workspace::pool::WarmPool::new(&config.data_dir),
             changes: changes::ChangeService::new(&config.data_dir),
             receipts: receipts::ReceiptService::new(config.clone()),
             history: history::HistoryService::new(),
@@ -213,6 +215,7 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
         None => None,
     };
     let state = ServerState::new(config.clone());
+    let pool_worker = state.pool.start(config.endpoint.clone());
     let mirror = tokio::spawn(mirror::run(Arc::clone(&state)));
     let network_task = network.map(|(tcp, acceptor, identity, address)| {
         state.set_network(identity, address);
@@ -226,6 +229,7 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     // A push cut short here is retried at the next start: the mirror's
     // pushed commit is only recorded once the remote accepts it.
     mirror.abort();
+    pool_worker.abort();
     Ok(())
 }
 

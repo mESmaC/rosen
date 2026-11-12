@@ -919,6 +919,7 @@ dependencies = [
  "clap",
  "getrandom 0.3.4",
  "rcgen",
+ "rosen-client",
  "rosen-core",
  "rosen-merge",
  "rosen-protocol",

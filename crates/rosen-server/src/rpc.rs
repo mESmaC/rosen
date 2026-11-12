@@ -19,6 +19,8 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         ));
     }
     match request {
+        Request::PoolSize { size } => state.pool.set_size(size).await,
+        Request::PoolTake { tree, dest } => state.pool.take(tree, dest).await,
         Request::Ping => Outcome::Ok(Response::Pong),
         Request::Status => Outcome::Ok(Response::Status(status(state))),
         Request::Shutdown => {

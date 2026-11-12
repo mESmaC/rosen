@@ -20,6 +20,8 @@ mod clone;
 mod layout;
 pub mod limits;
 mod parallel;
+pub mod pool;
+mod pool_worker;
 mod sparse;
 mod write;
 
@@ -57,6 +59,8 @@ pub struct SourceWorkspace {
 /// How a workspace's files were made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
+    /// Atomically renamed from the daemon's ready pool.
+    WarmPool,
     /// Block cloned from a source workspace, then brought to the tree.
     BlockClone,
     /// Every tracked file written from the object store.
@@ -66,6 +70,7 @@ pub enum Method {
 impl Method {
     pub fn as_str(self) -> &'static str {
         match self {
+            Method::WarmPool => "warm-pool",
             Method::BlockClone => "block-clone",
             Method::PlainCopy => "plain-copy",
         }
