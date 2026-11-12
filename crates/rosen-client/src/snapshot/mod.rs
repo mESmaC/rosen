@@ -9,6 +9,7 @@
 //! events (`ReadDirectoryChangesW` on Windows); `rosen commit` runs it once
 //! with a message.
 
+mod guard;
 mod ignore;
 mod index;
 mod marker;

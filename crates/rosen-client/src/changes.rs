@@ -25,8 +25,20 @@ impl Client {
     }
 
     pub async fn change_abandon(&self, change: &str) -> Result<ChangeRecord, Error> {
+        let record = self.change_show(change).await?;
+        for workspace in self.workspace_list().await? {
+            if workspace.change == record.change.id && workspace.path.exists() {
+                self.snapshot_workspace(&workspace.path, None).await?;
+            }
+        }
         let change = change.to_owned();
-        expect_change(self.request(Request::ChangeAbandon { change }).await?)
+        let record = expect_change(self.request(Request::ChangeAbandon { change }).await?)?;
+        for report in self.cleanup_workspaces().await? {
+            if let Some(error) = report.error {
+                eprintln!("workspace kept at {}: {error}", report.path.display());
+            }
+        }
+        Ok(record)
     }
 }
 

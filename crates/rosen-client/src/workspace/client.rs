@@ -46,6 +46,7 @@ impl Client {
         WorkspaceMarker::new(change.change.id, change.change.head, sparse)
             .write(dest)
             .map_err(Error::Io)?;
+        self.register_workspace(change.change.id, dest).await?;
         Ok(report)
     }
 

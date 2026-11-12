@@ -1,5 +1,5 @@
 name = "proofs"
-defaultTargets = ["Landing", "ThreeWayMerge", "Claims"]
+defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion"]
 
 # One library per proof-list feature (SPEC.md §7). Each library also builds
 # its fixture exporter, so `lake build` type-checks it.
@@ -30,3 +30,12 @@ globs = ["Claims.Design", "Claims.Export"]
 [[lean_exe]]
 name = "claims-fixtures"
 root = "Claims.Export"
+
+[[lean_lib]]
+name = "WorkspaceDeletion"
+globs = ["WorkspaceDeletion.Design", "WorkspaceDeletion.Fixtures"]
+
+# Export: lake exe workspace-deletion-fixtures > fixtures/workspace-deletion.tsv
+[[lean_exe]]
+name = "workspace-deletion-fixtures"
+root = "WorkspaceDeletion.Fixtures"

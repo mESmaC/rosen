@@ -176,7 +176,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 
   The refusal names the files and keeps the workspace.
 - A workspace whose change is closed or failed is kept until the change is explicitly deleted.
-- Deleting a workspace removes only that workspace.
+- Deleting a workspace removes only that workspace. Local workspace registrations survive daemon restart; the daemon retries guarded cleanup of landed and abandoned workspaces on startup and change events. A refused cleanup retains the registration and reports the reason.
 - **Accept when:** no sequence of crashes, deletions, offline periods and reconnects loses an edit that was written to a workspace.
 
 ### R5 · Automatic merge and conflicts

@@ -18,6 +18,10 @@
 mod client;
 mod clone;
 mod layout;
+mod lifecycle;
+mod registry;
+pub use lifecycle::{deletion_permitted, CleanupReport};
+pub use registry::WorkspaceRecord;
 mod parallel;
 mod sparse;
 mod write;
