@@ -14,6 +14,7 @@ mod import;
 pub mod project_config;
 pub mod receipts;
 pub mod reviews;
+pub mod server_workspace;
 pub mod snapshot;
 pub mod workspace;
 
