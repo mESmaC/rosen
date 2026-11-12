@@ -3,6 +3,7 @@
 //! their waiting request by id, and events to the subscriber.
 
 use crate::Error;
+use rosen_core::AgentId;
 use rosen_protocol::frame::{read_frame, write_frame};
 use rosen_protocol::{
     BoxStream, ClientFrame, Endpoint, Event, Outcome, Request, Response, ServerFrame, ServerStatus,
@@ -95,13 +96,35 @@ impl Client {
         }
     }
 
-    /// Starts this connection's event stream from `after` (every retained event
-    /// when `None`). Calling it again restarts the stream from the new cursor and
-    /// closes the previous receiver.
+    /// Starts this connection's project-view event stream: every event after
+    /// `after`, or every event from now when `None`. Calling it (or
+    /// [`Client::subscribe_as`]) again restarts the stream and closes the
+    /// previous receiver.
     pub async fn subscribe(&self, after: Option<u64>) -> Result<mpsc::Receiver<Event>, Error> {
+        self.start_stream(after, None).await
+    }
+
+    /// Starts this connection's event stream for one agent: only the events
+    /// that concern it, plus broadcasts (SPEC R9). With `after: None` it
+    /// resumes after the agent's stored cursor, so acknowledge handled events
+    /// with [`Client::ack_events`] to survive a reconnect or server restart.
+    pub async fn subscribe_as(
+        &self,
+        subscriber: AgentId,
+        after: Option<u64>,
+    ) -> Result<mpsc::Receiver<Event>, Error> {
+        self.start_stream(after, Some(subscriber)).await
+    }
+
+    async fn start_stream(
+        &self,
+        after: Option<u64>,
+        subscriber: Option<AgentId>,
+    ) -> Result<mpsc::Receiver<Event>, Error> {
         let (sender, receiver) = mpsc::channel(EVENT_BUFFER);
         *lock(&self.events) = Some(sender);
-        self.send(&ClientFrame::Subscribe { after }).await?;
+        self.send(&ClientFrame::Subscribe { after, subscriber })
+            .await?;
         Ok(receiver)
     }
 

@@ -13,6 +13,7 @@ use crate::claim::{
 };
 use crate::receipt::{ReceiptRecord, SubmitReceipt};
 use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
+use rosen_core::AgentId;
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. Bump it on any incompatible change to
@@ -44,10 +45,18 @@ pub enum ClientFrame {
     },
     /// A request; the server answers with a [`ServerFrame::Response`] with the same id.
     Request { id: u64, request: Request },
-    /// Starts this connection's event stream, delivering every event after the
-    /// sequence number `after`, or only events published from now on when
-    /// `after` is `None`.
-    Subscribe { after: Option<u64> },
+    /// Starts this connection's event stream (SPEC R9).
+    ///
+    /// With a `subscriber`, the stream carries only the events that concern
+    /// that agent, plus broadcasts, and `after: None` resumes after the
+    /// subscriber's stored cursor (see [`Request::AckEvents`]), or from now if
+    /// it has none. Without one, the stream is the project view: every event,
+    /// from `after` or from now.
+    Subscribe {
+        after: Option<u64>,
+        #[serde(default)]
+        subscriber: Option<AgentId>,
+    },
 }
 
 /// A frame sent from server to client.
@@ -116,6 +125,13 @@ pub enum Request {
     ReleasePaths(ClaimRequest),
     /// Lists claims, shares and waits on live changes.
     ClaimList(ClaimFilter),
+    /// Stores the subscriber's event cursor: it has handled every event up
+    /// to `seq`. A later subscribe with no cursor resumes after it, even
+    /// across a server restart (R9). The cursor never moves backwards.
+    AckEvents {
+        subscriber: AgentId,
+        seq: u64,
+    },
     /// Starts a review thread on a line of a change's head, or replies in
     /// one (R7). Answered with the whole thread.
     ReviewComment(CommentRequest),
@@ -160,10 +176,19 @@ pub enum Response {
     Waiting(WaitOutcome),
     Released(ReleaseOutcome),
     PathClaims(Vec<PathClaim>),
+    EventsAcked(EventCursor),
     /// The answer to `review_comment` and `review_resolve`.
     ReviewThread(ReviewThread),
     ReviewThreads(Vec<ReviewThread>),
     Receipt(ReceiptRecord),
+}
+
+/// The answer to [`Request::AckEvents`]: the cursor now stored, which is
+/// higher than the acknowledged `seq` when an earlier ack went further.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventCursor {
+    pub subscriber: AgentId,
+    pub cursor: u64,
 }
 
 /// The answer to [`Request::Import`].
@@ -246,16 +271,28 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    /// A snapshot of the change's workspace was stored (R2).
     Snapshot,
+    /// The change landed; `detail.commit` is the landed commit (R8).
     Landed,
+    /// The server rebased the change; `detail.onto` is its new parent commit.
     Rebased,
+    /// A merge left stored conflicts; `detail.paths` names the files (R5).
     Conflict,
+    /// The change's state changed other than by landing; `detail.state`.
     Updated,
+    /// A review comment, approval or resolution on the change (R7).
     Review,
+    /// The change claimed `detail.paths` (R6).
     Claim,
+    /// Claims were released: the change's own (`detail.paths`), or a wake
+    /// for a waiting change (`detail.path`, `detail.wake`).
     Released,
+    /// Post-land checks passed up to a commit (R12).
     Green,
+    /// The change was reverted after failing post-land checks (R12).
     Reverted,
+    /// A git mirror push failed or recovered (R1). Sent to every subscriber.
     Mirror,
 }
 

@@ -44,9 +44,9 @@ impl ServerState {
         let state = Arc::new(Self {
             changes: changes::ChangeService::new(&config.data_dir),
             receipts: receipts::ReceiptService::new(config.clone()),
+            events: EventLog::open(config.metadata_path()),
             config,
             started: Instant::now(),
-            events: EventLog::default(),
             open_connections: AtomicU64::new(0),
             shutdown: watch::Sender::new(false),
         });
