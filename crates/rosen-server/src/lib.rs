@@ -17,6 +17,7 @@ pub mod history;
 pub mod import;
 pub mod landing;
 pub mod listener;
+pub mod load_limits;
 pub mod mirror;
 pub mod network;
 pub mod objects;
@@ -49,6 +50,8 @@ pub struct ServerState {
     /// The TLS identity and bound address, once the network listener is up.
     network: OnceLock<NetworkInfo>,
     pub history: history::HistoryService,
+    /// Shared by workspace reads, lists, diffs and writes across all transports.
+    pub workspace_io: Arc<tokio::sync::Semaphore>,
     pub project_config: project_config::ConfigService,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
@@ -56,10 +59,19 @@ pub struct ServerState {
 
 impl ServerState {
     pub fn new(config: ServerConfig) -> Arc<Self> {
+        Self::with_workspace_io(
+            config,
+            std::num::NonZeroUsize::new(load_limits::DEFAULT_WORKSPACE_IO).unwrap(),
+        )
+    }
+
+    /// Creates a server with an explicit positive workspace I/O cap.
+    pub fn with_workspace_io(config: ServerConfig, cap: std::num::NonZeroUsize) -> Arc<Self> {
         let state = Arc::new(Self {
             changes: changes::ChangeService::new(&config.data_dir),
             receipts: receipts::ReceiptService::new(config.clone()),
             history: history::HistoryService::new(),
+            workspace_io: load_limits::workspace_io(cap),
             project_config: project_config::ConfigService::new(config.clone()),
             events: EventLog::open(config.metadata_path()),
             config,

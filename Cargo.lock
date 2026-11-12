@@ -865,6 +865,7 @@ dependencies = [
 name = "rosen-client"
 version = "0.1.0"
 dependencies = [
+ "atomicwrites",
  "ignore",
  "notify",
  "reflink-copy",
