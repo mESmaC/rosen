@@ -120,7 +120,7 @@ approval and SPEC.md R8 step 3 stack order): a land step succeeds
 only when the land is authorized, the base still equals the expected commit,
 and the change has not landed; it then moves the base to the landed commit
 and records the land. Conversely every such land succeeds. -/
--- SPEC.md R8
+-- SPEC.md §R8
 theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     (∀ l', landStep l i expected change commit = some l' →
       Authorized i ∧ expected = l.base ∧ l.hasLanded change = false ∧
@@ -158,7 +158,7 @@ def attempts : Nat → List Bool → Nat
 /-- **cost_bound**: under the cost model of `attempts`, a land never costs
 more than `cap` attempts, nor more than one attempt per competing land that
 beat it plus one. -/
--- SPEC.md R8
+-- SPEC.md §R8
 theorem cost_bound (cap : Nat) (races : List Bool) :
     attempts cap races ≤ cap ∧ attempts cap races ≤ races.count true + 1 := by
   induction cap generalizing races with
@@ -209,7 +209,7 @@ private theorem countP_le_of_imp (p q : Input → Bool) (hpq : ∀ i, p i = true
 
 /-- **optimal**: our re-check policy is sound, and no sound policy asks for
 fewer new receipts on any history of land requests. -/
--- SPEC.md R8
+-- SPEC.md §R8
 theorem optimal :
     SoundPolicy oursRecheck ∧
     ∀ policy, SoundPolicy policy → ∀ requests : List Input,
