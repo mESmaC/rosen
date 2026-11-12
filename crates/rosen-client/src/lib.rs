@@ -1,4 +1,8 @@
-//! `rosen-client`: the library Velocity links and the `rosen` CLI wraps (SPEC D7).
+//! The Rosen client library (SPEC.md D7, §3).
+//!
+//! Velocity links this crate directly, and the `rosen` CLI is a thin layer
+//! over it. It covers daemon discovery and start, workspace
+//! materialisation, the file watcher and snapshots, and the offline journal.
 
 pub mod connection;
 pub mod daemon;
@@ -9,44 +13,48 @@ pub use rosen_protocol as protocol;
 pub use rosen_protocol::Endpoint;
 
 use rosen_protocol::ErrorBody;
-use std::fmt;
 
-/// Why a client call failed.
-#[derive(Debug)]
-pub enum ClientError {
+/// Errors a client operation can return.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// The operation exists in the CLI and API surface but has no
+    /// implementation in this build yet.
+    #[error("`{operation}` is not implemented yet")]
+    NotImplemented { operation: String },
     /// No server listens on the endpoint.
+    #[error("no rosen server is running on {0}")]
     NotRunning(Endpoint),
     /// The daemon could not be launched, or did not come up in time.
+    #[error("could not start rosen-server: {0}")]
     Start(String),
     /// The server refused the handshake, usually a protocol version mismatch.
-    Rejected {
-        reason: String,
-        supported: Vec<u32>,
-    },
+    #[error(
+        "the server refused the connection: {reason} (it speaks protocol versions {supported:?})"
+    )]
+    Rejected { reason: String, supported: Vec<u32> },
     /// The server answered the request with an error.
+    #[error("server error: {0}")]
     Server(ErrorBody),
     /// The connection closed before the answer arrived.
+    #[error("the connection to the server closed")]
     Disconnected,
     /// The server sent something the protocol does not allow here.
+    #[error("protocol error: {0}")]
     Unexpected(String),
-    Io(std::io::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
-impl fmt::Display for ClientError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotRunning(endpoint) => write!(f, "no rosen server is running on {endpoint}"),
-            Self::Start(reason) => write!(f, "could not start rosen-server: {reason}"),
-            Self::Rejected { reason, supported } => write!(
-                f,
-                "the server refused the connection: {reason} (it speaks protocol versions {supported:?})"
-            ),
-            Self::Server(error) => write!(f, "server error: {error}"),
-            Self::Disconnected => f.write_str("the connection to the server closed"),
-            Self::Unexpected(what) => write!(f, "protocol error: {what}"),
-            Self::Io(err) => write!(f, "{err}"),
-        }
-    }
-}
+/// Result type for client operations.
+pub type Result<T> = std::result::Result<T, Error>;
 
-impl std::error::Error for ClientError {}
+/// Runs a client operation by its command path, for example `change new`.
+///
+/// Every operation without a typed method yet reports
+/// [`Error::NotImplemented`]; each feature replaces its operation with a typed
+/// method as it lands.
+pub fn run_operation(operation: &str) -> Result<()> {
+    Err(Error::NotImplemented {
+        operation: operation.to_owned(),
+    })
+}

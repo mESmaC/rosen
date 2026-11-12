@@ -1,0 +1,94 @@
+# Cargo checks from SPEC.md §5 "Done means (v1)":
+#   cargo build --workspace
+#   cargo clippy --workspace --all-targets -- -D warnings
+#   cargo test --workspace
+# Windows 11 is the shipped platform (D11), so it runs all three.
+# Linux is best-effort and only has to compile.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a PR makes the run for its previous head useless.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts are never reused across CI runs; they only bloat the cache.
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  windows:
+    name: Windows (build, clippy, test)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The repository starts without a Cargo workspace; the scaffold task adds it.
+      # Skip loudly until then instead of failing every PR that predates it.
+      - name: Detect Cargo workspace
+        id: workspace
+        shell: bash
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No Cargo workspace::Cargo.toml not found; cargo checks skipped."
+          fi
+
+      # A rust-toolchain.toml in the repository, if any, overrides this default.
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.workspace.outputs.present == 'true'
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.workspace.outputs.present == 'true'
+
+      - name: cargo build
+        if: steps.workspace.outputs.present == 'true'
+        run: cargo build --workspace
+
+      - name: cargo clippy (zero warnings)
+        if: steps.workspace.outputs.present == 'true'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        if: steps.workspace.outputs.present == 'true'
+        run: cargo test --workspace
+
+  linux:
+    name: Linux (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect Cargo workspace
+        id: workspace
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No Cargo workspace::Cargo.toml not found; cargo checks skipped."
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.workspace.outputs.present == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.workspace.outputs.present == 'true'
+
+      - name: cargo build
+        if: steps.workspace.outputs.present == 'true'
+        run: cargo build --workspace

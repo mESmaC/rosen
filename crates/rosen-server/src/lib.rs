@@ -8,6 +8,7 @@ pub mod rpc;
 
 use events::EventLog;
 use rosen_protocol::Endpoint;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,7 +19,7 @@ pub const SERVER_NAME: &str = concat!("rosen-server ", env!("CARGO_PKG_VERSION")
 
 /// State shared by every connection.
 pub struct ServerState {
-    pub endpoint: Endpoint,
+    pub config: ServerConfig,
     pub started: Instant,
     pub events: EventLog,
     open_connections: AtomicU64,
@@ -26,9 +27,9 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    pub fn new(endpoint: Endpoint) -> Arc<Self> {
+    pub fn new(config: ServerConfig) -> Arc<Self> {
         Arc::new(Self {
-            endpoint,
+            config,
             started: Instant::now(),
             events: EventLog::default(),
             open_connections: AtomicU64::new(0),
@@ -80,10 +81,20 @@ impl Drop for ConnectionGuard {
     }
 }
 
-/// Binds the endpoint and serves until shutdown is requested.
-pub async fn run(endpoint: Endpoint) -> std::io::Result<()> {
-    let listener = rosen_protocol::Listener::bind(&endpoint)?;
-    let state = ServerState::new(endpoint);
+/// Where a server keeps its state and where it listens.
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    /// Directory holding the object store and the metadata database.
+    pub data_dir: PathBuf,
+    /// The pipe or socket clients connect to.
+    pub endpoint: Endpoint,
+}
+
+/// Binds the endpoint and serves until shutdown is requested. Fails with
+/// [`std::io::ErrorKind::AddrInUse`] when another server owns the endpoint.
+pub async fn serve(config: &ServerConfig) -> std::io::Result<()> {
+    let listener = rosen_protocol::Listener::bind(&config.endpoint)?;
+    let state = ServerState::new(config.clone());
     listener::serve(listener, Arc::clone(&state)).await;
     state.drain_connections(Duration::from_secs(2)).await;
     Ok(())

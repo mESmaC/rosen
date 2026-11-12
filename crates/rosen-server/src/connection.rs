@@ -177,7 +177,7 @@ impl Session {
         }
         let state = Arc::clone(&self.state);
         let outbox = self.outbox.clone();
-        let cursor = after.unwrap_or(0);
+        let cursor = after.unwrap_or_else(|| state.events.last_seq());
         self.subscription = Some(tokio::spawn(forward_events(state, outbox, cursor)));
     }
 

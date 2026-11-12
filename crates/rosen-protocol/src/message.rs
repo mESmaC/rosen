@@ -38,8 +38,9 @@ pub enum ClientFrame {
     },
     /// A request; the server answers with a [`ServerFrame::Response`] with the same id.
     Request { id: u64, request: Request },
-    /// Starts this connection's event stream, delivering every event after
-    /// `after` (or every retained event when `after` is `None`).
+    /// Starts this connection's event stream, delivering every event after the
+    /// sequence number `after`, or only events published from now on when
+    /// `after` is `None`.
     Subscribe { after: Option<u64> },
 }
 
@@ -108,6 +109,8 @@ pub struct ServerStatus {
     pub pid: u32,
     /// The endpoint the server listens on.
     pub endpoint: String,
+    /// The directory holding the server's object store and metadata.
+    pub data_dir: String,
     pub uptime_ms: u64,
     pub open_connections: u64,
     /// The sequence number of the newest event, 0 when there is none.

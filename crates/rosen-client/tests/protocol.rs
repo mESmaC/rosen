@@ -8,8 +8,8 @@
 
 use rosen_client::protocol::frame::{read_frame, write_frame};
 use rosen_client::protocol::{ClientFrame, ErrorCode, EventKind, Listener, ServerFrame};
-use rosen_client::{Client, ClientError, Endpoint};
-use rosen_server::ServerState;
+use rosen_client::{Client, Endpoint, Error};
+use rosen_server::{ServerConfig, ServerState};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -32,7 +32,10 @@ fn start_server() -> (Endpoint, Arc<ServerState>) {
         )
     };
     let listener = Listener::bind(&endpoint).expect("bind test endpoint");
-    let state = ServerState::new(endpoint.clone());
+    let state = ServerState::new(ServerConfig {
+        data_dir: std::env::temp_dir(),
+        endpoint: endpoint.clone(),
+    });
     tokio::spawn(rosen_server::listener::serve(listener, Arc::clone(&state)));
     (endpoint, state)
 }
@@ -103,7 +106,7 @@ async fn events_resume_from_cursor_without_gaps_or_repeats() {
         publish(n);
     });
     let first = Client::connect(&endpoint).await.unwrap();
-    let mut stream = first.subscribe(None).await.unwrap();
+    let mut stream = first.subscribe(Some(0)).await.unwrap();
     let seen: Vec<u64> = take_seqs(&mut stream, 3).await;
     assert_eq!(seen, vec![1, 2, 3]);
     drop((stream, first));
@@ -126,7 +129,7 @@ async fn shutdown_answers_then_refuses_new_work() {
     let late = client.ping().await;
     assert!(matches!(
         late,
-        Err(ClientError::Disconnected) | Err(ClientError::Io(_)) | Err(ClientError::Server(_))
+        Err(Error::Disconnected) | Err(Error::Io(_)) | Err(Error::Server(_))
     ));
 }
 

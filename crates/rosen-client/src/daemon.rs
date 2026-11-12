@@ -1,7 +1,7 @@
 //! Daemon discovery and start (SPEC D8): find the machine's server, and launch it
 //! in the background when none is running.
 
-use crate::{Client, ClientError};
+use crate::{Client, Error};
 use rosen_protocol::Endpoint;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -18,9 +18,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const EXIT_ALREADY_RUNNING: i32 = 3;
 
 /// Connects to the running daemon, starting one first if none is running.
-pub async fn connect_or_start(endpoint: &Endpoint) -> Result<Client, ClientError> {
+pub async fn connect_or_start(endpoint: &Endpoint) -> Result<Client, Error> {
     match Client::connect(endpoint).await {
-        Err(ClientError::NotRunning(_)) => {}
+        Err(Error::NotRunning(_)) => {}
         connected => return connected,
     }
     let mut child = spawn_daemon(endpoint)?;
@@ -41,7 +41,7 @@ pub fn server_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(file_name))
 }
 
-fn spawn_daemon(endpoint: &Endpoint) -> Result<Child, ClientError> {
+fn spawn_daemon(endpoint: &Endpoint) -> Result<Child, Error> {
     let binary = server_binary();
     let mut command = Command::new(&binary);
     command
@@ -54,7 +54,7 @@ fn spawn_daemon(endpoint: &Endpoint) -> Result<Child, ClientError> {
     command
         .spawn()
         .or_else(|_| detach(&mut command, false).spawn())
-        .map_err(|err| ClientError::Start(format!("could not run {}: {err}", binary.display())))
+        .map_err(|err| Error::Start(format!("could not run {}: {err}", binary.display())))
 }
 
 /// Detaches the daemon from the launcher's console and job, so closing the
@@ -84,23 +84,21 @@ fn detach(command: &mut Command, _leave_job: bool) -> &mut Command {
 
 /// Retries the connection until the new daemon answers, it exits, or the
 /// start timeout passes.
-async fn wait_until_ready(endpoint: &Endpoint, child: &mut Child) -> Result<Client, ClientError> {
+async fn wait_until_ready(endpoint: &Endpoint, child: &mut Child) -> Result<Client, Error> {
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     let mut delay = Duration::from_millis(10);
     loop {
         match Client::connect(endpoint).await {
-            Err(ClientError::NotRunning(_)) => {}
+            Err(Error::NotRunning(_)) => {}
             connected => return connected,
         }
         if let Ok(Some(status)) = child.try_wait() {
             if status.code() != Some(EXIT_ALREADY_RUNNING) {
-                return Err(ClientError::Start(format!(
-                    "rosen-server exited with {status}"
-                )));
+                return Err(Error::Start(format!("rosen-server exited with {status}")));
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(ClientError::Start(format!(
+            return Err(Error::Start(format!(
                 "rosen-server did not start listening on {endpoint} within {START_TIMEOUT:?}"
             )));
         }

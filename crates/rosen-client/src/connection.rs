@@ -2,7 +2,7 @@
 //! requests. A background task reads every server frame and routes responses to
 //! their waiting request by id, and events to the subscriber.
 
-use crate::ClientError;
+use crate::Error;
 use rosen_protocol::frame::{read_frame, write_frame};
 use rosen_protocol::{
     BoxStream, ClientFrame, Endpoint, Event, Outcome, Request, Response, ServerFrame, ServerStatus,
@@ -37,13 +37,13 @@ pub struct Client {
 
 impl Client {
     /// Connects and completes the handshake. Fails with
-    /// [`ClientError::NotRunning`] when no server listens on `endpoint`.
-    pub async fn connect(endpoint: &Endpoint) -> Result<Self, ClientError> {
+    /// [`Error::NotRunning`] when no server listens on `endpoint`.
+    pub async fn connect(endpoint: &Endpoint) -> Result<Self, Error> {
         let stream = rosen_protocol::connect(endpoint).await.map_err(|err| {
             if rosen_protocol::transport::is_not_running(&err) {
-                ClientError::NotRunning(endpoint.clone())
+                Error::NotRunning(endpoint.clone())
             } else {
-                ClientError::Io(err)
+                Error::Io(err)
             }
         })?;
         let (mut reader, mut writer) = tokio::io::split(stream);
@@ -76,12 +76,12 @@ impl Client {
     }
 
     /// Sends one request and waits for its response.
-    pub async fn request(&self, request: Request) -> Result<Response, ClientError> {
+    pub async fn request(&self, request: Request) -> Result<Response, Error> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (answer, answered) = oneshot::channel();
         lock(&self.pending)
             .as_mut()
-            .ok_or(ClientError::Disconnected)?
+            .ok_or(Error::Disconnected)?
             .insert(id, answer);
         if let Err(err) = self.send(&ClientFrame::Request { id, request }).await {
             lock(&self.pending)
@@ -89,33 +89,30 @@ impl Client {
                 .map(|waiting| waiting.remove(&id));
             return Err(err);
         }
-        match answered.await.map_err(|_| ClientError::Disconnected)? {
+        match answered.await.map_err(|_| Error::Disconnected)? {
             Outcome::Ok(response) => Ok(response),
-            Outcome::Error(error) => Err(ClientError::Server(error)),
+            Outcome::Error(error) => Err(Error::Server(error)),
         }
     }
 
     /// Starts this connection's event stream from `after` (every retained event
     /// when `None`). Calling it again restarts the stream from the new cursor and
     /// closes the previous receiver.
-    pub async fn subscribe(
-        &self,
-        after: Option<u64>,
-    ) -> Result<mpsc::Receiver<Event>, ClientError> {
+    pub async fn subscribe(&self, after: Option<u64>) -> Result<mpsc::Receiver<Event>, Error> {
         let (sender, receiver) = mpsc::channel(EVENT_BUFFER);
         *lock(&self.events) = Some(sender);
         self.send(&ClientFrame::Subscribe { after }).await?;
         Ok(receiver)
     }
 
-    pub async fn ping(&self) -> Result<(), ClientError> {
+    pub async fn ping(&self) -> Result<(), Error> {
         match self.request(Request::Ping).await? {
             Response::Pong => Ok(()),
             other => Err(unexpected(other)),
         }
     }
 
-    pub async fn status(&self) -> Result<ServerStatus, ClientError> {
+    pub async fn status(&self) -> Result<ServerStatus, Error> {
         match self.request(Request::Status).await? {
             Response::Status(status) => Ok(status),
             other => Err(unexpected(other)),
@@ -123,40 +120,38 @@ impl Client {
     }
 
     /// Asks the daemon to exit. It finishes answering open connections first.
-    pub async fn shutdown(&self) -> Result<(), ClientError> {
+    pub async fn shutdown(&self) -> Result<(), Error> {
         match self.request(Request::Shutdown).await? {
             Response::ShuttingDown => Ok(()),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn send(&self, frame: &ClientFrame) -> Result<(), ClientError> {
+    async fn send(&self, frame: &ClientFrame) -> Result<(), Error> {
         let mut writer = self.writer.lock().await;
-        write_frame(&mut *writer, frame)
-            .await
-            .map_err(ClientError::Io)
+        write_frame(&mut *writer, frame).await.map_err(Error::Io)
     }
 }
 
 async fn handshake(
     reader: &mut ReadHalf<BoxStream>,
     writer: &mut WriteHalf<BoxStream>,
-) -> Result<(u32, String), ClientError> {
+) -> Result<(u32, String), Error> {
     let hello = ClientFrame::Hello {
         versions: SUPPORTED_VERSIONS.to_vec(),
         client: CLIENT_NAME.to_owned(),
     };
-    write_frame(writer, &hello).await.map_err(ClientError::Io)?;
+    write_frame(writer, &hello).await.map_err(Error::Io)?;
     match read_frame::<_, ServerFrame>(reader)
         .await
-        .map_err(ClientError::Io)?
+        .map_err(Error::Io)?
     {
         Some(ServerFrame::Welcome { version, server }) => Ok((version, server)),
         Some(ServerFrame::Reject { reason, supported }) => {
-            Err(ClientError::Rejected { reason, supported })
+            Err(Error::Rejected { reason, supported })
         }
-        Some(other) => Err(ClientError::Unexpected(format!("{other:?} before welcome"))),
-        None => Err(ClientError::Disconnected),
+        Some(other) => Err(Error::Unexpected(format!("{other:?} before welcome"))),
+        None => Err(Error::Disconnected),
     }
 }
 
@@ -194,6 +189,6 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-fn unexpected(response: Response) -> ClientError {
-    ClientError::Unexpected(format!("unexpected response {response:?}"))
+fn unexpected(response: Response) -> Error {
+    Error::Unexpected(format!("unexpected response {response:?}"))
 }

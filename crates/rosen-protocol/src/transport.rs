@@ -82,7 +82,10 @@ pub fn is_not_running(err: &io::Error) -> bool {
     )
 }
 
+// Restricting the pipe's DACL has no safe wrapper; the unsafe calls stay
+// inside this module.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 #[path = "transport_windows.rs"]
 mod imp;
 
