@@ -40,9 +40,26 @@ impl Client {
         options: Options,
     ) -> Result<Report, Error> {
         let sparse = options.sparse.chosen();
-        let report = self
-            .materialise_tree(change.change.head, dest, options)
-            .await?;
+        let pooled = if options.sparse.is_all() && options.source.is_none() {
+            self.take_workspace(change.change.head, dest).await?
+        } else {
+            None
+        };
+        let report = match pooled {
+            Some(files) => Report {
+                method: super::Method::WarmPool,
+                files,
+                cloned: 0,
+                copied: 0,
+                written: 0,
+                bytes_written: 0,
+                fallback: None,
+            },
+            None => {
+                self.materialise_tree(change.change.head, dest, options)
+                    .await?
+            }
+        };
         WorkspaceMarker::new(change.change.id, change.change.head, sparse)
             .write(dest)
             .map_err(Error::Io)?;
@@ -70,5 +87,23 @@ impl Client {
             .await
             .map_err(|error| Error::Unexpected(format!("materialisation stopped: {error}")))?
             .map_err(Error::Workspace)
+    }
+}
+
+impl Client {
+    /// Changes this machine's ready-pool target. Zero disables the pool.
+    pub async fn set_pool_size(&self, size: usize) -> Result<(), Error> {
+        match self.request(Request::PoolSize { size }).await? {
+            Response::PoolSized => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    async fn take_workspace(&self, tree: ObjectId, dest: &Path) -> Result<Option<u64>, Error> {
+        let dest = std::path::absolute(dest)?.to_string_lossy().into_owned();
+        match self.request(Request::PoolTake { tree, dest }).await? {
+            Response::PoolTaken(files) => Ok(files),
+            other => Err(unexpected(other)),
+        }
     }
 }
