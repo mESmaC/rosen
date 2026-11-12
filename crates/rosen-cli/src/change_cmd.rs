@@ -145,7 +145,7 @@ fn workspace_json(dir: &Path, report: &Report) -> serde_json::Value {
 
 /// The owner is the agent's identity. Velocity sets ROSEN_AGENT per thread; a
 /// human at a terminal falls back to their OS user name.
-fn resolve_owner(explicit: Option<&str>) -> Result<AgentId, Error> {
+pub(crate) fn resolve_owner(explicit: Option<&str>) -> Result<AgentId, Error> {
     let from_env = || {
         ["ROSEN_AGENT", "USERNAME", "USER"]
             .iter()

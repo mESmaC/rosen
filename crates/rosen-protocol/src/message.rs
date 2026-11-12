@@ -11,6 +11,7 @@ use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
 };
+use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. Bump it on any incompatible change to
@@ -114,6 +115,13 @@ pub enum Request {
     ReleasePaths(ClaimRequest),
     /// Lists claims, shares and waits on live changes.
     ClaimList(ClaimFilter),
+    /// Starts a review thread on a line of a change's head, or replies in
+    /// one (R7). Answered with the whole thread.
+    ReviewComment(CommentRequest),
+    /// Marks a review thread resolved. Resolving a resolved thread is a no-op.
+    ReviewResolve(ResolveRequest),
+    /// Lists a change's review threads with their comments, oldest first.
+    ReviewList(ThreadFilter),
     /// Loads a git repository's history and makes one of its branches the
     /// project's base (SPEC R1). Refused once the project has a base.
     Import {
@@ -147,6 +155,9 @@ pub enum Response {
     Waiting(WaitOutcome),
     Released(ReleaseOutcome),
     PathClaims(Vec<PathClaim>),
+    /// The answer to `review_comment` and `review_resolve`.
+    ReviewThread(ReviewThread),
+    ReviewThreads(Vec<ReviewThread>),
 }
 
 /// The answer to [`Request::Import`].
