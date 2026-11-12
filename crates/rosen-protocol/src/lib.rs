@@ -9,6 +9,7 @@ pub mod change;
 pub mod claim;
 pub mod config;
 pub mod frame;
+pub mod history;
 pub mod message;
 pub mod objects;
 pub mod receipt;
@@ -22,6 +23,11 @@ pub use claim::{
     ShareOutcome, WaitOutcome, WokenWait,
 };
 pub use config::{ConfigQuery, ConfigRecord};
+pub use history::{
+    Blame, BlameRange, BlameRequest, Diff, DiffHunk, DiffLine, DiffRequest, DirEntry, FileDiff,
+    FileStatus, FileVersion, LineKind, Log, LogEntry, LogRequest, MergeBaseAnswer,
+    MergeResultAnswer, ReadAnswer, ReadRequest,
+};
 pub use message::*;
 pub use objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal, WireKind, WireObject};
 pub use receipt::{ReceiptRecord, SubmitReceipt};
