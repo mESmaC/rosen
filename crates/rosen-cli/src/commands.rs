@@ -47,6 +47,12 @@ pub enum Command {
         /// Branch to import instead of the one the repository's HEAD names.
         #[arg(long)]
         branch: Option<String>,
+        /// Git remote (URL or path) to mirror the base to. After each land
+        /// the server pushes the base there as a fast-forward, never a
+        /// force-push, and retries a failed push in the background,
+        /// reporting each failure as a `mirror` event.
+        #[arg(long, value_name = "REMOTE")]
+        mirror: Option<String>,
     },
     /// Create, list, inspect or abandon changes.
     #[command(subcommand)]

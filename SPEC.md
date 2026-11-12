@@ -123,6 +123,9 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - `rosen import <git repo>` loads a git repository's history and makes its default branch the base.
 - After each land, the server pushes the base to the configured git remote (for example GitHub). The push runs after the land commits and off its critical path. A failed push is retried and reported as an event, and never blocks or undoes a land.
 - A push to the mirror is a fast-forward and never a force-push.
+- `rosen import --mirror <remote>` names the remote, a URL or a path. It is kept in the metadata store, so it survives restarts.
+- One background task on the server does every push. It pushes the base tip, so lands made during a push go out with the next one. It also pushes at server start, so a push a crash interrupted still happens.
+- Each failed push publishes a `mirror` event with the error and the retry delay. Retries back off from 1 s to at most 5 min. A push the remote refused, for example because the mirror has commits the base lacks, is marked `rejected`: only a person can fix that. The first push that succeeds after failures publishes a `mirror` event too.
 - **Accept when:** a repo imported and then landed on shows the same history in `git log` on the mirror, with one commit per change and its trailers.
 
 ### R2 · Changes, snapshots and offline work
