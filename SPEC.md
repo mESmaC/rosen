@@ -189,6 +189,8 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 
 ### R7 · Review
 - Review comments anchor to file, line and change head, and form threads with an open or resolved state.
+  - A new thread anchors to a line of a file in the change's current head, and the server refuses a path that is not a file there or a line the file lacks. A comment that names the head it was written against is refused once the change has a different head. The anchor never moves; each reply records the head it was written at.
+  - Only open and ready changes take comments. Anyone can resolve a thread. A reply to a resolved thread reopens it. Each comment, resolve and reopen publishes a `review` event.
 - An approval is tied to the head it approved. A new head by the author voids the approval. A rebase done by the server (R8, D19) keeps it, because it changes only the parent.
 - **Review tiers** follow Anthropic's semantic approval rules and Velocity F7:
   - The server tiers each change from its diff: prose-only, normal, or sensitive.
@@ -229,7 +231,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 - Rosen's events and the channel's events (R13) share one log, one sequence and one cursor per subscriber. A claim release and the land that caused it are always delivered in order, to subscribers on any machine.
 
 ### R10 · CLI
-- The `rosen` commands are `import`, `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve`, `receipt submit`, `land`, `resolve`, `workspace list|delete`, `server start|status`, `events`, `machine join|list|approve|revoke` and `machine key create|list|revoke` (R14).
+- The `rosen` commands are `import`, `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve|list`, `receipt submit`, `land`, `resolve`, `workspace list|delete`, `server start|status`, `events`, `machine join|list|approve|revoke` and `machine key create|list|revoke` (R14).
 - `--json` on every command, with versioned output schemas.
 - `--help` is complete enough that an agent can learn Rosen from it alone.
 

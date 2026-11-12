@@ -13,6 +13,7 @@ pub mod import;
 pub mod landing;
 pub mod listener;
 pub mod mirror;
+pub mod reviews;
 pub mod rpc;
 
 use events::EventLog;

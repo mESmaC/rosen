@@ -9,6 +9,7 @@ pub mod claims;
 pub mod connection;
 pub mod daemon;
 mod import;
+pub mod reviews;
 pub mod workspace;
 
 pub use connection::Client;
