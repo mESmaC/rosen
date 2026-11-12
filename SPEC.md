@@ -2,7 +2,7 @@
 
 Rosen is a version control system built so that many coding agents can work on one project at the same time: 100 agents in v1 and up to 1000 later. Rosen is two programs: a **server** that holds the project and does the expensive work, and a thin **client** that agents and humans use. Rosen is the source-control layer under [Velocity](https://github.com/mESmaC/velocity), the parallel agentic IDE. Where a cleaner or faster Rosen design needs Velocity to change, Velocity changes (§9).
 
-- **Status:** draft, 2026-11-11. Written from the spec interview, then revised after reviewing the prior art below.
+- **Status:** draft, 2026-11-11. Written from the spec interview, then revised after reviewing the prior art below. Revised 2026-11-12: one server for agents on many machines, with AIRC served by Rosen and zero-touch enrollment (#25); snapshot ignore rules (#28); rebases applied when the workspace owner asks (#29).
 - **Optimizing for:** development velocity. Landing must be fast and must never lose work.
 
 ## 0. Prior art and what Rosen takes from it
@@ -13,7 +13,7 @@ Rosen is a version control system built so that many coding agents can work on o
 | Anthropic | Server-side commits, rebases and merges; "nothing to push"; the client "can compute very little on its own" | D17, R2, R8 |
 | Anthropic | Refs discouraged except main and release branches, because global state is a scaling problem | Changes are not refs (D18) |
 | Anthropic | Changesets stored as deltas against the first parent, with derived data (blame, path history, ancestry) built from them | R11 history API |
-| Anthropic | Tiered content-addressed caches: a per-node daemon, then regional, then authoritative, all answering the same RPCs | D8: the daemon is tier 1; the hosted server is added later behind the same RPCs |
+| Anthropic | Tiered content-addressed caches: a per-node daemon, then regional, then authoritative, all answering the same RPCs | D8: each machine's daemon is tier 1 in front of the project's server; a hosted server takes that place later behind the same RPCs |
 | Anthropic | Source control as a service, so many jobs need no checkout | Server-side workspaces, R11 |
 | Anthropic | Post-merge and pre-deploy testing replace pre-merge gating at agent scale | D20, R12 |
 | Anthropic | Review intent, with semantic approval rules (comment-only vs logic changes) | R7 review tiers |
@@ -24,7 +24,7 @@ Rosen is a version control system built so that many coding agents can work on o
 | Google [Scion](https://github.com/googlecloudplatform/scion) (agent orchestration) | Agents have their own identity; notifications when work finishes or needs attention; "less is more", with agents learning the CLI from help text | Change owner identity (§2), targeted events (R9), self-describing CLI (R10) |
 | Velocity SPEC §3.3, F5–F7, F14 | Receipts bound to an exact head and base, re-checks when the base moves, targeted rebases, 3-line overlap rule, warm pool, dependency waits and parking | R4, R6, R8; dependency waits become stacked changes (D19) |
 
-**Not adopted:** Spanner, CockroachDB or S3 (v1 is a local daemon); a virtual filesystem; and Anthropic's "always online, no offline" rule. Rosen keeps an offline fallback (D6).
+**Not adopted:** Spanner, CockroachDB or S3 (v1 is one server with SQLite and a local volume); a virtual filesystem; and Anthropic's "always online, no offline" rule. Rosen keeps an offline fallback (D6).
 
 ---
 
@@ -39,22 +39,23 @@ Rosen is a version control system built so that many coding agents can work on o
 | D5 | Storage | Objects are stored in **git format** (blobs, trees, commits), as loose content-addressed objects with no packfiles, so no repack or maintenance is needed. Rosen imports git repos and pushes landed history to a git remote. Storage sits behind a pluggable backend interface: the git-backed backend comes first, and a Rosen-native remote store comes later. |
 | D6 | Workspaces | Two modes. **Local workspaces** are files on disk for agents' tools. **Server-side workspaces** have no checkout, and are read and written through the API. Both keep resource use bounded. Local workspaces keep working when the server is unreachable (offline fallback, R2). |
 | D7 | Velocity integration | A `rosen-client` library crate that Velocity links directly. The `rosen` CLI is a thin layer over the same crate. |
-| D8 | Server deployment | In v1 the server is a local daemon, one per machine, which `rosen-client` or Velocity can start. It holds the authoritative store and is also the machine's shared object cache. Its protocol works over the network, so it can later become the per-node tier in front of a hosted server answering the same RPCs. |
+| D8 | Server deployment *(revised)* | **One authoritative server per project**, reachable from every machine that runs agents for it (R14). Every machine runs a **daemon**, which `rosen-client` or Velocity can start. On the server's machine the daemon is the server. On every other machine it is the tier-1 object cache in front of the server, answering the same RPCs, so workspaces materialise from a local store. A hosted server can later take the authoritative role behind the same RPCs. |
 | D9 | Check runner | Checks run **outside** Rosen: Velocity's build queue, PR duty, or any other client. They submit a **receipt**. Rosen stores and validates receipts and runs no builds. |
-| D10 | Path claims | **Rosen owns path state**: each change's live edited paths and line regions, and path claims. AIRC keeps task claims and messaging, and asks Rosen about overlaps. |
+| D10 | Coordination *(revised)* | **Rosen owns all coordination state**: path state (each change's live edited paths and line regions, and path claims) and the project's AIRC channel (task claims, events, messages and ledgers, R13). Velocity keeps AIRC's agent tools and view, and calls Rosen for every one, so every machine sees the same channel. |
 | D11 | Platforms | v1 is tested and shipped on Windows 11. The code stays portable, and Linux and macOS are best-effort until a later milestone. |
 | D12 | Review | **Rosen-native review**: comments, approvals and receipts are Rosen objects. GitHub receives landed history as a mirror and is not in the landing path. |
 | D13 | Metadata store | Embedded SQLite in WAL mode, one database per server. |
-| D14 | Scale target | v1: 100 concurrent changes on one machine (see §5). |
+| D14 | Scale target *(revised)* | v1: at least 100 concurrent changes on one project, from agents on several machines, typically 30–40 agents per machine (see §5). |
 | D15 | Landed history | **One commit per change**: the change's final tree, with trailers for the change ID, receipt and approval. The agent's own commits stay in Rosen and are never rewritten. |
 | D16 | Workspace lifecycle | **Rosen owns it**: creation, a warm pool, and deletion behind a guard. |
 | D17 | Write-through snapshots *(revised)* | Every workspace write is snapshotted to the server automatically and within seconds, like jj's working-copy commit. There is no push or sync step. An edit that exists only on the client is the exception (offline, or inside the snapshot window), not the norm. This makes the deletion guard simple, gives the server live edit regions, and lets the server do every rebase. |
 | D18 | Changes are not refs *(revised)* | The base (and later, release refs) is the only ref. A change is a row in the metadata store, with no branch name to create, delete or collide. |
 | D19 | Stacked changes *(revised)* | A change can sit on top of another unlanded change instead of waiting for it to land. When the lower change lands or updates, the server rebases the upper one automatically. This replaces Velocity's dependency waits and parking for most cases. |
 | D20 | Landing gate | **Fast pre-land, full post-land.** A land needs a receipt for build and lint on the exact merge result. Full tests run on landed commits in batches. A failure is bisected to the culprit, and the server lands a revert automatically and reopens the culprit change for its owner (Anthropic's post-merge testing, R12). |
+| D21 | Network access and enrollment *(new)* | The server listens on a network listener with TLS as well as the local transport. Machines join with **join keys**, with no login, monitor or remote desktop on the joining machine. Each machine gets its own revocable credential. Every agent on a machine works under that machine's credential, and Velocity names the agent and its role (R14). One enrollment adds a machine to both Rosen and Velocity. |
 
 Defaults set during spec writing. These follow from the decisions above, and changing one is a product decision:
-- **Transport.** v1 listens only on a local transport: a named pipe on Windows and a Unix socket elsewhere. Access is limited to the OS user. The network listener and its authentication are out of scope for v1, but the protocol is versioned and does not assume a local peer.
+- **Transport.** Each daemon listens on a local transport for its own machine's clients: a named pipe on Windows and a Unix socket elsewhere, limited to the OS user. The server also listens on a TCP port with TLS for enrolled machines' daemons (R14). The protocol is versioned and does not assume a local peer.
 - **Events.** The server pushes events to subscribed clients. Clients never poll.
 - **Garbage collection.** v1 never deletes objects from the store.
 
@@ -63,9 +64,11 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 ## 2. Concepts
 
 - **Project.** One repository held by one server. It has one **base** ref (for example `main`), which only a land can move.
+- **Machine.** A computer enrolled in a project (R14). It holds its own revocable machine credential and runs a daemon that caches objects for its workspaces.
+- **Channel.** The project's AIRC channel, served by the server (R13): task claims, events, messages and ledgers.
 - **Change.** One agent's unit of work. Each change has:
   - a stable **change ID**;
-  - an **owner** (agent identity);
+  - an **owner** (agent identity: its machine and the nick Velocity gave it, R14);
   - a **parent**: either a base commit or another change (stacked);
   - an ordered list of commits and a current **head** tree;
   - a state;
@@ -91,14 +94,15 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 | `rosen-core` | Data model: changes, stacks, conflicts, receipts, reviews, claims, regions. Pure logic, with no I/O. |
 | `rosen-store` | The storage backend interface and the git-format loose-object backend. |
 | `rosen-merge` | Three-way file merge, conflict objects and overlap detection. |
-| `rosen-server` | The daemon: protocol, the SQLite metadata store, snapshots, server-side rebase, landing, claims, review, events, history queries, server-side workspaces and the git mirror push. |
-| `rosen-client` | The public library API Velocity links: daemon discovery and start, workspace materialisation, the file watcher and snapshotting, and the offline journal. |
+| `rosen-server` | The daemon: protocol, the SQLite metadata store, snapshots, server-side rebase, landing, claims, review, events, the AIRC channel, history queries, server-side workspaces, the git mirror push, the network listener and enrollment. On a machine that is not the server, the same daemon runs as the object cache that forwards to the server. |
+| `rosen-client` | The public library API Velocity links: daemon discovery and start, joining a project, workspace materialisation, the file watcher and snapshotting, applying server rebases, and the offline journal. |
 | `rosen-cli` | The `rosen` binary, a thin layer over `rosen-client`. |
 
 - **Client–server asymmetry.** The server does every merge, rebase, landed commit and history query. The client materialises files, watches them, and uploads snapshots. Clients never run merge logic.
-- **Metadata store.** SQLite in WAL mode holds changes, stacks, claims, regions, receipts, reviews, conflicts, workspace records and the base ref. Every ref move and every claim is one transaction, and a crash in the middle leaves the store either before or after it, never between.
-- **Object store.** Git object format, stored loose and content-addressed, on the server's volume. Because the v1 server is local, its store is the machine's shared object cache. Objects are immutable, so any later cache tier can hold them without coordination.
-- **Protocol.** Versioned, framed request/response plus one event stream per client. The same protocol runs over the local transport in v1 and over the network later.
+- **Topology.** One authoritative server per project. On every other enrolled machine, the daemon serves its clients over the local transport, answers object reads from its own cache, and forwards every other request to the server. Refs, claims, the channel and every other piece of mutable state are read and written only on the server, so no machine can fall behind or move ahead of it.
+- **Metadata store.** SQLite in WAL mode, on the server only, holds changes, stacks, claims, regions, receipts, reviews, conflicts, workspace records, the channel, enrolled machines and the base ref. Every ref move and every claim is one transaction, and a crash in the middle leaves the store either before or after it, never between.
+- **Object store.** Git object format, stored loose and content-addressed. The server's store is authoritative. Each other machine's daemon keeps a store of the objects its workspaces use, filled from the server on demand and shared by every workspace on that machine. Objects are immutable, so any cache tier can hold them without coordination.
+- **Protocol.** Versioned, framed request/response plus one event stream per client. The same protocol runs over the local transport and over the network listener.
 
 ---
 
@@ -113,9 +117,14 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 ### R2 · Changes, snapshots and offline work
 - `rosen change new [--on <change>]` creates a change on the current base, or stacked on another change, together with its workspace. The change ID stays the same for its whole life.
 - **Write-through snapshots.** The client watches the workspace (`ReadDirectoryChangesW` on Windows) and uploads a snapshot within 2 s of the last write, plus on `rosen commit`. A snapshot sends only the changed blobs.
+- **Ignored paths.** Snapshots skip paths matched by the workspace's `.gitignore` files and by the project's ignore list (project configuration), such as build output (`target/`, `node_modules/`). An ignored path is never uploaded, never counts as an edit or an overlap (R6), and never blocks deletion (R4). Writes to ignored paths do not delay a snapshot.
 - **Offline journal.** When the server is unreachable, snapshots go to a local append-only journal and are uploaded in order on reconnect. Landing requires the server.
 - Snapshots and commits belong to the change and are never rewritten.
-- **Accept when:** a change's commits survive any number of rebases unchanged, and a write is on the server within 2 s while the server is reachable.
+- **Applying server rebases.** When the server rebases a change (R5, R8, D19), the rebased tree is written into a local workspace only when the workspace's owner asks. Velocity asks at the agent's step boundary, or while the agent is parked, so files never change under an agent mid-step (§9).
+  - The client first flushes a final snapshot, then writes the rebased files, with conflict markers for any stored conflict (R5).
+  - If the files on disk differ from that snapshot, it refuses and leaves the workspace unchanged, and the owner asks again after the next snapshot.
+  - A server rebase never writes into a local workspace by itself. A server-side workspace (R3) takes the rebased tree directly.
+- **Accept when:** a change's commits survive any number of rebases unchanged; a write is on the server within 2 s while the server is reachable; and applying a rebase never overwrites a write that is not in a stored snapshot.
 
 ### R3 · Workspaces
 - **Local workspaces** are materialised from the local store:
@@ -124,8 +133,8 @@ Defaults set during spec writing. These follow from the decisions above, and cha
   - **Hardlinks are never used** for files in a workspace. Agents' tools often write files in place, so a hardlink would let one workspace's write corrupt the shared object and every other workspace that links to it.
   - Sparse checkout lets a workspace hold only chosen paths.
 - **Server-side workspaces.** Files live on the server, and clients read, write, list and diff them through the API, with no checkout. Writes become snapshots directly. Rosen recommends them for jobs that touch few files, such as reviewers, check runners and doc edits.
-- **Warm pool.** Rosen keeps N ready local workspaces at the tip of the base (default 4, 0 turns the pool off). After each land it brings them up to the new tip by rewriting only the changed files. Taking one is atomic, so two changes never get the same workspace.
-- **Load limits.** The server caps concurrent materialisations and server-side workspace I/O, and queues the rest. The client caps local disk use. A request over a cap waits; it never fails or degrades another workspace.
+- **Warm pool.** Each machine's daemon keeps N ready local workspaces at the tip of the base (default 4, 0 turns the pool off). After each land it brings them up to the new tip by rewriting only the changed files. Taking one is atomic, so two changes never get the same workspace.
+- **Load limits.** Each daemon caps its machine's concurrent materialisations, and the server caps server-side workspace I/O; both queue the rest. The client caps local disk use. A request over a cap waits; it never fails or degrades another workspace.
 - **Accept when:** with the warm pool filled, a new workspace is ready in under 2 s, and two changes never share a workspace.
 
 ### R4 · Workspace lifecycle and deletion
@@ -134,7 +143,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - **Deletion guard.** Before deleting, Rosen flushes a final snapshot. It refuses deletion while any of these is not stored on the server:
   - a write the watcher has seen but not yet snapshotted;
   - a journal entry that has not been uploaded;
-  - a file whose content differs from the last stored snapshot, found by a final hash scan.
+  - a file whose content differs from the last stored snapshot, found by a final hash scan. Ignored paths (R2) are not scanned.
 
   The refusal names the files and keeps the workspace.
 - A workspace whose change is closed or failed is kept until the change is explicitly deleted.
@@ -144,13 +153,14 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 ### R5 · Automatic merge and conflicts
 - The server merges three ways at file level and line level, against the merge base.
 - Generated files listed in project configuration are regenerated, never merged. Registration lists keep both sides' additions.
-- A region that does not merge automatically becomes a stored conflict on the change, which records base, ours and theirs. The workspace shows conflict markers. `rosen resolve` clears a conflict.
+- A region that does not merge automatically becomes a stored conflict on the change, which records base, ours and theirs. A local workspace shows conflict markers once the rebase is applied (R2). `rosen resolve` clears a conflict.
 - **Accept when:** a clean merge never drops or duplicates a line that either side kept, and every non-clean region becomes a conflict instead of a silent pick.
 
 ### R6 · Path claims and edit tracking
 - `rosen claim <paths…>` claims paths or globs for a change. The first claim wins. A refused claim names the holder. `share` and `wait` record the other two outcomes.
-- Edit regions update from each snapshot.
-- An **overlap query** returns, for a change or a set of paths, every change that overlaps it. AIRC and Velocity call it.
+- Edit regions update from each snapshot. Ignored paths (R2) have no edit regions.
+- An **overlap query** returns, for a change or a set of paths, every change that overlaps it. The channel (R13) and Velocity call it.
+- These are AIRC's file claims: `airc_claim` files, `airc_share` and `airc_wait` record path claims, shares and waits here (R13). There is one claim record per path, not one in AIRC and one in Rosen.
 - Claims release when their change lands or is abandoned. A wait is then signalled by an event.
 - **Accept when:** two concurrent claims on one path never both succeed, and every released claim wakes its waiters.
 
@@ -182,6 +192,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
    - the server rebases, without rewriting commits:
      - changes stacked on the landed change, onto the new base;
      - changes that overlap the landed change, with a `rebased` event to each;
+     - a rebased change's local workspace is updated when its owner asks (R2);
    - every other change rebases only at its own landing time;
    - the mirror push is scheduled.
 - **Order** is set only between changes that overlap each other, or are stacked.
@@ -190,10 +201,11 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 ### R9 · Events
 - The event types are `snapshot`, `landed`, `rebased`, `conflict`, `updated`, `review`, `claim`, `released`, `green`, `reverted` and `mirror`.
 - Each event is delivered only to subscribers it concerns: the change's owner, its reviewers, changes stacked on it, and the holders of overlapping changes or claims.
-- Delivery is at least once and resumes from a cursor after reconnect.
+- Delivery is at least once and resumes from a cursor after reconnect. Cursors and the event log are stored on the server, so they survive a server restart.
+- Rosen's events and the channel's events (R13) share one log, one sequence and one cursor per subscriber. A claim release and the land that caused it are always delivered in order, to subscribers on any machine.
 
 ### R10 · CLI
-- The `rosen` commands are `import`, `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve`, `receipt submit`, `land`, `resolve`, `workspace list|delete`, `server start|status` and `events`.
+- The `rosen` commands are `import`, `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve`, `receipt submit`, `land`, `resolve`, `workspace list|delete`, `server start|status`, `events`, `machine join|list|approve|revoke` and `machine key create|list|revoke` (R14).
 - `--json` on every command, with versioned output schemas.
 - `--help` is complete enough that an agent can learn Rosen from it alone.
 
@@ -210,19 +222,51 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 - A flaky result is the checker's concern: a revert happens only after the culprit fails twice and its parent passes.
 - **Accept when:** a landed commit that fails the full tests is reverted automatically, its change reopens with its work intact, and no other change is reverted.
 
+### R13 · AIRC channel on the server
+The server holds each project's AIRC channel, so agents on every machine coordinate through one source of truth. AIRC's behaviour (claims, events, targeted delivery, messages, message modes and ledgers) is as Velocity SPEC F14 defines it. Rosen is its store and its authority.
+- **State.** The channel's state lives in the server's metadata store:
+  - **piece claims** on work items (`task:<id>`, `issue:<n>`, `spec:<section>`, or the task text);
+  - **file claims, shares and waits**, which are Rosen path claims (R6);
+  - **events** and agent **messages** with their `to` and `intent`;
+  - **presence**: the nicks joined, their machine, and each one's message mode;
+  - the **Discoveries** and **Past work** ledgers.
+- **Piece claims** are first-claim-wins, each in one transaction, like path claims. A refusal names the holder and the time of its claim. A claim is kept through failure and disconnects, and released as Velocity F14 says.
+- **One log.** Channel events and Rosen's events share one ordered log and one cursor per subscriber (R9). Targeted delivery follows Velocity F14: an agent receives only the lines it must act on.
+- **Velocity keeps the tools.** Velocity serves AIRC's tools to every agent as now, with the member ID and nick fixed at launch, and calls the server through `rosen-client` for each one. No machine keeps channel state of its own beyond its delivery cursors.
+- **Server unreachable.** Claims and messages need the server, as landing does. A tool call made while the server is unreachable fails with that reason. It is never answered from a local copy.
+- **Accept when:** two agents on different machines that claim the same piece or path at the same moment never both succeed; an event or message reaches its recipient on another machine within 1 s while both machines reach the server; and no two machines ever see different claim holders.
+
+### R14 · Network access and enrollment
+Machines join a project with no login, monitor or remote desktop on the joining machine, so headless machines can be added from a script.
+- **Network listener.** The server listens on a TCP port with TLS, alongside the local transport. Its certificate is created when the project is created. Daemons on other machines connect to it, and serve their own machine's clients over the local transport.
+- **Join keys.** The project owner creates a join key from any enrolled machine, through Velocity or `rosen machine key create`. A join key has an expiry, a use limit and a role (agent machine or checker), and carries the server's address and the fingerprint of its certificate.
+- **Zero-touch join.** A machine joins with one non-interactive command, such as `rosen machine join <key>` in an install or provisioning script, or a machine image.
+  1. The daemon connects to the server and checks the server's certificate against the key's fingerprint. On a mismatch it stops before sending the key.
+  2. It exchanges the key for the machine's own **machine credential**.
+  3. It stores the credential encrypted (Windows: DPAPI through Credential Manager). The client rotates it automatically before it expires.
+
+  The machine never uses the join key again.
+- **Approval.** A machine that joins with a valid key is admitted at once. A machine that asks to join without one waits as **pending** until the owner approves it from an enrolled machine.
+- **Machine list and revocation.** The server lists every machine with its role, last contact and running agents. Revoking a machine refuses its credential on its next request. Its changes, claims and workspaces are kept, as for a failed change.
+- **Discovery.** On a local network, daemons find the server by DNS-SD (mDNS), so a key without a reachable address still works there.
+- **Agents.** Every agent on a machine works under that machine's credential. Velocity names each agent (its nick) and its role when it starts the agent's session, as AIRC does now. Owners, reviewers and receipt submitters are recorded as machine plus nick.
+- **One enrollment for Rosen and Velocity.** Velocity's cross-system dispatch uses the same join key, so one command adds a machine to both (§9).
+- **Accept when:** a headless machine joins from one command with no interactive step; a revoked machine's next request is refused; and a daemon that meets a certificate other than the key's fingerprint never sends the key.
+
 ---
 
 ## 5. Done means (v1)
 
-- R1–R12 are built and run on Windows 11. The Linux build compiles.
-- **The stress run passes on one Windows 11 machine:**
-  - 100 concurrent agents, each creating a change (some stacked), editing, claiming, submitting receipts and landing, over at least 1000 lands;
+- R1–R14 are built and run on Windows 11. The Linux build compiles.
+- **The stress run passes on at least three Windows 11 machines**, enrolled with one join key and no interactive step, one of them serving the project:
+  - 100 concurrent agents spread across the machines, each creating a change (some stacked), editing, claiming, submitting receipts and landing, over at least 1000 lands;
   - a new workspace is ready in under 2 s (p95) with the warm pool filled;
   - a land with a valid receipt commits in under 200 ms (p95);
   - no edit is lost, no land is applied twice, and the base never moves without a matching receipt and approval (or as a server revert);
   - an injected failing commit is bisected and reverted, and its change reopens with its work intact;
-  - the run is repeated with the server and clients killed at random points and with the server unreachable for a period, and still meets those three guarantees.
-- Velocity can create workspaces, claim paths, stack changes, review, submit receipts and land through `rosen-client` alone, with no git worktree or GitHub PR in the loop.
+  - no two agents ever hold the same piece or path claim, on any machine;
+  - the run is repeated with the server, machine daemons and clients killed at random points, and with the server unreachable from some machines for a period, and still meets those guarantees.
+- Velocity can create workspaces, claim pieces and paths, message agents, stack changes, review, submit receipts and land through `rosen-client` alone, with no git worktree, GitHub PR or local AIRC files in the loop.
 - The proofs on the proof list check, and each is tested against its fixture table. Merge is also checked against `git merge-file` on a differential corpus.
 - `cargo build --workspace`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass, as does `lake build` in `proofs/`.
 
@@ -231,7 +275,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 ## 6. Out of scope (v1)
 
 - The Rosen-native remote storage backend (designed for behind the backend interface, built later).
-- A network listener, authentication, a hosted server, and regional cache tiers.
+- A hosted server, an internet-facing web login (OAuth), and regional cache tiers. The network listener and join-key enrollment are in v1 (R14). The hosted platform's web login will mint the same join keys.
 - Clustered servers and the 1000-agent target.
 - First-class Linux and macOS support (best-effort only).
 - Running checks or builds inside Rosen.
@@ -240,7 +284,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 - Object garbage collection, and redaction or purge of objects.
 - Per-directory access control.
 - A GUI. Velocity is the UI.
-- Task claims and agent messaging (these stay in AIRC).
+- AIRC's agent tools and its view. These stay in Velocity; the channel's state is on the server (R13).
 
 ---
 
@@ -251,7 +295,7 @@ Lean proofs are written only for these features (AGENTS.md "Proofs"):
 | Feature | SPEC section | Why it needs a proof |
 |---|---|---|
 | Optimistic landing and auto-revert | R8, R12 | It decides when the base moves: the compare-and-swap, receipt and approval binding, re-check rules, stack order, and the culprit revert. A wrong rule lands unbuilt code, applies a land twice, reverts the wrong change, or drops another change's work. |
-| Path claims | R6 | First-claim-wins with shares and waits is the coordination lock for every agent. A wrong rule lets two agents both own a path, or leaves a waiter stuck forever. |
+| Path and piece claims | R6, R13 | First-claim-wins with shares and waits is the coordination lock for every agent on every machine. A wrong rule lets two agents both own a path or a piece of work, or leaves a waiter stuck forever. |
 | Workspace deletion guard | R4 | Deletion must never remove an edit that is not yet stored on the server, including across the snapshot window and the offline journal. A wrong guard loses an agent's work. |
 | Three-way merge | R5 | Every land and rebase merges automatically. A wrong merge silently drops or duplicates lines, which corrupts work without a conflict. |
 
@@ -259,7 +303,9 @@ Lean proofs are written only for these features (AGENTS.md "Proofs"):
 
 ## 8. Open questions
 
-None at spec lock.
+None at spec lock. Raised since, and tracked as GitHub issues:
+- **#26.** Whether a receipt stays valid on a moved base when the changes landed since share no build unit with it (R8 step 2).
+- **#31.** Who runs the warm pool's setup, skills and prebuild once the pool moves into Rosen: Velocity's pool worker over Rosen's pool, or a setup step in Rosen (R3, §9).
 
 ---
 
@@ -270,7 +316,9 @@ Rosen depends on these changes to Velocity. They are built in Velocity's reposit
 - **Worktrees.** Threads get workspaces from `rosen-client`. The worktree warm pool (F5) and `git worktree` calls go.
 - **PR watcher.** GitHub polling every 15 s (F6) is replaced by the Rosen event stream.
 - **PR duty.** Duty agents review, approve, submit receipts and land through `rosen-client`. Branch updates (F6) become server-side rebases.
-- **AIRC file claims.** File claims, shares, waits and overlap notices move to Rosen path claims (F14). Task claims and messaging stay in AIRC.
+- **AIRC.** Velocity's AIRC tools and view call the Rosen server (R13) instead of local files. File claims, shares, waits and overlap notices become Rosen path claims (R6). Task claims, events, messages, presence and ledgers become channel state on the server.
+- **Rebases.** Velocity asks `rosen-client` to apply a pending server rebase at the agent's step boundary, or while it is parked, in place of `airc_rebase` (R2).
+- **Enrollment and dispatch.** Velocity creates join keys and lists, approves and revokes machines through R14. Its cross-system dispatch uses the same join key, so one command adds a headless machine to both Velocity and Rosen.
 - **Dependency waits and parking.** Most waits become stacked changes. Parking remains only for path-claim waits.
 - **Build queue.** Velocity keeps its build queue. It produces pre-land receipts with priority, and runs post-land full tests and bisection (R12) at the next priority.
 
@@ -279,6 +327,6 @@ Rosen depends on these changes to Velocity. They are built in Velocity's reposit
 These features are proven in Lean after their code (F17). Every other feature ships with no Lean.
 
 - Optimistic landing and auto-revert (R8, R12): decides when the base moves; a wrong compare-and-swap, receipt binding, re-check rule, stack order or culprit revert lands unbuilt code, applies a land twice, reverts the wrong change or drops another change's work
-- Path claims (R6): first-claim-wins with shares and waits is the coordination lock for every agent; a wrong rule lets two agents own one path or strands a waiter
+- Path and piece claims (R6, R13): first-claim-wins with shares and waits is the coordination lock for every agent on every machine; a wrong rule lets two agents own one path or piece, or strands a waiter
 - Workspace deletion guard (R4): must never delete an edit not yet stored on the server, across the snapshot window and the offline journal; a wrong guard loses an agent's work
 - Three-way merge (R5): every land and rebase merges automatically; a wrong merge silently drops or duplicates lines
