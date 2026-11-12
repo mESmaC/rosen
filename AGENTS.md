@@ -95,6 +95,8 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - `crates/rosen-merge/`: every land and rebase merges through it; a bug silently drops or duplicates lines (SPEC.md R5).
 - `crates/rosen-server/src/network/`: the TLS listener, certificate pinning and machine credential check; a bug admits an unenrolled peer or sends the credential to an impostor (SPEC.md R14).
 
+- `crates/rosen-client/src/workspace/pool_worker.rs`: removes unused ready directories on restart and pool shrink; a wrong root could delete a taken workspace (SPEC.md R3).
+
 ## Pull requests
 - One piece, one branch, one PR. Name the branch `vel/<task-name>`.
 - Use your thread's own worktree. Velocity creates and removes it. Never run `git worktree add`, `git worktree remove` or `git worktree prune` yourself.
