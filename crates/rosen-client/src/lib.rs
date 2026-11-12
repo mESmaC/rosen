@@ -10,6 +10,7 @@ pub mod connection;
 pub mod daemon;
 pub mod events;
 mod import;
+pub mod receipts;
 pub mod reviews;
 pub mod snapshot;
 pub mod workspace;

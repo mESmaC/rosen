@@ -5,6 +5,7 @@ mod claim_cmd;
 mod commands;
 mod commit_cmd;
 mod import;
+mod receipt_cmd;
 mod review_cmd;
 mod server;
 
@@ -60,6 +61,7 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
             block_on(commit_cmd::watch(json, &endpoint, workspace.as_deref()))
         }
         Command::Review(review) => block_on(review_cmd::run(json, &endpoint, review)),
+        Command::Receipt(receipt) => block_on(receipt_cmd::run(json, &endpoint, receipt)),
         Command::Claim(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Claim, args)),
         Command::Share(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Share, args)),
         Command::Wait(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Wait, args)),

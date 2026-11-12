@@ -60,6 +60,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::ReviewList(filter) => {
             crate::reviews::handle(state, ReviewCall::List(filter)).await
         }
+        Request::ReceiptSubmit(req) => crate::receipts::submit(state, req).await,
     }
 }
 
