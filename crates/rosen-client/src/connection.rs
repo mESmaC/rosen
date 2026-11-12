@@ -189,6 +189,6 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-fn unexpected(response: Response) -> Error {
+pub(crate) fn unexpected(response: Response) -> Error {
     Error::Unexpected(format!("unexpected response {response:?}"))
 }
