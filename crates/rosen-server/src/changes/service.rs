@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
-/// File name of the metadata database inside the server's data directory (D13).
-pub const METADATA_DB: &str = "metadata.db";
+/// File name of the metadata database inside the server's data directory
+/// (D13). Landing, import and conflicts share this one database.
+pub const METADATA_DB: &str = "metadata.sqlite";
 
 /// The base tip an unstacked change starts from.
 #[derive(Debug, Clone, Copy)]
@@ -43,7 +44,7 @@ pub struct ChangeService {
 }
 
 impl ChangeService {
-    /// A registry stored in `<data_dir>/metadata.db`.
+    /// A registry stored in `<data_dir>/metadata.sqlite`.
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self::with_path(Some(data_dir.into().join(METADATA_DB)))
     }
