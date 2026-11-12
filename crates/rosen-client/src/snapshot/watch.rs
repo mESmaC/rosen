@@ -6,7 +6,7 @@
 //! the server well inside SPEC R2's 2 s. Writes to ignored paths are dropped
 //! before they reach the timer, so they never delay a snapshot.
 
-use super::{take_snapshot, Dirty, SnapshotReport, Snapshotter};
+use super::{journal_snapshot, take_snapshot, Dirty, SnapshotReport, Snapshotter};
 use crate::{Client, Endpoint, Error};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rosen_protocol::ErrorCode;
@@ -43,11 +43,14 @@ pub async fn watch(
     stop: impl Future<Output = ()>,
     mut report: impl FnMut(WatchEvent),
 ) -> Result<(), Error> {
-    let client = Client::connect(endpoint).await?;
-    let mut snapshotter = client.open_snapshotter(root).await?;
+    let client = Client::connect(endpoint).await.ok();
+    let mut snapshotter = match &client {
+        Some(client) => client.open_snapshotter(root).await?,
+        None => Snapshotter::open_offline(root)?,
+    };
     let mut link = Link {
         endpoint: endpoint.clone(),
-        client: Some(client),
+        client,
     };
     let (sender, mut events) = mpsc::unbounded_channel();
     let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |event| {
@@ -102,7 +105,7 @@ impl Link {
             Some(client) => client,
             None => match Client::connect(&self.endpoint).await {
                 Ok(client) => client,
-                Err(err) => return (snapshotter, Err(err)),
+                Err(_) => return journal_snapshot(snapshotter, dirty).await,
             },
         };
         let (back, result) = take_snapshot(&client, snapshotter, dirty, None).await;
