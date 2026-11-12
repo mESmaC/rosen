@@ -11,6 +11,7 @@ use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
 };
+use crate::config::{ConfigQuery, ConfigRecord};
 use crate::objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal};
 use crate::receipt::{ReceiptRecord, SubmitReceipt};
 use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
@@ -176,6 +177,9 @@ pub enum Request {
     /// local store, fetching what a cache lacks from the server (D8, R3).
     /// Clients ask before reading a tree from the local store.
     EnsureObjects(EnsureObjects),
+    /// Reads the project configuration in force at a commit, by default the
+    /// current base (SPEC "Project configuration").
+    ConfigShow(ConfigQuery),
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -203,6 +207,8 @@ pub enum Response {
     Receipt(ReceiptRecord),
     Objects(ObjectBatch),
     ObjectsLocal(ObjectsLocal),
+    /// Boxed: a configuration is far larger than every other answer.
+    Config(Box<ConfigRecord>),
 }
 
 /// The answer to [`Request::AckEvents`]: the cursor now stored, which is

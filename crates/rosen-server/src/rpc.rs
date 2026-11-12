@@ -63,6 +63,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::ReceiptSubmit(req) => crate::receipts::submit(state, req).await,
         Request::GetObjects(query) => crate::objects::get(state, query).await,
         Request::EnsureObjects(ensure) => crate::objects::ensure(state, ensure).await,
+        Request::ConfigShow(query) => crate::project_config::show(state, query).await,
     }
 }
 
