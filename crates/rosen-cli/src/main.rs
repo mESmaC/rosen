@@ -4,6 +4,7 @@ mod change_cmd;
 mod claim_cmd;
 mod commands;
 mod import;
+mod review_cmd;
 mod server;
 
 use std::process::ExitCode;
@@ -48,6 +49,7 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
             block_on(server::stream_events(json, &endpoint, agent, *after))
         }
         Command::Change(change) => block_on(change_cmd::run(json, &endpoint, change)),
+        Command::Review(review) => block_on(review_cmd::run(json, &endpoint, review)),
         Command::Claim(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Claim, args)),
         Command::Share(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Share, args)),
         Command::Wait(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Wait, args)),

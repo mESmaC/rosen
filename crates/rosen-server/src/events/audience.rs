@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 /// itself. Most events need neither field.
 #[derive(Debug, Clone, Default)]
 pub struct Concern {
-    /// Agents the change model does not record, such as reviewers (R7).
+    /// Agents the change and review records do not name.
     pub agents: Vec<AgentId>,
     /// Paths the event is about that the change may no longer hold, such as
     /// the paths a release just dropped. Holders of overlapping claims on
@@ -30,6 +30,7 @@ pub fn concerned(
 ) -> rusqlite::Result<BTreeSet<String>> {
     let mut agents: BTreeSet<String> = concern.agents.iter().map(|a| a.to_string()).collect();
     agents.extend(owner(conn, change)?);
+    agents.extend(reviewers(conn, change)?);
     agents.extend(stacked_above(conn, change)?);
     let mut patterns = held_patterns(conn, change)?;
     patterns.extend(
@@ -46,6 +47,21 @@ fn owner(conn: &Connection, change: &str) -> rusqlite::Result<Option<String>> {
     let mut stmt = conn.prepare_cached("SELECT owner FROM changes WHERE id = ?1")?;
     let mut rows = stmt.query_map([change], |row| row.get(0))?;
     rows.next().transpose()
+}
+
+/// Everyone who has commented on or resolved a review thread on the change
+/// (R7): the change model records no reviewer list, so taking part in its
+/// review is what makes an agent a reviewer.
+fn reviewers(conn: &Connection, change: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT rc.author FROM review_comments rc
+             JOIN review_threads rt ON rt.id = rc.thread_id WHERE rt.change_id = ?1
+         UNION
+         SELECT resolved_by FROM review_threads
+             WHERE change_id = ?1 AND resolved_by IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([change], |row| row.get(0))?;
+    rows.collect()
 }
 
 /// Owners of live changes anywhere above `change` in its stack: a land or

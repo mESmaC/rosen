@@ -106,7 +106,7 @@ pub enum Command {
     /// Two changes overlap when they claim the same path, or their edits in
     /// one file touch or sit within 3 lines of each other.
     Overlaps(ChangePaths),
-    /// Comment on, approve, or resolve review threads on a change.
+    /// Comment on, list or resolve review threads, or approve a change.
     #[command(subcommand)]
     Review(ReviewCommand),
     /// Submit check results for a change's merge result.
@@ -208,22 +208,36 @@ pub enum ChangeCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ReviewCommand {
-    /// Comment on a line of a change at its current head.
+    /// Start a review thread on a line of a change, or reply in a thread.
+    ///
+    /// A new thread anchors to --path and --line at the change's current
+    /// head, and the path must be a file there with that line. The anchor
+    /// never moves, even when the author edits the file later. A reply
+    /// (--thread) to a resolved thread reopens it. Prints the whole thread.
+    /// Only open and ready changes take comments.
     Comment {
-        /// Change to comment on.
+        /// Change to comment on: its ID or a unique prefix.
         change: String,
-        /// File the comment anchors to.
-        #[arg(long)]
-        path: PathBuf,
-        /// Line the comment anchors to.
-        #[arg(long)]
-        line: u32,
+        /// File the new thread anchors to, relative to the repository root.
+        #[arg(long, required_unless_present = "thread", conflicts_with = "thread")]
+        path: Option<String>,
+        /// Line (from 1) of that file the new thread anchors to.
+        #[arg(long, required_unless_present = "thread", conflicts_with = "thread")]
+        line: Option<u32>,
         /// Comment text.
         #[arg(short, long)]
         message: String,
         /// Reply in this thread instead of starting a new one.
-        #[arg(long)]
-        thread: Option<String>,
+        #[arg(long, value_name = "THREAD")]
+        thread: Option<u64>,
+        /// The head tree you read (from `rosen change show`). The comment is
+        /// refused if the change has a different head now, because its line
+        /// numbers may have shifted. Default: whatever head it has.
+        #[arg(long, value_name = "TREE")]
+        head: Option<String>,
+        /// Who is commenting. Defaults to $ROSEN_AGENT, then the OS user name.
+        #[arg(long, value_name = "AGENT")]
+        author: Option<String>,
     },
     /// Approve a change at its current head. A new head by its author voids
     /// the approval; a server rebase keeps it.
@@ -231,10 +245,22 @@ pub enum ReviewCommand {
         /// Change to approve.
         change: String,
     },
-    /// Mark a review thread resolved.
+    /// Mark a review thread resolved. Resolving a resolved thread does
+    /// nothing; a reply reopens it.
     Resolve {
-        /// Thread to resolve.
-        thread: String,
+        /// Thread to resolve, as `review comment` and `review list` print it.
+        thread: u64,
+        /// Who resolved it. Defaults to $ROSEN_AGENT, then the OS user name.
+        #[arg(long, value_name = "AGENT")]
+        by: Option<String>,
+    },
+    /// List a change's review threads and their comments, oldest first.
+    List {
+        /// Change whose threads to list: its ID or a unique prefix.
+        change: String,
+        /// Only threads in this state: open or resolved.
+        #[arg(long)]
+        state: Option<String>,
     },
 }
 
@@ -349,6 +375,7 @@ impl ReviewCommand {
             ReviewCommand::Comment { .. } => "review comment",
             ReviewCommand::Approve { .. } => "review approve",
             ReviewCommand::Resolve { .. } => "review resolve",
+            ReviewCommand::List { .. } => "review list",
         }
     }
 }

@@ -11,6 +11,7 @@ use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
 };
+use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
 use rosen_core::AgentId;
 use serde::{Deserialize, Serialize};
 
@@ -130,6 +131,13 @@ pub enum Request {
         subscriber: AgentId,
         seq: u64,
     },
+    /// Starts a review thread on a line of a change's head, or replies in
+    /// one (R7). Answered with the whole thread.
+    ReviewComment(CommentRequest),
+    /// Marks a review thread resolved. Resolving a resolved thread is a no-op.
+    ReviewResolve(ResolveRequest),
+    /// Lists a change's review threads with their comments, oldest first.
+    ReviewList(ThreadFilter),
     /// Loads a git repository's history and makes one of its branches the
     /// project's base (SPEC R1). Refused once the project has a base.
     Import {
@@ -164,6 +172,9 @@ pub enum Response {
     Released(ReleaseOutcome),
     PathClaims(Vec<PathClaim>),
     EventsAcked(EventCursor),
+    /// The answer to `review_comment` and `review_resolve`.
+    ReviewThread(ReviewThread),
+    ReviewThreads(Vec<ReviewThread>),
 }
 
 /// The answer to [`Request::AckEvents`]: the cursor now stored, which is

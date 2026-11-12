@@ -10,6 +10,7 @@ pub mod connection;
 pub mod daemon;
 pub mod events;
 mod import;
+pub mod reviews;
 pub mod workspace;
 
 pub use connection::Client;

@@ -2,6 +2,7 @@
 
 use crate::changes::{ChangeError, ChangeService};
 use crate::claims::ClaimCall;
+use crate::reviews::ReviewCall;
 use crate::{ServerState, SERVER_NAME};
 use rosen_protocol::{
     ErrorBody, ErrorCode, Outcome, Request, Response, ServerStatus, PROTOCOL_VERSION,
@@ -47,6 +48,15 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         }
         Request::AckEvents { subscriber, seq } => {
             crate::events::acknowledge(state, subscriber, seq).await
+        }
+        Request::ReviewComment(req) => {
+            crate::reviews::handle(state, ReviewCall::Comment(req)).await
+        }
+        Request::ReviewResolve(req) => {
+            crate::reviews::handle(state, ReviewCall::Resolve(req)).await
+        }
+        Request::ReviewList(filter) => {
+            crate::reviews::handle(state, ReviewCall::List(filter)).await
         }
     }
 }
