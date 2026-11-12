@@ -203,6 +203,15 @@ pub enum Request {
     /// Reads the project configuration in force at a commit, by default the
     /// current base (SPEC "Project configuration").
     ConfigShow(ConfigQuery),
+    /// Machine-local warm pool size; zero disables it.
+    PoolSize {
+        size: usize,
+    },
+    /// Atomically takes a ready workspace matching this tree.
+    PoolTake {
+        tree: rosen_core::ObjectId,
+        dest: String,
+    },
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -210,6 +219,9 @@ pub enum Request {
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
     Pong,
+    PoolSized,
+    /// Number of tracked files, or None when no matching slot is ready.
+    PoolTaken(Option<u64>),
     Status(ServerStatus),
     ShuttingDown,
     /// The answer to `change_new`, `change_show` and `change_abandon`.

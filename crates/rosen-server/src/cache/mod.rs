@@ -25,6 +25,7 @@ use tokio::sync::watch;
 /// State shared by every local connection of a cache daemon.
 pub struct CacheState {
     pub config: ServerConfig,
+    pub pool: Arc<rosen_client::workspace::pool::WarmPool>,
     pub upstream: UpstreamConfig,
     /// The machine's object store, at the path `status` reports, so clients
     /// materialise workspaces from it directly (R3).
@@ -84,12 +85,14 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
         .map_err(|err| io::Error::other(err.to_string()))?;
     let state = Arc::new(CacheState {
         config: config.clone(),
+        pool: rosen_client::workspace::pool::WarmPool::new(&config.data_dir),
         upstream,
         store,
         started: Instant::now(),
         open_connections: AtomicU64::new(0),
         shutdown: watch::Sender::new(false),
     });
+    let pool_worker = state.pool.start(config.endpoint.clone());
     loop {
         let accepted = tokio::select! {
             accepted = listener.accept() => accepted,
@@ -105,6 +108,7 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
             }
         }
     }
+    pool_worker.abort();
     // Let queued answers, such as the one to `shutdown`, reach their clients.
     let deadline = Instant::now() + Duration::from_secs(2);
     while state.open_connections.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
