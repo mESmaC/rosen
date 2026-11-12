@@ -10,7 +10,7 @@
 use std::ops::Range;
 
 use crate::diff::match_lines;
-use crate::lines::{LineInterner, split_lines};
+use crate::lines::{split_lines, LineInterner};
 
 /// One region of a three-way merge result.
 #[derive(Clone, Debug, PartialEq, Eq)]

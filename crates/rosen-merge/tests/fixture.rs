@@ -5,7 +5,7 @@
 //! two cut or resolve chunks differently, a merge can silently drop or
 //! duplicate lines while the proof still checks.
 
-use rosen_merge::{Hunk, merge_text};
+use rosen_merge::{merge_text, Hunk};
 
 /// One fixture character per line, as the model writes them.
 fn to_lines(column: &str) -> Vec<u8> {

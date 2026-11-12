@@ -1,0 +1,19 @@
+[package]
+name = "rosen-cli"
+description = "The `rosen` command-line tool, a thin layer over rosen-client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rosen"
+path = "src/main.rs"
+
+[dependencies]
+rosen-client.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

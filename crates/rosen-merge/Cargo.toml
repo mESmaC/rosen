@@ -1,8 +1,13 @@
 [package]
 name = "rosen-merge"
-description = "Three-way file merge for Rosen: line-level diff3 and path-level file merge."
+description = "Rosen three-way file merge, conflict objects and overlap detection."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
+rosen-core.workspace = true
+
+[lints]
+workspace = true

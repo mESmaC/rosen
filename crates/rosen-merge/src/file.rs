@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::lines::split_lines;
-use crate::merge::{Hunk, MarkerLabels, TextMerge, merge_text};
+use crate::merge::{merge_text, Hunk, MarkerLabels, TextMerge};
 
 /// How a path merges, from project configuration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
