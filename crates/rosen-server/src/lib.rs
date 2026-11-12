@@ -1,6 +1,7 @@
 //! The Rosen daemon (SPEC §3): one per machine, holding the project and answering
 //! the protocol in `rosen-protocol` over the local transport.
 
+pub mod conflicts;
 pub mod connection;
 pub mod events;
 pub mod listener;
