@@ -1,13 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/rosen-core",
-    "crates/rosen-store",
-    "crates/rosen-merge",
-    "crates/rosen-server",
-    "crates/rosen-client",
-    "crates/rosen-cli",
-]
+members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
