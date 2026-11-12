@@ -53,10 +53,16 @@ async fn offline_versions_survive_restart_and_replay_in_order() {
     result.unwrap();
     drop(state);
     assert_eq!(pending_journal(&workspace).unwrap(), 0);
-    let history = client
-        .change_show(&change.change.id.to_string())
-        .await
-        .unwrap();
+    verify_history(&client, &store, &change.change.id.to_string(), &workspace).await;
+    let lease = Snapshotter::open_offline(&workspace).unwrap();
+    let deleting = dir.path().join("deleting");
+    std::fs::rename(&workspace, &deleting).unwrap();
+    std::fs::remove_dir_all(deleting).unwrap();
+    drop(lease);
+}
+
+async fn verify_history(client: &Client, store: &dyn ObjectStore, change: &str, workspace: &Path) {
+    let history = client.change_show(change).await.unwrap();
     let versions: Vec<_> = history
         .change
         .snapshots
@@ -77,10 +83,10 @@ async fn offline_versions_survive_restart_and_replay_in_order() {
             b"third edit".to_vec()
         ]
     );
-    client.snapshot_workspace(&workspace, None).await.unwrap();
+    client.snapshot_workspace(workspace, None).await.unwrap();
     assert_eq!(
         client
-            .change_show(&change.change.id.to_string())
+            .change_show(change)
             .await
             .unwrap()
             .change
@@ -88,11 +94,6 @@ async fn offline_versions_survive_restart_and_replay_in_order() {
             .len(),
         3
     );
-    let lease = Snapshotter::open_offline(&workspace).unwrap();
-    let deleting = dir.path().join("deleting");
-    std::fs::rename(&workspace, &deleting).unwrap();
-    std::fs::remove_dir_all(deleting).unwrap();
-    drop(lease);
 }
 
 /// An in-process server whose base holds `main.rs` and a `.gitignore`

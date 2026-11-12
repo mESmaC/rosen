@@ -25,12 +25,21 @@ impl Journal {
     pub fn open(root: &Path) -> io::Result<Self> {
         let dir = root.join(STATE_DIR).join("journal");
         fs::create_dir_all(&dir)?;
+        // Windows refuses removing a byte-range-locked file, so the lease
+        // must live outside the workspace that R4 deletes while holding it.
+        let canonical = fs::canonicalize(root)?;
+        let locks = canonical
+            .parent()
+            .ok_or_else(|| io::Error::other("workspace has no parent"))?
+            .join(".rosen-locks");
+        fs::create_dir_all(&locks)?;
+        let key = rosen_core::ObjectId::hash_object("blob", canonical.to_string_lossy().as_bytes());
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(dir.join("lock"))?;
+            .open(locks.join(format!("{key}.lock")))?;
         lock.try_lock().map_err(io::Error::other)?;
         Ok(Self { dir, _lock: lock })
     }
