@@ -145,45 +145,51 @@ fn record(
     }
     let mut outcome = None;
     state.changes.with_conn(|conn| {
-        let id = changes::resolve(conn, &request.change)?;
-        let current = changes::get(conn, id)?;
-        if request.message.is_none() && holds_tree(&current.change, request.tree) {
-            let commit = current.change.snapshots.last().map(|s| s.commit);
-            outcome = Some(SnapshotOutcome {
-                change: current,
-                commit,
-                recorded: false,
-            });
-            return Ok(());
-        }
-        let commit = snapshot_commit(conn, &current.change, request)?;
-        let commit_id = store.put_commit(&commit).map_err(store_failure)?;
-        let snapshot = Snapshot {
-            commit: commit_id,
-            tree: request.tree,
-            kind: request
-                .message
-                .clone()
-                .map_or(SnapshotKind::Automatic, SnapshotKind::Named),
-        };
-        outcome = Some(SnapshotOutcome {
-            change: changes::record_snapshot(conn, id, snapshot)?,
-            commit: Some(commit_id),
-            recorded: true,
-        });
+        outcome = Some(record_on(conn, store, request)?);
         Ok(())
     })?;
     Ok(outcome.expect("set by every successful path above"))
+}
+
+/// Records while the caller holds the registry connection, allowing a tree
+/// edit and its snapshot to use the same head without losing concurrent writes.
+pub(crate) fn record_on(
+    conn: &mut Connection,
+    store: &dyn ObjectStore,
+    request: &SnapshotRequest,
+) -> Result<SnapshotOutcome, ChangeError> {
+    let id = changes::resolve(conn, &request.change)?;
+    let current = changes::get(conn, id)?;
+    if request.message.is_none() && holds_tree(&current.change, request.tree) {
+        let commit = current.change.snapshots.last().map(|s| s.commit);
+        return Ok(SnapshotOutcome {
+            change: current,
+            commit,
+            recorded: false,
+        });
+    }
+    let commit = snapshot_commit(conn, &current.change, request)?;
+    let commit_id = store.put_commit(&commit).map_err(store_failure)?;
+    let snapshot = Snapshot {
+        commit: commit_id,
+        tree: request.tree,
+        kind: request
+            .message
+            .clone()
+            .map_or(SnapshotKind::Automatic, SnapshotKind::Named),
+    };
+    Ok(SnapshotOutcome {
+        change: changes::record_snapshot(conn, id, snapshot)?,
+        commit: Some(commit_id),
+        recorded: true,
+    })
 }
 
 /// An automatic snapshot of the tree the change already holds stores
 /// nothing: the watcher may resend after a lost answer, or after a write
 /// that put a file back as it was.
 fn holds_tree(change: &Change, tree: ObjectId) -> bool {
-    match change.snapshots.last() {
-        Some(latest) => latest.tree == tree,
-        None => change.head == tree,
-    }
+    change.head == tree
 }
 
 fn snapshot_commit(
@@ -241,7 +247,7 @@ fn first_parent(conn: &Connection, parent: ChangeParent) -> Result<Option<Object
     }
 }
 
-fn publish(state: &ServerState, outcome: &SnapshotOutcome, named: bool) {
+pub(crate) fn publish(state: &ServerState, outcome: &SnapshotOutcome, named: bool) {
     let change = &outcome.change.change;
     let detail = serde_json::json!({
         "commit": outcome.commit,

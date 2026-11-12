@@ -30,6 +30,7 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
     // in the read or queued in the stream, never missed between the two.
     let mut events = client.subscribe(None).await?;
     loop {
+        let retry_cleanup = cleanup(&client).await?;
         if let Err(error) = refill(pool, &client).await {
             if matches!(error, Error::Disconnected | Error::NotRunning(_)) {
                 return Err(error);
@@ -43,6 +44,7 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
         tokio::select! {
             event = events.recv() => { event.ok_or(Error::Disconnected)?; }
             _ = pool.wake.notified() => {}
+            _ = tokio::time::sleep(Duration::from_secs(1)), if retry_cleanup => {}
         }
     }
 }
@@ -135,4 +137,15 @@ async fn reset_ready_root(pool: &WarmPool) -> Result<(), Error> {
     .await
     .map_err(|error| Error::Unexpected(error.to_string()))??;
     Ok(())
+}
+
+async fn cleanup(client: &Client) -> Result<bool, Error> {
+    let mut pending = false;
+    for report in client.cleanup_workspaces().await? {
+        if let Some(error) = report.error {
+            pending = true;
+            eprintln!("rosen workspace cleanup {}: {error}", report.path.display());
+        }
+    }
+    Ok(pending)
 }

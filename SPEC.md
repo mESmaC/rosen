@@ -109,6 +109,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 |---|---|
 | `rosen-core` | Data model: changes, stacks, conflicts, receipts, reviews, claims, regions. Pure logic, with no I/O. |
 | `rosen-store` | The storage backend interface and the git-format loose-object backend. |
+| `rosen-platform` | Narrow OS primitives with safe handle interfaces, including verified Windows file disposition. |
 | `rosen-merge` | Three-way file merge, conflict objects and overlap detection. |
 | `rosen-server` | The daemon: protocol, the SQLite metadata store, snapshots, server-side rebase, landing, claims, review, events, the AIRC channel, history queries, server-side workspaces, the git mirror push, the network listener and enrollment. On a machine that is not the server, the same daemon runs as the object cache that forwards to the server. |
 | `rosen-client` | The public library API Velocity links: daemon discovery and start, joining a project, workspace materialisation, the file watcher and snapshotting, applying server rebases, and the offline journal. |
@@ -155,7 +156,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
   - A workspace is built in a hidden directory beside its destination and renamed into place when complete, so a crash never leaves a partial workspace.
   - A block clone is checked by hashing one cloned file against its blob before the rest are cloned. On a mismatch, or any clone failure, the workspace is written by plain copy instead.
   - On Windows a symlink in the tree is written as a plain file holding its target, as git does by default there.
-- **Server-side workspaces.** Files live on the server, and clients read, write, list and diff them through the API, with no checkout. Writes become snapshots directly. Rosen recommends them for jobs that touch few files, such as reviewers, check runners and doc edits.
+- **Server-side workspaces.** Files live on the server, and clients read, write, list and diff them through the API, with no checkout. Writes become snapshots directly. `workspace_read` reads a file or lists a directory on the current change head; `workspace_diff` compares it with its parent. `workspace_write` writes bytes (new files are regular files and existing modes are preserved), or deletes a file with `None`, and returns its stored snapshot. Parent directories are created as needed and empty directories are pruned on deletion. Concurrent writes each build on the preceding head. Reads and writes follow server rebases directly. Rosen recommends them for jobs that touch few files, such as reviewers, check runners and doc edits.
 - **Warm pool.** Each machine's daemon keeps N ready local workspaces at the tip of the base (default 4, 0 turns the pool off). Velocity can raise N for a launch. After each land the daemon brings ready workspaces up to the new tip by rewriting only the changed files. Taking one is atomic, so two changes never get the same workspace. A take prefers a prepared workspace and reports whether it is prepared.
 - **Prepared workspaces.** Project configuration lists **prepare commands**. These are steps whose results don't depend on the workspace's path or its agent, such as installing pinned toolchains, fetching dependency caches (`lake exe cache get`) and a prebuild (`cargo build --workspace`). The daemon runs them in each ready workspace, so an agent's first build compiles only what it changes.
   - Prepare commands run for one workspace at a time per machine, at below-normal priority, so agents' own builds go first.
@@ -164,6 +165,8 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - **Template on ReFS.** On a ReFS volume the daemon keeps one prepared **template** workspace at the base tip. It makes ready workspaces, and any workspace beyond the pool, as block clones of the template, including its ignored build output (R2). Each starts prepared at almost no copy cost. Without ReFS, each ready workspace is prepared on its own.
 - **Per-agent setup stays with the owner.** Steps that depend on the agent, its credentials or its final path run after the take, by whoever took the workspace. Velocity copies untracked files such as `.env`, links skills and runs its after-take setup command (§9). Rosen never stores those files.
 - **Load limits.** Each daemon caps its machine's concurrent materialisations, and the server caps server-side workspace I/O; both queue the rest. The client caps local disk use. A request over a cap waits; it never fails or degrades another workspace.
+  - Machine admission is shared by clients and pool workers through OS file leases under the daemon's data directory. Defaults are 4 simultaneous materialisations and a 100 GiB logical workspace-content budget; the server defaults to 8 concurrent workspace I/O operations. The library can initialize other positive limits and change the disk cap while requests wait.
+  - Disk admission reserves the target files plus source-template content before copying, counts existing workspace files (including ignored output) and crash staging files, and keeps pool workspaces charged after a take. Deletion frees their budget. These limits control Rosen's workspace creation; agents' later filesystem writes are counted on the next admission scan.
 - **Accept when:** with the warm pool filled, a new prepared workspace is ready in under 2 s; an agent's first build in it compiles only what the agent changed; and two changes never share a workspace.
 
 ### R4 · Workspace lifecycle and deletion
@@ -175,8 +178,9 @@ Defaults set during spec writing. These follow from the decisions above, and cha
   - a file whose content differs from the last stored snapshot, found by a final hash scan. Ignored paths (R2) are not scanned.
 
   The refusal names the files and keeps the workspace.
+- On Windows, final removal hashes write-excluded file handles and deletes those exact objects while excluding concurrent renames. Directories are removed only when empty; newly created files are retained. Cleanup interrupted after removing durable files keeps the remaining directory for recovery. Platforms without an equivalent verified-removal primitive retain the workspace with an unsupported-operation reason.
 - A workspace whose change is closed or failed is kept until the change is explicitly deleted.
-- Deleting a workspace removes only that workspace.
+- Deleting a workspace removes only that workspace. Local workspace registrations survive daemon restart; the daemon retries guarded cleanup of landed and abandoned workspaces on startup and change events. A refused cleanup retains the registration and reports the reason.
 - **Accept when:** no sequence of crashes, deletions, offline periods and reconnects loses an edit that was written to a workspace.
 
 ### R5 · Automatic merge and conflicts

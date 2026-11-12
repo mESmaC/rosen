@@ -73,10 +73,7 @@ impl WarmPool {
         let slot = state.ready.remove(index);
         // Removing the slot under the same lock as refresh makes ownership
         // exclusive even when two clients ask for the same tree together.
-        let source = slot.path.clone();
-        let result = tokio::task::spawn_blocking(move || publish(&source, Path::new(&dest)))
-            .await
-            .unwrap_or_else(|error| Err(std::io::Error::other(error.to_string())));
+        let result = publish_slot(&slot, dest, &state.root).await;
         let files = slot.files;
         if result.is_err() {
             state.ready.push(slot);
@@ -96,7 +93,17 @@ impl WarmPool {
     }
 }
 
-fn publish(source: &Path, dest: &Path) -> std::io::Result<()> {
+async fn publish_slot(slot: &Slot, dest: String, pool_root: &Path) -> std::io::Result<()> {
+    let source = slot.path.clone();
+    let limits_root = pool_root
+        .parent()
+        .expect("pool data directory")
+        .join("workspace-limits");
+    tokio::task::spawn_blocking(move || publish(&source, Path::new(&dest), &limits_root))
+        .await
+        .unwrap_or_else(|error| Err(std::io::Error::other(error.to_string())))
+}
+fn publish(source: &Path, dest: &Path, limits_root: &Path) -> std::io::Result<()> {
     if std::fs::symlink_metadata(dest).is_ok() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
@@ -106,7 +113,8 @@ fn publish(source: &Path, dest: &Path) -> std::io::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::rename(source, dest)
+    super::limits::Budget::open(limits_root, super::limits::Settings::default())?
+        .rename_workspace(source, dest)
 }
 
 pub(super) fn refresh(

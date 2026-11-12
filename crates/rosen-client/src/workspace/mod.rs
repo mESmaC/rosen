@@ -17,7 +17,13 @@
 
 mod client;
 mod clone;
+pub(crate) mod delete;
 mod layout;
+mod lifecycle;
+mod registry;
+pub use lifecycle::{deletion_permitted, CleanupReport};
+pub use registry::WorkspaceRecord;
+pub mod limits;
 mod parallel;
 pub mod pool;
 mod pool_worker;
@@ -125,8 +131,20 @@ pub fn materialise(
     dest: &Path,
     options: &Options,
 ) -> Result<Report, MaterialiseError> {
+    materialise_with_budget(store, tree, dest, options, None)
+}
+
+/// Materialises with machine-wide admission, used by connected clients and pool workers.
+pub fn materialise_with_budget(
+    store: &dyn ObjectStore,
+    tree: ObjectId,
+    dest: &Path,
+    options: &Options,
+    budget: Option<&limits::Budget>,
+) -> Result<Report, MaterialiseError> {
     let target = Layout::of_tree(store, tree, &options.sparse)?;
     let staging = Staging::create(dest)?;
+    let _permit = reserve(budget, store, &target, options, dest, staging.path())?;
     let mut fallback = None;
     if let Some(source) = &options.source {
         if !clone::may_block_clone(&source.dir, staging.parent()) {
@@ -145,6 +163,32 @@ pub fn materialise(
     Ok(report)
 }
 
+fn reserve(
+    budget: Option<&limits::Budget>,
+    store: &dyn ObjectStore,
+    target: &Layout,
+    options: &Options,
+    dest: &Path,
+    staging: &Path,
+) -> Result<Option<limits::Permit>, MaterialiseError> {
+    let Some(budget) = budget else {
+        return Ok(None);
+    };
+    let mut bytes = 0u64;
+    for entry in &target.files {
+        bytes = bytes.saturating_add(store.read_blob(&entry.blob)?.data.len() as u64);
+    }
+    if let Some(source) = &options.source {
+        bytes = bytes.saturating_add(
+            limits::disk_bytes(&source.dir)
+                .map_err(|error| MaterialiseError::io(&source.dir, error))?,
+        );
+    }
+    budget
+        .acquire(dest, staging, bytes)
+        .map(Some)
+        .map_err(|error| MaterialiseError::io(dest, error))
+}
 /// The parallel plain copy: every directory, then every file from the store.
 fn from_store(
     store: &dyn ObjectStore,

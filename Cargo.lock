@@ -865,10 +865,12 @@ dependencies = [
 name = "rosen-client"
 version = "0.1.0"
 dependencies = [
+ "atomicwrites",
  "ignore",
  "notify",
  "reflink-copy",
  "rosen-core",
+ "rosen-platform",
  "rosen-protocol",
  "rosen-server",
  "rosen-store",
@@ -894,6 +896,13 @@ version = "0.1.0"
 dependencies = [
  "rosen-core",
  "tempfile",
+]
+
+[[package]]
+name = "rosen-platform"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

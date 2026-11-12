@@ -6,7 +6,10 @@ use rosen_core::ObjectId;
 use rosen_protocol::{ChangeRecord, EnsureObjects, Request, Response};
 use rosen_store::LooseObjectStore;
 
-use super::{materialise, Options, Report};
+use super::{
+    limits::{Budget, Settings},
+    materialise_with_budget, Options, Report,
+};
 use crate::connection::unexpected;
 use crate::snapshot::WorkspaceMarker;
 use crate::{Client, Error};
@@ -66,6 +69,7 @@ impl Client {
         let store = self.local_store().await?;
         // Seed tree metadata so a watcher can start during a server outage.
         crate::snapshot::Snapshotter::open(&store, dest)?;
+        self.register_workspace(change.change.id, dest).await?;
         Ok(report)
     }
 
@@ -82,11 +86,16 @@ impl Client {
         // its cache lacks (D8).
         self.ensure_local(tree).await?;
         let store = self.local_store().await?;
+        let limits_root = PathBuf::from(self.status().await?.data_dir).join("workspace-limits");
         let dest = dest.to_path_buf();
-        tokio::task::spawn_blocking(move || materialise(&store, tree, &dest, &options))
-            .await
-            .map_err(|error| Error::Unexpected(format!("materialisation stopped: {error}")))?
-            .map_err(Error::Workspace)
+        tokio::task::spawn_blocking(move || {
+            let budget = Budget::open(&limits_root, Settings::default())
+                .map_err(|error| super::MaterialiseError::io(&limits_root, error))?;
+            materialise_with_budget(&store, tree, &dest, &options, Some(&budget))
+        })
+        .await
+        .map_err(|error| Error::Unexpected(format!("materialisation stopped: {error}")))?
+        .map_err(Error::Workspace)
     }
 }
 

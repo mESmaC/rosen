@@ -10,6 +10,7 @@ mod import;
 mod receipt_cmd;
 mod review_cmd;
 mod server;
+mod workspace_cmd;
 
 use std::process::ExitCode;
 
@@ -63,6 +64,7 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
         Command::Workspace(WorkspaceCommand::Watch { workspace }) => {
             block_on(commit_cmd::watch(json, &endpoint, workspace.as_deref()))
         }
+        Command::Workspace(command) => block_on(workspace_cmd::run(json, &endpoint, command)),
         Command::Log {
             change,
             paths,

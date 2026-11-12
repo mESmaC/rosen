@@ -1,0 +1,18 @@
+[package]
+name = "rosen-platform"
+description = "Narrow operating-system primitives behind safe Rosen APIs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
+# The only unsafe code is the audited file-disposition ABI boundary. All
+# consumers continue to inherit the workspace's unsafe_code = forbid policy.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
