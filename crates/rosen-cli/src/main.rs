@@ -5,6 +5,7 @@ mod claim_cmd;
 mod commands;
 mod commit_cmd;
 mod config_cmd;
+mod history_cmd;
 mod import;
 mod receipt_cmd;
 mod review_cmd;
@@ -62,6 +63,23 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
         Command::Workspace(WorkspaceCommand::Watch { workspace }) => {
             block_on(commit_cmd::watch(json, &endpoint, workspace.as_deref()))
         }
+        Command::Log {
+            change,
+            paths,
+            limit,
+        } => block_on(history_cmd::log(
+            json,
+            &endpoint,
+            change.as_deref(),
+            paths,
+            *limit,
+        )),
+        Command::Diff(args) => block_on(history_cmd::diff(
+            json,
+            &endpoint,
+            args.change.as_deref(),
+            &args.paths,
+        )),
         Command::Review(review) => block_on(review_cmd::run(json, &endpoint, review)),
         Command::Receipt(receipt) => block_on(receipt_cmd::run(json, &endpoint, receipt)),
         Command::Claim(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Claim, args)),

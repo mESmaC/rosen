@@ -13,6 +13,7 @@ pub mod claims;
 pub mod conflicts;
 pub mod connection;
 pub mod events;
+pub mod history;
 pub mod import;
 pub mod landing;
 pub mod listener;
@@ -47,6 +48,7 @@ pub struct ServerState {
     pub receipts: receipts::ReceiptService,
     /// The TLS identity and bound address, once the network listener is up.
     network: OnceLock<NetworkInfo>,
+    pub history: history::HistoryService,
     pub project_config: project_config::ConfigService,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
@@ -57,6 +59,7 @@ impl ServerState {
         let state = Arc::new(Self {
             changes: changes::ChangeService::new(&config.data_dir),
             receipts: receipts::ReceiptService::new(config.clone()),
+            history: history::HistoryService::new(),
             project_config: project_config::ConfigService::new(config.clone()),
             events: EventLog::open(config.metadata_path()),
             config,
