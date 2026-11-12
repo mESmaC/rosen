@@ -40,7 +40,14 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
     match &cli.command {
         Command::Server(ServerCommand::Start) => block_on(server::start(json, &endpoint)),
         Command::Server(ServerCommand::Status) => block_on(server::status(json, &endpoint)),
-        Command::Events { after } => block_on(server::stream_events(json, &endpoint, *after)),
+        Command::Events { after, agent, all } => {
+            let agent = if *all {
+                None
+            } else {
+                Some(change_cmd::resolve_owner(agent.as_deref())?)
+            };
+            block_on(server::stream_events(json, &endpoint, agent, *after))
+        }
         Command::Change(change) => block_on(change_cmd::run(json, &endpoint, change)),
         Command::Review(review) => block_on(review_cmd::run(json, &endpoint, review)),
         Command::Claim(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Claim, args)),

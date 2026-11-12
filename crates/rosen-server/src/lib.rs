@@ -41,9 +41,9 @@ impl ServerState {
     pub fn new(config: ServerConfig) -> Arc<Self> {
         let state = Arc::new(Self {
             changes: changes::ChangeService::new(&config.data_dir),
+            events: EventLog::open(config.metadata_path()),
             config,
             started: Instant::now(),
-            events: EventLog::default(),
             open_connections: AtomicU64::new(0),
             shutdown: watch::Sender::new(false),
         });
