@@ -7,6 +7,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(super) async fn run(pool: Arc<WarmPool>, endpoint: Endpoint) {
+    // Only unused ready directories live here. Taken workspaces are moved
+    // outside this root, so restart cleanup cannot remove an agent's files.
+    loop {
+        match reset_ready_root(&pool).await {
+            Ok(()) => break,
+            Err(error) => eprintln!("rosen warm pool startup: {error}"),
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     loop {
         if let Err(error) = connected(&pool, &endpoint).await {
             eprintln!("rosen warm pool: {error}");
@@ -103,5 +112,17 @@ async fn refresh_ready(
         }
     }
     *ready = retained;
+    Ok(())
+}
+
+async fn reset_ready_root(pool: &WarmPool) -> Result<(), Error> {
+    let root = std::path::absolute(&pool.state.lock().await.root)?;
+    tokio::task::spawn_blocking(move || match std::fs::remove_dir_all(&root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    })
+    .await
+    .map_err(|error| Error::Unexpected(error.to_string()))??;
     Ok(())
 }
