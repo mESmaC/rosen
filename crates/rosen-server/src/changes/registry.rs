@@ -360,3 +360,46 @@ fn now_millis() -> i64 {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
         })
 }
+
+/// Commit a computed rebase only while both inputs still match. The write
+/// transaction prevents a concurrent snapshot or land from losing edits.
+pub fn rebase_checked(
+    conn: &mut Connection,
+    expected: &Change,
+    onto: ObjectId,
+    tree: ObjectId,
+) -> Result<ChangeRecord, ChangeError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = load(&tx, expected.id)?;
+    let base: String = tx.query_row("SELECT target FROM base_refs LIMIT 1", [], |r| r.get(0))?;
+    if current.change != *expected || base != onto.to_hex() {
+        return Err(ChangeError::Base(
+            "rebase inputs moved; retry the rebase".into(),
+        ));
+    }
+    let record = apply_and_save(&tx, expected.id, |c| {
+        c.rebase(ChangeParent::Base(onto), tree)
+    })?;
+    tx.commit()?;
+    Ok(record)
+}
+
+/// Preserve a pending rebase while appending the author's original snapshot.
+/// Both updates are one transaction; a concurrent rebase forces a retry.
+pub fn record_snapshot_merged(
+    conn: &mut Connection,
+    expected: &Change,
+    snapshot: Snapshot,
+    head: ObjectId,
+) -> Result<ChangeRecord, ChangeError> {
+    update(conn, expected.id, |current| {
+        if current != expected {
+            return Err(rosen_core::Error::InvalidPath(
+                "snapshot inputs moved; retry".into(),
+            ));
+        }
+        current.record_snapshot(snapshot)?;
+        current.head = head;
+        Ok(())
+    })
+}

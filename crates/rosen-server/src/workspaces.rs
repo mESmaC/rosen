@@ -58,6 +58,7 @@ fn edit(
             &SnapshotRequest {
                 change: id.to_string(),
                 tree,
+                from: Some(current.change.head),
                 message: None,
             },
         )
