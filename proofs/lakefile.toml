@@ -1,5 +1,5 @@
 name = "proofs"
-defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "PieceClaims", "BatchGreen"]
+defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "PieceClaims", "StackedChanges", "BatchGreen"]
 
 # One library per proof-list feature (SPEC.md §7). Each library also builds
 # its fixture exporter, so `lake build` type-checks it.
@@ -87,6 +87,14 @@ globs = ["PieceClaims.Design", "PieceClaims.Export"]
 [[lean_exe]]
 name = "piece-claims-fixtures"
 root = "PieceClaims.Export"
+
+[[lean_lib]]
+name = "StackedChanges"
+globs = ["StackedChanges.Design", "StackedChanges.Export"]
+
+[[lean_exe]]
+name = "stacked-changes-fixtures"
+root = "StackedChanges.Export"
 
 [[lean_lib]]
 name = "BatchGreen"
