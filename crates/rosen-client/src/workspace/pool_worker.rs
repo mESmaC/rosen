@@ -4,10 +4,15 @@ use super::pool::{refresh, Prep, Slot, WarmPool};
 use super::{prepare, template, Method, Options};
 use crate::{Client, Error};
 use rosen_core::ObjectId;
-use rosen_protocol::{Endpoint, LogRequest};
+use rosen_protocol::{Endpoint, EventKind, LogRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::Instant;
+
+/// Bounds on the delay before a refused workspace cleanup is retried.
+const CLEANUP_RETRY_MIN: Duration = Duration::from_secs(1);
+const CLEANUP_RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// The base tip a refill pass brought the pool to.
 struct Base {
@@ -45,8 +50,13 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
     // Subscribe before reading base: a concurrent land is either reflected
     // in the read or queued in the stream, never missed between the two.
     let mut events = client.subscribe(None).await?;
+    // Clean up at every (re)connect: events missed while disconnected are
+    // covered by reading each registration's current change state.
+    let mut schedule = CleanupSchedule::default();
     loop {
-        let retry_cleanup = cleanup(&client).await?;
+        if schedule.due {
+            schedule.ran(cleanup(&client).await?);
+        }
         let base = match refill(pool, &client).await {
             Ok(base) => base,
             Err(error) if matches!(error, Error::Disconnected | Error::NotRunning(_)) => {
@@ -68,11 +78,67 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
                 continue;
             }
         }
+        let retry_at = schedule.retry_at;
         tokio::select! {
-            event = events.recv() => { event.ok_or(Error::Disconnected)?; }
+            event = events.recv() => {
+                let event = event.ok_or(Error::Disconnected)?;
+                schedule.due |= may_close_or_reopen(event.kind);
+            }
             _ = pool.wake.notified() => {}
-            _ = tokio::time::sleep(Duration::from_secs(1)), if retry_cleanup => {}
+            _ = sleep_until(retry_at), if retry_at.is_some() => schedule.due = true,
         }
+    }
+}
+
+/// When the daemon next runs guarded cleanup of landed and abandoned
+/// workspaces (R4).
+struct CleanupSchedule {
+    due: bool,
+    retry_at: Option<Instant>,
+    delay: Duration,
+}
+
+impl Default for CleanupSchedule {
+    fn default() -> Self {
+        Self {
+            due: true,
+            retry_at: None,
+            delay: CLEANUP_RETRY_MIN,
+        }
+    }
+}
+
+impl CleanupSchedule {
+    /// A refusal on a closed change usually needs a person, and each retry
+    /// rehashes the kept workspace, so retries back off. A pass with no
+    /// refusal resets the delay. The retry is a fixed deadline: frequent
+    /// unrelated events must not keep postponing it.
+    fn ran(&mut self, refused: bool) {
+        self.due = false;
+        if refused {
+            self.retry_at = Some(Instant::now() + self.delay);
+            self.delay = (self.delay * 2).min(CLEANUP_RETRY_MAX);
+        } else {
+            self.retry_at = None;
+            self.delay = CLEANUP_RETRY_MIN;
+        }
+    }
+}
+
+/// Events that can move a change into or out of `landed` or `abandoned`.
+/// Snapshots, claims and reviews cannot, so they do not rehash kept
+/// workspaces on every write anywhere in the project.
+fn may_close_or_reopen(kind: EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Landed | EventKind::Updated | EventKind::Reverted
+    )
+}
+
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 

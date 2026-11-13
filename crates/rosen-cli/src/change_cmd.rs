@@ -9,10 +9,9 @@ use rosen_core::{AgentId, ChangeParent, ChangeState};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-/// Schema tags for `--json` output (SPEC R10). Bump on any shape change.
-const CHANGE_SCHEMA: &str = "rosen.change/v1";
-const CHANGE_LIST_SCHEMA: &str = "rosen.change.list/v1";
-const CHANGE_WORKSPACE_SCHEMA: &str = "rosen.change.workspace/v2";
+use crate::output::CHANGE_LIST_SCHEMA;
+use crate::output::CHANGE_SCHEMA;
+use crate::output::CHANGE_WORKSPACE_SCHEMA;
 
 pub async fn run(
     json: bool,
