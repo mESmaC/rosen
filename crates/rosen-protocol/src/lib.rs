@@ -10,6 +10,7 @@ pub mod claim;
 pub mod config;
 pub mod frame;
 pub mod history;
+pub mod land;
 pub mod message;
 pub mod objects;
 pub mod receipt;
@@ -30,6 +31,7 @@ pub use history::{
     FileStatus, FileVersion, LineKind, Log, LogEntry, LogRequest, MergeBaseAnswer,
     MergeResultAnswer, ReadAnswer, ReadRequest,
 };
+pub use land::{LandAnswer, LandStatus};
 pub use message::*;
 pub use objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal, WireKind, WireObject};
 pub use receipt::{ReceiptRecord, SubmitReceipt};

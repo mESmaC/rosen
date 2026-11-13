@@ -70,6 +70,9 @@ pub enum CasResult {
     },
     /// The change gained an open conflict after the land read it.
     OpenConflicts,
+    /// The change's head or state moved after the land read it, so the
+    /// receipt and approval it decided on may no longer be for its head.
+    ChangeMoved,
 }
 
 /// What [`Ledger::init_base`] did.
@@ -322,6 +325,9 @@ impl Ledger {
                 commit: parse_commit(commit)?,
             });
         }
+        if !change_unmoved(&tx, record)? {
+            return Ok(CasResult::ChangeMoved);
+        }
         match conflicts::check_landable(&tx, &record.change.to_string()) {
             Ok(()) => {}
             Err(ConflictStoreError::Conflict(_)) => return Ok(CasResult::OpenConflicts),
@@ -401,6 +407,35 @@ impl Ledger {
         )?;
         Ok(())
     }
+}
+
+/// True while the change registry still holds the change at the head the
+/// land merged and in a state that may land. Read inside the land
+/// transaction: a snapshot stored between the land's read and its swap
+/// would otherwise be marked landed without ever reaching the base.
+/// A ledger used without the change registry has nothing to contradict.
+fn change_unmoved(tx: &Connection, record: &LandRecord) -> LandResult<bool> {
+    let has_registry = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'changes'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !has_registry {
+        return Ok(true);
+    }
+    let row: Option<(String, String)> = tx
+        .query_row(
+            "SELECT state, head FROM changes WHERE id = ?1",
+            params![record.change.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.is_none_or(|(state, head)| {
+        matches!(state.as_str(), "open" | "ready") && head == record.head.to_hex()
+    }))
 }
 
 /// Reads a commit ID the ledger stored as hex.
