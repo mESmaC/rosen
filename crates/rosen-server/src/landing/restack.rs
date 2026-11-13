@@ -75,7 +75,13 @@ impl Restacker<'_> {
                 // Conflicts are stored on the change, never raised as errors
                 // (D2): the change moves anyway and its owner resolves them.
                 self.book.reparent(change, onto, None)?;
-                self.book.record_conflicts(change, &paths)?;
+                self.book.record_conflicts_at(
+                    change,
+                    &facts.merge_base,
+                    onto,
+                    &facts.head,
+                    &paths,
+                )?;
                 self.events.emit(LandingEvent::Conflict {
                     change: *change,
                     paths,
