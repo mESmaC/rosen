@@ -12,6 +12,7 @@ pub mod cache;
 pub mod changes;
 pub mod channel;
 pub mod claims;
+pub mod conflict_resolve;
 pub mod conflicts;
 pub mod connection;
 pub mod events;

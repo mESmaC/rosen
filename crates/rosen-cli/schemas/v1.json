@@ -49,6 +49,9 @@
       "$ref": "#/$defs/rosen.land~1v1"
     },
     {
+      "$ref": "#/$defs/rosen.resolve~1v1"
+    },
+    {
       "$ref": "#/$defs/rosen.config~1v1"
     },
     {
@@ -760,6 +763,46 @@
         "base_ref",
         "base",
         "outcome"
+      ],
+      "additionalProperties": false
+    },
+    "ConflictsResolved": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "resolved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "conflicts": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "path",
+              "conflicts"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "open_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "change",
+        "resolved",
+        "open_paths"
       ],
       "additionalProperties": false
     },
@@ -1721,6 +1764,25 @@
       "additionalProperties": false,
       "x-commands": [
         "land"
+      ]
+    },
+    "rosen.resolve/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.resolve/v1"
+        },
+        "resolve": {
+          "$ref": "#/$defs/ConflictsResolved"
+        }
+      },
+      "required": [
+        "schema",
+        "resolve"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "resolve"
       ]
     },
     "rosen.config/v1": {

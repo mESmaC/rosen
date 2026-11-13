@@ -214,6 +214,11 @@ pub enum Request {
         /// A change ID or unique prefix of one.
         change: String,
     },
+    /// Marks every open conflict stored in some files of a change resolved
+    /// (`rosen resolve`, R5), in one transaction. Refused for a landed or
+    /// abandoned change, and fails without changing anything when a path
+    /// holds no conflict stored on the change.
+    ConflictResolve(crate::ResolveConflicts),
     /// Loads a git repository's history and makes one of its branches the
     /// project's base (SPEC R1). Refused once the project has a base.
     Import {
@@ -326,6 +331,7 @@ pub enum Response {
     Approvals(Vec<Approval>),
     Receipt(ReceiptRecord),
     Land(LandAnswer),
+    ConflictsResolved(crate::ConflictsResolved),
     Objects(ObjectBatch),
     ObjectsLocal(ObjectsLocal),
     Log(Log),
