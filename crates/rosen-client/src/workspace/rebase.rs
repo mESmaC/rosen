@@ -33,10 +33,13 @@ impl Client {
         self.ensure_local(marker.tree).await?;
         self.ensure_local(change.change.head).await?;
         let store = self.local_store().await?;
+        // A rebase moves the workspace onto a newer base, whose ignore list
+        // may have landed since the workspace was made.
+        let ignore = self.base_config().await?.ignore;
         let root = root.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let mut snapshotter = Snapshotter::open(&store, &root)?;
-            snapshotter.apply_rebased_tree(&store, change.change.head)?;
+            snapshotter.apply_rebased_tree(&store, change.change.head, ignore)?;
             Ok(change.change.head)
         })
         .await

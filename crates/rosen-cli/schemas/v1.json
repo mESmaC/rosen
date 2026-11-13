@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Rosen CLI JSON lines, version 1",
+  "title": "Rosen CLI versioned JSON lines",
   "description": "Validate stdout one line at a time. Help/version are text. Refusals use command schemas; errors use rosen.error/v1. Event detail is event-specific. Unimplemented commands use rosen.error/v1.",
   "oneOf": [
     {
@@ -77,6 +77,9 @@
     },
     {
       "$ref": "#/$defs/rosen.server.status~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.config~1v2"
     }
   ],
   "$defs": {
@@ -964,6 +967,15 @@
         },
         "mirror": {
           "$ref": "#/$defs/Mirror"
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prepare": {
+          "$ref": "#/$defs/Prepare"
         }
       },
       "required": [
@@ -974,7 +986,9 @@
         "sensitive",
         "checks",
         "warm_pool",
-        "mirror"
+        "mirror",
+        "ignore",
+        "prepare"
       ],
       "additionalProperties": false
     },
@@ -1633,7 +1647,7 @@
           "const": "rosen.config/v1"
         },
         "config": {
-          "$ref": "#/$defs/ConfigRecord"
+          "$ref": "#/$defs/ConfigRecordV1"
         }
       },
       "required": [
@@ -2024,6 +2038,144 @@
       "x-commands": [
         "server start",
         "server status"
+      ]
+    },
+    "ProjectConfigV1": {
+      "type": "object",
+      "properties": {
+        "build_units": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/BuildUnit"
+          }
+        },
+        "workspace_inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "generated": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "registration_lists": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "sensitive": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "checks": {
+          "$ref": "#/$defs/CheckSets"
+        },
+        "warm_pool": {
+          "$ref": "#/$defs/WarmPool"
+        },
+        "mirror": {
+          "$ref": "#/$defs/Mirror"
+        }
+      },
+      "required": [
+        "build_units",
+        "workspace_inputs",
+        "generated",
+        "registration_lists",
+        "sensitive",
+        "checks",
+        "warm_pool",
+        "mirror"
+      ],
+      "additionalProperties": false
+    },
+    "ConfigRecordV1": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "base_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config": {
+          "$ref": "#/$defs/ProjectConfigV1"
+        }
+      },
+      "required": [
+        "commit",
+        "base_ref",
+        "source",
+        "error",
+        "config"
+      ],
+      "additionalProperties": false
+    },
+    "Prepare": {
+      "type": "object",
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "commands"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.config/v2": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.config/v2"
+        },
+        "config": {
+          "$ref": "#/$defs/ConfigRecord"
+        }
+      },
+      "required": [
+        "schema",
+        "config"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "config show"
       ]
     }
   }
