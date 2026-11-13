@@ -240,6 +240,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
    - A legacy edited stack with no recoverable parent-tree basis is refused rather than merged against a guessed basis that could delete intervening landed work.
    - A stacked change's merge result (step 1) measures each unlanded change in its stack from that remembered parent tree, merging them bottom first onto the base. It is the same merge the land performs once the parent has landed, so a child whose head has not caught up with its parent never reads the lands in between as deletions.
 4. After a land:
+   - the requester is answered as soon as the transaction that moves the ref commits. That transaction also records the land's post-land work as pending, so the work below runs after the answer, and recovery finishes it if the server stops first. The `landed` and `released` events, released claims and rebases can therefore follow the answer;
    - claims are released;
    - the server rebases, without rewriting commits:
      - changes stacked on the landed change, onto the new base;

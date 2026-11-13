@@ -75,8 +75,27 @@ pub struct MergePreview {
     pub outcome: MergeOutcome,
 }
 
+/// A land whose base move has committed but whose post-land work (R8 step
+/// 4) has not run yet. The ledger marks it pending in the same transaction,
+/// so a crash before [`Landing::finish_land`] leaves it to recovery.
+#[derive(Debug)]
+pub struct CommittedLand {
+    pub record: LandRecord,
+    pub attempts: u32,
+}
+
+/// How a land request ended before any post-land work.
+#[derive(Debug)]
+pub enum Decision {
+    /// This request moved the base; its post-land work is still to run.
+    Committed(CommittedLand),
+    /// Already landed, or refused: nothing is left to run.
+    Decided(LandOutcome),
+}
+
 enum Attempt {
     Done(LandOutcome),
+    Committed(CommittedLand),
     /// The base or the change moved after this attempt read it; decide again.
     Retry,
 }
@@ -187,12 +206,34 @@ impl Landing {
 
     /// Lands a change (R8 step 2). Retries a lost compare-and-swap with
     /// jittered exponential backoff; each retry re-decides, so a retry stops
-    /// as soon as the moved base needs a new receipt.
+    /// as soon as the moved base needs a new receipt. Runs the land's
+    /// post-land work before returning.
     pub fn land(&self, change: &ChangeId) -> LandResult<LandOutcome> {
+        Ok(match self.decide(change)? {
+            Decision::Committed(land) => {
+                let commit = land.record.commit;
+                let attempts = land.attempts;
+                LandOutcome::Landed {
+                    commit,
+                    attempts,
+                    restack: self.finish_land(&land),
+                }
+            }
+            Decision::Decided(outcome) => outcome,
+        })
+    }
+
+    /// Lands a change like [`Landing::land`], but returns once the base move
+    /// commits, so the requester hears of the land without waiting for the
+    /// rebases of other changes. The caller runs [`Landing::finish_land`]
+    /// next; recovery replays it if the caller never does.
+    pub fn decide(&self, change: &ChangeId) -> LandResult<Decision> {
         let mut delay = self.config.backoff_start;
         for attempt in 1..=self.config.max_attempts {
-            if let Attempt::Done(outcome) = self.attempt(change, attempt)? {
-                return Ok(outcome);
+            match self.attempt(change, attempt)? {
+                Attempt::Done(outcome) => return Ok(Decision::Decided(outcome)),
+                Attempt::Committed(land) => return Ok(Decision::Committed(land)),
+                Attempt::Retry => {}
             }
             thread::sleep(jitter(delay, change, attempt));
             delay = (delay * 2).min(self.config.backoff_cap);
@@ -200,6 +241,15 @@ impl Landing {
         Err(LandError::Contended {
             attempts: self.config.max_attempts,
         })
+    }
+
+    /// Runs the post-land work of a land this engine's [`Landing::decide`]
+    /// committed. A failure never undoes the land; [`Landing::recover`]
+    /// replays it. A recovery pass that reached the land first finishes it.
+    pub fn finish_land(&self, land: &CommittedLand) -> Result<RestackReport, String> {
+        self.post_land(&land.record, false)
+            .map(Option::unwrap_or_default)
+            .map_err(|error| error.to_string())
     }
 
     /// Replays post-land work that a crash or a failed step interrupted,
@@ -365,19 +415,7 @@ impl Landing {
             tier: facts.tier,
         };
         match self.ledger.compare_and_swap(&base, &record)? {
-            CasResult::Swapped { .. } => {
-                // Nobody else can know of this land yet, so the run is ours;
-                // a concurrent recovery pass that saw it first finishes it.
-                let restack = self
-                    .post_land(&record, false)
-                    .map(Option::unwrap_or_default)
-                    .map_err(|error| error.to_string());
-                Ok(Attempt::Done(LandOutcome::Landed {
-                    commit,
-                    attempts,
-                    restack,
-                }))
-            }
+            CasResult::Swapped { .. } => Ok(Attempt::Committed(CommittedLand { record, attempts })),
             // A moved change is decided afresh, like a moved base: the retry
             // reads its new head and state, and refuses if the receipt or
             // approval no longer covers them.
@@ -452,8 +490,10 @@ struct PostLandRun<'a> {
 impl<'a> PostLandRun<'a> {
     fn start(running: &'a Mutex<HashSet<CommitId>>, commit: CommitId) -> Option<Self> {
         let mut set = running.lock().unwrap_or_else(PoisonError::into_inner);
-        set.insert(commit)
-            .then_some(PostLandRun { running, commit })
+        // Lazily: a guard built for a run already in the set would drop
+        // here, relocking `running` while it is held and removing the other
+        // run's entry.
+        set.insert(commit).then(|| PostLandRun { running, commit })
     }
 }
 

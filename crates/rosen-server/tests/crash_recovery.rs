@@ -137,6 +137,8 @@ async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
         ready(&first, &db, change.clone()).await;
         ok(&first, Land { change }).await;
     }
+    // A land answers before its post-land work runs (issue #190).
+    first.landing.settle();
     let unfinish =
         |id| format!("UPDATE base_history SET post_land_done = 0 WHERE change_id = '{id}'");
     if a_pending {
@@ -152,6 +154,7 @@ async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
         db.execute_batch(&format!("CREATE TRIGGER crash BEFORE INSERT ON {on} = '{c}' BEGIN SELECT RAISE(ABORT, 'crash'); END")).unwrap();
     }
     let outcome = dispatch(&first, Land { change: c.clone() }).await;
+    first.landing.settle();
     assert_eq!(
         matches!(outcome, Outcome::Error(_)),
         crash == 0,
@@ -167,6 +170,7 @@ async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
     let Response::Land(answer) = ok(&restarted, Land { change: c.clone() }).await else {
         panic!()
     };
+    restarted.landing.settle();
     let retry = match answer.outcome {
         LandStatus::Landed { .. } => "landed",
         LandStatus::AlreadyLanded { .. } => "already_landed",
