@@ -214,8 +214,11 @@ impl LandingService {
         };
         let store = LooseObjectStore::open(state.config.objects_dir())
             .map_err(|err| internal(err.to_string()))?;
-        let engine =
-            Arc::new(Landing::new(ledger, deps, config).with_recheck_store(Arc::new(store)));
+        let mut engine = Landing::new(ledger, deps, config).with_recheck_store(Arc::new(store));
+        if let Some(old) = slot.as_ref() {
+            engine = engine.taking_over(old);
+        }
+        let engine = Arc::new(engine);
         *slot = Some(Arc::clone(&engine));
         Ok(engine)
     }

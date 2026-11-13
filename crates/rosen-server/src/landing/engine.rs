@@ -4,7 +4,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -113,8 +113,9 @@ pub struct Landing {
     recheck_store: Option<std::sync::Arc<dyn rosen_store::ObjectStore>>,
     /// Lands whose post-land work is running now. A recovery pass and the
     /// land's own request, or two passes, never run it at once, so one land
-    /// never releases, rebases or announces twice in parallel.
-    post_landing: Mutex<HashSet<CommitId>>,
+    /// never releases, rebases or announces twice in parallel. Shared with
+    /// the engine that replaces this one ([`Landing::taking_over`]).
+    post_landing: Arc<Mutex<HashSet<CommitId>>>,
 }
 
 impl Landing {
@@ -124,8 +125,15 @@ impl Landing {
             deps,
             config,
             recheck_store: None,
-            post_landing: Mutex::new(HashSet::new()),
+            post_landing: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Shares `old`'s record of running post-land work, so a run still going
+    /// on the engine this one replaces keeps excluding runs of the same land.
+    pub fn taking_over(mut self, old: &Landing) -> Self {
+        self.post_landing = Arc::clone(&old.post_landing);
+        self
     }
 
     /// Enables build-unit receipt reuse using immutable objects from the
