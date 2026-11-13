@@ -8,7 +8,10 @@ use crate::change::{AgentId, ChangeId};
 use crate::hash::ObjectId;
 use crate::object::{Commit, Signature};
 use crate::{Error, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+use std::str::FromStr;
 
 pub const CHANGE_TRAILER: &str = "Rosen-Change";
 pub const RECEIPT_TRAILER: &str = "Rosen-Receipt";
@@ -20,28 +23,46 @@ pub struct LandedTrailers {
     pub change: ChangeId,
     /// Absent for prose-only changes and server reverts, which land without
     /// a receipt (R8 step 1, R12).
-    pub receipt: Option<String>,
+    pub receipt: Option<ReceiptTrailer>,
     pub approvers: Vec<AgentId>,
 }
 
 impl LandedTrailers {
     fn render(&self) -> String {
-        let mut out = format!("{CHANGE_TRAILER}: {}\n", self.change);
+        let mut out = format!(
+            "{CHANGE_TRAILER}: {}
+",
+            self.change
+        );
         if let Some(receipt) = &self.receipt {
-            out.push_str(&format!("{RECEIPT_TRAILER}: {receipt}\n"));
+            out.push_str(&format!(
+                "{RECEIPT_TRAILER}: {receipt}
+"
+            ));
         }
         for approver in &self.approvers {
-            out.push_str(&format!("{APPROVAL_TRAILER}: {approver}\n"));
+            out.push_str(&format!(
+                "{APPROVAL_TRAILER}: {approver}
+"
+            ));
         }
         out
     }
 
     /// Reads Rosen's trailers from the last paragraph of a commit message.
     /// Returns `None` for commits that did not come from a land, such as
-    /// imported history.
+    /// imported history. A receipt trailer that does not parse reads as no
+    /// receipt rather than hiding the change the commit landed.
     pub fn parse(message: &[u8]) -> Option<Self> {
         let text = String::from_utf8_lossy(message);
-        let last_paragraph = text.trim_end().rsplit("\n\n").next()?;
+        let last_paragraph = text
+            .trim_end()
+            .rsplit(
+                "
+
+",
+            )
+            .next()?;
         let mut change = None;
         let mut receipt = None;
         let mut approvers = Vec::new();
@@ -51,7 +72,7 @@ impl LandedTrailers {
             };
             match key {
                 CHANGE_TRAILER => change = value.trim().parse::<ChangeId>().ok(),
-                RECEIPT_TRAILER => receipt = Some(value.trim().to_string()),
+                RECEIPT_TRAILER => receipt = value.parse::<ReceiptTrailer>().ok(),
                 APPROVAL_TRAILER => approvers.extend(AgentId::new(value.trim()).ok()),
                 _ => {}
             }
@@ -61,6 +82,96 @@ impl LandedTrailers {
             receipt,
             approvers,
         })
+    }
+}
+
+/// The receipt a land counted (R8 step 1), as its `Rosen-Receipt` trailer:
+/// `<check set> <head> <base> <submitter>`. It names the whole binding
+/// `(head, base, check set)` so the landed commit records exactly what was
+/// checked; when the base moved and the receipt was reused, `base` is older
+/// than the commit's parent.
+///
+/// Every field is a single token, so the value can never break onto a new
+/// line and forge another trailer (issue #18): the check set is validated
+/// here, and the other fields are typed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ReceiptTrailerFields")]
+pub struct ReceiptTrailer {
+    check_set: String,
+    pub head: ObjectId,
+    pub base: ObjectId,
+    pub submitter: AgentId,
+}
+
+/// The unvalidated wire form, so a deserialized trailer is checked like a
+/// constructed one.
+#[derive(Deserialize)]
+struct ReceiptTrailerFields {
+    check_set: String,
+    head: ObjectId,
+    base: ObjectId,
+    submitter: AgentId,
+}
+
+impl TryFrom<ReceiptTrailerFields> for ReceiptTrailer {
+    type Error = Error;
+    fn try_from(fields: ReceiptTrailerFields) -> Result<Self> {
+        ReceiptTrailer::new(fields.check_set, fields.head, fields.base, fields.submitter)
+    }
+}
+
+impl ReceiptTrailer {
+    pub fn new(
+        check_set: impl Into<String>,
+        head: ObjectId,
+        base: ObjectId,
+        submitter: AgentId,
+    ) -> Result<Self> {
+        let check_set = check_set.into();
+        if check_set.is_empty()
+            || check_set
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(Error::InvalidCheckSet(check_set));
+        }
+        Ok(ReceiptTrailer {
+            check_set,
+            head,
+            base,
+            submitter,
+        })
+    }
+
+    pub fn check_set(&self) -> &str {
+        &self.check_set
+    }
+}
+
+impl fmt::Display for ReceiptTrailer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {} {}",
+            self.check_set, self.head, self.base, self.submitter
+        )
+    }
+}
+
+impl FromStr for ReceiptTrailer {
+    type Err = Error;
+    fn from_str(value: &str) -> Result<Self> {
+        let malformed = || Error::InvalidCheckSet(value.to_owned());
+        let fields: Vec<&str> = value.split_whitespace().collect();
+        let [check_set, head, base, submitter] = fields[..] else {
+            return Err(malformed());
+        };
+        ReceiptTrailer::new(
+            check_set,
+            ObjectId::from_hex(head)?,
+            ObjectId::from_hex(base)?,
+            AgentId::new(submitter)?,
+        )
     }
 }
 
