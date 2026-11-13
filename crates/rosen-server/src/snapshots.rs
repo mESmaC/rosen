@@ -272,6 +272,7 @@ pub(crate) fn publish(state: &ServerState, outcome: &SnapshotOutcome, named: boo
     state
         .events
         .publish(EventKind::Snapshot, Some(change.id.to_string()), detail);
+    crate::stacks::refresh(state);
 }
 
 fn empty_tree() -> ObjectId {

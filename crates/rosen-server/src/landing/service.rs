@@ -71,7 +71,13 @@ pub async fn keep_recovering(state: Arc<ServerState>) {
     let mut delay = RETRY_START;
     loop {
         let pass = Arc::clone(&state);
-        let report = tokio::task::spawn_blocking(move || pass.landing.recover(&pass)).await;
+        let report = tokio::task::spawn_blocking(move || {
+            let report = pass.landing.recover(&pass);
+            // Children of replayed lands follow them (R8 step 4, D19).
+            crate::stacks::refresh(&pass);
+            report
+        })
+        .await;
         let complete = match report {
             Ok(Ok(report)) => {
                 for (change, why) in &report.failed {
@@ -130,6 +136,7 @@ impl LandingService {
         }
         let engine = self.engine(state)?;
         let outcome = engine.land(&id).map_err(land_body)?;
+        crate::stacks::refresh(state);
         let base_ref = engine.config().base_ref.clone();
         let base = engine
             .ledger()
@@ -296,7 +303,7 @@ impl ChangeBook for Adapters {
         let merge_base = match change.parent {
             ChangeParent::Base(commit) => commit,
             ChangeParent::Change(below) => {
-                self.with_changes(|c| changes::get(c, below))?.change.head
+                self.with_changes(|c| crate::stacks::basis(c, change.id, below))?
             }
         };
         let gate = state.landing.gate();
@@ -371,17 +378,30 @@ impl ChangeBook for Adapters {
         head: &CommitId,
         merged: Option<&TreeId>,
     ) -> LandResult<Reparent> {
+        let state = self.state()?;
         // A conflicted change stays on its old parent (`merged` is `None`),
         // so its head never holds a half-merged tree; it merges again when
-        // it lands.
-        let done = self.with_changes(|conn| {
-            changes::rebase_after_land(conn, *id, *onto, *head, merged.copied())
-        })?;
-        Ok(match done {
-            changes::AfterLand::Rebased => Reparent::Moved,
-            changes::AfterLand::AlreadyPast => Reparent::AlreadyPast,
-            changes::AfterLand::HeadMoved => Reparent::HeadMoved,
-        })
+        // it lands. Only ask whether a move would be forward.
+        let Some(_) = merged else {
+            let behind =
+                self.with_changes(|conn| changes::behind_after_land(conn, *id, *onto, *head))?;
+            return Ok(match behind {
+                changes::AfterLand::Rebased => Reparent::Moved,
+                changes::AfterLand::AlreadyPast => Reparent::AlreadyPast,
+                changes::AfterLand::HeadMoved => Reparent::HeadMoved,
+            });
+        };
+        // The stack-aware rebase merges again under the writer lock from the
+        // live head, so a snapshot stored since the restacker's merge is kept.
+        Ok(
+            match crate::stacks::land_rebase(&state, *id, *onto).map_err(backend)? {
+                crate::stacks::LandRebase::Moved => Reparent::Moved,
+                crate::stacks::LandRebase::Skipped => Reparent::AlreadyPast,
+                // The live head conflicts where the restacker's read did not:
+                // merge again from it, so its conflicts are routed.
+                crate::stacks::LandRebase::Conflicted => Reparent::HeadMoved,
+            },
+        )
     }
 
     fn release_claims(&self, id: &ChangeId) -> LandResult<()> {

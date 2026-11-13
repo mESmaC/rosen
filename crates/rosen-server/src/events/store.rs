@@ -35,7 +35,6 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-/// The newest stored sequence number, 0 when the log is empty.
 /// True when the log holds this exact event: kind, change and detail.
 pub fn holds(
     conn: &Connection,
@@ -51,6 +50,7 @@ pub fn holds(
     )
 }
 
+/// The newest stored sequence number, 0 when the log is empty.
 pub fn last_seq(conn: &Connection) -> rusqlite::Result<u64> {
     let max: Option<i64> = conn.query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))?;
     Ok(max.map_or(0, to_seq))

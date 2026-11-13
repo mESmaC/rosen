@@ -37,6 +37,9 @@ pub fn create(
     };
     let now = now_millis();
     let id = insert_with_fresh_id(&tx, owner, parent, start_tree, now)?;
+    if matches!(parent, ChangeParent::Change(_)) {
+        crate::stacks::track(&tx, id, start_tree)?;
+    }
     tx.commit()?;
     Ok(ChangeRecord {
         change: Change::new(id, owner.clone(), parent, start_tree),
@@ -201,10 +204,10 @@ pub fn rebase(
     Ok(record)
 }
 
-/// What [`rebase_after_land`] did.
+/// What a post-land rebase onto `onto` would do, per [`behind_after_land`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AfterLand {
-    /// The change moved onto the landed commit, or would have when only asked.
+    /// The change is behind `onto`, at the head the merge read.
     Rebased,
     /// The change already sits on the landed commit or a later base.
     AlreadyPast,
@@ -212,37 +215,25 @@ pub enum AfterLand {
     HeadMoved,
 }
 
-/// Moves a change onto base commit `onto` after a land (R8 step 4), but only
-/// forward and only from the head the merge read. Writes nothing when the
-/// change already sits on `onto` or a later base: lands finish their
-/// post-land work in any order, and recovery replays a land after later
-/// lands finished theirs, so without this check the older one would move the
-/// change back. Writes nothing either when a snapshot moved the head, which
-/// recovery makes likely because daemons upload their offline journals as
-/// the restarted server comes up; storing the merge of the older head would
-/// drop that snapshot's edits from the head. `merged` `None` only asks.
-pub fn rebase_after_land(
+/// Whether a change whose merge onto `onto` conflicted still needs its
+/// conflicts stored: only while it is behind `onto` and at the head the merge
+/// read. Lands finish their post-land work in any order and recovery replays
+/// a land after later lands finished theirs, so conflicts against a base
+/// older than the change's own would be stale.
+pub fn behind_after_land(
     conn: &mut Connection,
     id: ChangeId,
     onto: ObjectId,
     read_head: ObjectId,
-    merged: Option<ObjectId>,
 ) -> Result<AfterLand, ChangeError> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let current = load(&tx, id)?.change;
-    if !behind_base(&tx, current.parent, onto)? {
-        return Ok(AfterLand::AlreadyPast);
-    }
-    if current.head != read_head {
-        return Ok(AfterLand::HeadMoved);
-    }
-    if let Some(head) = merged {
-        update_in(&tx, id, |change| {
-            change.rebase(ChangeParent::Base(onto), head)
-        })?;
-        tx.commit()?;
-    }
-    Ok(AfterLand::Rebased)
+    let current = load(conn, id)?.change;
+    Ok(if !behind_base(conn, current.parent, onto)? {
+        AfterLand::AlreadyPast
+    } else if current.head != read_head {
+        AfterLand::HeadMoved
+    } else {
+        AfterLand::Rebased
+    })
 }
 
 /// True when `parent` is earlier in the base history than `onto`. A stacked
