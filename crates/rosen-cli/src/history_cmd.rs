@@ -2,15 +2,14 @@
 //! server, with no checkout.
 
 use crate::server::Succeeded;
-use rosen_client::protocol::{Diff, DiffRequest, FileDiff, LineKind, Log, LogRequest};
+use rosen_client::protocol::{Diff, DiffRequest, FileDiff, LineKind, Log, LogEntry, LogRequest};
 use rosen_client::snapshot::WorkspaceMarker;
 use rosen_client::{Endpoint, Error};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-/// Schema tags for `--json` output (SPEC R10). Bump on any shape change.
-const LOG_SCHEMA: &str = "rosen.log/v1";
-const DIFF_SCHEMA: &str = "rosen.diff/v1";
+use crate::output::DIFF_SCHEMA;
+use crate::output::LOG_SCHEMA;
 
 pub async fn log(
     json: bool,
@@ -114,10 +113,32 @@ fn print_log(json: bool, log: &Log) {
             utc_date(entry.time),
             entry.summary
         );
+        if let Some(line) = landed_line(entry) {
+            println!("    {line}");
+        }
     }
     if log.truncated {
         println!("(more history: raise --limit)");
     }
+}
+
+/// What a landed commit's receipt and approval trailers say, or `None` for a
+/// commit that carries neither.
+fn landed_line(entry: &LogEntry) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(receipt) = &entry.receipt {
+        parts.push(format!(
+            "receipt {} by {} on {}",
+            receipt.check_set(),
+            receipt.submitter,
+            receipt.base
+        ));
+    }
+    if !entry.approvers.is_empty() {
+        let names: Vec<&str> = entry.approvers.iter().map(|a| a.as_str()).collect();
+        parts.push(format!("approved by {}", names.join(", ")));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 fn print_diff(json: bool, diff: &Diff) {

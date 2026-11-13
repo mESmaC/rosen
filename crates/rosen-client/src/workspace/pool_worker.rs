@@ -2,9 +2,14 @@
 use super::pool::{refresh, seed_slot, Slot, WarmPool};
 use super::Options;
 use crate::{Client, Error};
-use rosen_protocol::{Endpoint, LogRequest};
+use rosen_protocol::{Endpoint, EventKind, LogRequest};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::Instant;
+
+/// Bounds on the delay before a refused workspace cleanup is retried.
+const CLEANUP_RETRY_MIN: Duration = Duration::from_secs(1);
+const CLEANUP_RETRY_MAX: Duration = Duration::from_secs(60);
 
 pub(super) async fn run(pool: Arc<WarmPool>, endpoint: Endpoint) {
     // Only unused ready directories live here. Taken workspaces are moved
@@ -29,8 +34,13 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
     // Subscribe before reading base: a concurrent land is either reflected
     // in the read or queued in the stream, never missed between the two.
     let mut events = client.subscribe(None).await?;
+    // Clean up at every (re)connect: events missed while disconnected are
+    // covered by reading each registration's current change state.
+    let mut schedule = CleanupSchedule::default();
     loop {
-        let retry_cleanup = cleanup(&client).await?;
+        if schedule.due {
+            schedule.ran(cleanup(&client).await?);
+        }
         if let Err(error) = refill(pool, &client).await {
             if matches!(error, Error::Disconnected | Error::NotRunning(_)) {
                 return Err(error);
@@ -41,16 +51,75 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
+        let retry_at = schedule.retry_at;
         tokio::select! {
-            event = events.recv() => { event.ok_or(Error::Disconnected)?; }
+            event = events.recv() => {
+                let event = event.ok_or(Error::Disconnected)?;
+                schedule.due |= may_close_or_reopen(event.kind);
+            }
             _ = pool.wake.notified() => {}
-            _ = tokio::time::sleep(Duration::from_secs(1)), if retry_cleanup => {}
+            _ = sleep_until(retry_at), if retry_at.is_some() => schedule.due = true,
         }
     }
 }
 
+/// When the daemon next runs guarded cleanup of landed and abandoned
+/// workspaces (R4).
+struct CleanupSchedule {
+    due: bool,
+    retry_at: Option<Instant>,
+    delay: Duration,
+}
+
+impl Default for CleanupSchedule {
+    fn default() -> Self {
+        Self {
+            due: true,
+            retry_at: None,
+            delay: CLEANUP_RETRY_MIN,
+        }
+    }
+}
+
+impl CleanupSchedule {
+    /// A refusal on a closed change usually needs a person, and each retry
+    /// rehashes the kept workspace, so retries back off. A pass with no
+    /// refusal resets the delay. The retry is a fixed deadline: frequent
+    /// unrelated events must not keep postponing it.
+    fn ran(&mut self, refused: bool) {
+        self.due = false;
+        if refused {
+            self.retry_at = Some(Instant::now() + self.delay);
+            self.delay = (self.delay * 2).min(CLEANUP_RETRY_MAX);
+        } else {
+            self.retry_at = None;
+            self.delay = CLEANUP_RETRY_MIN;
+        }
+    }
+}
+
+/// Events that can move a change into or out of `landed` or `abandoned`.
+/// Snapshots, claims and reviews cannot, so they do not rehash kept
+/// workspaces on every write anywhere in the project.
+fn may_close_or_reopen(kind: EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Landed | EventKind::Updated | EventKind::Reverted
+    )
+}
+
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<(), Error> {
+    // Read on every pass: a land can change the configured size.
+    let configured = client.base_config().await?.warm_pool.size as usize;
     let mut state = pool.state.lock().await;
+    state.size = state.requested.unwrap_or(configured);
     while state.ready.len() > state.size {
         let slot = state.ready.pop().expect("excess slot");
         std::fs::remove_dir_all(slot.path)?;
