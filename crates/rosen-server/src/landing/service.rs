@@ -205,14 +205,20 @@ impl LandingService {
         })
     }
 
-    /// Lands `id` up to its base move, or the refusal that stops it, and
-    /// hands what is left to a background task. The base move, landed
-    /// history and `landed` state commit in one transaction that also marks
-    /// the post-land work pending, so the requester is answered before that
-    /// work runs (R8 accept: 200 ms) and a crash leaves it to recovery.
+    /// Lands `id` up to its base move, or the refusal that stops it, rebases
+    /// the changes stacked on it, and hands what is left to a background
+    /// task. The base move, landed history and `landed` state commit in one
+    /// transaction that also marks the post-land work pending, so the
+    /// requester is answered before the overlap rebases run (R8 accept:
+    /// 200 ms) and a crash leaves them to recovery.
     fn decide(&self, engine: &Arc<Landing>, id: &ChangeId) -> Result<Decided, ErrorBody> {
         let (status, land) = match engine.decide(id).map_err(land_body)? {
             Decision::Committed(land) => {
+                // A failure is retried by the post-land run handed off below.
+                if let Err(why) = engine.restack_stacked(&land) {
+                    let change = land.record.change;
+                    eprintln!("rosen-server: stack rebase after {change} landed failed: {why}");
+                }
                 let commit = land.record.commit;
                 let attempts = land.attempts;
                 (Ok(LandStatus::Landed { commit, attempts }), Some(land))

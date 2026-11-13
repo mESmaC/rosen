@@ -216,7 +216,10 @@ impl Landing {
                 LandOutcome::Landed {
                     commit,
                     attempts,
-                    restack: self.finish_land(&land),
+                    restack: self
+                        .post_land(&land.record, false)
+                        .map(Option::unwrap_or_default)
+                        .map_err(|error| error.to_string()),
                 }
             }
             Decision::Decided(outcome) => outcome,
@@ -225,8 +228,9 @@ impl Landing {
 
     /// Lands a change like [`Landing::land`], but returns once the base move
     /// commits, so the requester hears of the land without waiting for the
-    /// rebases of other changes. The caller runs [`Landing::finish_land`]
-    /// next; recovery replays it if the caller never does.
+    /// rebases of other changes. The caller runs [`Landing::restack_stacked`]
+    /// and then [`Landing::finish_land`]; recovery replays the work if the
+    /// caller never does.
     pub fn decide(&self, change: &ChangeId) -> LandResult<Decision> {
         let mut delay = self.config.backoff_start;
         for attempt in 1..=self.config.max_attempts {
@@ -243,11 +247,32 @@ impl Landing {
         })
     }
 
-    /// Runs the post-land work of a land this engine's [`Landing::decide`]
-    /// committed. A failure never undoes the land; [`Landing::recover`]
-    /// replays it. A recovery pass that reached the land first finishes it.
+    /// The part of a committed land's post-land work its requester waits
+    /// for: announces the land and rebases the changes stacked on it. A
+    /// stacked child's merge result reads its parent link, recorded parent
+    /// tree and head separately, so the child must not move under a checker
+    /// that asks for it right after hearing that its parent landed.
+    /// Does nothing when a recovery pass is running the land's work now.
+    pub fn restack_stacked(&self, land: &CommittedLand) -> Result<RestackReport, String> {
+        let record = &land.record;
+        let Some(_running) = PostLandRun::start(&self.post_landing, record.commit) else {
+            return Ok(RestackReport::default());
+        };
+        self.deps.events.emit(LandingEvent::Landed {
+            change: record.change,
+            commit: record.commit,
+        });
+        self.restacker(false)
+            .rebase_stacked(&record.change, &record.commit)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Runs the rest of a land's post-land work after
+    /// [`Landing::restack_stacked`]. It replays that run, so it announces
+    /// the land only if the event log does not hold it yet. A failure never
+    /// undoes the land; [`Landing::recover`] replays it.
     pub fn finish_land(&self, land: &CommittedLand) -> Result<RestackReport, String> {
-        self.post_land(&land.record, false)
+        self.post_land(&land.record, true)
             .map(Option::unwrap_or_default)
             .map_err(|error| error.to_string())
     }
@@ -453,16 +478,21 @@ impl Landing {
         } else {
             self.deps.events.emit(landed);
         }
-        let restacker = Restacker {
+        let report = self
+            .restacker(replay)
+            .after_land(&record.change, &record.commit)?;
+        self.ledger
+            .mark_post_land_done(&record.ref_name, &record.commit)?;
+        Ok(Some(report))
+    }
+
+    fn restacker(&self, replay: bool) -> Restacker<'_> {
+        Restacker {
             book: self.deps.book.as_ref(),
             merger: self.deps.merger.as_ref(),
             events: self.deps.events.as_ref(),
             replay,
-        };
-        let report = restacker.after_land(&record.change, &record.commit)?;
-        self.ledger
-            .mark_post_land_done(&record.ref_name, &record.commit)?;
-        Ok(Some(report))
+        }
     }
 
     fn facts(&self, change: &ChangeId) -> LandResult<ChangeFacts> {
