@@ -252,12 +252,19 @@ impl Landing {
     /// stacked child's merge result reads its parent link, recorded parent
     /// tree and head separately, so the child must not move under a checker
     /// that asks for it right after hearing that its parent landed.
-    /// Does nothing when a recovery pass is running the land's work now.
+    /// Does nothing when a recovery pass is running the land's work now, or
+    /// has already finished it.
     pub fn restack_stacked(&self, land: &CommittedLand) -> Result<RestackReport, String> {
         let record = &land.record;
         let Some(_running) = PostLandRun::start(&self.post_landing, record.commit) else {
             return Ok(RestackReport::default());
         };
+        // A finished run announced the land; announcing it here would repeat it.
+        match self.ledger.post_land_pending(&record.ref_name, &record.commit) {
+            Ok(true) => {}
+            Ok(false) => return Ok(RestackReport::default()),
+            Err(error) => return Err(error.to_string()),
+        }
         self.deps.events.emit(LandingEvent::Landed {
             change: record.change,
             commit: record.commit,
