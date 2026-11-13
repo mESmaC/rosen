@@ -11,9 +11,8 @@ use rosen_client::{Endpoint, Error};
 use rosen_core::{ObjectId, ThreadState};
 use serde_json::json;
 
-/// Schema tags for `--json` output (SPEC R10). Bump on any shape change.
-const THREAD_SCHEMA: &str = "rosen.review.thread/v1";
-const THREAD_LIST_SCHEMA: &str = "rosen.review.list/v1";
+use crate::output::REVIEW_LIST_SCHEMA as THREAD_LIST_SCHEMA;
+use crate::output::REVIEW_THREAD_SCHEMA as THREAD_SCHEMA;
 
 /// A review command with its arguments checked, ready to send.
 enum ReviewCall {
@@ -163,7 +162,7 @@ fn print_approval(json: bool, approval: &Approval) {
     if json {
         println!(
             "{}",
-            json!({"schema": "rosen.review.approval/v1", "approval": approval})
+            json!({"schema": crate::output::REVIEW_APPROVAL_SCHEMA, "approval": approval})
         );
     } else {
         println!(
@@ -177,7 +176,7 @@ fn print_approvals(json: bool, approvals: &[Approval]) {
     if json {
         println!(
             "{}",
-            json!({"schema": "rosen.review.approvals/v1", "approvals": approvals})
+            json!({"schema": crate::output::REVIEW_APPROVALS_SCHEMA, "approvals": approvals})
         );
     } else {
         for approval in approvals {
