@@ -11,8 +11,8 @@ use anyhow::{bail, Context};
 use rosen_client::Client;
 use rosen_core::{AgentId, ChangeState};
 use rosen_protocol::{
-    ApproveRequest, ChangeFilter, ChangeRecord, Endpoint, ErrorCode, LandStatus, NewChange,
-    ReadRequest, Request, Response, SubmitReceipt, WorkspaceBytes, WorkspaceWrite,
+    ApproveRequest, ChangeFilter, ChangeRecord, Endpoint, ErrorCode, LandStatus, LogRequest,
+    NewChange, ReadRequest, Request, Response, SubmitReceipt, WorkspaceBytes, WorkspaceWrite,
 };
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -86,44 +86,70 @@ async fn round(args: &AgentArgs, agent: &AgentId, endpoint: &Endpoint) -> anyhow
     if landed >= args.lands {
         return Ok(true);
     }
-    let change = match resumable(&client, args, agent).await? {
+    let failure_landed = args.fail_at.is_some() && failure_landed(&client, args).await?;
+    let change = match resumable(&client, args, agent, failure_landed).await? {
         Some(change) => change,
         None => new_change(&client, agent).await?,
     };
     let path = format!("{}/{change}.rs", args.unit);
     write(&client, &change, &path, format!("// change {change}\n")).await?;
-    if args.fail_at == Some(landed) {
-        let path = format!("{}/{}", args.unit, failing::FILE_NAME);
-        write(&client, &change, &path, failing::contents(&change)).await?;
+    // A server revert reopens the culprit and lowers the landed count, so
+    // the count alone would inject the failure into a second change.
+    if args.fail_at == Some(landed) && !failure_landed {
+        write(&client, &change, &failure_path(args), failing::contents(&change)).await?;
         report(&Ack::Culprit { change: change.clone() });
     }
     land(&client, agent, &change).await?;
     Ok(false)
 }
 
-/// The newest open change to carry on with after a restart. A change that
-/// holds the failure file is the reopened culprit once the server reverts
-/// it: its owner would fix it, so the drill leaves it as R12 left it.
+/// The newest unlanded change to carry on with after a restart: open, or
+/// ready when a kill cut its land short. Once the failure has landed, an
+/// open change that holds the failure file is the culprit the server
+/// reverted and reopened: its owner would fix it, so the drill leaves it as
+/// R12 left it. Before that, it is the culprit a kill interrupted, and the
+/// agent carries on landing it.
 async fn resumable(
     client: &Client,
     args: &AgentArgs,
     agent: &AgentId,
+    failure_landed: bool,
 ) -> anyhow::Result<Option<String>> {
     let mut open = mine(client, agent, ChangeState::Open).await?;
+    open.extend(mine(client, agent, ChangeState::Ready).await?);
     open.sort_by_key(|record| record.created_at);
     while let Some(record) = open.pop() {
         let change = record.change.id.to_string();
-        if args.fail_at.is_none() || !holds_failure(client, args, &change).await? {
+        if !failure_landed || !holds_failure(client, args, &change).await? {
             return Ok(Some(change));
         }
     }
     Ok(None)
 }
 
+/// Whether the base ever held this agent's failure file. Its land and its
+/// server revert both touch it, so the base's path log is non-empty from
+/// the culprit's land onwards, even after the revert removed the file.
+async fn failure_landed(client: &Client, args: &AgentArgs) -> anyhow::Result<bool> {
+    let request = Request::Log(LogRequest {
+        at: None,
+        paths: vec![failure_path(args)],
+        limit: Some(1),
+    });
+    match call(client, request).await? {
+        Response::Log(log) => Ok(!log.entries.is_empty()),
+        other => bail!("unexpected answer to log: {other:?}"),
+    }
+}
+
+fn failure_path(args: &AgentArgs) -> String {
+    format!("{}/{}", args.unit, failing::FILE_NAME)
+}
+
 async fn holds_failure(client: &Client, args: &AgentArgs, change: &str) -> anyhow::Result<bool> {
     let request = Request::ReadFile(ReadRequest {
         at: Some(change.into()),
-        path: format!("{}/{}", args.unit, failing::FILE_NAME),
+        path: failure_path(args),
     });
     match timed(client.request(request)).await {
         Ok(_) => Ok(true),

@@ -163,7 +163,7 @@ Rosen backs its core guarantees with three layers of checking:
 
 - **Lean design proofs** for the features on the proof list: optimistic landing and auto-revert, path and piece claims, the workspace deletion guard and three-way merge. Each proof states that the model meets its SPEC section, a cost bound and an optimality result, and exports a fixture table under `proofs/fixtures/` that a Rust test checks the implementation against.
 - **A differential test** of the three-way merge against `git merge-file`.
-- **The stress run and fault drill.** `rosen-stress` drives many agents creating, claiming, receipting and landing changes, then verifies that no edit was lost and no land was applied twice. `rosen-faults drill --seed <n>` kills processes and cuts off machines at random points, and replays exactly from its seed.
+- **The stress run and fault drill.** `rosen-stress` drives many agents creating, claiming, receipting and landing changes, then verifies that no edit was lost and no land was applied twice. `rosen-faults drill --seed <n>` kills processes and cuts off machines at random points, and replays exactly from its seed. It also lands an injected failing commit and runs a post-land checker, and checks the server bisected and reverted it; `--no-failing-commit` leaves that out.
 
 AGENTS.md lists the commands for each.
 
