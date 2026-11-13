@@ -1,0 +1,178 @@
+//! Reading changed files into blobs, and sending blobs and trees to the
+//! server in frames it accepts.
+
+use super::index::{Entry, Index};
+use super::scan::{disk, stat_of};
+use super::SnapshotError;
+use crate::connection::unexpected;
+use crate::{Client, Error};
+use rosen_core::{FileMode, ObjectId};
+use rosen_protocol::{ObjectUpload, Request, Response, UploadKind, UploadObject};
+use std::collections::BTreeSet;
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::time::{Duration, SystemTime};
+
+/// Raw bytes per `put_objects` frame. Base64 grows them by a third, which
+/// keeps a full batch well inside the protocol's 64 MiB frame limit.
+const BATCH_BYTES: usize = 16 * 1024 * 1024;
+/// The largest file a snapshot can carry in one frame.
+pub const MAX_FILE_BYTES: u64 = 40 * 1024 * 1024;
+/// A timestamp this close to the read is not trusted to detect later writes:
+/// a second write in the same clock tick would leave it unchanged.
+const RACY_WINDOW: Duration = Duration::from_secs(2);
+
+/// A blob to send, with the file it came from.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ChangedBlob {
+    pub path: String,
+    pub data: Vec<u8>,
+}
+
+/// Reads each candidate into the index. Returns the blobs the server may
+/// lack: those whose content changed, and those of `unconfirmed` paths, whose
+/// last upload failed. Every file is read before the index changes, so a
+/// failed read leaves the index as it was and nothing is half-recorded.
+pub fn read_candidates(
+    root: &Path,
+    index: &mut Index,
+    candidates: &BTreeSet<String>,
+    unconfirmed: &BTreeSet<String>,
+) -> Result<Vec<ChangedBlob>, SnapshotError> {
+    let paths: BTreeSet<&String> = candidates.iter().chain(unconfirmed).collect();
+    let mut read = Vec::with_capacity(paths.len());
+    for path in paths {
+        read.push((path, read_file(root, path, index.files.get(path))?));
+    }
+    let mut changed = Vec::new();
+    for (path, file) in read {
+        let Some((entry, data)) = file else {
+            // Deleted since the scan saw it.
+            index.files.remove(path);
+            continue;
+        };
+        let same = index
+            .files
+            .get(path)
+            .is_some_and(|old| old.blob == entry.blob && old.mode == entry.mode);
+        if !same || unconfirmed.contains(path) {
+            changed.push(ChangedBlob {
+                path: path.clone(),
+                data,
+            });
+        }
+        index.files.insert(path.clone(), entry);
+    }
+    Ok(changed)
+}
+
+/// Reads one file as a blob. A symlink's blob is its target, as git stores
+/// it. `None` when the file no longer exists.
+fn read_file(
+    root: &Path,
+    rel: &str,
+    old: Option<&Entry>,
+) -> Result<Option<(Entry, Vec<u8>)>, SnapshotError> {
+    let path = disk(root, rel);
+    let meta = match fs::symlink_metadata(&path) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        other => other.map_err(|err| SnapshotError::io(&path, err))?,
+    };
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(SnapshotError::TooLarge(rel.to_owned(), meta.len()));
+    }
+    let read = if meta.file_type().is_symlink() {
+        fs::read_link(&path).map(|target| target.to_string_lossy().replace('\\', "/").into_bytes())
+    } else {
+        fs::read(&path)
+    };
+    let data = match read {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        other => other.map_err(|err| SnapshotError::io(&path, err))?,
+    };
+    let trusted = stat_of(&meta).filter(|stat| {
+        SystemTime::now()
+            .duration_since(stat.modified)
+            .is_ok_and(|age| age > RACY_WINDOW)
+    });
+    let entry = Entry {
+        mode: mode_of(&meta, old.map(|entry| entry.mode)),
+        blob: ObjectId::hash_object("blob", &data),
+        stat: trusted,
+    };
+    Ok(Some((entry, data)))
+}
+
+/// Windows has no executable bit, and R3 writes symlinks there as plain
+/// files, so a tracked file keeps the mode its tree gave it.
+#[cfg(windows)]
+fn mode_of(meta: &fs::Metadata, old: Option<FileMode>) -> FileMode {
+    if meta.file_type().is_symlink() {
+        return FileMode::Symlink;
+    }
+    old.unwrap_or(FileMode::Regular)
+}
+
+#[cfg(not(windows))]
+fn mode_of(meta: &fs::Metadata, _old: Option<FileMode>) -> FileMode {
+    use std::os::unix::fs::PermissionsExt;
+    if meta.file_type().is_symlink() {
+        FileMode::Symlink
+    } else if meta.permissions().mode() & 0o111 != 0 {
+        FileMode::Executable
+    } else {
+        FileMode::Regular
+    }
+}
+
+/// What an upload sent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sent {
+    pub blobs: u64,
+    pub trees: u64,
+    pub bytes: u64,
+}
+
+/// Sends blobs, then trees children first, so the server never sees a tree
+/// before what it names.
+pub async fn send_objects(
+    client: &Client,
+    blobs: &[ChangedBlob],
+    trees: &[(ObjectId, Vec<u8>)],
+) -> Result<Sent, Error> {
+    let objects = blobs
+        .iter()
+        .map(|blob| (UploadKind::Blob, &blob.data))
+        .chain(trees.iter().map(|(_, body)| (UploadKind::Tree, body)));
+    let mut batch = ObjectUpload::default();
+    let mut batch_bytes = 0;
+    let mut sent = Sent::default();
+    for (kind, data) in objects {
+        if batch_bytes + data.len() > BATCH_BYTES && !batch.objects.is_empty() {
+            put(client, std::mem::take(&mut batch)).await?;
+            batch_bytes = 0;
+        }
+        batch_bytes += data.len();
+        sent.bytes += data.len() as u64;
+        match kind {
+            UploadKind::Blob => sent.blobs += 1,
+            UploadKind::Tree => sent.trees += 1,
+        }
+        batch.objects.push(UploadObject {
+            kind,
+            data: data.clone(),
+        });
+    }
+    if !batch.objects.is_empty() {
+        put(client, batch).await?;
+    }
+    Ok(sent)
+}
+
+async fn put(client: &Client, batch: ObjectUpload) -> Result<(), Error> {
+    match client.request(Request::PutObjects(batch)).await? {
+        Response::ObjectsStored(_) => Ok(()),
+        other => Err(unexpected(other)),
+    }
+}
