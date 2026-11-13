@@ -164,4 +164,44 @@ impl ObjectStore for LooseObjectStore {
             Err(error) => Err(error.into()),
         }
     }
+
+    /// Inflates only the `<kind> <len>\0` header, so sizing a large blob
+    /// costs one small read instead of reading and hashing all of it.
+    fn object_size(&self, id: &ObjectId) -> Result<u64, StoreError> {
+        let file = match File::open(self.object_path(id)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(StoreError::NotFound(*id))
+            }
+            Err(error) => return Err(error.into()),
+        };
+        read_header_len(id, ZlibDecoder::new(file))
+    }
+}
+
+/// The longest header is a kind name, a space and a 20-digit u64 length.
+const MAX_HEADER: usize = 32;
+
+fn read_header_len(id: &ObjectId, mut inflated: impl Read) -> Result<u64, StoreError> {
+    let corrupt = |reason: String| StoreError::Corrupt { id: *id, reason };
+    let mut header = Vec::with_capacity(MAX_HEADER);
+    let mut byte = [0u8; 1];
+    loop {
+        let read = inflated
+            .read(&mut byte)
+            .map_err(|error| corrupt(format!("zlib: {error}")))?;
+        if read == 0 || header.len() == MAX_HEADER {
+            return Err(corrupt("missing header".into()));
+        }
+        if byte[0] == 0 {
+            break;
+        }
+        header.push(byte[0]);
+    }
+    let header = std::str::from_utf8(&header).map_err(|_| corrupt("bad header".into()))?;
+    let (kind, len) = header
+        .split_once(' ')
+        .ok_or_else(|| corrupt("bad header".into()))?;
+    ObjectKind::parse(kind.as_bytes()).map_err(|error| corrupt(error.to_string()))?;
+    len.parse().map_err(|_| corrupt("bad length".into()))
 }

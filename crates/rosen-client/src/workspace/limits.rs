@@ -1,9 +1,16 @@
 //! Machine-wide materialisation admission (SPEC R3).
-use std::collections::HashSet;
+//!
+//! Admission runs under one machine-wide registry lock, so it must stay
+//! cheap: it adds up sizes stored in the registry and never walks a
+//! directory. One process at a time rescans the workspaces' files on disk,
+//! walking them with no registry lock held, and stores what it measured.
+//! Reservations made since that scan are charged the bytes they reserved.
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,18 +30,56 @@ impl Default for Settings {
     }
 }
 
+/// The slot of a pool take's record, which never holds a slot lease.
+const NO_SLOT: usize = usize::MAX;
+
+/// How often a queued request retries admission.
+const POLL: Duration = Duration::from_millis(100);
+
+/// The youngest scan that is rescanned. A scan slower than this waits as
+/// long as it took, so scanning never keeps the disk busy more than half
+/// the time however many workspaces there are.
+const RESCAN_AFTER_MS: u64 = 1000;
+
 #[derive(Serialize, Deserialize)]
 struct Reservation {
     destination: PathBuf,
     staging: PathBuf,
     bytes: u64,
     slot: usize,
+    /// Unique and increasing, so a scan's results attach to the records it
+    /// saw. Records written before sequences existed read as 0.
+    #[serde(default)]
+    sequence: u64,
+    /// The bytes its paths held at the last scan; `None` until a scan sees it.
+    #[serde(default)]
+    measured: Option<u64>,
+    /// Its copy was running during that scan, so the measure may be partial.
+    #[serde(default)]
+    measured_in_flight: bool,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct ScanTime {
+    finished_ms: u64,
+    took_ms: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Registry {
     settings: Settings,
     workspaces: Vec<Reservation>,
+    #[serde(default)]
+    next_sequence: u64,
+    #[serde(default)]
+    last_scan: Option<ScanTime>,
+}
+
+/// One record's share of a scan: its paths no newer record also names.
+struct ScanTarget {
+    sequence: u64,
+    paths: Vec<PathBuf>,
+    in_flight: bool,
 }
 
 /// Coordinates independent clients and daemon pool workers through OS locks.
@@ -65,6 +110,8 @@ impl Budget {
             budget.save(&Registry {
                 settings,
                 workspaces: Vec::new(),
+                next_sequence: 0,
+                last_scan: None,
             })?;
         }
         Ok(budget)
@@ -76,21 +123,35 @@ impl Budget {
         loop {
             let lock = self.lock()?;
             let mut registry = self.read()?;
-            let used = self.usage(&registry)?;
-            if bytes <= registry.settings.disk_bytes.saturating_sub(used) {
+            if scan_due(&registry) {
+                if let Some(lease) = self.scan_lease()? {
+                    drop(lock);
+                    self.scan(lease)?;
+                    continue;
+                }
+            }
+            // Before the first scan finishes, existing workspaces are unknown.
+            if registry.last_scan.is_some()
+                && bytes
+                    <= registry
+                        .settings
+                        .disk_bytes
+                        .saturating_sub(self.usage(&registry)?)
+            {
                 if let Some((slot, file)) = self.free_slot(registry.settings.materialisations)? {
-                    registry.workspaces.push(Reservation {
-                        destination: destination.clone(),
-                        staging: staging.to_path_buf(),
+                    push_reservation(
+                        &mut registry,
+                        destination,
+                        staging.to_path_buf(),
                         bytes,
                         slot,
-                    });
+                    );
                     self.save(&registry)?;
                     return Ok(Permit { _slot: file });
                 }
             }
             drop(lock);
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(POLL);
         }
     }
 
@@ -108,25 +169,43 @@ impl Budget {
         let _lock = self.lock()?;
         let mut registry = self.read()?;
         // Record both names before renaming. A crash on either side of the
-        // rename therefore charges whichever name survives.
-        registry.workspaces.push(Reservation {
-            destination: std::path::absolute(to)?,
-            staging: std::path::absolute(from)?,
-            bytes: 0,
-            slot: usize::MAX,
-        });
+        // rename therefore charges whichever name survives. Until the next
+        // scan the workspace stays charged under `from`, which the last scan
+        // measured, so this record reserves nothing itself.
+        let (to_absolute, from_absolute) = (std::path::absolute(to)?, std::path::absolute(from)?);
+        push_reservation(&mut registry, to_absolute, from_absolute, 0, NO_SLOT);
         self.save(&registry)?;
         fs::rename(from, to)
     }
+
     fn lock(&self) -> io::Result<File> {
         let file = open_lock(&self.root.join("registry.lock"))?;
         file.lock()?;
         Ok(file)
     }
 
+    /// Held by the one process scanning; the OS frees it if that process dies.
+    fn scan_lease(&self) -> io::Result<Option<File>> {
+        let file = open_lock(&self.root.join("scan.lock"))?;
+        Ok(try_lock(&file)?.then_some(file))
+    }
+
     fn read(&self) -> io::Result<Registry> {
-        serde_json::from_slice(&fs::read(self.root.join("registry.json"))?)
-            .map_err(io::Error::other)
+        let mut registry: Registry =
+            serde_json::from_slice(&fs::read(self.root.join("registry.json"))?)
+                .map_err(io::Error::other)?;
+        // A client from before sequences existed rewrites the registry
+        // without them. Number its records after every surviving one, so a
+        // scan can still tell all records apart.
+        let highest = registry.workspaces.iter().map(|entry| entry.sequence).max();
+        registry.next_sequence = registry.next_sequence.max(highest.unwrap_or(0));
+        for entry in &mut registry.workspaces {
+            if entry.sequence == 0 {
+                registry.next_sequence += 1;
+                entry.sequence = registry.next_sequence;
+            }
+        }
+        Ok(registry)
     }
 
     fn save(&self, registry: &Registry) -> io::Result<()> {
@@ -156,27 +235,158 @@ impl Budget {
         Ok(None)
     }
 
-    fn usage(&self, registry: &Registry) -> io::Result<u64> {
-        let mut used = 0u64;
+    /// The records whose materialisation still holds its slot lease. Only
+    /// the newest record owns a reused slot; older workspaces still count
+    /// their files, but never inherit that slot's new lease.
+    fn active(&self, registry: &Registry) -> io::Result<HashSet<u64>> {
         let mut slots = HashSet::new();
-        let mut paths = HashSet::new();
+        let mut active = HashSet::new();
         for entry in registry.workspaces.iter().rev() {
-            let mut actual = 0u64;
+            if entry.slot != NO_SLOT
+                && slots.insert(entry.slot)
+                && !try_lock(&self.slot(entry.slot)?)?
+            {
+                active.insert(entry.sequence);
+            }
+        }
+        Ok(active)
+    }
+
+    fn usage(&self, registry: &Registry) -> io::Result<u64> {
+        let active = self.active(registry)?;
+        Ok(registry
+            .workspaces
+            .iter()
+            .map(|entry| charge(entry, active.contains(&entry.sequence)))
+            .fold(0, u64::saturating_add))
+    }
+
+    /// Measures every workspace's files without holding the registry lock,
+    /// so admissions and pool takes never wait behind a directory walk.
+    fn scan(&self, _lease: File) -> io::Result<()> {
+        let started = Instant::now();
+        let targets = self.prune_and_snapshot()?;
+        let measured = measure(&targets)?;
+        let _lock = self.lock()?;
+        let mut registry = self.read()?;
+        for entry in &mut registry.workspaces {
+            if let Some(&(bytes, in_flight)) = measured.get(&entry.sequence) {
+                entry.measured = Some(bytes);
+                entry.measured_in_flight = in_flight;
+            }
+        }
+        registry.last_scan = Some(ScanTime {
+            finished_ms: now_ms(),
+            took_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        });
+        self.save(&registry)
+    }
+
+    /// Drops records that no longer charge anything, and lists the paths
+    /// each remaining record owns. A record charges nothing when its copy
+    /// is not running and each of its paths is gone or named by a newer
+    /// record. Without this the registry grows by a record per
+    /// materialisation and per take, forever.
+    fn prune_and_snapshot(&self) -> io::Result<Vec<ScanTarget>> {
+        let _lock = self.lock()?;
+        let mut registry = self.read()?;
+        let active = self.active(&registry)?;
+        let mut claimed = HashSet::new();
+        let mut targets = Vec::new();
+        for entry in registry.workspaces.iter().rev() {
+            let mut paths = Vec::new();
             for path in [&entry.destination, &entry.staging] {
-                if paths.insert(path) {
-                    actual = actual.saturating_add(disk_bytes(path)?);
+                if claimed.insert(path.clone()) && exists(path)? {
+                    paths.push(path.clone());
                 }
             }
-            // Only the newest reservation owns a reused slot. Older workspaces
-            // still count their files, but never inherit that slot's new lease.
-            let active = slots.insert(entry.slot) && !try_lock(&self.slot(entry.slot)?)?;
-            used = used.saturating_add(if active {
-                actual.max(entry.bytes)
-            } else {
-                actual
-            });
+            let in_flight = active.contains(&entry.sequence);
+            if in_flight || !paths.is_empty() {
+                targets.push(ScanTarget {
+                    sequence: entry.sequence,
+                    paths,
+                    in_flight,
+                });
+            }
         }
-        Ok(used)
+        let kept: HashSet<u64> = targets.iter().map(|target| target.sequence).collect();
+        registry
+            .workspaces
+            .retain(|entry| kept.contains(&entry.sequence));
+        self.save(&registry)?;
+        Ok(targets)
+    }
+}
+
+fn push_reservation(
+    registry: &mut Registry,
+    destination: PathBuf,
+    staging: PathBuf,
+    bytes: u64,
+    slot: usize,
+) {
+    registry.next_sequence += 1;
+    registry.workspaces.push(Reservation {
+        destination,
+        staging,
+        bytes,
+        slot,
+        sequence: registry.next_sequence,
+        measured: None,
+        measured_in_flight: false,
+    });
+}
+
+/// A running copy is charged at least what it reserved; a record the last
+/// scan has not seen is charged only that.
+fn charge(entry: &Reservation, active: bool) -> u64 {
+    match entry.measured {
+        None => entry.bytes,
+        Some(measured) if active || entry.measured_in_flight => measured.max(entry.bytes),
+        Some(measured) => measured,
+    }
+}
+
+fn scan_due(registry: &Registry) -> bool {
+    let Some(scan) = registry.last_scan else {
+        return true;
+    };
+    // A clock that went backwards makes the age unknown, so rescan.
+    now_ms()
+        .checked_sub(scan.finished_ms)
+        .is_none_or(|age| age >= RESCAN_AFTER_MS.max(scan.took_ms))
+}
+
+/// Walks the targets in parallel: each walk waits mostly on the file system.
+fn measure(targets: &[ScanTarget]) -> io::Result<HashMap<u64, (u64, bool)>> {
+    let sizes: Vec<AtomicU64> = targets.iter().map(|_| AtomicU64::new(0)).collect();
+    let indexed: Vec<usize> = (0..targets.len()).collect();
+    super::parallel::for_each(&indexed, |&index| {
+        for path in &targets[index].paths {
+            sizes[index].fetch_add(disk_bytes(path)?, Ordering::Relaxed);
+        }
+        Ok::<(), io::Error>(())
+    })?;
+    Ok(targets
+        .iter()
+        .zip(sizes)
+        .map(|(target, size)| (target.sequence, (size.into_inner(), target.in_flight)))
+        .collect())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -198,6 +408,8 @@ fn try_lock(file: &File) -> io::Result<bool> {
 }
 
 /// Does not follow symlinks into another workspace or outside its root.
+/// Runs with no lock held, so a directory removed or renamed mid-walk,
+/// such as a staging directory being published, counts as empty.
 pub(super) fn disk_bytes(root: &Path) -> io::Result<u64> {
     let mut bytes = 0u64;
     let mut pending = vec![root.to_path_buf()];
@@ -208,7 +420,12 @@ pub(super) fn disk_bytes(root: &Path) -> io::Result<u64> {
             Err(error) => return Err(error),
         };
         if metadata.is_dir() && !metadata.is_symlink() {
-            for entry in fs::read_dir(path)? {
+            let entries = match fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
                 pending.push(entry?.path());
             }
         } else {
