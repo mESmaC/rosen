@@ -6,8 +6,10 @@
 //! only after that transaction commits, so a subscriber never sees a claim or
 //! a wake that a rollback undid.
 
-mod store;
+mod delivery;
+pub(crate) mod store;
 
+pub use delivery::recover;
 pub use store::ensure_schema;
 
 /// Every claim, share and wait record of an open or ready change, oldest
@@ -45,36 +47,36 @@ pub async fn handle(state: &Arc<ServerState>, call: ClaimCall) -> Outcome {
     finish(tokio::task::spawn_blocking(move || run(&state, call)).await)
 }
 
-/// Abandons a change, then releases its claims and wakes their waiters
-/// (R6). The release is a second transaction; if the server stops between
-/// the two, the abandoned change's records are already inert because only
-/// open and ready changes hold claims, and the next release clears them.
+/// Abandons a change and releases its claims in one transaction (R6).
 pub async fn abandon(state: &Arc<ServerState>, change: String) -> Outcome {
     let state = Arc::clone(state);
     let work = move || {
-        let record = state.changes.abandon(&change)?;
-        // Published before the release, while the change still holds its
-        // claims, so the holders of overlapping claims hear of it too.
+        let (record, released) = state.changes.abandon_releasing(&change)?;
+        // Closure already removed the claims; preserve the former paths so
+        // their overlapping holders still hear about the update.
         let detail = json!({ "state": record.change.state });
         let id = Some(record.change.id.to_string());
-        state.events.publish(EventKind::Updated, id, detail);
-        let released = state
-            .changes
-            .with_conn(|conn| store::release_all(conn, record.change.id))?;
-        publish_release(&state, &released, true);
+        let concern = Concern {
+            paths: released.released.iter().map(|r| r.path.clone()).collect(),
+            ..Concern::default()
+        };
+        state
+            .events
+            .publish_to(EventKind::Updated, id, detail, &concern);
+        recover(&state)?;
         Ok(Response::Change(record))
     };
     finish(tokio::task::spawn_blocking(work).await)
 }
 
 /// Releases a landed change's claims and wakes their waiters. Landing's
-/// `ChangeBook::release_claims` calls this; landing itself then emits the
-/// landed change's own `released` event, so only the wakes are published here.
+/// `ChangeBook::release_claims` calls this. Notifications are durable so
+/// replay can finish delivery even after the claim records are gone.
 pub fn release_landed(state: &ServerState, id: ChangeId) -> Result<ReleaseOutcome, ChangeError> {
     let released = state
         .changes
         .with_conn(|conn| store::release_all(conn, id))?;
-    publish_release(state, &released, false);
+    recover(state)?;
     Ok(released)
 }
 
@@ -110,41 +112,13 @@ fn run(state: &ServerState, call: ClaimCall) -> Result<Response, ChangeError> {
         }
         ClaimCall::Release(req) => {
             let released = changes.with_conn(|c| store::release(c, &req.change, &req.paths))?;
-            publish_release(state, &released, true);
+            recover(state)?;
             Response::Released(released)
         }
         ClaimCall::List(change) => {
             Response::PathClaims(changes.with_conn(|c| store::list(c, change.as_deref()))?)
         }
     })
-}
-
-/// One `released` event for the releasing change, then one for each woken
-/// waiter, addressed to the waiter's change so its subscriber can wake.
-fn publish_release(state: &ServerState, released: &ReleaseOutcome, include_releaser: bool) {
-    let releaser = released.change.to_string();
-    if include_releaser && !released.released.is_empty() {
-        let paths: Vec<String> = released.released.iter().map(|r| r.path.clone()).collect();
-        let detail = json!({ "paths": paths, "woken": released.woken });
-        // The change no longer holds these paths, so name them: holders of
-        // overlapping shares and waits are concerned by the release (R9).
-        let concern = Concern {
-            paths,
-            ..Concern::default()
-        };
-        state.events.publish_to(
-            EventKind::Released,
-            Some(releaser.clone()),
-            detail,
-            &concern,
-        );
-    }
-    for woken in &released.woken {
-        let detail = json!({ "path": woken.path, "released_by": releaser, "wake": true });
-        state
-            .events
-            .publish(EventKind::Released, Some(woken.change.to_string()), detail);
-    }
 }
 
 fn finish(joined: Result<Result<Response, ChangeError>, tokio::task::JoinError>) -> Outcome {
