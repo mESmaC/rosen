@@ -17,6 +17,12 @@ impl Client {
     /// Flushes writes while the change is open, then independently rehashes
     /// disk contents. Any inability to establish durability keeps the files.
     pub async fn workspace_delete(&self, root: &Path) -> Result<(), Error> {
+        let _cleanup = self.cleanup_lock().await?;
+        self.delete_locked(root).await
+    }
+
+    /// [`Client::workspace_delete`] for a caller holding the cleanup lock.
+    async fn delete_locked(&self, root: &Path) -> Result<(), Error> {
         reject_symlink(root)?;
         let root = std::fs::canonicalize(root)?;
         self.check_workspace_boundary(&root).await?;
@@ -24,6 +30,7 @@ impl Client {
         let record = WorkspaceRecord {
             change: marker.change,
             path: root.clone(),
+            kept: None,
         };
         let staged = staging_path(&record)?;
         if staged.try_exists()? {
@@ -36,11 +43,11 @@ impl Client {
         if !change.change.state.is_closed() {
             self.snapshot_workspace(&root, None).await?;
         }
-        let _original_lease = self.verify_workspace_durable(&root).await?;
+        let _original_lease = self.verify_workspace_durable(&root, false).await?;
         // The original registration also identifies this deterministic
         // sibling, so a crash after rename can be recovered at daemon start.
         std::fs::rename(&root, &staged)?;
-        let staged_result = self.verify_workspace_durable(&staged).await;
+        let staged_result = self.verify_workspace_durable(&staged, false).await;
         if let Err(err) = &staged_result {
             // Never replace a directory someone created at the old path.
             if !root.try_exists()? {
@@ -73,7 +80,16 @@ impl Client {
         Ok(())
     }
 
-    async fn verify_workspace_durable(&self, root: &Path) -> Result<Snapshotter, Error> {
+    /// `staged` marks a directory renamed aside only after an earlier pass
+    /// verified it. Removal there may have been interrupted after deleting
+    /// some verified files, so a missing tracked file is already removed
+    /// rather than an unstored deletion; changed and added files still keep
+    /// it (issue #90).
+    async fn verify_workspace_durable(
+        &self,
+        root: &Path,
+        staged: bool,
+    ) -> Result<Snapshotter, Error> {
         let marker = WorkspaceMarker::read(root)?;
         self.ensure_local(marker.tree).await?;
         let store = self.local_store().await?;
@@ -86,7 +102,11 @@ impl Client {
                 scan.unuploaded_paths()?.join(", ")
             )));
         }
-        let paths = scan.unstored_paths()?;
+        let paths = if staged {
+            scan.unstored_paths_on_disk()?
+        } else {
+            scan.unstored_paths()?
+        };
         if !deletion_permitted(0, 0, paths.len()) {
             return Err(kept(format!("unstored files: {}", paths.join(", "))));
         }
@@ -105,17 +125,36 @@ impl Client {
         Ok(scan)
     }
 
-    /// Reconciles durable registrations after startup or a change event.
+    /// Reconciles durable registrations after startup or a change event:
+    /// deletes the workspaces of landed and abandoned changes (R4). A refusal
+    /// is kept on the registration, so `rosen workspace list` and
+    /// `Session::workspaces` report why the workspace is still there.
     pub async fn cleanup_workspaces(&self) -> Result<Vec<CleanupReport>, Error> {
+        let _cleanup = self.cleanup_lock().await?;
         let mut reports = Vec::new();
         for record in self.workspace_list().await? {
             let result = self.cleanup_workspace(&record).await;
-            match result {
-                Ok(false) => {}
-                result => reports.push(CleanupReport {
+            let kept = match &result {
+                Ok(_) => None,
+                Err(err) => Some(err.to_string()),
+            };
+            // A finished cleanup already removed the registration. A lost
+            // server connection says nothing about the workspace, so it
+            // neither records nor clears a reason.
+            let unreachable = matches!(result, Err(Error::Disconnected | Error::NotRunning(_)));
+            if !matches!(result, Ok(true)) && !unreachable {
+                if let Err(err) = self.set_kept_reason(&record, kept.clone()).await {
+                    eprintln!(
+                        "rosen workspace cleanup {}: recording reason: {err}",
+                        record.path.display()
+                    );
+                }
+            }
+            if !matches!(result, Ok(false)) {
+                reports.push(CleanupReport {
                     path: record.path,
-                    error: result.err().map(|err| err.to_string()),
-                }),
+                    error: kept,
+                });
             }
         }
         Ok(reports)
@@ -146,12 +185,12 @@ impl Client {
             verify_registration(&staged, record)?;
             self.check_workspace_boundary(&record.path).await?;
             self.check_workspace_boundary(&staged).await?;
-            let mut staged_lease = self.verify_workspace_durable(&staged).await?;
+            let mut staged_lease = self.verify_workspace_durable(&staged, true).await?;
             staged_lease.remove_verified()?;
             self.unregister_workspace(record).await?;
         } else {
             verify_registration(&record.path, record)?;
-            self.workspace_delete(&record.path).await?;
+            self.delete_locked(&record.path).await?;
         }
         Ok(true)
     }
@@ -162,8 +201,7 @@ fn staging_path(record: &WorkspaceRecord) -> Result<PathBuf, Error> {
         .path
         .parent()
         .ok_or_else(|| kept("cannot delete a root"))?;
-    let body = serde_json::to_vec(record).map_err(std::io::Error::other)?;
-    let id = rosen_core::ObjectId::hash_object("blob", &body);
+    let id = record.identity()?;
     Ok(parent.join(format!(".rosen-delete-{}-{id}", record.change)))
 }
 

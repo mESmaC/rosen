@@ -28,6 +28,8 @@ async fn deletion_stores_edits_or_keeps_and_names_them() {
     offline_journal_keeps_workspace(&client, &dir.path().join("journalled")).await;
     #[cfg(windows)]
     writable_handle_keeps_workspace(&client, &dir.path().join("writable")).await;
+    #[cfg(windows)]
+    interrupted_cleanup_finishes(&client, &data, &dir.path().join("interrupted")).await;
     daemon_cleans_closed_workspace(&client, &endpoint, &data, &dir.path().join("automatic")).await;
 }
 
@@ -145,6 +147,44 @@ async fn writable_handle_keeps_workspace(client: &Client, workspace: &Path) {
     assert_eq!(std::fs::read(kept.join("main.rs")).unwrap(), original);
     drop(writer);
 }
+/// Issue #90: a crash after verified removal deleted some tracked files of
+/// the staged directory must not leave a cleanup that refuses forever.
+#[cfg(windows)]
+async fn interrupted_cleanup_finishes(client: &Client, data: &Path, workspace: &Path) {
+    let change = new_workspace(client, workspace).await;
+    close_without_snapshot(client, &change).await;
+    // The registration file's name is the identity that names the staging
+    // directory beside the workspace.
+    let identity = std::fs::read_dir(data.join("workspaces"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension().is_some_and(|ext| ext == "json")
+                && std::fs::read_to_string(path)
+                    .unwrap()
+                    .contains(&change.change.id.to_string())
+        })
+        .expect("workspace was not registered");
+    let staged = workspace.with_file_name(format!(
+        ".rosen-delete-{}-{}",
+        change.change.id,
+        identity.file_stem().unwrap().to_string_lossy()
+    ));
+    std::fs::rename(workspace, &staged).unwrap();
+    std::fs::remove_file(staged.join("main.rs")).unwrap();
+    // Earlier scenarios' kept workspaces are refused in the same pass.
+    let reports = client.cleanup_workspaces().await.unwrap();
+    let report = reports
+        .iter()
+        .find(|report| report.path.ends_with(workspace.file_name().unwrap()))
+        .expect("interrupted cleanup was not attempted");
+    assert!(
+        report.error.is_none(),
+        "interrupted cleanup was refused: {report:?}"
+    );
+    assert!(!staged.exists(), "staged workspace was kept");
+}
+
 async fn daemon_cleans_closed_workspace(
     client: &Client,
     endpoint: &Endpoint,
