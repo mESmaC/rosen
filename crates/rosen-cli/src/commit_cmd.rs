@@ -7,8 +7,7 @@ use rosen_client::{Endpoint, Error};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-/// Schema tag for `--json` output (SPEC R10). Bump on any shape change.
-const SNAPSHOT_SCHEMA: &str = "rosen.snapshot/v1";
+use crate::output::SNAPSHOT_SCHEMA;
 
 /// Stores a named snapshot of the workspace holding `workspace`, or the
 /// current directory.
@@ -48,8 +47,7 @@ pub async fn watch(
         WatchEvent::Snapshot(report) if report.recorded => print_report(json, &report),
         WatchEvent::Snapshot(_) => {}
         WatchEvent::Failed(err) if json => {
-            let body = json!({"schema": SNAPSHOT_SCHEMA, "error": err.to_string()});
-            println!("{body}");
+            crate::output::print_error(Some("workspace watch"), &err.to_string());
         }
         WatchEvent::Failed(err) => eprintln!("rosen: snapshot failed, retrying: {err}"),
     })

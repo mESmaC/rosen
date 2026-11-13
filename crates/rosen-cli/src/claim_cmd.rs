@@ -5,11 +5,10 @@ use rosen_client::protocol::{ClaimHolder, ClaimOutcome, ClaimRequest};
 use rosen_client::{Client, Endpoint, Error};
 use serde_json::json;
 
-/// Schema tags for `--json` output (SPEC R10). Bump on any shape change.
-const CLAIM_SCHEMA: &str = "rosen.claim/v1";
-const SHARE_SCHEMA: &str = "rosen.share/v1";
-const WAIT_SCHEMA: &str = "rosen.wait/v1";
-const RELEASE_SCHEMA: &str = "rosen.release/v1";
+use crate::output::CLAIM_SCHEMA;
+use crate::output::RELEASE_SCHEMA;
+use crate::output::SHARE_SCHEMA;
+use crate::output::WAIT_SCHEMA;
 
 #[derive(Clone, Copy)]
 pub enum ClaimVerb {
