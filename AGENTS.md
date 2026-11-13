@@ -17,6 +17,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Re-check fixtures: `lake exe recheck-fixtures > fixtures/recheck.tsv` in `proofs/`.
 - Workspace deletion fixtures: `lake exe workspace-deletion-fixtures > fixtures/workspace-deletion.tsv` in `proofs/`.
 - Fixture tables, regenerated from `proofs/` after a model changes: `lake exe landing-fixtures > fixtures/landing.tsv` and `lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv`.
+- §5 stress run on one machine: `cargo build --release -p rosen-server -p rosen-stress`, then `target/release/rosen-stress local --dir <new dir>`. Across machines: `rosen-stress seed`, `rosen import` on the server, `rosen-stress agents` on each machine, then `rosen-stress verify <reports…>`; `rosen-stress --help` has the flags.
 - Fault drill (SPEC.md §5): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed <n>`. It prints a JSON report, exits non-zero when a guarantee breaks, and replays exactly from its seed.
 - CI runs the Rust build, lint and tests on Windows, and the Rust build on Linux.
 
