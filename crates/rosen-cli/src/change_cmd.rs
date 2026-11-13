@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// Schema tags for `--json` output (SPEC R10). Bump on any shape change.
 const CHANGE_SCHEMA: &str = "rosen.change/v1";
 const CHANGE_LIST_SCHEMA: &str = "rosen.change.list/v1";
-const CHANGE_WORKSPACE_SCHEMA: &str = "rosen.change.workspace/v1";
+const CHANGE_WORKSPACE_SCHEMA: &str = "rosen.change.workspace/v2";
 
 pub async fn run(
     json: bool,
