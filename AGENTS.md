@@ -8,6 +8,13 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - For a project with a pinned Lean project, run `lake build` in `proofs/` before pushing proof changes.
 - Run the project's local checks on the merge result before marking a PR ready. Lint reports zero warnings.
 - Build and check only what your change can affect. A change to docs or SPEC.md needs no build. A change to one part, such as the UI or one package, needs that part's checks, not the whole project's. Never run a build or check again when nothing it covers changed since it last passed.
+- Rust build: `cargo build --workspace`. For one crate, use `cargo build -p <crate>`.
+- Rust lint, zero warnings: `cargo clippy --workspace --all-targets -- -D warnings`. For one crate, use `-p <crate>` in place of `--workspace`.
+- Rust tests: `cargo test --workspace`. For one crate, use `cargo test -p <crate>`.
+- Proofs: `lake build` in `proofs/`.
+- Workspace deletion fixtures: `lake exe workspace-deletion-fixtures > fixtures/workspace-deletion.tsv` in `proofs/`.
+- Fixture tables, regenerated from `proofs/` after a model changes: `lake exe landing-fixtures > fixtures/landing.tsv` and `lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv`.
+- CI runs the Rust build, lint and tests on Windows, and the Rust build on Linux.
 
 ## Code
 - Keep functions under 60 lines. Split anything longer.
@@ -66,11 +73,33 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Identify generated files and registration lists for this project here as they are established.
 - Regenerate generated files after a merge. Never merge them by hand.
 - Keep both additions to shared registration lists, inside each module's group.
+- Generated files:
+  - `Cargo.lock`: regenerate with cargo.
+  - `proofs/lake-manifest.json`: regenerate with lake.
+  - `proofs/fixtures/*.tsv`: regenerate with the fixture commands under Commands.
+- Registration lists:
+  - `Cargo.toml` `[workspace.dependencies]`.
+  - `crates/rosen-protocol/src/message.rs`: the `Request`, `Response`, `ErrorCode` and `EventKind` enums.
+  - `crates/rosen-server/src/rpc.rs`: the `dispatch` match.
+  - `crates/rosen-cli/src/commands.rs`: the `Command` enum and its subcommand enums.
+  - `proofs/lakefile.toml`: the `lean_lib` and `lean_exe` entries.
 
 ## Sensitive paths
 - PR duty gives a PR that touches a path listed here the sensitive review: full review, the full stress suite before merge, and a confidence proof at the strongest level its language allows.
 - List one path, folder or glob per bullet, as inline code, followed by why it is sensitive. Add migrations, worktree deletion and auth code as they are established.
 - `.github/workflows/`: CI config.
+- `crates/rosen-server/src/landing/`: decides when the base moves; a bug lands unchecked code or applies a land twice (SPEC.md R8).
+- `crates/rosen-server/src/changes/schema.rs`: SQLite schema and migration for changes and snapshots; a bad migration corrupts or loses metadata.
+- `crates/rosen-server/src/conflicts.rs`: SQLite schema and storage for stored conflicts; a bug lets a conflicted change land (SPEC.md R5).
+- `crates/rosen-client/src/workspace/lifecycle.rs`: guarded workspace deletion; an unsafe deletion loses local edits (SPEC.md R4).
+- `crates/rosen-client/src/workspace/delete.rs`: holds verified files and removes exact objects; a pathname race can lose another workspace's edits.
+- `crates/rosen-platform/`: the audited Windows file-disposition boundary; its handle and ABI contract protects verified deletion.
+- `crates/rosen-store/`: the authoritative object store; a bug loses or corrupts objects, and objects are never deleted (SPEC.md D5).
+- `crates/rosen-protocol/src/transport_windows.rs`: restricts the named pipe to the current user; a bug exposes the server to other users.
+- `crates/rosen-merge/`: every land and rebase merges through it; a bug silently drops or duplicates lines (SPEC.md R5).
+- `crates/rosen-server/src/network/`: the TLS listener, certificate pinning and machine credential check; a bug admits an unenrolled peer or sends the credential to an impostor (SPEC.md R14).
+
+- `crates/rosen-client/src/workspace/pool_worker.rs`: removes unused ready directories on restart and pool shrink; a wrong root could delete a taken workspace (SPEC.md R3).
 
 ## Pull requests
 - One piece, one branch, one PR. Name the branch `vel/<task-name>`.

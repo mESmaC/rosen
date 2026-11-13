@@ -1,0 +1,25 @@
+abc	abc	abc	abc
+abc	aXc	abc	aXc
+abc	abc	aYc	aYc
+abc	aXc	aXc	aXc
+abc	aXc	aYc	a<X|b|Y>c
+abcde	aXcde	abcYe	aXcYe
+abcd	aXcd	abYd	a<Xc|bc|bY>d
+abc	ac	aYc	a<|b|Y>c
+abc	ac	ac	ac
+abc	Xabc	abcY	XabcY
+abc	Xabc	Yabc	<X||Y>abc
+abc	Xabc	Xabc	Xabc
+	ab	ab	ab
+	ab	cd	<ab||cd>
+		ab	ab
+ab		ab	
+ab		aX	<|ab|aX>
+abcdefg	aXcdefZ	abcYefg	aXcYefZ
+abcdefg	aXcdeQg	aWcdeRg	a<X|b|W>cde<Q|f|R>g
+abc	abXYc	abc	abXYc
+abc	abXc	abYc	ab<X||Y>c
+abcd	ad	abcd	ad
+abcd	ad	abYd	a<|bc|bY>d
+abcdef	abcdefXY	Wabcdef	WabcdefXY
+abcabc	abcXabc	abcabc	abcXabc

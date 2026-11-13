@@ -1,0 +1,128 @@
+//! `rosen`: the Rosen command-line tool, a thin layer over `rosen-client`.
+
+mod change_cmd;
+mod claim_cmd;
+mod commands;
+mod commit_cmd;
+mod config_cmd;
+mod history_cmd;
+mod import;
+mod receipt_cmd;
+mod review_cmd;
+mod server;
+mod workspace_cmd;
+
+use std::process::ExitCode;
+
+use claim_cmd::ClaimVerb;
+use clap::Parser;
+use commands::{Cli, Command, ServerCommand, WorkspaceCommand};
+use rosen_client::Endpoint;
+
+/// Schema tag for `--json` error output. Bump it when the shape changes, so
+/// agents parsing the output can detect the change (SPEC.md R10).
+const ERROR_SCHEMA: &str = "rosen.error/v1";
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let operation = cli.command.path();
+    match run(&cli) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(error) => {
+            report_error(cli.json, operation, &error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
+    let endpoint = cli
+        .endpoint
+        .clone()
+        .map_or_else(Endpoint::resolve, Endpoint::new);
+    let json = cli.json;
+    match &cli.command {
+        Command::Server(ServerCommand::Start) => block_on(server::start(json, &endpoint)),
+        Command::Server(ServerCommand::Status) => block_on(server::status(json, &endpoint)),
+        Command::Events { after, agent, all } => {
+            let agent = if *all {
+                None
+            } else {
+                Some(change_cmd::resolve_owner(agent.as_deref())?)
+            };
+            block_on(server::stream_events(json, &endpoint, agent, *after))
+        }
+        Command::Config(config) => block_on(config_cmd::run(json, &endpoint, config)),
+        Command::Change(change) => block_on(change_cmd::run(json, &endpoint, change)),
+        Command::Commit { message, workspace } => block_on(commit_cmd::commit(
+            json,
+            &endpoint,
+            message,
+            workspace.as_deref(),
+        )),
+        Command::Workspace(WorkspaceCommand::Watch { workspace }) => {
+            block_on(commit_cmd::watch(json, &endpoint, workspace.as_deref()))
+        }
+        Command::Workspace(command) => block_on(workspace_cmd::run(json, &endpoint, command)),
+        Command::Log {
+            change,
+            paths,
+            limit,
+        } => block_on(history_cmd::log(
+            json,
+            &endpoint,
+            change.as_deref(),
+            paths,
+            *limit,
+        )),
+        Command::Diff(args) => block_on(history_cmd::diff(
+            json,
+            &endpoint,
+            args.change.as_deref(),
+            &args.paths,
+        )),
+        Command::Review(review) => block_on(review_cmd::run(json, &endpoint, review)),
+        Command::Receipt(receipt) => block_on(receipt_cmd::run(json, &endpoint, receipt)),
+        Command::Claim(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Claim, args)),
+        Command::Share(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Share, args)),
+        Command::Wait(args) => block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Wait, args)),
+        Command::Release(args) => {
+            block_on(claim_cmd::run(json, &endpoint, ClaimVerb::Release, args))
+        }
+        Command::Import {
+            repo,
+            branch,
+            mirror,
+        } => block_on(import::import(
+            json,
+            &endpoint,
+            repo,
+            branch.as_deref(),
+            mirror.as_deref(),
+        )),
+        other => rosen_client::run_operation(other.path()).map(|()| true),
+    }
+}
+
+fn block_on<T>(
+    work: impl std::future::Future<Output = rosen_client::Result<T>>,
+) -> rosen_client::Result<T> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(work)
+}
+
+fn report_error(json: bool, operation: &str, error: &rosen_client::Error) {
+    if json {
+        let body = serde_json::json!({
+            "schema": ERROR_SCHEMA,
+            "command": operation,
+            "error": error.to_string(),
+        });
+        println!("{body}");
+    } else {
+        eprintln!("rosen: {error}");
+    }
+}
