@@ -142,6 +142,10 @@ pub enum Request {
     ReleasePaths(ClaimRequest),
     /// Lists claims, shares and waits on live changes.
     ClaimList(ClaimFilter),
+    /// Reads the latest snapshotted paths and edit regions (R6).
+    EditRegions {
+        change: String,
+    },
     /// Stores the subscriber's event cursor: it has handled every event up
     /// to `seq`. A later subscribe with no cursor resumes after it, even
     /// across a server restart (R9). The cursor never moves backwards.
@@ -248,6 +252,7 @@ pub enum Response {
     Waiting(WaitOutcome),
     Released(ReleaseOutcome),
     PathClaims(Vec<PathClaim>),
+    EditRegions(crate::edits::EditRegions),
     ObjectsStored(ObjectsStored),
     Snapshot(SnapshotOutcome),
     EventsAcked(EventCursor),
