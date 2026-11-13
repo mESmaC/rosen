@@ -133,4 +133,41 @@ async fn edits_within_three_lines_overlap_and_farther_ones_do_not() {
         sorted(vec![docs, guide])
     );
     assert!(overlaps(&state, path("README.md")).is_empty());
+    reverted_regions(&state, line5).await;
+}
+
+async fn reverted_regions(state: &Arc<ServerState>, line5: ChangeId) {
+    // R6 risk: stale region state would keep a reverted edit overlapping.
+    let id = line5.to_string();
+    let response = dispatch(state, Request::EditRegions { change: id.clone() }).await;
+    let rosen_protocol::Outcome::Ok(rosen_protocol::Response::EditRegions(wire)) = response else {
+        panic!("{response:?}")
+    };
+    assert_eq!(
+        wire.files[0].regions,
+        rosen_protocol::Regions::Lines(vec![rosen_protocol::EditSpan { start: 4, end: 5 },])
+    );
+    let view = rosen_server::overlaps::edits::read(state, &id).unwrap();
+    assert_eq!(
+        view.files["lib.rs"].regions,
+        rosen_merge::FileEdit::Lines(vec![rosen_merge::LineSpan { start: 4, end: 5 },])
+    );
+    dispatch(
+        state,
+        Request::WorkspaceWrite(WorkspaceWrite {
+            change: id.clone(),
+            path: "lib.rs".into(),
+            data: Some(WorkspaceBytes(lines(&[]))),
+        }),
+    )
+    .await;
+    assert!(rosen_server::overlaps::edits::read(state, &id)
+        .unwrap()
+        .files
+        .is_empty());
+    let restarted = ServerState::new(state.config.clone());
+    assert!(rosen_server::overlaps::edits::read(&restarted, &id)
+        .unwrap()
+        .files
+        .is_empty());
 }

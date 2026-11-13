@@ -8,6 +8,7 @@
 pub mod change;
 pub mod claim;
 pub mod config;
+pub mod edits;
 pub mod frame;
 pub mod history;
 pub mod land;
@@ -26,6 +27,7 @@ pub use claim::{
     OverlapRecord, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome, WokenWait,
 };
 pub use config::{ConfigQuery, ConfigRecord};
+pub use edits::{EditRegions, EditSpan, PathEdit, Regions};
 pub use history::{
     Blame, BlameRange, BlameRequest, Diff, DiffHunk, DiffLine, DiffRequest, DirEntry, FileDiff,
     FileStatus, FileVersion, LineKind, Log, LogEntry, LogRequest, MergeBaseAnswer,
