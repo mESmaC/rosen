@@ -120,6 +120,18 @@ pub enum Request {
     },
     /// Submits one exact bisection job; stale results are refused.
     BisectSubmit(crate::BisectResult),
+    JoinKeyCreate(crate::CreateJoinKey),
+    MachineEnroll {
+        key: String,
+        name: String,
+    },
+    MachineRotate {
+        credential: String,
+    },
+    MachinePending {
+        name: String,
+        role: crate::MachineRole,
+    },
     /// Offers the newest untested landed commit to an external checker (R12).
     PostLandNext,
     /// Starts bisection from the stored green boundary after a batch failure.
@@ -262,6 +274,10 @@ pub enum Request {
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
     Bisection(crate::BisectState),
+    JoinKeyCreated {
+        key: String,
+    },
+    MachineCredential(crate::MachineCredential),
     PostLand(crate::post_land::PostLandWork),
     Pong,
     PoolSized,
