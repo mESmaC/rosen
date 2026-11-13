@@ -5,8 +5,8 @@
 use rosen_core::history::LandedTrailers;
 use rosen_core::{AgentId, Commit, ObjectId, ReceiptTrailer, Signature, Tree};
 use rosen_protocol::{
-    ApproveRequest, LandAnswer, LandStatus, LogRequest, NewChange, Outcome, Request, Response,
-    SubmitReceipt, WorkspaceBytes, WorkspaceWrite,
+    ApproveRequest, ErrorCode, LandAnswer, LandStatus, LogRequest, NewChange, Outcome, Request,
+    ResolveConflicts, Response, SubmitReceipt, WorkspaceBytes, WorkspaceWrite,
 };
 use rosen_server::landing::{CasResult, LandRecord, Ledger, Tier};
 use rosen_server::{rpc::dispatch, ServerConfig, ServerState};
@@ -319,6 +319,58 @@ async fn conflicted_land_routes_regions_and_files_to_its_owner() {
     let record = restarted.changes.show(&b).unwrap().change;
     assert_eq!(record.head, hb);
     assert_eq!(record.conflicts, vec![region.id]);
+}
+
+// Risk (SPEC R5, R8): `rosen resolve` is the only way a conflicted change
+// lands again. Resolving must clear the gate, yet resolving a region that
+// still fails to merge must reopen it rather than land a silent pick.
+#[tokio::test(flavor = "multi_thread")]
+async fn resolved_conflicts_land_only_once_the_file_merges() {
+    let (_temp, state, root) = setup();
+    let (a, b) = (new_change(&state).await, new_change(&state).await);
+    let ha = write(&state, &a, "shared.rs", b"first\n").await;
+    receipt(&state, &a, ha, root).await;
+    let tip = land(&state, &a).await.base;
+    let hb = write(&state, &b, "shared.rs", b"second\n").await;
+    receipt(&state, &b, hb, tip).await;
+    assert_eq!(refused(&land(&state, &b).await), Some("merge_conflict"));
+    assert_eq!(refused(&land(&state, &b).await), Some("conflicts"));
+
+    let resolve = |paths: &[&str]| {
+        let request = Request::ConflictResolve(ResolveConflicts {
+            change: b.clone(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+        });
+        dispatch(&state, request)
+    };
+    let Outcome::Error(unknown) = resolve(&["other.rs"]).await else {
+        panic!("a path with no stored conflict must fail");
+    };
+    assert_eq!(unknown.code, ErrorCode::NotFound);
+    let Outcome::Ok(Response::ConflictsResolved(answer)) = resolve(&[r".\shared.rs"]).await else {
+        panic!("resolving the conflicted file must succeed");
+    };
+    assert_eq!(
+        (answer.resolved[0].conflicts, answer.open_paths.len()),
+        (1, 0)
+    );
+
+    // Resolved without fixing the file: the land merges again and reopens it.
+    assert_eq!(refused(&land(&state, &b).await), Some("merge_conflict"));
+    assert_eq!(refused(&land(&state, &b).await), Some("conflicts"));
+
+    // The owner's fix: take the base's line, and keep B's own work elsewhere.
+    write(&state, &b, "shared.rs", b"first\n").await;
+    let head = write(&state, &b, "b.rs", b"b\n").await;
+    receipt(&state, &b, head, tip).await;
+    let Outcome::Ok(Response::ConflictsResolved(answer)) = resolve(&["shared.rs"]).await else {
+        panic!("resolving the reopened conflict must succeed");
+    };
+    assert!(answer.open_paths.is_empty());
+    assert!(matches!(
+        land(&state, &b).await.outcome,
+        LandStatus::Landed { .. }
+    ));
 }
 
 // Risk (SPEC R7 "Accept when"): a change lands only with an approval for its

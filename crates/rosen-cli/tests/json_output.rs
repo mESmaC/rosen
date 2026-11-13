@@ -45,7 +45,7 @@ fn output_catalog_and_failures_stay_machine_readable() {
         vec!["--json"],
         vec!["--json", "change"],
         vec!["--json", "status", "--unknown"],
-        vec!["resolve", "file.txt", "--json"],
+        vec!["resolve", "../file.txt", "--change", "k", "--json"],
     ] {
         let output = run(&args);
         assert!(!output.status.success());

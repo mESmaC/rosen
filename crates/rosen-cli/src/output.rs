@@ -23,6 +23,7 @@ pub const LOG_SCHEMA: &str = "rosen.log/v2";
 pub const OVERLAPS_SCHEMA: &str = "rosen.overlaps/v1";
 pub const RECEIPT_SCHEMA: &str = "rosen.receipt/v1";
 pub const RELEASE_SCHEMA: &str = "rosen.release/v1";
+pub const RESOLVE_SCHEMA: &str = "rosen.resolve/v1";
 pub const REVIEW_APPROVALS_SCHEMA: &str = "rosen.review.approvals/v1";
 pub const REVIEW_APPROVAL_SCHEMA: &str = "rosen.review.approval/v1";
 pub const REVIEW_LIST_SCHEMA: &str = "rosen.review.list/v1";
