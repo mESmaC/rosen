@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security_Credentials"] }
 
 # The only unsafe code is the audited file-disposition ABI boundary. All
 # consumers continue to inherit the workspace's unsafe_code = forbid policy.
