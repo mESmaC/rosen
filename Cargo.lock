@@ -896,6 +896,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rosen-faults"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "getrandom 0.3.4",
+ "rosen-client",
+ "rosen-core",
+ "rosen-platform",
+ "rosen-protocol",
+ "rosen-server",
+ "rosen-store",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rosen-merge"
 version = "0.1.0"
 dependencies = [
@@ -957,6 +975,19 @@ dependencies = [
  "flate2",
  "rosen-core",
  "tempfile",
+]
+
+[[package]]
+name = "rosen-stress"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rosen-client",
+ "rosen-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
