@@ -39,3 +39,7 @@ pub fn delete_on_close(_file: &std::fs::File) -> std::io::Result<()> {
         "this platform has no verified handle-deletion primitive",
     ))
 }
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub mod credentials;
