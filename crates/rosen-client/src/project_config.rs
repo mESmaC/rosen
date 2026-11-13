@@ -3,8 +3,8 @@
 
 use crate::connection::{unexpected, Client};
 use crate::Error;
-use rosen_core::ObjectId;
-use rosen_protocol::{ConfigQuery, ConfigRecord, Request, Response};
+use rosen_core::{ObjectId, ProjectConfig};
+use rosen_protocol::{ConfigQuery, ConfigRecord, ErrorCode, Request, Response};
 
 impl Client {
     /// The project configuration in force at `at`, or at the current base
@@ -17,6 +17,18 @@ impl Client {
         {
             Response::Config(record) => Ok(*record),
             other => Err(unexpected(other)),
+        }
+    }
+
+    /// The configuration in force at the current base, or the defaults
+    /// before the project has a base: nothing configured can apply yet.
+    pub async fn base_config(&self) -> Result<ProjectConfig, Error> {
+        match self.project_config(None).await {
+            Ok(record) => Ok(record.config),
+            Err(Error::Server(body)) if body.code == ErrorCode::Refused => {
+                Ok(ProjectConfig::default())
+            }
+            Err(error) => Err(error),
         }
     }
 }
