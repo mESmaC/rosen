@@ -46,7 +46,7 @@ Rosen is a version control system built so that many coding agents can work on o
 | D12 | Review | **Rosen-native review**: comments, approvals and receipts are Rosen objects. GitHub receives landed history as a mirror and is not in the landing path. |
 | D13 | Metadata store | Embedded SQLite in WAL mode, one database per server. |
 | D14 | Scale target *(revised)* | v1: at least 100 concurrent changes on one project, from agents on several machines, typically 30–40 agents per machine (see §5). |
-| D15 | Landed history | **One commit per change**: the change's final tree, with trailers for the change ID, receipt and approval. The agent's own commits stay in Rosen and are never rewritten. |
+| D15 | Landed history | **One commit per change**: the change's final tree, with trailers for the change ID, receipt and approval. The agent's own commits stay in Rosen and are never rewritten. The commit's only parent is the base it landed on, its author is the change's owner and its message is the change's newest `rosen commit` message. Its last paragraph holds git trailers: `Rosen-Change: <change ID>`; `Rosen-Receipt: <check set> <head> <base> <submitter>`, the receipt the land counted, omitted when none was needed; and one `Rosen-Approved-By: <reviewer>` per approval that holds. `rosen log` shows them. |
 | D16 | Workspace lifecycle | **Rosen owns it**: creation, a warm pool, and deletion behind a guard. |
 | D17 | Write-through snapshots *(revised)* | Every workspace write is snapshotted to the server automatically and within seconds, like jj's working-copy commit. There is no push or sync step. An edit that exists only on the client is the exception (offline, or inside the snapshot window), not the norm. This makes the deletion guard simple, gives the server live edit regions, and lets the server do every rebase. |
 | D18 | Changes are not refs *(revised)* | The base (and later, release refs) is the only ref. A change is a row in the metadata store, with no branch name to create, delete or collide. |
@@ -296,7 +296,7 @@ Machines join a project with no login, monitor or remote desktop on the joining 
   2. It exchanges the key for the machine's own **machine credential**.
   3. It stores the credential encrypted (Windows: DPAPI through Credential Manager). The client rotates it automatically before it expires.
 
-  The machine never uses the join key again.
+  The machine never uses the join key again. Credentials last 30 days; the daemon checks hourly and renews during the final seven days. A lost rotation response can be retried with the prior credential until its original expiry. The server stores only credential hashes. Windows Credential Manager holds the encrypted enrollment; `upstream.json` holds only a reference, address and certificate fingerprint. Enrollment and pending requests alone are accepted without an authenticated machine; every other network request rechecks the machine's current status.
 - **Approval.** A machine that joins with a valid key is admitted at once. A machine that asks to join without one waits as **pending** until the owner approves it from an enrolled machine.
 - **Machine list and revocation.** The server lists every machine with its role, last contact and running agents. Revoking a machine refuses its credential on its next request. Its changes, claims and workspaces are kept, as for a failed change.
 - **Discovery.** On a local network, daemons find the server by DNS-SD (mDNS), so a key without a reachable address still works there.
