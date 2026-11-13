@@ -8,7 +8,7 @@
 
 mod error;
 mod registry;
-mod schema;
+pub(crate) mod schema;
 mod service;
 
 pub use error::ChangeError;

@@ -5,9 +5,14 @@
 //! Every step is idempotent, so the engine can replay it after a crash.
 
 use super::{
-    ChangeBook, ChangeId, ChangeState, CommitId, EventSink, LandResult, LandingEvent, MergeOutcome,
-    Merger,
+    ChangeBook, ChangeId, ChangeState, CommitId, EventSink, LandError, LandResult, LandingEvent,
+    MergeOutcome, Merger, Routing,
 };
+
+/// How often one target is re-merged when snapshots keep moving its head
+/// while its conflicts are being stored. Each round re-reads the new head,
+/// so only a change edited continuously through every round exhausts it.
+const ROUTING_ROUNDS: u32 = 8;
 
 /// What the post-land rebase did, for callers and logs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -56,11 +61,31 @@ impl Restacker<'_> {
         onto: &CommitId,
         report: &mut RestackReport,
     ) -> LandResult<()> {
+        for _ in 0..ROUTING_ROUNDS {
+            if self.try_rebase(change, onto, report)? {
+                return Ok(());
+            }
+        }
+        Err(LandError::Backend(format!(
+            "change {change} kept moving while its rebase conflicts were stored; \
+             recovery retries it"
+        )))
+    }
+
+    /// One rebase of `change` onto `onto`. Returns false when a snapshot
+    /// moved its head before conflicts were stored: nothing from the stale
+    /// head is attached, and the caller merges again.
+    fn try_rebase(
+        &self,
+        change: &ChangeId,
+        onto: &CommitId,
+        report: &mut RestackReport,
+    ) -> LandResult<bool> {
         let Some(facts) = self.book.facts(change)? else {
-            return Ok(());
+            return Ok(true);
         };
         if matches!(facts.state, ChangeState::Landed | ChangeState::Abandoned) {
-            return Ok(());
+            return Ok(true);
         }
         match self.merger.merge(&facts.merge_base, onto, &facts.head)? {
             MergeOutcome::Clean(tree) => {
@@ -75,13 +100,16 @@ impl Restacker<'_> {
                 // Conflicts are stored on the change, never raised as errors
                 // (D2): the change moves anyway and its owner resolves them.
                 self.book.reparent(change, onto, None)?;
-                self.book.record_conflicts_at(
+                let routing = self.book.record_conflicts_at(
                     change,
                     &facts.merge_base,
                     onto,
                     &facts.head,
                     &paths,
                 )?;
+                if routing == Routing::ChangeMoved {
+                    return Ok(false);
+                }
                 self.events.emit(LandingEvent::Conflict {
                     change: *change,
                     paths,
@@ -89,6 +117,6 @@ impl Restacker<'_> {
                 report.conflicted.push(*change);
             }
         }
-        Ok(())
+        Ok(true)
     }
 }
