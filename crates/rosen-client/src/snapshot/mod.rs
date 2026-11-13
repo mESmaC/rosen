@@ -138,7 +138,7 @@ impl Snapshotter {
             )
         })?;
         Ok(Self {
-            ignore: ignore::IgnoreRules::new(root.clone()),
+            ignore: ignore::IgnoreRules::new(root.clone(), &marker.ignore),
             sparse,
             known_trees,
             root,

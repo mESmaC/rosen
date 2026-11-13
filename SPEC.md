@@ -46,7 +46,7 @@ Rosen is a version control system built so that many coding agents can work on o
 | D12 | Review | **Rosen-native review**: comments, approvals and receipts are Rosen objects. GitHub receives landed history as a mirror and is not in the landing path. |
 | D13 | Metadata store | Embedded SQLite in WAL mode, one database per server. |
 | D14 | Scale target *(revised)* | v1: at least 100 concurrent changes on one project, from agents on several machines, typically 30–40 agents per machine (see §5). |
-| D15 | Landed history | **One commit per change**: the change's final tree, with trailers for the change ID, receipt and approval. The agent's own commits stay in Rosen and are never rewritten. |
+| D15 | Landed history | **One commit per change**: the change's final tree, with trailers for the change ID, receipt and approval. The agent's own commits stay in Rosen and are never rewritten. The commit's only parent is the base it landed on, its author is the change's owner and its message is the change's newest `rosen commit` message. Its last paragraph holds git trailers: `Rosen-Change: <change ID>`; `Rosen-Receipt: <check set> <head> <base> <submitter>`, the receipt the land counted, omitted when none was needed; and one `Rosen-Approved-By: <reviewer>` per approval that holds. `rosen log` shows them. |
 | D16 | Workspace lifecycle | **Rosen owns it**: creation, a warm pool, and deletion behind a guard. |
 | D17 | Write-through snapshots *(revised)* | Every workspace write is snapshotted to the server automatically and within seconds, like jj's working-copy commit. There is no push or sync step. An edit that exists only on the client is the exception (offline, or inside the snapshot window), not the norm. This makes the deletion guard simple, gives the server live edit regions, and lets the server do every rebase. |
 | D18 | Changes are not refs *(revised)* | The base (and later, release refs) is the only ref. A change is a row in the metadata store, with no branch name to create, delete or collide. |
@@ -97,6 +97,9 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - **Independent.** Two changes are independent when their reaches share no unit. Then no unit's build sees both changes.
 - **Project configuration.** The file `rosen.toml` at the repository root. The server reads it from the base, never from a change, so a change takes effect only once it lands.
   - It lists generated files, registration lists and sensitive paths as path globs, the pre-land and post-land check sets (a name and the commands checkers run), the warm pool size and the mirror remote. Each part is optional and has a default: no paths, check sets named `pre-land` and `post-land` with no commands, a pool of 4 and no remote.
+  - `ignore` lists untracked paths snapshots skip (R2), in `.gitignore` syntax from the repository root, such as `target/`. It ranks below every `.gitignore` file. A workspace records the base's list when it is made or a rebase is applied, so a watcher started offline skips the same paths and a change cannot alter what its own snapshots skip.
+  - `[prepare] commands` lists the prepare commands daemons run in ready workspaces (R3). The configured `warm_pool.size` is each daemon's target, read again after every land, unless a pool-size request has raised or lowered it since the daemon started.
+  - Each ignore line and prepare command is one non-empty line with no control characters.
   - Optional `[build_units.<name>]` tables contain `paths` globs and `dependencies` unit names; absent units are discovered from Cargo workspace manifests, including target, build and dev dependencies. `workspace_inputs` adds shared input globs. Unknown dependency names conservatively reach every unit.
   - Unknown keys are refused, so a misspelt key cannot drop a list silently.
   - An invalid file never takes effect. The configuration in force is the one in the nearest first-parent ancestor of the base whose file is valid, or the defaults. The change that fixes the file still lands under the last valid configuration.
@@ -209,7 +212,8 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - An approval is tied to the head it approved. A new head by the author voids the approval. A rebase done by the server (R8, D19) keeps it, because it changes only the parent.
 - **Review tiers** follow Anthropic's semantic approval rules and Velocity F7:
   - The server tiers each change from its diff: prose-only, normal, or sensitive.
-  - Sensitive paths are listed in project configuration and read from the base, so a change cannot lower its own tier.
+  - Sensitive paths are listed in project configuration and read from the base, so a change cannot lower its own tier. Sensitive matches take precedence, including removed paths.
+  - Prose-only means all changed files are regular UTF-8 `.md`, `.markdown`, `.txt` or `.rst` files without NUL bytes on either side. Generated files, registration lists and configured workspace inputs take normal review. Other edits, including source comments and executable or symlink modes, conservatively take normal review. The diff is against the parent (the stack parent for a stacked change); an empty diff is prose-only.
   - Every tier still needs an approval.
 - Velocity's PR duty reviews through `rosen-client`.
 - **Accept when:** a change cannot land without an approval for its current head.
@@ -279,6 +283,7 @@ The server holds each project's AIRC channel, so agents on every machine coordin
   - the **Discoveries** and **Past work** ledgers.
 - **Piece claims** are first-claim-wins, each in one transaction, like path claims. A refusal names the holder and the time of its claim. A claim is kept through failure and disconnects, and released as Velocity F14 says.
 - **One log.** Channel events and Rosen's events share one ordered log and one cursor per subscriber (R9). Targeted delivery follows Velocity F14: an agent receives only the lines it must act on.
+  - Channel lines use the `channel` event kind with the channel payload in `detail`. Their recipient agent identities are fixed at publication; an empty audience reaches only the project view. They use the same subscription and acknowledgement API as Rosen events, including over the network transport.
 - **Velocity keeps the tools.** Velocity serves AIRC's tools to every agent as now, with the member ID and nick fixed at launch, and calls the server through `rosen-client` for each one. No machine keeps channel state of its own beyond its delivery cursors.
 - **Server unreachable.** Claims and messages need the server, as landing does. A tool call made while the server is unreachable fails with that reason. It is never answered from a local copy.
 - **Accept when:** two agents on different machines that claim the same piece or path at the same moment never both succeed; an event or message reaches its recipient on another machine within 1 s while both machines reach the server; and no two machines ever see different claim holders.
@@ -292,7 +297,7 @@ Machines join a project with no login, monitor or remote desktop on the joining 
   2. It exchanges the key for the machine's own **machine credential**.
   3. It stores the credential encrypted (Windows: DPAPI through Credential Manager). The client rotates it automatically before it expires.
 
-  The machine never uses the join key again.
+  The machine never uses the join key again. Credentials last 30 days; the daemon checks hourly and renews during the final seven days. A lost rotation response can be retried with the prior credential until its original expiry. The server stores only credential hashes. Windows Credential Manager holds the encrypted enrollment; `upstream.json` holds only a reference, address and certificate fingerprint. Enrollment and pending requests alone are accepted without an authenticated machine; every other network request rechecks the machine's current status.
 - **Approval.** A machine that joins with a valid key is admitted at once. A machine that asks to join without one waits as **pending** until the owner approves it from an enrolled machine.
 - **Machine list and revocation.** The server lists every machine with its role, last contact and running agents. Revoking a machine refuses its credential on its next request. Its changes, claims and workspaces are kept, as for a failed change.
 - **Discovery.** On a local network, daemons find the server by DNS-SD (mDNS), so a key without a reachable address still works there.

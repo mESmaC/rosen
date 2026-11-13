@@ -16,6 +16,7 @@
 //! whose write fails is queued and retried in order rather than dropped.
 
 pub mod audience;
+mod channel;
 mod landing_sink;
 mod pending;
 mod store;
@@ -134,17 +135,28 @@ impl EventLog {
         let concern = change
             .as_deref()
             .and_then(|id| self.with_overlapping_owners(id, concern));
+        let audience = |conn: Option<&Connection>| match (&change, &concern, conn) {
+            (Some(id), Some(concern), Some(conn)) => audience_or_everyone(conn, id, concern),
+            _ => None,
+        };
+        self.enqueue(kind, change.clone(), detail, audience)
+    }
+
+    /// Both producers use this queue so a failed write cannot let a channel
+    /// message overtake the Rosen event that preceded it (or vice versa).
+    fn enqueue(
+        &self,
+        kind: EventKind,
+        change: Option<String>,
+        detail: serde_json::Value,
+        audience: impl FnOnce(Option<&Connection>) -> Option<std::collections::BTreeSet<String>>,
+    ) -> u64 {
         let inner = &self.inner;
         inner.with_slot(|slot| {
             let opened = inner.connection(&mut slot.conn, true);
             // The audience is fixed now, from the state the publisher just
             // committed, even if the write itself is retried later.
-            let audience = match (&change, &concern, &opened) {
-                (Some(id), Some(concern), Ok(Some(conn))) => {
-                    audience_or_everyone(conn, id, concern)
-                }
-                _ => None,
-            };
+            let audience = audience(opened.as_ref().ok().and_then(|conn| conn.as_deref()));
             slot.queue.push_back(Pending {
                 kind,
                 change,
