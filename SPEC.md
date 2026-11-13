@@ -257,7 +257,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 
 ### R10 · CLI
 - The `rosen` commands are `import`, `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve|list`, `receipt submit`, `land`, `resolve`, `workspace list|delete|watch`, `server start|status`, `config show`, `events`, `machine join|list|approve|revoke` and `machine key create|list|revoke` (R14).
-- `--json` on every command, with versioned output schemas.
+- `--json` on every command, with versioned output schemas. Each output line has a `schema` ID (`rosen.<shape>/v1`); incompatible shape changes bump that version. `--json-schema` prints the offline JSON Schema catalog (`crates/rosen-cli/schemas/v1.json`), including nested records and refusal variants. Usage and runtime failures, including retried workspace watcher failures, use `rosen.error/v1` with `command` (null for usage errors) and `error`. Help and version requests remain text.
 - `--help` is complete enough that an agent can learn Rosen from it alone.
 
 ### R11 · History queries

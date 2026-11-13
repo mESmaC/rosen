@@ -1,0 +1,2497 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Rosen CLI versioned JSON lines",
+  "description": "Validate stdout one line at a time. Help/version are text. Refusals use command schemas; errors use rosen.error/v1. Event detail is event-specific. Unimplemented commands use rosen.error/v1.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/rosen.change~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.change.list~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.claim~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.share~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.wait~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.release~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.overlaps~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.log~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.diff~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.review.thread~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.review.list~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.review.approval~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.review.approvals~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.receipt~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.land~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.config~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.workspace.list~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.workspace.delete~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.change.workspace~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.status~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.import~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.snapshot~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.event~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.error~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.server.status~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.config~1v2"
+    },
+    {
+      "$ref": "#/$defs/rosen.log~1v2"
+    },
+    {
+      "$ref": "#/$defs/rosen.machine~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.machines~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.machine_key~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.machine_keys~1v1"
+    }
+  ],
+  "$defs": {
+    "ObjectId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ChangeId": {
+      "type": "string",
+      "pattern": "^[k-z]{32}$"
+    },
+    "AgentId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ConflictId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "PathPattern": {
+      "type": "string"
+    },
+    "ChangeState": {
+      "enum": [
+        "open",
+        "ready",
+        "landed",
+        "abandoned"
+      ]
+    },
+    "ThreadState": {
+      "enum": [
+        "open",
+        "resolved"
+      ]
+    },
+    "ClaimKind": {
+      "enum": [
+        "claim",
+        "share",
+        "wait"
+      ]
+    },
+    "FileStatus": {
+      "enum": [
+        "added",
+        "deleted",
+        "modified"
+      ]
+    },
+    "LineKind": {
+      "enum": [
+        "context",
+        "added",
+        "removed"
+      ]
+    },
+    "EventKind": {
+      "enum": [
+        "snapshot",
+        "landed",
+        "rebased",
+        "conflict",
+        "updated",
+        "review",
+        "claim",
+        "released",
+        "green",
+        "reverted",
+        "mirror",
+        "channel"
+      ]
+    },
+    "ChangeParent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/ObjectId"
+            }
+          },
+          "required": [
+            "base"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "change": {
+              "$ref": "#/$defs/ChangeId"
+            }
+          },
+          "required": [
+            "change"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SnapshotKind": {
+      "oneOf": [
+        {
+          "const": "automatic"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "named": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "named"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Change": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "owner": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "parent": {
+          "$ref": "#/$defs/ChangeParent"
+        },
+        "snapshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Snapshot"
+          }
+        },
+        "head": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "state": {
+          "$ref": "#/$defs/ChangeState"
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConflictId"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "owner",
+        "parent",
+        "snapshots",
+        "head",
+        "state",
+        "conflicts"
+      ],
+      "additionalProperties": false
+    },
+    "Snapshot": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "tree": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "kind": {
+          "$ref": "#/$defs/SnapshotKind"
+        }
+      },
+      "required": [
+        "commit",
+        "tree",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "ChangeRecord": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "owner": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "parent": {
+          "$ref": "#/$defs/ChangeParent"
+        },
+        "snapshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Snapshot"
+          }
+        },
+        "head": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "state": {
+          "$ref": "#/$defs/ChangeState"
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConflictId"
+          }
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "owner",
+        "parent",
+        "snapshots",
+        "head",
+        "state",
+        "conflicts",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "PathClaim": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "owner": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ClaimKind"
+        },
+        "since": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "change",
+        "owner",
+        "path",
+        "kind",
+        "since"
+      ],
+      "additionalProperties": false
+    },
+    "ClaimHolder": {
+      "type": "object",
+      "properties": {
+        "requested": {
+          "type": "string"
+        },
+        "held": {
+          "$ref": "#/$defs/PathClaim"
+        }
+      },
+      "required": [
+        "requested",
+        "held"
+      ],
+      "additionalProperties": false
+    },
+    "ShareOutcome": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "holders": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClaimHolder"
+          }
+        }
+      },
+      "required": [
+        "change",
+        "paths",
+        "holders"
+      ],
+      "additionalProperties": false
+    },
+    "WaitOutcome": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "waiting_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClaimHolder"
+          }
+        },
+        "free": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "change",
+        "waiting_on",
+        "free",
+        "cursor"
+      ],
+      "additionalProperties": false
+    },
+    "WokenWait": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "owner": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "change",
+        "owner",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "ReleaseOutcome": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "released": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathClaim"
+          }
+        },
+        "woken": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WokenWait"
+          }
+        }
+      },
+      "required": [
+        "change",
+        "released",
+        "woken"
+      ],
+      "additionalProperties": false
+    },
+    "OverlapRecord": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "owner": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "change",
+        "owner",
+        "paths"
+      ],
+      "additionalProperties": false
+    },
+    "OverlapAnswer": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChangeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "overlaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OverlapRecord"
+          }
+        }
+      },
+      "required": [
+        "change",
+        "overlaps"
+      ],
+      "additionalProperties": false
+    },
+    "LogEntry": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "parents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ObjectId"
+          }
+        },
+        "tree": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "author": {
+          "type": "string"
+        },
+        "time": {
+          "type": "integer"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "change": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChangeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt": {
+          "$ref": "#/$defs/ReceiptTrailer"
+        },
+        "approvers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentId"
+          }
+        }
+      },
+      "required": [
+        "commit",
+        "parents",
+        "tree",
+        "author",
+        "time",
+        "summary",
+        "change"
+      ],
+      "additionalProperties": false
+    },
+    "Log": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LogEntry"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "FileVersion": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/ObjectId"
+        }
+      },
+      "required": [
+        "mode",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "DiffLine": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/LineKind"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "DiffHunk": {
+      "type": "object",
+      "properties": {
+        "old_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "old_lines": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "new_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "new_lines": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiffLine"
+          }
+        }
+      },
+      "required": [
+        "old_start",
+        "old_lines",
+        "new_start",
+        "new_lines",
+        "lines"
+      ],
+      "additionalProperties": false
+    },
+    "FileDiff": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/FileStatus"
+        },
+        "old": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "new": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "binary": {
+          "type": "boolean"
+        },
+        "hunks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiffHunk"
+          }
+        }
+      },
+      "required": [
+        "path",
+        "status",
+        "old",
+        "new",
+        "binary",
+        "hunks"
+      ],
+      "additionalProperties": false
+    },
+    "Diff": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "to": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileDiff"
+          }
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "files"
+      ],
+      "additionalProperties": false
+    },
+    "LandAnswer": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "base_ref": {
+          "type": "string"
+        },
+        "base": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "outcome": {
+          "$ref": "#/$defs/LandStatus"
+        }
+      },
+      "required": [
+        "change",
+        "base_ref",
+        "base",
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewComment": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "author": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "body": {
+          "type": "string"
+        },
+        "head": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "created_at": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "author",
+        "body",
+        "head",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewThread": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "head": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "state": {
+          "$ref": "#/$defs/ThreadState"
+        },
+        "opened_by": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "resolved_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "integer"
+        },
+        "comments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewComment"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "change",
+        "path",
+        "line",
+        "head",
+        "state",
+        "opened_by",
+        "resolved_by",
+        "created_at",
+        "updated_at",
+        "comments"
+      ],
+      "additionalProperties": false
+    },
+    "Approval": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "head": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "valid": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "change",
+        "reviewer",
+        "head",
+        "created_at",
+        "valid"
+      ],
+      "additionalProperties": false
+    },
+    "Receipt": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "head": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "base": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "check_set": {
+          "type": "string"
+        },
+        "submitter": {
+          "$ref": "#/$defs/AgentId"
+        }
+      },
+      "required": [
+        "change",
+        "head",
+        "base",
+        "check_set",
+        "submitter"
+      ],
+      "additionalProperties": false
+    },
+    "ReceiptRecord": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "head": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "base": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "check_set": {
+          "type": "string"
+        },
+        "submitter": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "base_ref": {
+          "type": "string"
+        },
+        "base_current": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "change",
+        "head",
+        "base",
+        "check_set",
+        "submitter",
+        "base_ref",
+        "base_current"
+      ],
+      "additionalProperties": false
+    },
+    "ProjectConfig": {
+      "type": "object",
+      "properties": {
+        "build_units": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/BuildUnit"
+          }
+        },
+        "workspace_inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "generated": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "registration_lists": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "sensitive": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "checks": {
+          "$ref": "#/$defs/CheckSets"
+        },
+        "warm_pool": {
+          "$ref": "#/$defs/WarmPool"
+        },
+        "mirror": {
+          "$ref": "#/$defs/Mirror"
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prepare": {
+          "$ref": "#/$defs/Prepare"
+        }
+      },
+      "required": [
+        "build_units",
+        "workspace_inputs",
+        "generated",
+        "registration_lists",
+        "sensitive",
+        "checks",
+        "warm_pool",
+        "mirror",
+        "ignore",
+        "prepare"
+      ],
+      "additionalProperties": false
+    },
+    "BuildUnit": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "paths",
+        "dependencies"
+      ],
+      "additionalProperties": false
+    },
+    "CheckSets": {
+      "type": "object",
+      "properties": {
+        "pre_land": {
+          "$ref": "#/$defs/CheckSet"
+        },
+        "post_land": {
+          "$ref": "#/$defs/CheckSet"
+        }
+      },
+      "required": [
+        "pre_land",
+        "post_land"
+      ],
+      "additionalProperties": false
+    },
+    "CheckSet": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "commands"
+      ],
+      "additionalProperties": false
+    },
+    "WarmPool": {
+      "type": "object",
+      "properties": {
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "size"
+      ],
+      "additionalProperties": false
+    },
+    "Mirror": {
+      "type": "object",
+      "properties": {
+        "remote": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "remote"
+      ],
+      "additionalProperties": false
+    },
+    "ConfigRecord": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "base_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config": {
+          "$ref": "#/$defs/ProjectConfig"
+        }
+      },
+      "required": [
+        "commit",
+        "base_ref",
+        "source",
+        "error",
+        "config"
+      ],
+      "additionalProperties": false
+    },
+    "WorkspaceRecord": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "change",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "ClaimOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "granted"
+            },
+            "change": {
+              "$ref": "#/$defs/ChangeId"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "outcome",
+            "change",
+            "paths"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "refused"
+            },
+            "holders": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ClaimHolder"
+              }
+            }
+          },
+          "required": [
+            "outcome",
+            "holders"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LandStatus": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "landed"
+            },
+            "commit": {
+              "$ref": "#/$defs/ObjectId"
+            },
+            "attempts": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "status",
+            "commit",
+            "attempts"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "already_landed"
+            },
+            "commit": {
+              "$ref": "#/$defs/ObjectId"
+            }
+          },
+          "required": [
+            "status",
+            "commit"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "refused"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "WorkspaceState": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "stored_tree": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "journal_pending": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unsnapshotted": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rebase_waiting": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "stored_tree",
+        "journal_pending",
+        "unsnapshotted",
+        "rebase_waiting"
+      ],
+      "additionalProperties": false
+    },
+    "WorkspaceMaterialisation": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cloned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "copied": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "written": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes_written": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fallback": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "method",
+        "files",
+        "cloned",
+        "copied",
+        "written",
+        "bytes_written",
+        "fallback"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.change/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.change/v1"
+        },
+        "change": {
+          "$ref": "#/$defs/ChangeRecord"
+        }
+      },
+      "required": [
+        "schema",
+        "change"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "change new",
+        "change show",
+        "change abandon"
+      ]
+    },
+    "rosen.change.list/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.change.list/v1"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChangeRecord"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "changes"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "change list"
+      ]
+    },
+    "rosen.claim/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.claim/v1"
+        },
+        "claim": {
+          "$ref": "#/$defs/ClaimOutcome"
+        }
+      },
+      "required": [
+        "schema",
+        "claim"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "claim"
+      ]
+    },
+    "rosen.share/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.share/v1"
+        },
+        "share": {
+          "$ref": "#/$defs/ShareOutcome"
+        }
+      },
+      "required": [
+        "schema",
+        "share"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "share"
+      ]
+    },
+    "rosen.wait/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.wait/v1"
+        },
+        "wait": {
+          "$ref": "#/$defs/WaitOutcome"
+        }
+      },
+      "required": [
+        "schema",
+        "wait"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "wait"
+      ]
+    },
+    "rosen.release/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.release/v1"
+        },
+        "release": {
+          "$ref": "#/$defs/ReleaseOutcome"
+        }
+      },
+      "required": [
+        "schema",
+        "release"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "release"
+      ]
+    },
+    "rosen.overlaps/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.overlaps/v1"
+        },
+        "overlaps": {
+          "$ref": "#/$defs/OverlapAnswer"
+        }
+      },
+      "required": [
+        "schema",
+        "overlaps"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "overlaps"
+      ]
+    },
+    "rosen.log/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.log/v1"
+        },
+        "log": {
+          "$ref": "#/$defs/LogV1"
+        }
+      },
+      "required": [
+        "schema",
+        "log"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "log"
+      ]
+    },
+    "rosen.diff/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.diff/v1"
+        },
+        "diff": {
+          "$ref": "#/$defs/Diff"
+        }
+      },
+      "required": [
+        "schema",
+        "diff"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "diff"
+      ]
+    },
+    "rosen.review.thread/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.review.thread/v1"
+        },
+        "thread": {
+          "$ref": "#/$defs/ReviewThread"
+        }
+      },
+      "required": [
+        "schema",
+        "thread"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "review comment",
+        "review resolve"
+      ]
+    },
+    "rosen.review.list/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.review.list/v1"
+        },
+        "threads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewThread"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "threads"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "review list"
+      ]
+    },
+    "rosen.review.approval/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.review.approval/v1"
+        },
+        "approval": {
+          "$ref": "#/$defs/Approval"
+        }
+      },
+      "required": [
+        "schema",
+        "approval"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "review approve"
+      ]
+    },
+    "rosen.review.approvals/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.review.approvals/v1"
+        },
+        "approvals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Approval"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "approvals"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "review list --approvals"
+      ]
+    },
+    "rosen.receipt/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.receipt/v1"
+        },
+        "receipt": {
+          "$ref": "#/$defs/ReceiptRecord"
+        }
+      },
+      "required": [
+        "schema",
+        "receipt"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "receipt submit"
+      ]
+    },
+    "rosen.land/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.land/v1"
+        },
+        "land": {
+          "$ref": "#/$defs/LandAnswer"
+        }
+      },
+      "required": [
+        "schema",
+        "land"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "land"
+      ]
+    },
+    "rosen.config/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.config/v1"
+        },
+        "config": {
+          "$ref": "#/$defs/ConfigRecordV1"
+        }
+      },
+      "required": [
+        "schema",
+        "config"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "config show"
+      ]
+    },
+    "rosen.workspace.list/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.workspace.list/v1"
+        },
+        "workspaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkspaceRecord"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "workspaces"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "workspace list"
+      ]
+    },
+    "rosen.workspace.delete/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.workspace.delete/v1"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema",
+        "path"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "workspace delete"
+      ]
+    },
+    "rosen.change.workspace/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.change.workspace/v1"
+        },
+        "change": {
+          "$ref": "#/$defs/ChangeRecord"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceMaterialisation"
+        }
+      },
+      "required": [
+        "schema",
+        "change",
+        "workspace"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "change new --workspace"
+      ]
+    },
+    "rosen.status/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.status/v1"
+        },
+        "change": {
+          "$ref": "#/$defs/ChangeRecord"
+        },
+        "claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathClaim"
+          }
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "change",
+        "claims",
+        "workspace"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "status"
+      ]
+    },
+    "rosen.import/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.import/v1"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "base_commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "objects_reachable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "objects_written": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "schema",
+        "branch",
+        "base_commit",
+        "objects_reachable",
+        "objects_written"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "import"
+      ]
+    },
+    "rosen.snapshot/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.snapshot/v1"
+        },
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "tree": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "commit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recorded": {
+          "type": "boolean"
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "removed_files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blobs_sent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "trees_sent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes_sent": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "schema",
+        "change",
+        "tree",
+        "commit",
+        "recorded",
+        "changed_files",
+        "removed_files",
+        "blobs_sent",
+        "trees_sent",
+        "bytes_sent"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "commit",
+        "workspace watch"
+      ]
+    },
+    "rosen.event/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.event/v1"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "$ref": "#/$defs/EventKind"
+        },
+        "change": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "detail": {}
+      },
+      "required": [
+        "schema",
+        "seq",
+        "kind",
+        "change",
+        "detail"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "events"
+      ]
+    },
+    "rosen.error/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.error/v1"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema",
+        "command",
+        "error"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "*"
+      ]
+    },
+    "rosen.server.status/v1": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": "rosen.server.status/v1"
+            },
+            "running": {
+              "const": false
+            },
+            "endpoint": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema",
+            "running",
+            "endpoint"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": "rosen.server.status/v1"
+            },
+            "running": {
+              "const": true
+            },
+            "endpoint": {
+              "type": "string"
+            },
+            "server": {
+              "type": "string"
+            },
+            "protocol_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "pid": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "data_dir": {
+              "type": "string"
+            },
+            "uptime_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "open_connections": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "last_event": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "listen": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "fingerprint": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "upstream": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "schema",
+            "running",
+            "endpoint",
+            "server",
+            "protocol_version",
+            "pid",
+            "data_dir",
+            "uptime_ms",
+            "open_connections",
+            "last_event",
+            "listen",
+            "fingerprint",
+            "upstream"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "x-commands": [
+        "server start",
+        "server status"
+      ]
+    },
+    "ProjectConfigV1": {
+      "type": "object",
+      "properties": {
+        "build_units": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/BuildUnit"
+          }
+        },
+        "workspace_inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "generated": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "registration_lists": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "sensitive": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "checks": {
+          "$ref": "#/$defs/CheckSets"
+        },
+        "warm_pool": {
+          "$ref": "#/$defs/WarmPool"
+        },
+        "mirror": {
+          "$ref": "#/$defs/Mirror"
+        }
+      },
+      "required": [
+        "build_units",
+        "workspace_inputs",
+        "generated",
+        "registration_lists",
+        "sensitive",
+        "checks",
+        "warm_pool",
+        "mirror"
+      ],
+      "additionalProperties": false
+    },
+    "ConfigRecordV1": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "base_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config": {
+          "$ref": "#/$defs/ProjectConfigV1"
+        }
+      },
+      "required": [
+        "commit",
+        "base_ref",
+        "source",
+        "error",
+        "config"
+      ],
+      "additionalProperties": false
+    },
+    "Prepare": {
+      "type": "object",
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "commands"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.config/v2": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.config/v2"
+        },
+        "config": {
+          "$ref": "#/$defs/ConfigRecord"
+        }
+      },
+      "required": [
+        "schema",
+        "config"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "config show"
+      ]
+    },
+    "LogEntryV1": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "parents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ObjectId"
+          }
+        },
+        "tree": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "author": {
+          "type": "string"
+        },
+        "time": {
+          "type": "integer"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "change": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChangeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "commit",
+        "parents",
+        "tree",
+        "author",
+        "time",
+        "summary",
+        "change"
+      ],
+      "additionalProperties": false
+    },
+    "LogV1": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LogEntryV1"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "ReceiptTrailer": {
+      "type": "object",
+      "properties": {
+        "check_set": {
+          "type": "string"
+        },
+        "head": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "base": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "submitter": {
+          "$ref": "#/$defs/AgentId"
+        }
+      },
+      "required": [
+        "check_set",
+        "head",
+        "base",
+        "submitter"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.log/v2": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.log/v2"
+        },
+        "log": {
+          "$ref": "#/$defs/Log"
+        }
+      },
+      "required": [
+        "schema",
+        "log"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "log"
+      ]
+    },
+    "MachineRole": {
+      "enum": [
+        "agent",
+        "checker"
+      ]
+    },
+    "MachineStatus": {
+      "enum": [
+        "active",
+        "pending",
+        "revoked"
+      ]
+    },
+    "MachineRecord": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/MachineRole"
+        },
+        "status": {
+          "$ref": "#/$defs/MachineStatus"
+        },
+        "last_contact": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "running_agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "role",
+        "status",
+        "last_contact",
+        "running_agents"
+      ],
+      "additionalProperties": false
+    },
+    "JoinKeyRecord": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "role": {
+          "$ref": "#/$defs/MachineRole"
+        }
+      },
+      "required": [
+        "id",
+        "expires_at",
+        "remaining",
+        "role"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.machine/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.machine/v1"
+        },
+        "machine": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "$ref": "#/$defs/MachineRecord"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "machine"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "machine join",
+        "machine approve",
+        "machine revoke"
+      ]
+    },
+    "rosen.machines/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.machines/v1"
+        },
+        "machines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MachineRecord"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "machines"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "machine list"
+      ]
+    },
+    "rosen.machine_key/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.machine_key/v1"
+        },
+        "key": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/JoinKeyRecord"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "key"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "machine key create",
+        "machine key revoke"
+      ]
+    },
+    "rosen.machine_keys/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.machine_keys/v1"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JoinKeyRecord"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "keys"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "machine key list"
+      ]
+    }
+  }
+}
