@@ -32,30 +32,34 @@ pub(super) fn enqueue(conn: &Connection, outcome: &ReleaseOutcome) -> Result<(),
 /// Replays pending notifications at startup and after each release. Delivery
 /// is at least once: a crash after publishing but before deletion can repeat
 /// an event, but can never strand a waiter whose record was removed.
+///
+/// Publishes with the change registry unlocked: publishing reads the registry
+/// to find the event's audience (R9), so holding it here would deadlock.
 pub fn recover(state: &ServerState) -> Result<(), ChangeError> {
-    state.changes.with_conn(|conn| {
-        let pending = {
-            let mut stmt =
-                conn.prepare("SELECT id, outcome FROM claim_release_delivery ORDER BY id")?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
-        };
-        for (id, payload) in pending {
-            let outcome: ReleaseOutcome = serde_json::from_str(&payload).map_err(corrupt)?;
-            if !publish(state, &outcome) {
-                return Err(ChangeError::Base(
-                    "could not publish claim release; retained for retry".into(),
-                ));
-            }
+    let pending = state.changes.with_conn(|conn| {
+        let mut stmt =
+            conn.prepare("SELECT id, outcome FROM claim_release_delivery ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })?;
+    for (id, payload) in pending {
+        let outcome: ReleaseOutcome = serde_json::from_str(&payload).map_err(corrupt)?;
+        if !publish(state, &outcome) {
+            return Err(ChangeError::Base(
+                "could not publish claim release; retained for retry".into(),
+            ));
+        }
+        state.changes.with_conn(|conn| {
             conn.execute(
                 "DELETE FROM claim_release_delivery WHERE id = ?1",
                 params![id],
             )?;
-        }
-        Ok(())
-    })
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 fn publish(state: &ServerState, outcome: &ReleaseOutcome) -> bool {
