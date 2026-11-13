@@ -9,6 +9,7 @@
 
 pub mod cache;
 pub mod changes;
+pub mod channel;
 pub mod claims;
 pub mod conflicts;
 pub mod connection;

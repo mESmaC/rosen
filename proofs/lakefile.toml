@@ -1,6 +1,5 @@
 name = "proofs"
-defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "StackedChanges", "AutoRevert", "BatchGreen", "CrashRecovery"]
-
+defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "StackedChanges", "AutoRevert", "BatchGreen", "CrashRecovery", "PieceClaims"]
 
 # One library per proof-list feature (SPEC.md §7). Each library also builds
 # its fixture exporter, so `lake build` type-checks it.
@@ -86,6 +85,16 @@ globs = ["AutoRevert.Design", "AutoRevert.Export"]
 [[lean_exe]]
 name = "auto-revert-fixtures"
 root = "AutoRevert.Export"
+
+[[lean_lib]]
+name = "PieceClaims"
+globs = ["PieceClaims.Design", "PieceClaims.Export"]
+
+# Prints the piece claims fixture table:
+# `lake exe piece-claims-fixtures > fixtures/piece-claims.tsv`
+[[lean_exe]]
+name = "piece-claims-fixtures"
+root = "PieceClaims.Export"
 
 [[lean_lib]]
 name = "StackedChanges"

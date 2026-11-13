@@ -57,6 +57,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::PostLandPassed(job) => crate::post_land::handle(state, Some(job)).await,
         Request::PoolSize { size } => state.pool.set_size(size).await,
         Request::PoolTake { tree, dest } => state.pool.take(tree, dest).await,
+        Request::LandedProse(query) => crate::landing::service::landed_prose(state, query).await,
         Request::Ping => Outcome::Ok(Response::Pong),
         Request::Status => Outcome::Ok(Response::Status(status(state))),
         Request::Shutdown => {
@@ -124,6 +125,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         }
         Request::WorkspaceWrite(req) => crate::workspaces::write(state, req).await,
         Request::ConfigShow(query) => crate::project_config::show(state, query).await,
+        Request::Channel(call) => crate::channel::handle(state, call).await,
     }
 }
 
