@@ -206,6 +206,39 @@ impl Ledger {
         Ok(non_prose == 0)
     }
 
+    /// Read the complete interval ending at the attempt's base. Never include
+    /// a concurrent future land; CAS will retry against that base separately.
+    pub fn lands_between(
+        &self,
+        ref_name: &str,
+        after: i64,
+        through: &CommitId,
+    ) -> LandResult<Vec<(CommitId, Tier)>> {
+        let connection = self.lock()?;
+        let end: i64 = connection.query_row(
+            "SELECT seq FROM base_history WHERE ref_name=?1 AND commit_id=?2",
+            params![ref_name, through.to_string()],
+            |r| r.get(0),
+        )?;
+        if end < after {
+            return Err(LandError::Store(
+                "receipt base is ahead of attempted base".into(),
+            ));
+        }
+        let mut query = connection.prepare(
+            "SELECT commit_id,tier FROM base_history WHERE ref_name=?1 AND seq>?2 AND seq<=?3 ORDER BY seq")?;
+        let rows = query.query_map(params![ref_name, after, end], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (commit, tier) = row?;
+            let tier =
+                Tier::parse(&tier).ok_or_else(|| LandError::Store("invalid landed tier".into()))?;
+            Ok((parse_commit(commit)?, tier))
+        })
+        .collect()
+    }
+
     pub fn landing_of(&self, change: &ChangeId) -> LandResult<Option<CommitId>> {
         let connection = self.lock()?;
         let commit = connection

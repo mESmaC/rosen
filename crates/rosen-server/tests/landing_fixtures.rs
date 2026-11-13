@@ -52,7 +52,7 @@ fn decide_matches_lean_fixture_table() {
                 tier: Tier::parse(cells[4]).expect("tier"),
                 receipt: receipt(cells[5]),
                 base_moved: bit(cells[6]),
-                landed_since_all_prose: bit(cells[7]),
+                landed_since_all_independent: bit(cells[7]),
                 merge_clean: bit(cells[8]),
             };
             assert_eq!(decide(&input).code(), cells[9], "row {line} as {state:?}");

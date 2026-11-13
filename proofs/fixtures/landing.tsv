@@ -1,4 +1,4 @@
-state	parent_landed	has_conflicts	approved	tier	receipt	base_moved	landed_since_all_prose	merge_clean	verdict
+state	parent_landed	has_conflicts	approved	tier	receipt	base_moved	landed_since_all_independent	merge_clean	verdict
 active	0	0	0	prose	missing	0	1	0	parent_unlanded
 active	0	0	0	prose	missing	0	1	1	parent_unlanded
 active	0	0	0	prose	missing	1	0	0	parent_unlanded

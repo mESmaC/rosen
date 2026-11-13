@@ -940,6 +940,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "toml",
 ]
 
 [[package]]
