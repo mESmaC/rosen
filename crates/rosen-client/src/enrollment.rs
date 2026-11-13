@@ -55,8 +55,10 @@ fn load(_: &str) -> io::Result<Enrollment> {
 }
 /// Pins TLS before sending the join secret. Only the machine credential is retained.
 pub async fn join(dir: &Path, encoded: &str, name: &str) -> io::Result<MachineCredential> {
-    let key: JoinKey = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).map_err(invalid)?)
-        .map_err(invalid)?;
+    let mut key: JoinKey =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).map_err(invalid)?)
+            .map_err(invalid)?;
+    key.address = reachable(&key.address, key.fingerprint).await?;
     std::fs::create_dir_all(dir)?;
     let target = target(dir)?;
     let response = exchange(
@@ -86,9 +88,10 @@ pub async fn pending(
     name: &str,
     role: rosen_protocol::MachineRole,
 ) -> io::Result<MachineCredential> {
+    let address = reachable(address, pin).await?;
     std::fs::create_dir_all(dir)?;
     let response = exchange(
-        address,
+        &address,
         pin,
         Request::MachinePending {
             name: name.into(),
@@ -100,7 +103,7 @@ pub async fn pending(
         dir,
         &target(dir)?,
         Enrollment {
-            address: address.into(),
+            address,
             fingerprint: pin,
             credential: response.clone(),
         },
@@ -172,6 +175,34 @@ async fn exchange(address: &str, pin: [u8; 32], request: Request) -> io::Result<
     .await
     .map_err(invalid)?
 }
+
+/// Discovery provides hints only. A probe pins TLS before selecting an address,
+/// so an mDNS responder can never collect the enrollment secret.
+async fn reachable(address: &str, pin: [u8; 32]) -> io::Result<String> {
+    if !address.is_empty() {
+        if let Ok(Ok(_)) = tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::pinned_tls::connect(address, pin),
+        )
+        .await
+        {
+            return Ok(address.into());
+        }
+    }
+    for candidate in crate::discovery::discover(&hex(&pin)).await? {
+        if let Ok(Ok(_)) = tokio::time::timeout(
+            Duration::from_secs(3),
+            crate::pinned_tls::connect(&candidate, pin),
+        )
+        .await
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(invalid(
+        "server unreachable at key address and through DNS-SD",
+    ))
+}
 impl Client {
     pub async fn create_join_key(&self, req: CreateJoinKey) -> Result<String, Error> {
         match self.request(Request::JoinKeyCreate(req)).await? {
@@ -180,4 +211,3 @@ impl Client {
         }
     }
 }
-

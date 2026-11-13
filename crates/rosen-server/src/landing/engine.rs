@@ -2,7 +2,9 @@
 //! and retry with backoff when another land wins the race.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -85,11 +87,35 @@ struct Gathered {
     receipt: Option<Receipt>,
 }
 
+/// What one [`Landing::recover`] pass did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RecoveryReport {
+    /// Lands whose post-land work this pass finished.
+    pub finished: Vec<ChangeId>,
+    /// Lands whose post-land work failed again, with why. They stay pending
+    /// for the next pass.
+    pub failed: Vec<(ChangeId, String)>,
+    /// Lands another thread was already finishing.
+    pub busy: Vec<ChangeId>,
+}
+
+impl RecoveryReport {
+    /// True when no land this pass saw is left unfinished by it.
+    pub fn is_complete(&self) -> bool {
+        self.failed.is_empty() && self.busy.is_empty()
+    }
+}
+
 pub struct Landing {
     ledger: Ledger,
     deps: LandingDeps,
     config: LandingConfig,
     recheck_store: Option<std::sync::Arc<dyn rosen_store::ObjectStore>>,
+    /// Lands whose post-land work is running now. A recovery pass and the
+    /// land's own request, or two passes, never run it at once, so one land
+    /// never releases, rebases or announces twice in parallel. Shared with
+    /// the engine that replaces this one ([`Landing::taking_over`]).
+    post_landing: Arc<Mutex<HashSet<CommitId>>>,
 }
 
 impl Landing {
@@ -99,7 +125,15 @@ impl Landing {
             deps,
             config,
             recheck_store: None,
+            post_landing: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Shares `old`'s record of running post-land work, so a run still going
+    /// on the engine this one replaces keeps excluding runs of the same land.
+    pub fn taking_over(mut self, old: &Landing) -> Self {
+        self.post_landing = Arc::clone(&old.post_landing);
+        self
     }
 
     /// Enables build-unit receipt reuse using immutable objects from the
@@ -126,8 +160,9 @@ impl Landing {
     /// same receipt was already stored.
     pub fn submit_receipt(&self, receipt: Receipt) -> LandResult<Receipt> {
         let facts = self.facts(&receipt.change)?;
+        let required = self.check_set_at(&self.current_base()?)?;
         receipt
-            .check_binding(&facts.head, facts.state, &self.config.pre_land_check_set)
+            .check_binding(&facts.head, facts.state, &required)
             .map_err(|refusal| LandError::InvalidReceipt(refusal.to_string()))?;
         let base_ref = &self.config.base_ref;
         if self.ledger.base_seq(base_ref, &receipt.base)?.is_none() {
@@ -167,22 +202,30 @@ impl Landing {
         })
     }
 
-    /// Replays post-land work that a crash interrupted. Returns how many
-    /// lands it finished.
-    pub fn recover(&self) -> LandResult<usize> {
-        let pending = self.ledger.pending_post_land(&self.config.base_ref)?;
-        for record in &pending {
-            self.post_land(record)?;
+    /// Replays post-land work that a crash or a failed step interrupted,
+    /// oldest land first. One land's failure does not hold back the others:
+    /// it stays pending and the next pass retries it. Replays are safe in
+    /// any order because every step is idempotent and a rebase only ever
+    /// moves a change forward ([`ChangeBook::reparent`]).
+    pub fn recover(&self) -> LandResult<RecoveryReport> {
+        let mut report = RecoveryReport::default();
+        for record in self.ledger.pending_post_land(&self.config.base_ref)? {
+            match self.post_land(&record, true) {
+                Ok(Some(_)) => report.finished.push(record.change),
+                Ok(None) => report.busy.push(record.change),
+                Err(error) => report.failed.push((record.change, error.to_string())),
+            }
         }
-        Ok(pending.len())
+        Ok(report)
     }
 
     fn attempt(&self, change: &ChangeId, attempt: u32) -> LandResult<Attempt> {
         if let Some(commit) = self.ledger.landing_of(change)? {
             return Ok(Attempt::Done(LandOutcome::AlreadyLanded { commit }));
         }
-        let facts = self.facts(change)?;
+        let mut facts = self.facts(change)?;
         let base = self.current_base()?;
+        facts.tier = self.deps.book.tier_at(&facts, &base)?;
         // A receipt on a base newer than the one read means the base moved
         // mid-attempt; retrying reads that base instead of failing the land.
         let Some(mut gathered) = self.gather(&facts, &base)? else {
@@ -252,7 +295,7 @@ impl Landing {
             &self.config.base_ref,
             &facts.id,
             &facts.head,
-            &self.config.pre_land_check_set,
+            &self.check_set_at(base)?,
             base,
         )?;
         let receipt = match lookup {
@@ -271,6 +314,17 @@ impl Landing {
             }
         };
         Ok(Some(Gathered { input, receipt }))
+    }
+
+    /// Resolve against the attempt's immutable base. A cached engine can
+    /// outlive a config land, including when its own CAS loses that race.
+    pub(crate) fn check_set_at(&self, base: &CommitId) -> LandResult<String> {
+        match &self.recheck_store {
+            Some(store) => crate::project_config::resolve(store.as_ref(), base)
+                .map(|resolved| resolved.config.checks.pre_land.name.clone())
+                .map_err(|error| LandError::Backend(error.to_string())),
+            None => Ok(self.config.pre_land_check_set.clone()),
+        }
     }
 
     fn independent_since(
@@ -312,7 +366,12 @@ impl Landing {
         };
         match self.ledger.compare_and_swap(&base, &record)? {
             CasResult::Swapped { .. } => {
-                let restack = self.post_land(&record).map_err(|error| error.to_string());
+                // Nobody else can know of this land yet, so the run is ours;
+                // a concurrent recovery pass that saw it first finishes it.
+                let restack = self
+                    .post_land(&record, false)
+                    .map(Option::unwrap_or_default)
+                    .map_err(|error| error.to_string());
                 Ok(Attempt::Done(LandOutcome::Landed {
                     commit,
                     attempts,
@@ -330,19 +389,42 @@ impl Landing {
         }
     }
 
-    fn post_land(&self, record: &LandRecord) -> LandResult<RestackReport> {
-        self.deps.events.emit(LandingEvent::Landed {
+    /// Runs a land's post-land work (R8 step 4), or returns `None` when
+    /// another thread is running it now. A `replay` may follow a run that
+    /// announced the land before it crashed or failed, so it announces only
+    /// what the event log does not hold yet; a land's first run cannot have
+    /// announced anything, and skips that lookup.
+    fn post_land(&self, record: &LandRecord, replay: bool) -> LandResult<Option<RestackReport>> {
+        let Some(_running) = PostLandRun::start(&self.post_landing, record.commit) else {
+            return Ok(None);
+        };
+        // Read again under the run: a run that finished between the pending
+        // list being read and this one starting has nothing left to do.
+        if !self
+            .ledger
+            .post_land_pending(&record.ref_name, &record.commit)?
+        {
+            return Ok(Some(RestackReport::default()));
+        }
+        let landed = LandingEvent::Landed {
             change: record.change,
             commit: record.commit,
-        });
+        };
+        if replay {
+            self.deps.events.emit_once(landed);
+        } else {
+            self.deps.events.emit(landed);
+        }
         let restacker = Restacker {
             book: self.deps.book.as_ref(),
             merger: self.deps.merger.as_ref(),
             events: self.deps.events.as_ref(),
+            replay,
         };
         let report = restacker.after_land(&record.change, &record.commit)?;
-        self.ledger.mark_post_land_done(&record.change)?;
-        Ok(report)
+        self.ledger
+            .mark_post_land_done(&record.ref_name, &record.commit)?;
+        Ok(Some(report))
     }
 
     fn facts(&self, change: &ChangeId) -> LandResult<ChangeFacts> {
@@ -356,6 +438,29 @@ impl Landing {
         self.ledger
             .base(&self.config.base_ref)?
             .ok_or_else(|| LandError::NoBase(self.config.base_ref.clone()))
+    }
+}
+
+/// Marks one land's post-land work as running until dropped, including when
+/// the work fails or panics. Keyed by the landed commit, so a change that
+/// lands again after a revert (R12) runs its second land's work separately.
+struct PostLandRun<'a> {
+    running: &'a Mutex<HashSet<CommitId>>,
+    commit: CommitId,
+}
+
+impl<'a> PostLandRun<'a> {
+    fn start(running: &'a Mutex<HashSet<CommitId>>, commit: CommitId) -> Option<Self> {
+        let mut set = running.lock().unwrap_or_else(PoisonError::into_inner);
+        set.insert(commit)
+            .then_some(PostLandRun { running, commit })
+    }
+}
+
+impl Drop for PostLandRun<'_> {
+    fn drop(&mut self) {
+        let mut set = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+        set.remove(&self.commit);
     }
 }
 

@@ -24,8 +24,10 @@ pub mod channel;
 pub mod claims;
 pub mod connection;
 pub mod daemon;
+pub mod discovery;
 mod edits;
 pub mod enrollment;
+pub mod machines;
 pub mod events;
 pub mod history;
 pub mod identity;
@@ -43,6 +45,7 @@ pub mod workspace;
 
 pub use connection::Client;
 pub use daemon::connect_or_start;
+pub use land::land_reconnecting;
 pub use rosen_core::{AgentId, ChangeId, ChangeParent, ChangeState, ObjectId};
 pub use rosen_protocol as protocol;
 pub use rosen_protocol::Endpoint;

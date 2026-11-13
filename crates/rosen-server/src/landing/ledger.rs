@@ -415,11 +415,27 @@ impl Ledger {
         Ok(records)
     }
 
-    pub fn mark_post_land_done(&self, change: &ChangeId) -> LandResult<()> {
+    /// True while the land that made `commit` has unfinished post-land
+    /// work. Keyed by the landed commit, not the change: a reverted change
+    /// can land again (R12), and each land finishes on its own.
+    pub fn post_land_pending(&self, ref_name: &str, commit: &CommitId) -> LandResult<bool> {
+        let connection = self.lock()?;
+        let pending = connection
+            .query_row(
+                "SELECT post_land_done = 0 FROM base_history
+                 WHERE ref_name = ?1 AND commit_id = ?2",
+                params![ref_name, commit.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(pending.unwrap_or(false))
+    }
+
+    pub fn mark_post_land_done(&self, ref_name: &str, commit: &CommitId) -> LandResult<()> {
         let connection = self.lock()?;
         connection.execute(
-            "UPDATE base_history SET post_land_done = 1 WHERE change_id = ?1",
-            params![change.to_string()],
+            "UPDATE base_history SET post_land_done = 1 WHERE ref_name = ?1 AND commit_id = ?2",
+            params![ref_name, commit.to_string()],
         )?;
         Ok(())
     }

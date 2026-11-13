@@ -1,5 +1,5 @@
 //! Event-driven refill; one worker per daemon serializes refresh work.
-use super::pool::{refresh, Slot, WarmPool};
+use super::pool::{refresh, seed_slot, Slot, WarmPool};
 use super::Options;
 use crate::{Client, Error};
 use rosen_protocol::{Endpoint, EventKind, LogRequest};
@@ -159,6 +159,10 @@ async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<(), Error> {
         let report = client
             .materialise_tree(base.tree, &path, Options::default())
             .await?;
+        let (seed_store, seed_path, tree) = (store.clone(), path.clone(), base.tree);
+        tokio::task::spawn_blocking(move || seed_slot(&seed_store, &seed_path, tree))
+            .await
+            .map_err(|error| Error::Unexpected(error.to_string()))?;
         state = pool.state.lock().await;
         state.ready.push(Slot {
             path,
