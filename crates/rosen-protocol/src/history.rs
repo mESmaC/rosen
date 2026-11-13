@@ -9,7 +9,7 @@
 //!   the letters k-z, so they never look like hex). A change reads as its
 //!   current head tree, sitting on its parent.
 
-use rosen_core::{ChangeId, ObjectId};
+use rosen_core::{AgentId, ChangeId, ObjectId, ReceiptTrailer};
 use serde::{Deserialize, Serialize};
 
 /// Parameters of [`crate::Request::Log`].
@@ -44,6 +44,14 @@ pub struct LogEntry {
     /// The change the commit belongs to: a landed commit's `Rosen-Change`
     /// trailer, or the change whose snapshot it is.
     pub change: Option<ChangeId>,
+    /// A landed commit's `Rosen-Receipt` trailer: the receipt its land
+    /// counted. Absent for snapshots, imported history and lands that need
+    /// no receipt (prose-only changes, server reverts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ReceiptTrailer>,
+    /// A landed commit's `Rosen-Approved-By` trailers, in approval order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvers: Vec<AgentId>,
 }
 
 /// The answer to [`crate::Request::Log`], newest first.
