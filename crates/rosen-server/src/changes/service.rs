@@ -96,7 +96,15 @@ impl ChangeService {
     }
 
     pub fn abandon(&self, change: &str) -> Result<ChangeRecord, ChangeError> {
-        self.with_conn(|conn| registry::abandon(conn, registry::resolve(conn, change)?))
+        self.abandon_releasing(change).map(|(record, _)| record)
+    }
+
+    /// Retains the freed paths and waiter identities for post-commit events.
+    pub(crate) fn abandon_releasing(
+        &self,
+        change: &str,
+    ) -> Result<(ChangeRecord, rosen_protocol::ReleaseOutcome), ChangeError> {
+        self.with_conn(|conn| registry::abandon_releasing(conn, registry::resolve(conn, change)?))
     }
 
     /// Runs `work` on the connection, opening and migrating it first if needed.
