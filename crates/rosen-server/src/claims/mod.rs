@@ -10,6 +10,14 @@ mod store;
 
 pub use store::ensure_schema;
 
+/// Every claim, share and wait record of an open or ready change, oldest
+/// first. Overlap detection reads them (R6).
+pub fn live_records(
+    conn: &mut rusqlite::Connection,
+) -> Result<Vec<rosen_protocol::PathClaim>, ChangeError> {
+    store::list(conn, None)
+}
+
 use crate::changes::ChangeError;
 use crate::events::Concern;
 use crate::ServerState;
