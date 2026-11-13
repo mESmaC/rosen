@@ -184,7 +184,13 @@ impl Landing {
                 self.commit_land(&facts, base, tree, gathered.receipt, attempt)
             }
             (Verdict::Refuse(Refusal::MergeConflict), MergeOutcome::Conflicted(paths)) => {
-                self.deps.book.record_conflicts(change, &paths)?;
+                self.deps.book.record_conflicts_at(
+                    change,
+                    &facts.merge_base,
+                    &base,
+                    &facts.head,
+                    &paths,
+                )?;
                 self.deps.events.emit(LandingEvent::Conflict {
                     change: *change,
                     paths,

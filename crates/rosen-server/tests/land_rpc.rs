@@ -179,3 +179,51 @@ async fn base_moves_only_with_a_receipt_for_the_exact_head_and_a_trusted_base() 
     let names: Vec<_> = tree.entries().iter().map(|e| e.name.clone()).collect();
     assert_eq!(names, [b"a.txt".to_vec(), b"b.txt".to_vec()]);
 }
+
+// Risk (SPEC R8 step 2): a refused land must durably retain the owner's
+// conflicting edits and name their files without moving the base.
+#[tokio::test(flavor = "multi_thread")]
+async fn conflicted_land_routes_regions_and_files_to_its_owner() {
+    let (temp, state, root) = setup();
+    let (a, b) = (new_change(&state).await, new_change(&state).await);
+    let ha = write(&state, &a, "shared.txt", b"first\n").await;
+    let hb = write(&state, &b, "shared.txt", b"second\n").await;
+    receipt(&state, &a, ha, root).await;
+    receipt(&state, &b, hb, root).await;
+    let tip = land(&state, &a).await.base;
+    let answer = land(&state, &b).await;
+    assert_eq!(answer.base, tip);
+    assert_eq!(refused(&answer), Some("merge_conflict"));
+    let LandStatus::Refused { paths, .. } = answer.outcome else {
+        unreachable!()
+    };
+    assert_eq!(paths, ["shared.txt"]);
+    let events = state.events.after(0);
+    let event = events
+        .iter()
+        .find(|e| e.kind == rosen_protocol::EventKind::Conflict)
+        .unwrap();
+    assert_eq!(event.change.as_deref(), Some(b.as_str()));
+    assert_eq!(event.detail["paths"], serde_json::json!(["shared.txt"]));
+    let conn = rusqlite::Connection::open(state.config.metadata_path()).unwrap();
+    let set = rosen_server::conflicts::load(&conn, &b).unwrap();
+    let region = set.open().next().unwrap();
+    assert_eq!(
+        (&region.base, &region.ours, &region.theirs),
+        (&Vec::new(), &b"second\n".to_vec(), &b"first\n".to_vec())
+    );
+    assert!(rosen_server::conflicts::check_landable(&conn, &b).is_err());
+    assert!(rosen_server::conflicts::load(&conn, &a)
+        .unwrap()
+        .open()
+        .next()
+        .is_none());
+    drop(state);
+    let restarted = ServerState::new(ServerConfig {
+        data_dir: temp.path().into(),
+        endpoint: rosen_protocol::Endpoint::new("restart"),
+    });
+    let record = restarted.changes.show(&b).unwrap().change;
+    assert_eq!(record.head, hb);
+    assert_eq!(record.conflicts, vec![region.id]);
+}

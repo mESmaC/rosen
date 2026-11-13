@@ -117,7 +117,7 @@ impl LandingService {
             }
             LandOutcome::AlreadyLanded { commit } => LandStatus::AlreadyLanded { commit },
             LandOutcome::Refused(refusal) => {
-                refusal_status(&engine, &record.change, &base, refusal)
+                refusal_status(state, &engine, &record.change, &base, refusal)?
             }
         };
         Ok(LandAnswer {
@@ -179,11 +179,12 @@ impl LandingService {
 
 /// A refusal, with what the agent must do next.
 fn refusal_status(
+    state: &ServerState,
     engine: &Landing,
     change: &Change,
     base: &CommitId,
     refusal: Refusal,
-) -> LandStatus {
+) -> Result<LandStatus, ErrorBody> {
     let set = &engine.config().pre_land_check_set;
     let head = change.head;
     let submit = format!(
@@ -199,6 +200,7 @@ fn refusal_status(
             "the change below it in its stack has not landed; a stack lands bottom first".into()
         }
         Refusal::Conflicts => {
+            paths = super::conflict_routes::paths(state, change.id).map_err(land_body)?;
             "the change has stored conflicts; resolve them with `rosen resolve`".into()
         }
         Refusal::Unapproved => format!("no approval for the current head {head}"),
@@ -211,19 +213,15 @@ fn refusal_status(
              so the receipt no longer counts: {submit}"
         ),
         Refusal::MergeConflict => {
-            if let Ok(preview) = engine.merge_preview(&change.id) {
-                if let MergeOutcome::Conflicted(conflicted) = preview.outcome {
-                    paths = conflicted;
-                }
-            }
+            paths = super::conflict_routes::paths(state, change.id).map_err(land_body)?;
             format!("merging onto {base} conflicts in: {}", paths.join(", "))
         }
     };
-    LandStatus::Refused {
+    Ok(LandStatus::Refused {
         reason: refusal.code().to_owned(),
         message,
         paths,
-    }
+    })
 }
 
 /// The landing engine's view of this server: the change registry, the tree
@@ -310,11 +308,21 @@ impl ChangeBook for Adapters {
             .map(drop)
     }
 
-    /// Storing conflict regions from a land's merge is routed to the owning
-    /// change separately (R8 conflict routing); the land is refused and its
-    /// `conflict` event names the files either way.
     fn record_conflicts(&self, _: &ChangeId, _: &[String]) -> LandResult<()> {
-        Ok(())
+        Err(LandError::Backend(
+            "conflict routing requires merge inputs".into(),
+        ))
+    }
+
+    fn record_conflicts_at(
+        &self,
+        id: &ChangeId,
+        merge_base: &CommitId,
+        onto: &CommitId,
+        head: &CommitId,
+        paths: &[String],
+    ) -> LandResult<()> {
+        super::conflict_routes::record(&*self.state()?, *id, *merge_base, *onto, *head, paths)
     }
 
     fn reparent(&self, id: &ChangeId, onto: &CommitId, merged: Option<&TreeId>) -> LandResult<()> {

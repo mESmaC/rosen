@@ -69,7 +69,7 @@ pub fn load(conn: &Connection, change_id: &str) -> Result<ConflictSet> {
 }
 
 /// Replaces the stored conflicts of a change with `set`.
-fn save(tx: &Transaction<'_>, change_id: &str, set: &ConflictSet) -> Result<()> {
+pub(crate) fn save(tx: &Transaction<'_>, change_id: &str, set: &ConflictSet) -> Result<()> {
     tx.execute("DELETE FROM conflicts WHERE change_id = ?1", [change_id])?;
     let mut insert = tx.prepare_cached(
         "INSERT INTO conflicts

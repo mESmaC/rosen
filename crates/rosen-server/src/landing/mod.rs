@@ -11,6 +11,7 @@
 //! of the server. Landing reaches them only through the traits below, so each
 //! can be wired in without touching the landing algorithm.
 
+mod conflict_routes;
 mod engine;
 mod ledger;
 mod restack;
@@ -166,6 +167,19 @@ pub trait ChangeBook: Send + Sync {
     fn overlapping(&self, id: &ChangeId) -> LandResult<Vec<ChangeId>>;
     fn mark_landed(&self, id: &ChangeId, commit: &CommitId) -> LandResult<()>;
     fn record_conflicts(&self, id: &ChangeId, paths: &[String]) -> LandResult<()>;
+    /// Records conflicts against the exact immutable inputs of this attempt.
+    fn record_conflicts_at(
+        &self,
+        id: &ChangeId,
+        merge_base: &CommitId,
+        onto: &CommitId,
+        head: &CommitId,
+        paths: &[String],
+    ) -> LandResult<()> {
+        let _ = (merge_base, onto, head);
+        self.record_conflicts(id, paths)
+    }
+
     /// Moves a change onto `onto` without rewriting its commits (R8 step 4).
     /// `merged` is the clean merge result, or `None` when it conflicted.
     fn reparent(&self, id: &ChangeId, onto: &CommitId, merged: Option<&TreeId>) -> LandResult<()>;
