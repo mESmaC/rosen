@@ -64,7 +64,11 @@ impl UpstreamLink {
         // connecting, so a server that stalls here would hang the client.
         tokio::time::timeout(
             tls::HANDSHAKE_TIMEOUT,
-            hello(&mut reader, &mut writer, &config.credential),
+            hello(
+                &mut reader,
+                &mut writer,
+                &rosen_client::enrollment::resolve_reference(&config.credential)?,
+            ),
         )
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no welcome from the server"))??;
