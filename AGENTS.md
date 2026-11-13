@@ -101,6 +101,8 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - `crates/rosen-store/`: the authoritative object store; a bug loses or corrupts objects, and objects are never deleted (SPEC.md D5).
 - `crates/rosen-protocol/src/transport_windows.rs`: restricts the named pipe to the current user; a bug exposes the server to other users.
 - `crates/rosen-merge/`: every land and rebase merges through it; a bug silently drops or duplicates lines (SPEC.md R5).
+- `crates/rosen-server/src/machines/`: join-key consumption, enrollment and credential rotation; a bug admits an unauthorized machine (SPEC.md R14).
+- `crates/rosen-client/src/enrollment.rs`: TLS-pinned enrollment and Credential Manager persistence; a bug discloses a join key or machine credential (SPEC.md R14).
 - `crates/rosen-server/src/network/`: the TLS listener, certificate pinning and machine credential check; a bug admits an unenrolled peer or sends the credential to an impostor (SPEC.md R14).
 
 - `crates/rosen-client/src/workspace/pool_worker.rs`: removes unused ready directories on restart and pool shrink; a wrong root could delete a taken workspace (SPEC.md R3).
