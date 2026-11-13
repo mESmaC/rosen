@@ -114,6 +114,11 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
+    MachineList,
+    MachineApprove { machine: String },
+    MachineRevoke { machine: String },
+    JoinKeyList,
+    JoinKeyRevoke { key: String },
     JoinKeyCreate(crate::CreateJoinKey),
     MachineEnroll {
         key: String,
@@ -262,6 +267,10 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
+    Machines(Vec<crate::machine::MachineRecord>),
+    Machine(crate::machine::MachineRecord),
+    JoinKeys(Vec<crate::machine::JoinKeyRecord>),
+    JoinKey(crate::machine::JoinKeyRecord),
     JoinKeyCreated {
         key: String,
     },
