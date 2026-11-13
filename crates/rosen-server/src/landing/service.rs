@@ -119,6 +119,7 @@ impl LandingService {
     /// Replays post-land work a crash interrupted (R8 step 4). Does nothing
     /// before the project has a base.
     pub fn recover(&self, state: &ServerState) -> Result<usize, ErrorBody> {
+        super::revert::recover(state).map_err(land_body)?;
         if state.project_config.at_base().map_err(internal)?.is_none() {
             return Ok(0);
         }

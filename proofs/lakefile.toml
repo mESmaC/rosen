@@ -1,5 +1,5 @@
 name = "proofs"
-defaultTargets = ["Bisection", "Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "BatchGreen"]
+defaultTargets = ["Bisection", "Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "BatchGreen", "AutoRevert"]
 
 # One library per proof-list feature (SPEC.md §7). Each library also builds
 # its fixture exporter, so `lake build` type-checks it.
@@ -94,3 +94,11 @@ globs = ["BatchGreen.Design", "BatchGreen.Export"]
 [[lean_exe]]
 name = "batch-green-fixtures"
 root = "BatchGreen.Export"
+
+[[lean_lib]]
+name = "AutoRevert"
+globs = ["AutoRevert.Design", "AutoRevert.Export"]
+
+[[lean_exe]]
+name = "auto-revert-fixtures"
+root = "AutoRevert.Export"
