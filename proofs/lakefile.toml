@@ -1,5 +1,5 @@
 name = "proofs"
-defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting"]
+defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck"]
 
 # One library per proof-list feature (SPEC.md §7). Each library also builds
 # its fixture exporter, so `lake build` type-checks it.
@@ -47,3 +47,11 @@ globs = ["ConflictRouting.Design", "ConflictRouting.Export"]
 [[lean_exe]]
 name = "conflict-routing-fixtures"
 root = "ConflictRouting.Export"
+
+[[lean_lib]]
+name = "Recheck"
+globs = ["Recheck.Design", "Recheck.Export"]
+
+[[lean_exe]]
+name = "recheck-fixtures"
+root = "Recheck.Export"

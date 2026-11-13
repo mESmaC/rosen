@@ -53,6 +53,10 @@ pub struct SnapshotRequest {
     pub change: String,
     /// The workspace's whole tree. The server must already hold it.
     pub tree: ObjectId,
+    /// The stored local tree the workspace edited. Server rebases may have
+    /// advanced the authoritative head while this workspace kept working.
+    #[serde(default)]
+    pub from: Option<ObjectId>,
     /// `Some` for `rosen commit`, which names the snapshot; `None` for an
     /// automatic snapshot from the watcher.
     pub message: Option<String>,

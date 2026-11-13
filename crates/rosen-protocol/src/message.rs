@@ -124,6 +124,10 @@ pub enum Request {
     ChangeShow {
         change: String,
     },
+    /// Merge onto the current base without rewriting snapshots (R2).
+    ChangeRebase {
+        change: String,
+    },
     ChangeAbandon {
         change: String,
     },

@@ -117,6 +117,46 @@ fn refused(answer: &LandAnswer) -> Option<&str> {
     }
 }
 
+// Risk: the production adapter must reuse independent receipts while still
+// refusing clean textual merges whose changes share a build unit (SPEC R8).
+#[tokio::test(flavor = "multi_thread")]
+async fn moved_base_reuses_only_independent_receipts_through_server() {
+    let (_temp, state, root) = setup();
+    let configure = new_change(&state).await;
+    let config = b"[build_units.a]\npaths=['a*']\n[build_units.b]\npaths=['b*']\n";
+    let head = write(&state, &configure, "rosen.toml", config).await;
+    receipt(&state, &configure, head, root).await;
+    let LandStatus::Landed { commit: base, .. } = land(&state, &configure).await.outcome else {
+        panic!("configuration must land");
+    };
+    let a = new_change(&state).await;
+    let b = new_change(&state).await;
+    let c = new_change(&state).await;
+    let ah = write(&state, &a, "a.rs", b"a\n").await;
+    let bh = write(&state, &b, "b.rs", b"b\n").await;
+    let ch = write(&state, &c, "another.rs", b"c\n").await;
+    for (change, head) in [(&a, ah), (&b, bh), (&c, ch)] {
+        receipt(&state, change, head, base).await;
+    }
+    assert!(matches!(
+        land(&state, &a).await.outcome,
+        LandStatus::Landed { .. }
+    ));
+    let LandStatus::Landed { commit: tip, .. } = land(&state, &b).await.outcome else {
+        panic!("independent receipt must survive the moved base");
+    };
+    let refused_c = land(&state, &c).await;
+    assert_eq!(
+        (refused(&refused_c), refused_c.base),
+        (Some("needs_recheck"), tip)
+    );
+    receipt(&state, &c, ch, tip).await;
+    assert!(matches!(
+        land(&state, &c).await.outcome,
+        LandStatus::Landed { .. }
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn base_moves_only_with_a_receipt_for_the_exact_head_and_a_trusted_base() {
     let (_temp, state, root) = setup();

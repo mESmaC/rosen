@@ -171,7 +171,10 @@ impl LandingService {
             pre_land_check_set: check_set,
             ..LandingConfig::default()
         };
-        let engine = Arc::new(Landing::new(ledger, deps, config));
+        let store = LooseObjectStore::open(state.config.objects_dir())
+            .map_err(|err| internal(err.to_string()))?;
+        let engine =
+            Arc::new(Landing::new(ledger, deps, config).with_recheck_store(Arc::new(store)));
         *slot = Some(Arc::clone(&engine));
         Ok(engine)
     }

@@ -28,6 +28,10 @@ pub const MAX_WARM_POOL_SIZE: u32 = 1000;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectConfig {
+    /// Explicit build graph; empty discovers Cargo packages from the base.
+    pub build_units: std::collections::BTreeMap<String, BuildUnit>,
+    /// Additional inputs shared by every build unit.
+    pub workspace_inputs: Vec<PathPattern>,
     /// Files regenerated after a merge, never merged by hand (R5). They
     /// never count as an overlap (§2).
     pub generated: Vec<PathPattern>,
@@ -39,6 +43,13 @@ pub struct ProjectConfig {
     pub checks: CheckSets,
     pub warm_pool: WarmPool,
     pub mirror: Mirror,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BuildUnit {
+    pub paths: Vec<PathPattern>,
+    pub dependencies: Vec<String>,
 }
 
 /// The check sets receipts and post-land runs are bound to (D20).

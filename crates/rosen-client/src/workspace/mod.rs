@@ -20,6 +20,7 @@ mod clone;
 pub(crate) mod delete;
 mod layout;
 mod lifecycle;
+pub(crate) mod rebase;
 mod registry;
 pub use lifecycle::{deletion_permitted, CleanupReport};
 pub use registry::WorkspaceRecord;
