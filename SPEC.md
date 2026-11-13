@@ -238,6 +238,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 3. A **stack** lands bottom first. A change cannot land before its parent change.
    - The server remembers the parent tree each child was based on. A parent snapshot or server rebase automatically merges its new tree into live descendants in stack order, retaining each dependency, change ID and authored commit. Conflicts are stored on the child and stop propagation through that child until resolved. A restart resumes pending parent updates from the saved tree; workspaces apply the resulting head only when their owners ask (R2).
    - A legacy edited stack with no recoverable parent-tree basis is refused rather than merged against a guessed basis that could delete intervening landed work.
+   - A stacked change's merge result (step 1) measures each unlanded change in its stack from that remembered parent tree, merging them bottom first onto the base. It is the same merge the land performs once the parent has landed, so a child whose head has not caught up with its parent never reads the lands in between as deletions.
 4. After a land:
    - claims are released;
    - the server rebases, without rewriting commits:
