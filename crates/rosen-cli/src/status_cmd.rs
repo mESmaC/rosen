@@ -11,8 +11,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-/// Schema tag for `--json` output (SPEC.md R10). Bump on any shape change.
-const STATUS_SCHEMA: &str = "rosen.status/v1";
+use crate::output::STATUS_SCHEMA;
 
 /// What a local workspace holds beyond the server's copy of its change.
 #[derive(Serialize)]

@@ -8,9 +8,8 @@ use rosen_client::{Endpoint, Error};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-/// Schema tags for `--json` output (SPEC R10). Bump on any shape change.
-const LOG_SCHEMA: &str = "rosen.log/v1";
-const DIFF_SCHEMA: &str = "rosen.diff/v1";
+use crate::output::DIFF_SCHEMA;
+use crate::output::LOG_SCHEMA;
 
 pub async fn log(
     json: bool,
