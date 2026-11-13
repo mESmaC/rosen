@@ -33,7 +33,6 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::Duration;
 use tokio::sync::watch;
 
 /// Why the log could not be read or written.
@@ -291,12 +290,11 @@ impl Inner {
                 let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
                     | OpenFlags::SQLITE_OPEN_CREATE
                     | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-                let conn = Connection::open_with_flags(path, flags)?;
-                conn.pragma_update(None, "journal_mode", "WAL")?;
-                conn
+                Connection::open_with_flags(path, flags)?
             }
         };
-        conn.busy_timeout(Duration::from_secs(5))?;
+        crate::metadata::configure(&conn)?;
+        crate::metadata::ensure_schema(&conn)?;
         store::ensure_schema(&conn)?;
         let tip = store::last_seq(&conn)?;
         self.latest.send_if_modified(|latest| {

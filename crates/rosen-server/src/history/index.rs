@@ -14,7 +14,6 @@ use rosen_store::{LooseObjectStore, ObjectStore};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::cell::RefCell;
 use std::path::Path;
-use std::time::Duration;
 
 const SCHEMA: &str = "
 -- One row per commit a query has walked: its ancestry and log line.
@@ -94,10 +93,8 @@ impl Index {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| HistoryError::Store(e.into()))?;
         }
-        let conn = Connection::open(path)?;
-        conn.busy_timeout(Duration::from_secs(5))?;
+        let conn = crate::metadata::open(path)?;
         if create {
-            conn.pragma_update(None, "journal_mode", "WAL")?;
             conn.execute_batch(SCHEMA)?;
         }
         Ok(Index { conn })
