@@ -26,15 +26,20 @@ pub struct WorkspaceMarker {
     /// tracked file outside them is absent from disk but not deleted.
     #[serde(default)]
     pub sparse: Vec<String>,
+    /// The project's ignore list from the base's configuration (SPEC R2),
+    /// kept here so a watcher started offline skips the same paths.
+    #[serde(default)]
+    pub ignore: Vec<String>,
 }
 
 impl WorkspaceMarker {
-    pub fn new(change: ChangeId, tree: ObjectId, sparse: Vec<String>) -> Self {
+    pub fn new(change: ChangeId, tree: ObjectId, sparse: Vec<String>, ignore: Vec<String>) -> Self {
         Self {
             schema: MARKER_SCHEMA.to_owned(),
             change,
             tree,
             sparse,
+            ignore,
         }
     }
 

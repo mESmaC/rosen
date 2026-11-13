@@ -120,6 +120,10 @@ pub enum Request {
     },
     /// Submits one exact bisection job; stale results are refused.
     BisectSubmit(crate::BisectResult),
+    /// Offers the newest untested landed commit to an external checker (R12).
+    PostLandNext,
+    /// Marks the tested landed prefix green after the full check set passed.
+    PostLandPassed(crate::post_land::PostLandJob),
     /// Liveness check.
     Ping,
     /// The server's identity, uptime and load.
@@ -253,6 +257,7 @@ pub enum Request {
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
     Bisection(crate::BisectState),
+    PostLand(crate::post_land::PostLandWork),
     Pong,
     PoolSized,
     /// Number of tracked files, or None when no matching slot is ready.
@@ -417,6 +422,9 @@ pub enum EventKind {
     Reverted,
     /// A git mirror push failed or recovered (R1). Sent to every subscriber.
     Mirror,
+    /// An AIRC channel line (R13), with its channel-specific payload in detail.
+    /// Uses the same sequence, subscription and acknowledgement as R9 events.
+    Channel,
 }
 
 /// One event. `seq` is the cursor a client resumes from after a reconnect.

@@ -23,6 +23,8 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::BisectSubmit(result) => {
             crate::bisect::handle(state, result.job.session, Some(result)).await
         }
+        Request::PostLandNext => crate::post_land::handle(state, None).await,
+        Request::PostLandPassed(job) => crate::post_land::handle(state, Some(job)).await,
         Request::PoolSize { size } => state.pool.set_size(size).await,
         Request::PoolTake { tree, dest } => state.pool.take(tree, dest).await,
         Request::Ping => Outcome::Ok(Response::Pong),

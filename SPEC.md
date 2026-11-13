@@ -97,6 +97,9 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - **Independent.** Two changes are independent when their reaches share no unit. Then no unit's build sees both changes.
 - **Project configuration.** The file `rosen.toml` at the repository root. The server reads it from the base, never from a change, so a change takes effect only once it lands.
   - It lists generated files, registration lists and sensitive paths as path globs, the pre-land and post-land check sets (a name and the commands checkers run), the warm pool size and the mirror remote. Each part is optional and has a default: no paths, check sets named `pre-land` and `post-land` with no commands, a pool of 4 and no remote.
+  - `ignore` lists untracked paths snapshots skip (R2), in `.gitignore` syntax from the repository root, such as `target/`. It ranks below every `.gitignore` file. A workspace records the base's list when it is made or a rebase is applied, so a watcher started offline skips the same paths and a change cannot alter what its own snapshots skip.
+  - `[prepare] commands` lists the prepare commands daemons run in ready workspaces (R3). The configured `warm_pool.size` is each daemon's target, read again after every land, unless a pool-size request has raised or lowered it since the daemon started.
+  - Each ignore line and prepare command is one non-empty line with no control characters.
   - Optional `[build_units.<name>]` tables contain `paths` globs and `dependencies` unit names; absent units are discovered from Cargo workspace manifests, including target, build and dev dependencies. `workspace_inputs` adds shared input globs. Unknown dependency names conservatively reach every unit.
   - Unknown keys are refused, so a misspelt key cannot drop a list silently.
   - An invalid file never takes effect. The configuration in force is the one in the nearest first-parent ancestor of the base whose file is valid, or the defaults. The change that fixes the file still lands under the last valid configuration.
@@ -209,7 +212,8 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - An approval is tied to the head it approved. A new head by the author voids the approval. A rebase done by the server (R8, D19) keeps it, because it changes only the parent.
 - **Review tiers** follow Anthropic's semantic approval rules and Velocity F7:
   - The server tiers each change from its diff: prose-only, normal, or sensitive.
-  - Sensitive paths are listed in project configuration and read from the base, so a change cannot lower its own tier.
+  - Sensitive paths are listed in project configuration and read from the base, so a change cannot lower its own tier. Sensitive matches take precedence, including removed paths.
+  - Prose-only means all changed files are regular UTF-8 `.md`, `.markdown`, `.txt` or `.rst` files without NUL bytes on either side. Generated files, registration lists and configured workspace inputs take normal review. Other edits, including source comments and executable or symlink modes, conservatively take normal review. The diff is against the parent (the stack parent for a stacked change); an empty diff is prose-only.
   - Every tier still needs an approval.
 - Velocity's PR duty reviews through `rosen-client`.
 - **Accept when:** a change cannot land without an approval for its current head.
@@ -278,6 +282,7 @@ The server holds each project's AIRC channel, so agents on every machine coordin
   - the **Discoveries** and **Past work** ledgers.
 - **Piece claims** are first-claim-wins, each in one transaction, like path claims. A refusal names the holder and the time of its claim. A claim is kept through failure and disconnects, and released as Velocity F14 says.
 - **One log.** Channel events and Rosen's events share one ordered log and one cursor per subscriber (R9). Targeted delivery follows Velocity F14: an agent receives only the lines it must act on.
+  - Channel lines use the `channel` event kind with the channel payload in `detail`. Their recipient agent identities are fixed at publication; an empty audience reaches only the project view. They use the same subscription and acknowledgement API as Rosen events, including over the network transport.
 - **Velocity keeps the tools.** Velocity serves AIRC's tools to every agent as now, with the member ID and nick fixed at launch, and calls the server through `rosen-client` for each one. No machine keeps channel state of its own beyond its delivery cursors.
 - **Server unreachable.** Claims and messages need the server, as landing does. A tool call made while the server is unreachable fails with that reason. It is never answered from a local copy.
 - **Accept when:** two agents on different machines that claim the same piece or path at the same moment never both succeed; an event or message reaches its recipient on another machine within 1 s while both machines reach the server; and no two machines ever see different claim holders.

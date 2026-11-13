@@ -41,10 +41,10 @@ impl ReviewGate for StoredReviews {
             .map_err(|err| err.to_string())
     }
 
-    /// Every change is `normal` until the server tiers changes from their
-    /// diff: a normal change needs a receipt, so this never admits more.
-    fn tier(&self, _: &Change) -> Result<Tier, String> {
-        Ok(Tier::Normal)
+    /// Tier the actual edits under the current base policy.
+    fn tier(&self, change: &Change) -> Result<Tier, String> {
+        let state = self.state()?;
+        crate::reviews::tiers::for_change(&state, change)
     }
 }
 

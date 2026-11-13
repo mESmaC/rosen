@@ -14,7 +14,12 @@ pub struct WarmPool {
 
 pub(super) struct State {
     pub root: PathBuf,
+    /// The target in force: `requested` when set, else the base's
+    /// configured `warm_pool.size` (R3).
     pub size: usize,
+    /// A `pool_size` request, such as Velocity raising N for a launch. It
+    /// outranks the configuration until the daemon restarts.
+    pub requested: Option<usize>,
     pub next: u64,
     pub ready: Vec<Slot>,
 }
@@ -30,7 +35,9 @@ impl WarmPool {
         Arc::new(Self {
             state: Mutex::new(State {
                 root: data_dir.join("warm-pool"),
-                size: 4,
+                // Until the worker first reads the base's configuration.
+                size: rosen_core::project_config::DEFAULT_WARM_POOL_SIZE as usize,
+                requested: None,
                 next: 0,
                 ready: Vec::new(),
             }),
@@ -49,7 +56,10 @@ impl WarmPool {
     }
 
     pub async fn set_size(&self, size: usize) -> Outcome {
-        self.state.lock().await.size = size;
+        let mut state = self.state.lock().await;
+        state.size = size;
+        state.requested = Some(size);
+        drop(state);
         self.wake.notify_one();
         Outcome::Ok(Response::PoolSized)
     }
