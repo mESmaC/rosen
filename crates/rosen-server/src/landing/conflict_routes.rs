@@ -146,15 +146,69 @@ fn accepts(same_head: bool, closed: bool) -> bool {
 
 #[test]
 fn routing_matches_proved_fixture() {
-    // Risk (R8): stale results must never attach conflicts to a newer head.
+    // Risk (R8, R5): stale results must never attach conflicts to a newer
+    // head, and an accepted re-merge must leave exactly the proved rows (a
+    // dropped open region lets a conflicted change land), writing only the
+    // rows that differ.
     for row in include_str!("../../../../proofs/fixtures/conflict-routing.tsv")
         .lines()
         .skip(1)
     {
         let fields: Vec<_> = row.split('\t').collect();
-        assert_eq!(
-            accepts(fields[0] == "1", fields[1] == "1"),
-            fields[2] == "1"
-        );
+        let accepted = accepts(fields[0] == "1", fields[1] == "1");
+        assert_eq!(accepted, fields[2] == "1", "{row}");
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conflicts::ensure_schema(&conn).unwrap();
+        store_rows(&mut conn, fields[3]);
+        let before = total_changes(&conn);
+        if accepted {
+            let produced = fields[4].chars().enumerate().filter(|(_, c)| *c == '1');
+            let regions = produced.map(|(i, _)| region(i)).collect();
+            conflicts::record_merge(&mut conn, "c", [("f".to_owned(), regions)]).unwrap();
+        }
+        let writes = total_changes(&conn) - before;
+        assert_eq!(stored_rows(&conn), fields[5], "{row}");
+        assert_eq!(writes.to_string(), fields[6], "{row}");
     }
+}
+
+/// The fixture's region `i` of file `f`; distinct content gives distinct IDs.
+#[cfg(test)]
+fn region(i: usize) -> Conflict {
+    Conflict::new(
+        "f",
+        1 + 10 * i as u32,
+        "base\n",
+        format!("ours {i}\n"),
+        "theirs\n",
+    )
+}
+
+/// Stores the fixture's rows: `o` open, `r` resolved, `-` absent.
+#[cfg(test)]
+fn store_rows(conn: &mut rusqlite::Connection, rows: &str) {
+    let present = rows.chars().enumerate().filter(|(_, c)| *c != '-');
+    let regions: Vec<_> = present.clone().map(|(i, _)| region(i)).collect();
+    conflicts::record_merge(conn, "c", [("f".to_owned(), regions)]).unwrap();
+    for (i, _) in present.filter(|(_, c)| *c == 'r') {
+        conflicts::resolve(conn, "c", region(i).id).unwrap();
+    }
+}
+
+#[cfg(test)]
+fn stored_rows(conn: &rusqlite::Connection) -> String {
+    let set = conflicts::load(conn, "c").unwrap();
+    (0..2)
+        .map(|i| match set.all().iter().find(|c| c.id == region(i).id) {
+            None => '-',
+            Some(c) if c.is_open() => 'o',
+            Some(_) => 'r',
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn total_changes(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("SELECT total_changes()", [], |r| r.get(0))
+        .unwrap()
 }

@@ -1,7 +1,7 @@
 //! Risk (SPEC R8 / section 3): a failure between SQL writes must not publish
 //! a ref without its history and closed change, even on another connection.
-use rosen_core::{AgentId, ChangeState, ObjectId, Snapshot, SnapshotKind};
-use rosen_server::{changes, landing::*};
+use rosen_core::{AgentId, ChangeState, Conflict, ObjectId, Snapshot, SnapshotKind};
+use rosen_server::{changes, conflicts, landing::*};
 use rusqlite::Connection;
 fn oid(n: u8) -> ObjectId {
     ObjectId::from_bytes([n; 20])
@@ -13,6 +13,8 @@ fn transaction_fixtures() {
         .lines()
         .skip(1)
     {
+        // duplicate, head_matches, approval_holds, open_conflict,
+        // base_matches, committed, landed
         let flags: Vec<bool> = row.split('\t').map(|v| v == "1").collect();
         let (temp, ledger, mut conn, mut record) = new_attempt();
         let path = temp.path().join("metadata.sqlite");
@@ -21,27 +23,28 @@ fn transaction_fixtures() {
         }
         let before = ledger.base("main").unwrap().unwrap();
         record.commit = oid(2);
-        if !flags[2] {
+        break_gates(&mut conn, &mut record, &flags);
+        if !flags[5] {
             conn.execute_batch(
                 "CREATE TRIGGER fail_close BEFORE UPDATE OF state ON changes
                 WHEN NEW.state = 'landed' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
             )
             .unwrap();
         }
-        let expected = if flags[1] { before } else { oid(9) };
+        let expected = if flags[4] { before } else { oid(9) };
         let result = ledger.compare_and_swap(&expected, &record);
         assert_eq!(
             matches!(result, Ok(CasResult::Swapped { .. })),
-            flags[3],
+            flags[6],
             "{row}"
         );
         drop(ledger);
         let reopened = Ledger::open(&path).unwrap();
         assert_eq!(
             reopened.base("main").unwrap(),
-            Some(if flags[3] { oid(2) } else { before })
+            Some(if flags[6] { oid(2) } else { before })
         );
-        let closed = flags[0] || flags[3];
+        let closed = flags[0] || flags[6];
         assert_eq!(
             changes::get(&conn, record.change).unwrap().change.state == ChangeState::Landed,
             closed
@@ -61,7 +64,24 @@ fn transaction_fixtures() {
     }
 }
 
-fn new_attempt() -> (tempfile::TempDir, Ledger, Connection, LandRecord) {
+/// Turns off the in-transaction gates a row clears: a head the registry no
+/// longer holds, an approval voided since (R7), an open conflict (R5).
+fn break_gates(conn: &mut Connection, record: &mut LandRecord, flags: &[bool]) {
+    if !flags[1] {
+        record.head = oid(7);
+    }
+    if !flags[2] {
+        conn.execute("UPDATE review_approvals SET valid = 0", [])
+            .unwrap();
+    }
+    if flags[3] {
+        let conflict = Conflict::new("src/a.rs", 1, "base\n", "ours\n", "theirs\n");
+        let merged = vec![("src/a.rs".to_owned(), vec![conflict])];
+        conflicts::record_merge(conn, &record.change.to_string(), merged).unwrap();
+    }
+}
+
+fn new_attempt() ->(tempfile::TempDir, Ledger, Connection, LandRecord) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("metadata.sqlite");
     let ledger = Ledger::open(&path).unwrap();
