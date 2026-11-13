@@ -1036,6 +1036,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rosen-stress"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rosen-client",
+ "rosen-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rusqlite"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
