@@ -7,8 +7,7 @@ use rosen_client::{Endpoint, Error};
 use rosen_core::{AgentId, ObjectId};
 use serde_json::json;
 
-/// Schema tag for `--json` output (SPEC R10). Bump on any shape change.
-const RECEIPT_SCHEMA: &str = "rosen.receipt/v1";
+use crate::output::RECEIPT_SCHEMA;
 
 pub async fn run(
     json: bool,

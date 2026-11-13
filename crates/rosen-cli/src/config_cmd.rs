@@ -8,8 +8,7 @@ use rosen_core::project_config::CheckSet;
 use rosen_core::{ObjectId, PathPattern};
 use serde_json::json;
 
-/// Schema tag for `--json` output (SPEC R10). Bump on any shape change.
-const CONFIG_SCHEMA: &str = "rosen.config/v1";
+use crate::output::CONFIG_SCHEMA;
 
 pub async fn run(
     json: bool,
