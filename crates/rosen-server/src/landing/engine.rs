@@ -277,7 +277,7 @@ impl Landing {
 
     /// Resolve against the attempt's immutable base. A cached engine can
     /// outlive a config land, including when its own CAS loses that race.
-    fn check_set_at(&self, base: &CommitId) -> LandResult<String> {
+    pub(crate) fn check_set_at(&self, base: &CommitId) -> LandResult<String> {
         match &self.recheck_store {
             Some(store) => crate::project_config::resolve(store.as_ref(), base)
                 .map(|resolved| resolved.config.checks.pre_land.name.clone())
