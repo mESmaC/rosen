@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rosen_core::history::LandedTrailers;
+use rosen_core::history::{LandedTrailers, ReceiptTrailer};
 use rosen_core::{ReceiptRefusal, Signature, PRE_LAND_CHECK_SET};
 
 use super::ledger::ReceiptLookup;
@@ -299,7 +299,7 @@ impl Landing {
         receipt: Option<Receipt>,
         attempts: u32,
     ) -> LandResult<Attempt> {
-        let landed = landed_commit(facts, base, tree, receipt.as_ref());
+        let landed = landed_commit(facts, base, tree, receipt.as_ref())?;
         // Written before the swap: if the swap loses, the object is an
         // unreferenced orphan, which is harmless because objects are immutable.
         let commit = self.deps.writer.write_landed(&landed)?;
@@ -366,12 +366,18 @@ fn landed_commit(
     base: CommitId,
     tree: TreeId,
     receipt: Option<&Receipt>,
-) -> LandedCommit {
+) -> LandResult<LandedCommit> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() as i64);
     let owner = facts.owner.as_str();
-    LandedCommit {
+    // Submission already refuses a malformed check set; this keeps a stored
+    // row that slipped past it from forging trailers (issue #18).
+    let receipt = receipt
+        .map(|r| ReceiptTrailer::new(&r.check_set, r.head, r.base, r.submitter.clone()))
+        .transpose()
+        .map_err(|err| LandError::InvalidReceipt(err.to_string()))?;
+    Ok(LandedCommit {
         base,
         tree,
         author: Signature::new(owner, format!("{owner}@rosen"), now),
@@ -379,10 +385,10 @@ fn landed_commit(
         description: facts.description.clone(),
         trailers: LandedTrailers {
             change: facts.id,
-            receipt: receipt.map(|r| format!("{} {} {}", r.check_set, r.base, r.submitter)),
+            receipt,
             approvers: facts.approvers.clone(),
         },
-    }
+    })
 }
 
 fn refused(verdict: Verdict) -> LandOutcome {
