@@ -126,6 +126,10 @@ pub enum Request {
         name: String,
         role: crate::MachineRole,
     },
+    /// Offers the newest untested landed commit to an external checker (R12).
+    PostLandNext,
+    /// Marks the tested landed prefix green after the full check set passed.
+    PostLandPassed(crate::post_land::PostLandJob),
     /// Liveness check.
     Ping,
     /// The server's identity, uptime and load.
@@ -262,6 +266,7 @@ pub enum Response {
         key: String,
     },
     MachineCredential(crate::MachineCredential),
+    PostLand(crate::post_land::PostLandWork),
     Pong,
     PoolSized,
     /// Number of tracked files, or None when no matching slot is ready.

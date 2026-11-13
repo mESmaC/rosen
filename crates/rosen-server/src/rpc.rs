@@ -23,6 +23,8 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::MachineEnroll { key, name } => crate::machines::enroll(state, key, name).await,
         Request::MachinePending { name, role } => crate::machines::pending(state, name, role).await,
         Request::MachineRotate { credential } => crate::machines::rotate(state, credential).await,
+        Request::PostLandNext => crate::post_land::handle(state, None).await,
+        Request::PostLandPassed(job) => crate::post_land::handle(state, Some(job)).await,
         Request::PoolSize { size } => state.pool.set_size(size).await,
         Request::PoolTake { tree, dest } => state.pool.take(tree, dest).await,
         Request::Ping => Outcome::Ok(Response::Pong),
