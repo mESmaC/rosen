@@ -47,7 +47,7 @@ pub async fn diff(
 
 /// `--change`, then the workspace holding the current directory, then
 /// $ROSEN_CHANGE, which Velocity sets for each agent thread.
-fn change_of(explicit: Option<&str>) -> Result<String, Error> {
+pub(crate) fn change_of(explicit: Option<&str>) -> Result<String, Error> {
     if let Some(change) = explicit {
         return Ok(change.to_owned());
     }
