@@ -124,26 +124,12 @@ impl Snapshotter {
             _ => SnapshotError::io(&WorkspaceMarker::path(&root), err),
         })?;
         let journal = journal::Journal::open(&root).map_err(|e| SnapshotError::io(&root, e))?;
-        let mut index = Index::from_tree(store, marker.tree)?;
-        for (_, body) in index.build_trees()?.trees {
-            journal::cache(&root)?.put_raw(rosen_core::ObjectKind::Tree, &body)?;
-        }
-        let known_trees = index
-            .build_trees()?
-            .trees
-            .into_iter()
-            .map(|(id, _)| id)
-            .chain([marker.tree])
-            .collect();
-        if let Some((_, last)) = journal
-            .records()
-            .map_err(|e| SnapshotError::io(&root, e))?
-            .into_iter()
-            .rfind(|(id, _)| !journal.acknowledged(*id))
-        {
-            journal::save_trees(&root, &last.prepared)?;
-            index = Index::from_tree(&journal::cache(&root)?, last.prepared.root)?;
-        }
+        let (index, known_trees) = {
+            // Another writer may be appending or replaying; read its tail
+            // only once it is done.
+            let _writer = journal.writer().map_err(|e| SnapshotError::io(&root, e))?;
+            open_index(store, &root, &journal, marker.tree)?
+        };
         let sparse = Sparse::paths(&marker.sparse).map_err(|err| {
             SnapshotError::io(
                 &WorkspaceMarker::path(&root),
@@ -252,18 +238,102 @@ impl Snapshotter {
         let paths = prepared.blobs.iter().map(|blob| blob.path.clone());
         self.unconfirmed.extend(paths);
     }
+
+    /// Takes the writer lock, then prepares a snapshot. Blocking.
+    fn lease_and_prepare(
+        &mut self,
+        dirty: &Dirty,
+    ) -> Result<(journal::WriterLease, Prepared), SnapshotError> {
+        let lease = self
+            .journal
+            .writer()
+            .map_err(|err| SnapshotError::io(&self.root, err))?;
+        // Another writer may have stored a snapshot since this one last ran.
+        let path = WorkspaceMarker::path(&self.root);
+        self.marker.tree = WorkspaceMarker::read(&self.root)
+            .map_err(|err| SnapshotError::io(&path, err))?
+            .tree;
+        Ok((lease, self.prepare(dirty)?))
+    }
+
+    fn journal_record(
+        &mut self,
+        last: Option<u64>,
+        prepared: Prepared,
+        message: Option<String>,
+    ) -> Result<(), SnapshotError> {
+        journal::save_trees(&self.root, &prepared)?;
+        self.journal
+            .append(last, &journal::Record { prepared, message })
+    }
+
+    /// Takes the workspace for deletion (SPEC R4). Fails while any other
+    /// snapshotter, such as a running watcher, has it open.
+    pub(crate) fn hold_for_deletion(&self) -> Result<(), SnapshotError> {
+        self.journal
+            .exclusive()
+            .map_err(|err| SnapshotError::io(&self.root, err))
+    }
+}
+
+/// Builds the index from the last journal record, or from the stored tree
+/// when nothing waits, and caches the stored tree's trees so a watcher can
+/// start offline. Returns the trees the server is known to hold.
+fn open_index(
+    store: &dyn ObjectStore,
+    root: &Path,
+    journal: &journal::Journal,
+    stored: ObjectId,
+) -> Result<(Index, HashSet<ObjectId>), SnapshotError> {
+    let index = Index::from_tree(store, stored)?;
+    let cache = journal::cache(root)?;
+    let mut known_trees = HashSet::from([stored]);
+    for (id, body) in index.build_trees()?.trees {
+        cache.put_raw(rosen_core::ObjectKind::Tree, &body)?;
+        known_trees.insert(id);
+    }
+    let io = |err| SnapshotError::io(root, err);
+    let Some(last) = journal.pending().map_err(io)?.last().copied() else {
+        return Ok((index, known_trees));
+    };
+    let last_root = journal.root_of(last).map_err(io)?;
+    if !cache.contains(&last_root)? {
+        // Records from an earlier build carried their trees inline.
+        journal::save_trees(root, &journal.load(last, &cache)?.prepared)?;
+    }
+    Ok((Index::from_tree(&cache, last_root)?, known_trees))
 }
 
 /// Takes one snapshot of `dirty` paths. The snapshotter is handed back
 /// whatever happens, so a caller can retry.
 pub async fn take_snapshot(
     client: &Client,
+    snapshotter: Snapshotter,
+    dirty: Dirty,
+    message: Option<String>,
+) -> (Snapshotter, Result<SnapshotReport, Error>) {
+    capture(Some(client), snapshotter, dirty, message).await
+}
+
+/// Captures a snapshot durably while no connection is available.
+pub async fn journal_snapshot(
+    snapshotter: Snapshotter,
+    dirty: Dirty,
+) -> (Snapshotter, Result<SnapshotReport, Error>) {
+    capture(None, snapshotter, dirty, None).await
+}
+
+/// Prepares and stores one snapshot while holding the journal's writer lock,
+/// so a second writer (`rosen commit` beside a watcher) waits its turn and
+/// then scans what this one left.
+async fn capture(
+    client: Option<&Client>,
     mut snapshotter: Snapshotter,
     dirty: Dirty,
     message: Option<String>,
 ) -> (Snapshotter, Result<SnapshotReport, Error>) {
     let joined = tokio::task::spawn_blocking(move || {
-        let prepared = snapshotter.prepare(&dirty);
+        let prepared = snapshotter.lease_and_prepare(&dirty);
         (snapshotter, prepared)
     })
     .await;
@@ -271,27 +341,18 @@ pub async fn take_snapshot(
         Ok(pair) => pair,
         Err(join) => std::panic::resume_unwind(join.into_panic()),
     };
-    let prepared = match prepared {
-        Ok(prepared) => prepared,
+    let (lease, prepared) = match prepared {
+        Ok(pair) => pair,
         Err(err) => return (snapshotter, Err(err.into())),
     };
-    let result = queue_and_replay(Some(client), &mut snapshotter, prepared, message).await;
+    let result = queue_and_replay(client, &mut snapshotter, prepared, message).await;
+    drop(lease);
     (snapshotter, result)
 }
 
-/// Captures a snapshot durably while no connection is available.
-pub async fn journal_snapshot(
-    mut snapshotter: Snapshotter,
-    dirty: Dirty,
-) -> (Snapshotter, Result<SnapshotReport, Error>) {
-    let prepared = snapshotter.prepare(&dirty);
-    let result = match prepared {
-        Ok(prepared) => queue_and_replay(None, &mut snapshotter, prepared, None).await,
-        Err(err) => Err(err.into()),
-    };
-    (snapshotter, result)
-}
-
+/// Sends a snapshot straight to the server when nothing waits in the
+/// journal. The journal is written only when the server cannot be reached,
+/// or behind earlier records so the order holds (SPEC R2).
 async fn queue_and_replay(
     client: Option<&Client>,
     state: &mut Snapshotter,
@@ -299,20 +360,30 @@ async fn queue_and_replay(
     message: Option<String>,
 ) -> Result<SnapshotReport, Error> {
     state.fail(&prepared);
-    let records = state.journal.records()?;
-    let previous = records
-        .iter()
-        .rfind(|(id, _)| !state.journal.acknowledged(*id))
-        .map_or(state.marker.tree, |(_, r)| r.prepared.root);
-    if prepared.root != previous || message.is_some() {
-        journal::save_trees(&state.root, &prepared)?;
-        let record = journal::Record { prepared, message };
-        if let Err(err) = state.journal.append(&record) {
-            state.fail(&record.prepared);
-            return Err(err.into());
-        }
+    let pending = state.journal.pending()?;
+    if let (Some(client), true) = (client, pending.is_empty()) {
+        return match send(client, state, &prepared, message.clone()).await {
+            Err(err) if worth_journaling(&err) => {
+                state.journal_record(None, prepared, message)?;
+                Err(err)
+            }
+            result => result,
+        };
     }
-    let client = client.ok_or(Error::Disconnected)?;
+    let last = pending.last().copied();
+    let previous = match last {
+        Some(id) => state.journal.root_of(id)?,
+        None => state.marker.tree,
+    };
+    if prepared.root != previous || message.is_some() {
+        state.journal_record(last, prepared, message)?;
+    }
+    replay(client.ok_or(Error::Disconnected)?, state).await
+}
+
+/// Uploads every journal record in order, removing each once stored.
+async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotReport, Error> {
+    let trees = journal::cache(&state.root)?;
     let mut report = SnapshotReport {
         change: state.change(),
         tree: state.marker.tree,
@@ -322,14 +393,29 @@ async fn queue_and_replay(
         removed: 0,
         sent: Sent::default(),
     };
-    for (id, record) in state.journal.records()? {
-        if state.journal.acknowledged(id) {
-            continue;
-        }
+    for id in state.journal.pending()? {
+        let record = state.journal.load(id, &trees)?;
         report = send(client, state, &record.prepared, record.message).await?;
-        state.journal.acknowledge(id)?;
+        state.journal.remove(id)?;
     }
+    // Drops the blob store once the last record is gone.
+    state.journal.pending()?;
     Ok(report)
+}
+
+/// Failures the server may not have seen, so the snapshot is kept for a
+/// later replay. A refusal is final: journaling it would stall every later
+/// snapshot behind a record the server never takes.
+fn worth_journaling(err: &Error) -> bool {
+    use rosen_protocol::ErrorCode;
+    match err {
+        Error::Disconnected | Error::NotRunning(_) | Error::Io(_) | Error::Start(_) => true,
+        Error::Server(body) => matches!(
+            body.code,
+            ErrorCode::Unavailable | ErrorCode::ShuttingDown | ErrorCode::Internal
+        ),
+        _ => false,
+    }
 }
 
 async fn send(

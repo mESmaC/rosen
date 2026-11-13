@@ -78,6 +78,7 @@ impl Client {
         self.ensure_local(marker.tree).await?;
         let store = self.local_store().await?;
         let mut scan = Snapshotter::open(&store, root)?;
+        scan.hold_for_deletion()?;
         let journal = crate::snapshot::pending_journal(root)?;
         if !deletion_permitted(0, journal, 0) {
             return Err(kept(format!(
