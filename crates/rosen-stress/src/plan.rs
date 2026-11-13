@@ -32,6 +32,10 @@ pub struct Plan {
     /// (0: never), so first-claim-wins is exercised under load.
     #[arg(long, default_value_t = 3)]
     pub hot_every: usize,
+    /// One change of the last agent also adds a file that fails the
+    /// post-land check, so the run sees it bisected and reverted (R12).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub inject_failure: bool,
 }
 
 /// Lines of padding between slots in a unit's shared file. More than the
@@ -40,6 +44,23 @@ pub struct Plan {
 const SLOT_STRIDE: usize = 5;
 
 impl Plan {
+    /// The flags that give a child `rosen-stress` process this plan.
+    pub fn to_args(&self) -> Vec<String> {
+        let flags = [
+            ("--run", self.run.clone()),
+            ("--agents", self.agents.to_string()),
+            ("--lands-per-agent", self.lands_per_agent.to_string()),
+            ("--units", self.units.to_string()),
+            ("--stack-every", self.stack_every.to_string()),
+            ("--hot-every", self.hot_every.to_string()),
+            ("--inject-failure", self.inject_failure.to_string()),
+        ];
+        flags
+            .into_iter()
+            .flat_map(|(flag, value)| [flag.to_owned(), value])
+            .collect()
+    }
+
     pub fn unit_of(&self, agent: usize) -> usize {
         agent % self.units
     }
@@ -51,18 +72,18 @@ impl Plan {
     /// The file every change in a unit edits one line of: the shared
     /// file whose merges §5's "no edit is lost" is mostly about.
     pub fn slots_path(unit: usize) -> String {
-        format!("{}/slots.txt", Self::unit_dir(unit))
+        format!("{}/slots.rs", Self::unit_dir(unit))
     }
 
     /// The path several agents in a unit race to claim.
     pub fn hot_path(unit: usize) -> String {
-        format!("{}/hot.txt", Self::unit_dir(unit))
+        format!("{}/hot.rs", Self::unit_dir(unit))
     }
 
     /// The new file change `n` of `agent` adds; it claims it too.
     pub fn own_path(&self, agent: usize, n: usize) -> String {
         let unit = Self::unit_dir(self.unit_of(agent));
-        format!("{unit}/agents/{}/{n:04}.txt", self.agent_name(agent))
+        format!("{unit}/agents/{}/{n:04}.rs", self.agent_name(agent))
     }
 
     pub fn agents_per_unit(&self) -> usize {
@@ -126,6 +147,28 @@ impl Plan {
     /// the base.
     pub fn is_stacked(&self, n: usize) -> bool {
         self.stack_every > 0 && n % self.stack_every == self.stack_every - 1
+    }
+
+    /// The agent and change number that carry the injected failure. It is
+    /// a change halfway through, so landed history surrounds it, and one
+    /// with no change stacked on it, so the revert reopens only it.
+    pub fn culprit(&self) -> Option<(usize, usize)> {
+        if !self.inject_failure || self.agents == 0 || self.lands_per_agent == 0 {
+            return None;
+        }
+        let mut n = self.lands_per_agent / 2;
+        while n + 1 < self.lands_per_agent && self.is_stacked(n + 1) {
+            n += 1;
+        }
+        Some((self.agents - 1, n))
+    }
+
+    /// Where the culprit puts the failing file: in its own unit, so its
+    /// change stays independent of the other units' changes.
+    pub fn failure_path(&self) -> Option<String> {
+        let (agent, _) = self.culprit()?;
+        let unit = Self::unit_dir(self.unit_of(agent));
+        Some(format!("{unit}/{}", rosen_faults::failing::FILE_NAME))
     }
 
     pub fn claims_hot(&self, n: usize) -> bool {

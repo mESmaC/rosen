@@ -1,6 +1,7 @@
 //! The edits one change makes in its local workspace, as an agent's tools
 //! would: rewrite one line of the unit's shared file in place, and add a
-//! new file.
+//! new file. The culprit change also adds the file that fails the
+//! post-land check (R12).
 
 use crate::plan::Plan;
 use anyhow::{bail, Context, Result};
@@ -25,7 +26,13 @@ pub fn write_edits(
     let own_file = root.join(&own);
     std::fs::create_dir_all(own_file.parent().expect("own path has a directory"))?;
     std::fs::write(&own_file, format!("{line}\n"))?;
-    Ok(vec![(slots, line.clone()), (own, line)])
+    let mut expected = vec![(slots, line.clone()), (own, line.clone())];
+    if plan.culprit() == Some((agent, n)) {
+        let path = plan.failure_path().expect("a culprit has a failure path");
+        std::fs::write(root.join(&path), format!("// {line}\n"))?;
+        expected.push((path, format!("// {line}")));
+    }
+    Ok(expected)
 }
 
 fn rewrite_slot(file: &Path, index: usize, line: &str) -> Result<()> {
