@@ -13,6 +13,10 @@ structure State where
 
 def gate (already moved clean : Bool) : Bool := !already && !moved && clean
 
+/-- Reopening waits until the original land's last post-land mutation. -/
+def readyGate (already moved clean recovered : Bool) : Bool :=
+  recovered && gate already moved clean
+
 def apply (s : State) (expected culprit change commit : Nat) (clean : Bool)
     (output : String) : Option State :=
   if gate (s.reverted.contains culprit) (s.base != expected) clean then
@@ -25,7 +29,7 @@ def apply (s : State) (expected culprit change commit : Nat) (clean : Bool)
 
 /-- **correct** (SPEC.md R12 Auto-revert): exactly the successful inverse CAS reopens its culprit, records its
 output, preserves owners/snapshots and every other change, and prevents replay. -/
-theorem correct (s : State) (expected culprit change commit : Nat) (clean : Bool)
+private theorem apply_correct (s : State) (expected culprit change commit : Nat) (clean : Bool)
     (out : String) :
     (apply s expected culprit change commit clean out).isSome =
       gate (s.reverted.contains culprit) (s.base != expected) clean ∧
@@ -47,6 +51,26 @@ theorem correct (s : State) (expected culprit change commit : Nat) (clean : Bool
     · simp_all
     · intro t h
       contradiction
+
+/-- **correct** (SPEC.md R12 Auto-revert): the original preservation/replay
+guarantee holds, and the preparation gate permits that exact apply result
+only after original post-land recovery has finished. -/
+theorem correct (s : State) (expected culprit change commit : Nat) (clean : Bool)
+    (out : String) :
+    (apply s expected culprit change commit clean out).isSome =
+      gate (s.reverted.contains culprit) (s.base != expected) clean ∧
+    (∀ t, apply s expected culprit change commit clean out = some t →
+      t.base = commit ∧ t.openChange change = true ∧ t.output change = out ∧
+      t.snapshots = s.snapshots ∧ t.owner = s.owner ∧
+      (∀ c, c ≠ change → t.openChange c = s.openChange c) ∧
+      apply t commit culprit change commit true out = none) ∧
+    (∀ recovered, readyGate (s.reverted.contains culprit) (s.base != expected) clean recovered =
+      (recovered && (apply s expected culprit change commit clean out).isSome)) := by
+  have h := apply_correct s expected culprit change commit clean out
+  refine ⟨h.1, h.2, ?_⟩
+  intro recovered
+  rw [h.1]
+  rfl
 
 structure Attempt where
   state : State
@@ -112,7 +136,7 @@ theorem optimal (s t : State) (expected culprit change commit : Nat)
     metadataCost (apply s expected culprit change commit clean out) ≤ operations.length ∧
     execute [fun _ => t] s = t := by
   constructor
-  · have target := (correct s expected culprit change commit clean out).2 t success
+  · have target := (correct s expected culprit change commit clean out).2.1 t success
     cases operations with
     | nil =>
       have unchanged : s = t := achieves
@@ -123,7 +147,9 @@ theorem optimal (s t : State) (expected culprit change commit : Nat)
 
 #print axioms State
 #print axioms gate
+#print axioms readyGate
 #print axioms apply
+#print axioms apply_correct
 #print axioms Attempt
 #print axioms retry
 #print axioms retry_bound

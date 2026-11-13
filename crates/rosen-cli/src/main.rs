@@ -8,6 +8,7 @@ mod config_cmd;
 mod history_cmd;
 mod import;
 mod land_cmd;
+mod machine_cmd;
 mod output;
 mod overlaps_cmd;
 mod receipt_cmd;
@@ -69,6 +70,7 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
             events(json, &endpoint, *after, agent.as_deref(), *all)
         }
         Command::Config(config) => block_on(config_cmd::run(json, &endpoint, config)),
+        Command::Machine(command) => block_on(machine_cmd::run(json, &endpoint, command)),
         Command::Change(change) => block_on(change_cmd::run(json, &endpoint, change)),
         Command::Commit { message, workspace } => block_on(commit_cmd::commit(
             json,

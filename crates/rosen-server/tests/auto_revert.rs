@@ -49,6 +49,7 @@ async fn culprit_reopens_once_without_losing_later_work() {
     let temp = tempfile::tempdir().unwrap();
     let (s, store, ledger, root) = setup(temp.path());
     let (original, bad) = land_file(&s, root, "bad.rs").await;
+    assert_pending_recovery_blocks_revert(&s, &ledger, bad);
     let (later, tip) = land_file(&s, bad, "later.rs").await;
     let inverse = revert::revert(&s, bad, "tests failed twice").unwrap();
     assert_eq!(revert::revert(&s, bad, "retry").unwrap(), inverse);
@@ -90,6 +91,40 @@ async fn culprit_reopens_once_without_losing_later_work() {
         inverse
     );
     assert_eq!(ledger.base("main").unwrap(), Some(repaired));
+    assert_overlap_batches(&s, bad, repaired);
+}
+
+fn assert_pending_recovery_blocks_revert(s: &ServerState, ledger: &Ledger, bad: ObjectId) {
+    // R12 risk: an unfinished original worker could re-close the reopened owner.
+    let conn = rusqlite::Connection::open(s.config.metadata_path()).unwrap();
+    conn.execute(
+        "UPDATE base_history SET post_land_done=0 WHERE commit_id=?1",
+        [bad.to_hex()],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER hold_post_land BEFORE UPDATE OF post_land_done ON base_history
+        WHEN NEW.post_land_done=1 BEGIN SELECT RAISE(ABORT,'injected pending recovery'); END",
+    )
+    .unwrap();
+    assert!(revert::revert(s, bad, "must wait").is_err());
+    assert_eq!(ledger.base("main").unwrap(), Some(bad));
+    assert_eq!(revert::failure_output(s, bad).unwrap(), None);
+    conn.execute_batch("DROP TRIGGER hold_post_land").unwrap();
+    s.landing.recover(s).unwrap();
+}
+
+fn assert_overlap_batches(s: &ServerState, first: ObjectId, repaired: ObjectId) {
+    // R12 risk: the original ID's repaired land must capture fresh R8 targets.
+    let conn = rusqlite::Connection::open(s.config.metadata_path()).unwrap();
+    let batches: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM landing_overlap_batches WHERE landed IN (?1,?2)",
+            rusqlite::params![first.to_hex(), repaired.to_hex()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(batches, 2);
 }
 
 async fn approve_land(

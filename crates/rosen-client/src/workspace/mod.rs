@@ -25,10 +25,12 @@ mod registry;
 pub use lifecycle::{deletion_permitted, CleanupReport};
 pub use registry::WorkspaceRecord;
 pub mod limits;
-mod parallel;
+pub(crate) mod parallel;
 pub mod pool;
 mod pool_worker;
+mod prepare;
 mod sparse;
+mod template;
 mod write;
 
 use std::collections::HashMap;
@@ -98,6 +100,9 @@ pub struct Report {
     pub bytes_written: u64,
     /// Why a source workspace was given but not cloned from, if it was not.
     pub fallback: Option<String>,
+    /// The project's prepare commands have run in it at its tree (R3), so
+    /// an agent's first build compiles only what it changes.
+    pub prepared: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -175,10 +180,15 @@ fn reserve(
     let Some(budget) = budget else {
         return Ok(None);
     };
-    let mut bytes = 0u64;
-    for entry in &target.files {
-        bytes = bytes.saturating_add(store.read_blob(&entry.blob)?.data.len() as u64);
-    }
+    // Each read waits mostly on opening a file (and, on Windows, on the
+    // virus scanner), so threads overlap the waits as the copy does.
+    let total = AtomicU64::new(0);
+    parallel::for_each::<_, MaterialiseError, _>(&target.files, |entry| {
+        let size = store.read_blob(&entry.blob)?.data.len() as u64;
+        total.fetch_add(size, Ordering::Relaxed);
+        Ok(())
+    })?;
+    let mut bytes = total.into_inner();
     if let Some(source) = &options.source {
         bytes = bytes.saturating_add(
             limits::disk_bytes(&source.dir)
@@ -209,6 +219,7 @@ fn from_store(
         written: target.files.len() as u64,
         bytes_written: bytes,
         fallback: None,
+        prepared: false,
     })
 }
 
@@ -247,6 +258,7 @@ fn from_source(
         written: changed.len() as u64,
         bytes_written: bytes,
         fallback: None,
+        prepared: false,
     })
 }
 

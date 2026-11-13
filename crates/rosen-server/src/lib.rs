@@ -10,6 +10,7 @@
 pub mod bisect;
 pub mod cache;
 pub mod changes;
+pub mod channel;
 pub mod claims;
 pub mod conflicts;
 pub mod connection;
@@ -28,11 +29,11 @@ pub mod overlaps;
 pub mod post_land;
 pub mod project_config;
 pub mod rebase;
-pub mod stacks;
 pub mod receipts;
 pub mod reviews;
 pub mod rpc;
 pub mod snapshots;
+pub mod stacks;
 pub mod workspaces;
 
 use events::EventLog;
@@ -50,6 +51,7 @@ pub const SERVER_NAME: &str = concat!("rosen-server ", env!("CARGO_PKG_VERSION")
 
 /// State shared by every connection.
 pub struct ServerState {
+    pub machine_agents: std::sync::Mutex<machines::manage::Presence>,
     pub config: ServerConfig,
     pub pool: Arc<rosen_client::workspace::pool::WarmPool>,
     pub started: Instant,
@@ -79,6 +81,7 @@ impl ServerState {
     pub fn with_workspace_io(config: ServerConfig, cap: std::num::NonZeroUsize) -> Arc<Self> {
         // Cyclic because landing's adapters reach back into this state.
         let state = Arc::new_cyclic(|this| Self {
+            machine_agents: std::sync::Mutex::new(Default::default()),
             pool: rosen_client::workspace::pool::WarmPool::new(&config.data_dir),
             changes: changes::ChangeService::new(&config.data_dir),
             receipts: receipts::ReceiptService::new(config.clone()),
@@ -245,22 +248,25 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     let state = ServerState::new(config.clone());
     let pool_worker = state.pool.start(config.endpoint.clone());
     // Finishes post-land work (claim release, rebases) a crash cut short,
-    // off the accept path so clients can connect meanwhile.
+    // off the accept path so clients can connect meanwhile, then keeps
+    // retrying post-land work that fails later.
     let recovering = Arc::clone(&state);
-    tokio::task::spawn_blocking(move || {
-        if let Err(err) = bisect::recover(&recovering) {
-            eprintln!("rosen-server: confirmed bisection recovery failed: {err}");
-        }
-        if let Err(err) = post_land::recover(&recovering) {
-            eprintln!("rosen-server: green notification recovery failed: {err}");
-        }
-        if let Err(err) = claims::recover(&recovering) {
+    let landing_recovery = tokio::spawn(async move {
+        let first = Arc::clone(&recovering);
+        let replayed = tokio::task::spawn_blocking(move || {
+            if let Err(err) = bisect::recover(&first) {
+                eprintln!("rosen-server: confirmed bisection recovery failed: {err}");
+            }
+            if let Err(err) = post_land::recover(&first) {
+                eprintln!("rosen-server: green notification recovery failed: {err}");
+            }
+            claims::recover(&first)
+        })
+        .await;
+        if let Ok(Err(err)) = replayed {
             eprintln!("rosen-server: claim release recovery failed: {err}");
         }
-        if let Err(err) = recovering.landing.recover(&recovering) {
-            eprintln!("rosen-server: landing recovery failed: {err}");
-        }
-        stacks::refresh(&recovering);
+        landing::service::keep_recovering(recovering).await;
     });
     let mirror = tokio::spawn(mirror::run(Arc::clone(&state)));
     let network_task = network.map(|(tcp, acceptor, identity, address)| {
@@ -275,6 +281,7 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     // A push cut short here is retried at the next start: the mirror's
     // pushed commit is only recorded once the remote accepts it.
     mirror.abort();
+    landing_recovery.abort();
     pool_worker.abort();
     Ok(())
 }

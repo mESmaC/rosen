@@ -8,6 +8,7 @@
 pub mod bisect;
 pub mod change;
 pub use bisect::{BisectCulprit, BisectJob, BisectResult, BisectState};
+pub mod channel;
 pub mod claim;
 pub mod config;
 pub mod edits;
@@ -18,6 +19,7 @@ pub mod machine;
 pub mod message;
 pub use machine::*;
 pub mod objects;
+pub mod pool;
 pub mod post_land;
 pub mod receipt;
 pub mod review;
@@ -27,6 +29,7 @@ pub mod workspace;
 pub use workspace::{WorkspaceBytes, WorkspaceWrite};
 
 pub use change::{ChangeFilter, ChangeRecord, NewChange};
+pub use channel::{ChannelAnswer, ChannelRequest};
 pub use claim::{
     ClaimFilter, ClaimHolder, ClaimKind, ClaimOutcome, ClaimRequest, OverlapAnswer, OverlapQuery,
     OverlapRecord, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome, WokenWait,
@@ -39,9 +42,10 @@ pub use history::{
     MergeResultAnswer, ReadAnswer, ReadRequest,
 };
 pub use land::{LandAnswer, LandStatus};
-pub use post_land::{PostLandJob, PostLandWork};
 pub use message::*;
 pub use objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal, WireKind, WireObject};
+pub use pool::{LandedProseQuery, PooledWorkspace};
+pub use post_land::{PostLandJob, PostLandWork};
 pub use receipt::{ReceiptRecord, SubmitReceipt};
 pub use review::{
     Approval, ApproveRequest, CommentRequest, CommentTarget, ResolveRequest, ReviewComment,

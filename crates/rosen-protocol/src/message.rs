@@ -8,6 +8,7 @@
 //! Responses may arrive out of order, and event frames are interleaved with them.
 
 use crate::change::{ChangeFilter, ChangeRecord, NewChange};
+use crate::channel::{ChannelAnswer, ChannelRequest};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, OverlapAnswer, OverlapQuery, PathClaim,
     ReleaseOutcome, ShareOutcome, WaitOutcome,
@@ -120,6 +121,11 @@ pub enum Request {
     },
     /// Submits one exact bisection job; stale results are refused.
     BisectSubmit(crate::BisectResult),
+    MachineList,
+    MachineApprove { machine: String },
+    MachineRevoke { machine: String },
+    JoinKeyList,
+    JoinKeyRevoke { key: String },
     JoinKeyCreate(crate::CreateJoinKey),
     MachineEnroll {
         key: String,
@@ -267,6 +273,13 @@ pub enum Request {
         tree: rosen_core::ObjectId,
         dest: String,
     },
+    /// Whether every land after one base commit, up to and including a
+    /// later one, was prose-only (R7), so a workspace prepared at the first
+    /// needs no new prepare at the second (R3).
+    LandedProse(crate::LandedProseQuery),
+    /// An AIRC channel operation (R13). Answered only by the server, never
+    /// from a machine's local copy.
+    Channel(ChannelRequest),
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -274,6 +287,10 @@ pub enum Request {
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
     Bisection(crate::BisectState),
+    Machines(Vec<crate::machine::MachineRecord>),
+    Machine(crate::machine::MachineRecord),
+    JoinKeys(Vec<crate::machine::JoinKeyRecord>),
+    JoinKey(crate::machine::JoinKeyRecord),
     JoinKeyCreated {
         key: String,
     },
@@ -281,8 +298,11 @@ pub enum Response {
     PostLand(crate::post_land::PostLandWork),
     Pong,
     PoolSized,
-    /// Number of tracked files, or None when no matching slot is ready.
-    PoolTaken(Option<u64>),
+    /// The handed-over workspace, or None when the pool had none to give.
+    PoolTaken(Option<crate::PooledWorkspace>),
+    /// The answer to `landed_prose`: false when either commit is not in the
+    /// base's landed history.
+    LandedProse(bool),
     Status(ServerStatus),
     ShuttingDown,
     /// The answer to `change_new`, `change_show` and `change_abandon`.
@@ -316,6 +336,7 @@ pub enum Response {
     MergeResult(MergeResultAnswer),
     /// Boxed: a configuration is far larger than every other answer.
     Config(Box<ConfigRecord>),
+    Channel(ChannelAnswer),
 }
 
 /// The answer to [`Request::AckEvents`]: the cursor now stored, which is

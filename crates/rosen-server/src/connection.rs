@@ -80,6 +80,7 @@ pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, acces
         credential: presented,
         outbox,
         subscription: None,
+        machine_agent: None,
     };
     session.read_frames(&mut reader).await;
     session.close();
@@ -137,6 +138,7 @@ async fn write_frames(mut writer: WriteHalf<BoxStream>, mut inbox: mpsc::Receive
 }
 
 struct Session {
+    machine_agent: Option<(String, String)>,
     state: Arc<ServerState>,
     access: Access,
     outbox: Outbox,
@@ -267,6 +269,13 @@ impl Session {
 
     /// Starts (or restarts from a new cursor) this connection's event stream.
     fn subscribe(&mut self, after: Option<u64>, subscriber: Option<AgentId>) {
+        if let Some((machine, nick)) = self.machine_agent.take() {
+            crate::machines::manage::leave(&self.state, &machine, &nick);
+        }
+        if let (Some(credential), Some(agent)) = (&self.credential, &subscriber) {
+            self.machine_agent =
+                crate::machines::manage::join(&self.state, credential, &agent.to_string());
+        }
         if let Some(previous) = self.subscription.take() {
             previous.abort();
         }
@@ -277,6 +286,9 @@ impl Session {
     }
 
     fn close(mut self) {
+        if let Some((machine, nick)) = self.machine_agent.take() {
+            crate::machines::manage::leave(&self.state, &machine, &nick);
+        }
         if let Some(subscription) = self.subscription.take() {
             subscription.abort();
         }

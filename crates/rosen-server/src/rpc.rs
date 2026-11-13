@@ -26,6 +26,36 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::PostLandFailed { job, output } => {
             crate::bisect::failure::handle(state, job, output).await
         }
+        Request::MachineList => {
+            crate::machines::manage::handle(state, |c| {
+                crate::machines::manage::list(c).map(Response::Machines)
+            })
+            .await
+        }
+        Request::MachineApprove { machine } => {
+            crate::machines::manage::handle(state, move |c| {
+                crate::machines::manage::approve(c, &machine).map(Response::Machine)
+            })
+            .await
+        }
+        Request::MachineRevoke { machine } => {
+            crate::machines::manage::handle(state, move |c| {
+                crate::machines::manage::revoke(c, &machine).map(Response::Machine)
+            })
+            .await
+        }
+        Request::JoinKeyList => {
+            crate::machines::manage::handle(state, |c| {
+                crate::machines::manage::keys(c).map(Response::JoinKeys)
+            })
+            .await
+        }
+        Request::JoinKeyRevoke { key } => {
+            crate::machines::manage::handle(state, move |c| {
+                crate::machines::manage::revoke_key(c, &key).map(Response::JoinKey)
+            })
+            .await
+        }
         Request::JoinKeyCreate(req) => crate::machines::create(state, req).await,
         Request::MachineEnroll { key, name } => crate::machines::enroll(state, key, name).await,
         Request::MachinePending { name, role } => crate::machines::pending(state, name, role).await,
@@ -34,6 +64,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::PostLandPassed(job) => crate::post_land::handle(state, Some(job)).await,
         Request::PoolSize { size } => state.pool.set_size(size).await,
         Request::PoolTake { tree, dest } => state.pool.take(tree, dest).await,
+        Request::LandedProse(query) => crate::landing::service::landed_prose(state, query).await,
         Request::Ping => Outcome::Ok(Response::Pong),
         Request::Status => Outcome::Ok(Response::Status(status(state))),
         Request::Shutdown => {
@@ -101,6 +132,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         }
         Request::WorkspaceWrite(req) => crate::workspaces::write(state, req).await,
         Request::ConfigShow(query) => crate::project_config::show(state, query).await,
+        Request::Channel(call) => crate::channel::handle(state, call).await,
     }
 }
 
