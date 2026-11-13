@@ -16,7 +16,7 @@ mod index;
 mod log;
 mod merge;
 mod revision;
-mod trees;
+pub(crate) mod trees;
 
 use crate::changes::ChangeError;
 use crate::ServerState;
