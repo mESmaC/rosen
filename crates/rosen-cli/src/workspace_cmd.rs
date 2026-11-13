@@ -18,7 +18,14 @@ pub async fn run(
                 );
             } else {
                 for record in records {
-                    println!("{}  {}", record.change, record.path.display());
+                    match &record.kept {
+                        Some(reason) => println!(
+                            "{}  {}  (kept: {reason})",
+                            record.change,
+                            record.path.display()
+                        ),
+                        None => println!("{}  {}", record.change, record.path.display()),
+                    }
                 }
             }
         }
