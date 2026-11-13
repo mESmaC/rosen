@@ -1,0 +1,23 @@
+[package]
+name = "rosen-stress"
+description = "The SPEC.md §5 stress harness: many agents on several machines creating, editing, claiming, receipting and landing changes, then checking that no work was lost."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rosen-stress"
+path = "src/main.rs"
+
+[dependencies]
+rosen-client.workspace = true
+rosen-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
