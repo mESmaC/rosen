@@ -46,35 +46,24 @@ async fn next(state: &Arc<ServerState>) -> PostLandWork {
 }
 
 async fn land(state: &Arc<ServerState>, n: u8) -> ObjectId {
-    let Response::Change(record) = call(
-        state,
-        Request::ChangeNew(NewChange {
-            owner: AgentId::new("owner").unwrap(),
-            on: None,
-        }),
-    )
-    .await
-    else {
+    let create = NewChange {
+        owner: AgentId::new("owner").unwrap(),
+        on: None,
+    };
+    let Response::Change(record) = call(state, Request::ChangeNew(create)).await else {
         panic!()
     };
     let change = record.change.id.to_string();
-    call(
-        state,
-        Request::WorkspaceWrite(WorkspaceWrite {
-            change: change.clone(),
-            path: format!("file{n}.rs"),
-            data: Some(WorkspaceBytes(vec![n])),
-        }),
-    )
-    .await;
-    let Response::Change(record) = call(
-        state,
-        Request::ChangeShow {
-            change: change.clone(),
-        },
-    )
-    .await
-    else {
+    let write = WorkspaceWrite {
+        change: change.clone(),
+        path: format!("file{n}.rs"),
+        data: Some(WorkspaceBytes(vec![n])),
+    };
+    call(state, Request::WorkspaceWrite(write)).await;
+    let show = Request::ChangeShow {
+        change: change.clone(),
+    };
+    let Response::Change(record) = call(state, show).await else {
         panic!()
     };
     let base = current_base(state);
@@ -103,26 +92,20 @@ async fn approve_and_receipt(
     head: ObjectId,
     base: ObjectId,
 ) {
-    call(
-        state,
-        Request::ReceiptSubmit(SubmitReceipt {
-            change: change.into(),
-            head,
-            base,
-            check_set: "pre-land".into(),
-            submitter: AgentId::new("checker").unwrap(),
-        }),
-    )
-    .await;
-    call(
-        state,
-        Request::ReviewApprove(ApproveRequest {
-            change: change.into(),
-            head,
-            reviewer: AgentId::new("reviewer").unwrap(),
-        }),
-    )
-    .await;
+    let receipt = SubmitReceipt {
+        change: change.into(),
+        head,
+        base,
+        check_set: "pre-land".into(),
+        submitter: AgentId::new("checker").unwrap(),
+    };
+    call(state, Request::ReceiptSubmit(receipt)).await;
+    let approve = ApproveRequest {
+        change: change.into(),
+        head,
+        reviewer: AgentId::new("reviewer").unwrap(),
+    };
+    call(state, Request::ReviewApprove(approve)).await;
 }
 
 #[tokio::test]
