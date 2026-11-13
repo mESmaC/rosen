@@ -28,14 +28,13 @@ async fn setup() -> (tempfile::TempDir, Arc<ServerState>, ChangeId, ChangeId) {
         change: id.to_string(),
         paths: vec!["src/**".into()],
     };
-    assert!(matches!(
-        dispatch(&state, Request::ClaimPaths(req(ids[0]))).await,
-        Outcome::Ok(_)
-    ));
-    assert!(matches!(
-        dispatch(&state, Request::WaitPaths(req(ids[1]))).await,
-        Outcome::Ok(_)
-    ));
+    for request in [
+        Request::ClaimPaths(req(ids[0])),
+        Request::WaitPaths(req(ids[1])),
+    ] {
+        let outcome = dispatch(&state, request).await;
+        assert!(matches!(outcome, Outcome::Ok(_)));
+    }
     (dir, state, ids[0], ids[1])
 }
 
@@ -62,16 +61,8 @@ async fn release_fixtures_cover_rollback_and_restart_delivery() {
             v[0] == 1
         );
         assert_eq!(count(&state, "path_claims"), if v[2] == 1 { 0 } else { 2 });
-        assert_eq!(
-            state
-                .changes
-                .show(&holder.to_string())
-                .unwrap()
-                .change
-                .state
-                .is_closed(),
-            v[2] == 1
-        );
+        let change = state.changes.show(&holder.to_string()).unwrap().change;
+        assert_eq!(change.state.is_closed(), v[2] == 1);
         let config = state.config.clone();
         drop(state);
         let state = ServerState::new(config);
@@ -83,13 +74,10 @@ async fn release_fixtures_cover_rollback_and_restart_delivery() {
             .events
             .page(0, Some(&AgentId::new("waiter").unwrap()), 100)
             .unwrap();
-        assert_eq!(
-            wakes
-                .iter()
-                .filter(|e| e.change.as_deref() == Some(&waiter.to_string())
-                    && e.detail["wake"] == true)
-                .count(),
-            usize::from(v[0] == 1 && v[1] == 1)
-        );
+        let id = waiter.to_string();
+        let woke = wakes
+            .iter()
+            .any(|e| e.change.as_deref() == Some(&id) && e.detail["wake"] == true);
+        assert_eq!(woke, v[0] == 1 && v[1] == 1);
     }
 }
