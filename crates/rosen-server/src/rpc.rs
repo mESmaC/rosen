@@ -41,6 +41,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::ChangeShow { change } => {
             on_changes(state, move |c| c.show(&change).map(Response::Change)).await
         }
+        Request::ChangeRebase { change } => crate::rebase::handle(state, change).await,
         Request::ChangeAbandon { change } => crate::claims::abandon(state, change).await,
         Request::ClaimPaths(req) => crate::claims::handle(state, ClaimCall::Claim(req)).await,
         Request::SharePaths(req) => crate::claims::handle(state, ClaimCall::Share(req)).await,
