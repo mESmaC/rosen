@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Creates the claims table if it is missing. Safe to call on every start.
 pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
+    super::delivery::ensure_schema(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS path_claims (
              change_id  TEXT    NOT NULL REFERENCES changes(id),
@@ -148,7 +149,7 @@ pub fn list(conn: &mut Connection, change: Option<&str>) -> Result<Vec<PathClaim
     }
 }
 
-fn release_in(
+pub(crate) fn release_in(
     tx: &Transaction,
     id: ChangeId,
     only: Option<&[PathPattern]>,
@@ -170,11 +171,13 @@ fn release_in(
         .map(|record| stored_pattern(&record.path))
         .collect::<Result<_, _>>()?;
     let woken = wake_unblocked(tx, &freed)?;
-    Ok(ReleaseOutcome {
+    let outcome = ReleaseOutcome {
         change: id,
         released,
         woken,
-    })
+    };
+    super::delivery::enqueue(tx, &outcome)?;
+    Ok(outcome)
 }
 
 /// Ends every live wait that overlaps a freed path and that no live claim on
