@@ -1,5 +1,5 @@
 //! R8: attach a failed merge to its change before publishing the conflict event.
-use super::{ChangeId, CommitId, LandError, LandResult};
+use super::{ChangeId, CommitId, LandError, LandResult, Routing};
 use crate::history::trees::{content, file_at};
 use crate::{changes, conflicts, ServerState};
 use rosen_core::{Conflict, ObjectId, ObjectKind};
@@ -13,7 +13,7 @@ pub(super) fn record(
     onto: CommitId,
     head: CommitId,
     paths: &[String],
-) -> LandResult<()> {
+) -> LandResult<Routing> {
     let store = LooseObjectStore::open(state.config.objects_dir()).map_err(error)?;
     let trees = [
         tree(&store, base)?,
@@ -29,11 +29,10 @@ pub(super) fn record(
         .with_conn(|conn| {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let change = changes::get(&tx, id)?.change;
-            // A snapshot racing the merge must never receive conflicts from an older head.
+            // A snapshot racing the merge must never receive conflicts from
+            // an older head. Dropping `tx` rolls back; the caller merges again.
             if !accepts(change.head == head, change.state.is_closed()) {
-                return Err(changes::ChangeError::Corrupt(
-                    "change moved during conflict routing; retry".into(),
-                ));
+                return Ok(Routing::ChangeMoved);
             }
             let mut set = conflicts::load(&tx, &id.to_string())
                 .map_err(|e| changes::ChangeError::Corrupt(e.to_string()))?;
@@ -43,7 +42,7 @@ pub(super) fn record(
             conflicts::save(&tx, &id.to_string(), &set)
                 .map_err(|e| changes::ChangeError::Corrupt(e.to_string()))?;
             tx.commit()?;
-            Ok(())
+            Ok(Routing::Stored)
         })
         .map_err(error)
 }

@@ -322,7 +322,7 @@ impl ChangeBook for Adapters {
         onto: &CommitId,
         head: &CommitId,
         paths: &[String],
-    ) -> LandResult<()> {
+    ) -> LandResult<super::Routing> {
         super::conflict_routes::record(&*self.state()?, *id, *merge_base, *onto, *head, paths)
     }
 

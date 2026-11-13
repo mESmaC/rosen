@@ -18,6 +18,7 @@ pub mod import;
 pub mod landing;
 pub mod listener;
 pub mod load_limits;
+pub mod metadata;
 pub mod mirror;
 pub mod network;
 pub mod objects;

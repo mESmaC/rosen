@@ -5,7 +5,6 @@
 //! restarts knows whether the mirror is behind the base and pushes at once.
 
 use std::path::Path;
-use std::time::Duration;
 
 use rosen_core::ObjectId;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -34,8 +33,7 @@ pub struct MirrorStore {
 impl MirrorStore {
     /// Opens the mirror table in the metadata database at `path`.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
-        let connection = Connection::open(path)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
+        let connection = crate::metadata::open(path)?;
         connection.execute_batch(SCHEMA)?;
         Ok(Self { connection })
     }
