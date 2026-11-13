@@ -8,10 +8,12 @@
 //! a reader paging by delivery id still reads it.
 
 use super::{
-    enum_from, from_seq, now_millis, presence, to_seq, write_tx, ChannelError, PAGE_LIMIT,
+    enum_from, from_seq, line, now_millis, presence, to_seq, ChannelError, Written, PAGE_LIMIT,
 };
+use crate::events::ChannelLine;
 use rosen_protocol::channel::{
-    Author, ChannelMessage, Intent, Member, MessageMode, MessagePage, SendMessage,
+    Author, ChannelAnswer, ChannelEvent, ChannelMessage, Intent, Member, MessageMode, MessagePage,
+    SendMessage,
 };
 use rusqlite::{params, Connection, Row, Transaction};
 
@@ -20,14 +22,14 @@ pub const USER_NICK: &str = "you";
 
 const COLUMNS: &str = "m.seq, m.from_nick, m.member, m.to_nicks, m.intent, m.text, m.created_at";
 
-/// Stores a message and its deliveries in one transaction.
-pub fn send(conn: &mut Connection, message: &SendMessage) -> Result<ChannelMessage, ChannelError> {
+/// Stores a message and its deliveries, and posts it to every recipient
+/// whose delivery is not held.
+pub fn send(tx: &Transaction, message: &SendMessage) -> Result<Written, ChannelError> {
     if message.text.trim().is_empty() {
         return Err(ChannelError::Invalid("a message needs text".into()));
     }
-    let tx = write_tx(conn)?;
     let sender = match &message.from {
-        Author::Agent { member } => Some(presence::get(&tx, member)?),
+        Author::Agent { member } => Some(presence::get(tx, member)?),
         Author::User => None,
     };
     if sender.is_some() && message.to.is_empty() {
@@ -35,7 +37,7 @@ pub fn send(conn: &mut Connection, message: &SendMessage) -> Result<ChannelMessa
             "an agent's message must name its recipients; agents cannot broadcast".into(),
         ));
     }
-    let recipients = recipients(&tx, sender.as_ref(), &message.to)?;
+    let recipients = recipients(tx, sender.as_ref(), &message.to)?;
     let to =
         serde_json::to_string(&message.to).map_err(|e| ChannelError::Invalid(e.to_string()))?;
     tx.execute(
@@ -51,15 +53,22 @@ pub fn send(conn: &mut Connection, message: &SendMessage) -> Result<ChannelMessa
         ],
     )?;
     let seq = tx.last_insert_rowid();
-    for (member, held) in &recipients {
+    for (recipient, held) in &recipients {
         tx.execute(
             "INSERT OR IGNORE INTO channel_deliveries (seq, member, held) VALUES (?1, ?2, ?3)",
-            params![seq, member, held],
+            params![seq, recipient.member, held],
         )?;
     }
-    let sent = get(&tx, seq)?;
-    tx.commit()?;
-    Ok(sent)
+    let sent = get(tx, seq)?;
+    let now: Vec<&str> = recipients
+        .iter()
+        .filter(|(_, held)| !held)
+        .map(|(recipient, _)| recipient.nick.as_str())
+        .collect();
+    let event = ChannelEvent::Message {
+        message: sent.clone(),
+    };
+    Ok((ChannelAnswer::Sent(sent), vec![line(&event, &now)?]))
 }
 
 /// Who a message reaches, and whether each delivery is held:
@@ -72,7 +81,7 @@ fn recipients(
     tx: &Transaction,
     sender: Option<&Member>,
     to: &[String],
-) -> Result<Vec<(String, bool)>, ChannelError> {
+) -> Result<Vec<(Member, bool)>, ChannelError> {
     if sender.is_some_and(|s| s.mode == MessageMode::Quarantined) {
         return Ok(Vec::new());
     }
@@ -86,12 +95,15 @@ fn recipients(
             .collect::<Result<Vec<_>, _>>()?
     };
     let Some(sender) = sender else {
-        return Ok(named.into_iter().map(|m| (m.member, false)).collect());
+        return Ok(named.into_iter().map(|m| (m, false)).collect());
     };
     Ok(named
         .into_iter()
         .filter(|m| m.member != sender.member && m.mode != MessageMode::Quarantined)
-        .map(|m| (m.member, m.mode == MessageMode::HeadsDown))
+        .map(|m| {
+            let held = m.mode == MessageMode::HeadsDown;
+            (m, held)
+        })
         .collect())
 }
 
@@ -133,36 +145,42 @@ pub fn read(
     Ok(MessagePage { messages, cursor })
 }
 
-/// Delivers every message held for `member`. Returns how many.
-pub fn release_held(conn: &mut Connection, member: &str) -> Result<u64, ChannelError> {
-    let tx = write_tx(conn)?;
-    presence::get(&tx, member)?;
-    let delivered = deliver_held(&tx, member)?;
-    tx.commit()?;
-    Ok(delivered)
+/// Delivers every message held for `member`, answering how many.
+pub fn release_held(tx: &Transaction, member: &str) -> Result<Written, ChannelError> {
+    let member = presence::get(tx, member)?;
+    let lines = deliver_held(tx, &member)?;
+    Ok((ChannelAnswer::Delivered(lines.len() as u64), lines))
 }
 
 /// Re-inserts each held delivery as delivered, in message order, under new
-/// ids past every reader cursor.
-pub(super) fn deliver_held(tx: &Transaction, member: &str) -> Result<u64, ChannelError> {
+/// ids past every reader cursor, and posts each message to the member.
+pub(super) fn deliver_held(
+    tx: &Transaction,
+    member: &Member,
+) -> Result<Vec<ChannelLine>, ChannelError> {
     let held: Vec<i64> = {
         let mut stmt = tx.prepare(
             "SELECT seq FROM channel_deliveries WHERE member = ?1 AND held = 1 ORDER BY seq",
         )?;
-        let rows = stmt.query_map([member], |row| row.get(0))?;
+        let rows = stmt.query_map([&member.member], |row| row.get(0))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
-    for seq in &held {
+    let mut lines = Vec::with_capacity(held.len());
+    for seq in held {
         tx.execute(
             "DELETE FROM channel_deliveries WHERE seq = ?1 AND member = ?2",
-            params![seq, member],
+            params![seq, member.member],
         )?;
         tx.execute(
             "INSERT INTO channel_deliveries (seq, member, held) VALUES (?1, ?2, 0)",
-            params![seq, member],
+            params![seq, member.member],
         )?;
+        let event = ChannelEvent::Message {
+            message: get(tx, seq)?,
+        };
+        lines.push(line(&event, &[member.nick.as_str()])?);
     }
-    Ok(held.len() as u64)
+    Ok(lines)
 }
 
 fn get(conn: &Connection, seq: i64) -> Result<ChannelMessage, ChannelError> {

@@ -1,22 +1,24 @@
 //! The Discoveries and Past work ledgers (R13): append-only entries.
 
 use super::{
-    enum_from, from_seq, messages::USER_NICK, now_millis, presence, to_seq, ChannelError,
-    PAGE_LIMIT,
+    enum_from, from_seq, messages::USER_NICK, now_millis, presence, project_line, to_seq,
+    ChannelError, Written, PAGE_LIMIT,
 };
-use rosen_protocol::channel::{AppendEntry, Author, Ledger, LedgerEntry};
-use rusqlite::{params, Connection, Row};
+use rosen_protocol::channel::{
+    AppendEntry, Author, ChannelAnswer, ChannelEvent, Ledger, LedgerEntry,
+};
+use rusqlite::{params, Connection, Row, Transaction};
 
 const COLUMNS: &str = "seq, ledger, nick, member, text, velocity_issue, created_at";
 
-pub fn append(conn: &mut Connection, entry: &AppendEntry) -> Result<LedgerEntry, ChannelError> {
+/// Appends an entry. Velocity F14 posts a `discovery` line for it.
+pub fn append(tx: &Transaction, entry: &AppendEntry) -> Result<Written, ChannelError> {
     if entry.text.trim().is_empty() {
         return Err(ChannelError::Invalid("a ledger entry needs text".into()));
     }
-    let tx = super::write_tx(conn)?;
     let (nick, member) = match &entry.author {
         Author::Agent { member } => {
-            let author = presence::get(&tx, member)?;
+            let author = presence::get(tx, member)?;
             (author.nick, Some(author.member))
         }
         Author::User => (USER_NICK.to_owned(), None),
@@ -36,8 +38,10 @@ pub fn append(conn: &mut Connection, entry: &AppendEntry) -> Result<LedgerEntry,
     let seq = tx.last_insert_rowid();
     let sql = format!("SELECT {COLUMNS} FROM channel_ledger WHERE seq = ?1");
     let stored = tx.query_row(&sql, [seq], read_entry)?;
-    tx.commit()?;
-    Ok(stored)
+    let event = ChannelEvent::Ledger {
+        entry: stored.clone(),
+    };
+    Ok((ChannelAnswer::Entry(stored), vec![project_line(&event)?]))
 }
 
 /// Entries of one ledger after `after`, oldest first.

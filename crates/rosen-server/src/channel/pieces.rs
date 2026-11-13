@@ -5,32 +5,36 @@
 //! primary key backs it: even a second writer that skipped the read could
 //! not store a second holder.
 
-use super::{presence, write_tx, ChannelError};
+use super::{presence, project_line, ChannelError, Written};
 use rosen_core::{decide_piece, piece_key, PieceDecision};
-use rosen_protocol::channel::{MessageMode, PieceClaim, PieceOutcome};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rosen_protocol::channel::{ChannelAnswer, ChannelEvent, MessageMode, PieceClaim, PieceOutcome};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
 const COLUMNS: &str = "p.piece, p.member, m.nick, p.task, p.branch, p.since";
 const FROM: &str = "channel_pieces p JOIN channel_members m ON m.member = p.member";
 
 /// Claims a piece for `member`, extends its own claim, or names the holder.
 pub fn claim(
-    conn: &mut Connection,
+    tx: &Transaction,
     member: &str,
     piece: Option<&str>,
     task: &str,
     branch: &str,
-) -> Result<PieceOutcome, ChannelError> {
+) -> Result<Written, ChannelError> {
     let key = piece_key(piece, task).ok_or_else(|| {
         ChannelError::Invalid("a piece claim needs a piece identity or task text".into())
     })?;
-    let tx = write_tx(conn)?;
-    ensure_unfrozen(&tx, member)?;
-    let holder = get(&tx, &key)?;
-    let outcome = match decide_piece(holder.as_ref().map(|h| h.member.as_str()), member) {
+    let claimant = unfrozen(tx, member)?;
+    let holder = get(tx, &key)?;
+    let extended = match decide_piece(holder.as_ref().map(|h| h.member.as_str()), member) {
         PieceDecision::Refuse => {
             let holder = holder.expect("refused only when held");
-            return Ok(PieceOutcome::Refused { holder });
+            let event = ChannelEvent::Refused {
+                nick: claimant.nick,
+                holder: holder.clone(),
+            };
+            let outcome = PieceOutcome::Refused { holder };
+            return Ok((ChannelAnswer::Piece(outcome), vec![project_line(&event)?]));
         }
         PieceDecision::Extend => {
             tx.execute(
@@ -48,24 +52,24 @@ pub fn claim(
             false
         }
     };
-    let claim = get(&tx, &key)?.expect("stored above");
-    tx.commit()?;
-    Ok(PieceOutcome::Granted {
-        claim,
-        extended: outcome,
-    })
+    let claim = get(tx, &key)?.expect("stored above");
+    let event = ChannelEvent::Claim {
+        claim: claim.clone(),
+        extended,
+    };
+    let outcome = PieceOutcome::Granted { claim, extended };
+    Ok((ChannelAnswer::Piece(outcome), vec![project_line(&event)?]))
 }
 
-/// Releases `member`'s claim on one piece, or all of them. Returns what was
-/// released; a piece another member holds is never touched.
+/// Releases `member`'s claim on one piece, or all of them. Answers with what
+/// was released; a piece another member holds is never touched.
 pub fn release(
-    conn: &mut Connection,
+    tx: &Transaction,
     member: &str,
     piece: Option<&str>,
-) -> Result<Vec<PieceClaim>, ChannelError> {
-    let tx = write_tx(conn)?;
-    ensure_unfrozen(&tx, member)?;
-    let held: Vec<PieceClaim> = held_by(&tx, member)?
+) -> Result<Written, ChannelError> {
+    unfrozen(tx, member)?;
+    let held: Vec<PieceClaim> = held_by(tx, member)?
         .into_iter()
         .filter(|claim| piece.is_none_or(|key| claim.piece == key.trim()))
         .collect();
@@ -75,8 +79,13 @@ pub fn release(
             params![claim.piece, member],
         )?;
     }
-    tx.commit()?;
-    Ok(held)
+    let mut lines = Vec::new();
+    if !held.is_empty() {
+        lines.push(project_line(&ChannelEvent::Released {
+            pieces: held.clone(),
+        })?);
+    }
+    Ok((ChannelAnswer::Pieces(held), lines))
 }
 
 /// Every held piece, oldest claim first.
@@ -99,12 +108,16 @@ fn get(conn: &Connection, key: &str) -> Result<Option<PieceClaim>, ChannelError>
     Ok(conn.query_row(&sql, [key], read_claim).optional()?)
 }
 
-/// A quarantined member's claims are frozen (Velocity F14): it can neither
-/// take, extend nor release one until it is let out.
-fn ensure_unfrozen(conn: &Connection, member: &str) -> Result<(), ChannelError> {
-    match presence::get(conn, member)?.mode {
+/// The member, unless it is quarantined: its claims are then frozen
+/// (Velocity F14), so it can neither take, extend nor release one.
+fn unfrozen(
+    conn: &Connection,
+    member: &str,
+) -> Result<rosen_protocol::channel::Member, ChannelError> {
+    let found = presence::get(conn, member)?;
+    match found.mode {
         MessageMode::Quarantined => Err(ChannelError::Frozen(member.to_owned())),
-        _ => Ok(()),
+        _ => Ok(found),
     }
 }
 

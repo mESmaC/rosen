@@ -3,9 +3,13 @@
 //!
 //! Every machine's Velocity calls these through `rosen-client`; a cache
 //! daemon forwards them, so the server is the channel's only copy and no
-//! two machines can see different claim holders. Each write is one
-//! IMMEDIATE transaction, which takes SQLite's write lock before reading:
-//! two claims on one piece are serialised and the second sees the first.
+//! two machines can see different claim holders.
+//!
+//! Channel state lives in the metadata store and is read and written on the
+//! event log's connection (R9, R13 "One log"). Each write is one IMMEDIATE
+//! transaction that also appends its `channel` event lines, so two claims on
+//! one piece are serialised, the second sees the first, and a committed
+//! change never lacks its event.
 
 mod ledgers;
 mod messages;
@@ -15,12 +19,13 @@ mod schema;
 
 pub use schema::ensure_schema;
 
+use crate::events::{ChannelLine, EventError, EventLog};
 use crate::ServerState;
-use rosen_protocol::channel::{ChannelAnswer, ChannelRequest};
+use rosen_core::AgentId;
+use rosen_protocol::channel::{ChannelAnswer, ChannelEvent, ChannelRequest};
 use rosen_protocol::{ErrorBody, ErrorCode, Outcome, Response};
-use rusqlite::Connection;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use rusqlite::Transaction;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The most rows one read returns; callers page with the returned cursor.
@@ -32,7 +37,7 @@ pub enum ChannelError {
     #[error("channel store: {0}")]
     Sql(#[from] rusqlite::Error),
     #[error("channel store: {0}")]
-    Io(#[from] std::io::Error),
+    Event(#[from] EventError),
     #[error("member {0} has not joined the channel")]
     NotJoined(String),
     #[error("no member has the nick {0:?}")]
@@ -48,7 +53,7 @@ pub enum ChannelError {
 impl ChannelError {
     fn code(&self) -> ErrorCode {
         match self {
-            ChannelError::Sql(_) | ChannelError::Io(_) => ErrorCode::Internal,
+            ChannelError::Sql(_) | ChannelError::Event(_) => ErrorCode::Internal,
             ChannelError::NotJoined(_) | ChannelError::UnknownNick(_) => ErrorCode::NotFound,
             ChannelError::Frozen(_) | ChannelError::NickTaken { .. } => ErrorCode::Refused,
             ChannelError::Invalid(_) => ErrorCode::InvalidArgument,
@@ -56,118 +61,76 @@ impl ChannelError {
     }
 }
 
-/// The channel's connection to the metadata store. Separate from the change
-/// registry's so channel traffic never queues behind a land or a snapshot;
-/// WAL and the busy timeout let the two write the same file.
-pub struct ChannelService {
-    /// `None` keeps the channel in memory, for tests.
-    db_path: Option<PathBuf>,
-    conn: Mutex<Option<Connection>>,
-}
-
-impl ChannelService {
-    pub fn open(db_path: impl Into<PathBuf>) -> Self {
-        Self {
-            db_path: Some(db_path.into()),
-            conn: Mutex::new(None),
-        }
-    }
-
-    pub fn in_memory() -> Self {
-        Self {
-            db_path: None,
-            conn: Mutex::new(None),
-        }
-    }
-
-    /// Runs one channel operation to completion.
-    pub fn run(&self, call: ChannelRequest) -> Result<ChannelAnswer, ChannelError> {
-        self.with_conn(|conn| run(conn, call))
-    }
-
-    fn with_conn<T>(
-        &self,
-        work: impl FnOnce(&mut Connection) -> Result<T, ChannelError>,
-    ) -> Result<T, ChannelError> {
-        let mut slot = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
-        if slot.is_none() {
-            *slot = Some(self.connect()?);
-        }
-        work(slot.as_mut().expect("connection opened above"))
-    }
-
-    fn connect(&self) -> Result<Connection, ChannelError> {
-        let Some(path) = &self.db_path else {
-            let conn = Connection::open_in_memory()?;
-            crate::metadata::configure(&conn)?;
-            ensure_schema(&conn)?;
-            return Ok(conn);
-        };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        Ok(crate::metadata::open(path)?)
-    }
-}
+/// What a write returns: its answer and the channel lines to append with it.
+type Written = (ChannelAnswer, Vec<ChannelLine>);
 
 /// Answers [`rosen_protocol::Request::Channel`] on the blocking pool, as
 /// every SQLite call is.
 pub async fn handle(state: &Arc<ServerState>, call: ChannelRequest) -> Outcome {
     let state = Arc::clone(state);
-    match tokio::task::spawn_blocking(move || state.channel.run(call)).await {
+    match tokio::task::spawn_blocking(move || run(&state.events, call)).await {
         Ok(Ok(answer)) => Outcome::Ok(Response::Channel(answer)),
         Ok(Err(err)) => Outcome::Error(ErrorBody::new(err.code(), err.to_string())),
         Err(join) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, join.to_string())),
     }
 }
 
-fn run(conn: &mut Connection, call: ChannelRequest) -> Result<ChannelAnswer, ChannelError> {
+/// Runs one channel operation to completion on the log's connection.
+pub fn run(events: &EventLog, call: ChannelRequest) -> Result<ChannelAnswer, ChannelError> {
     use ChannelRequest as C;
-    Ok(match call {
+    match call {
+        C::Presence => events.read_channel(|c| Ok(ChannelAnswer::Members(presence::list(c)?))),
+        C::Pieces => events.read_channel(|c| Ok(ChannelAnswer::Pieces(pieces::list(c)?))),
+        C::Messages { reader, after } => events.read_channel(|c| {
+            messages::read(c, reader.as_deref(), after).map(ChannelAnswer::Messages)
+        }),
+        C::ReadLedger { ledger, after } => {
+            events.read_channel(|c| ledgers::read(c, ledger, after).map(ChannelAnswer::Entries))
+        }
+        write => events.commit_channel_lines(|tx| apply(tx, write)),
+    }
+}
+
+fn apply(tx: &Transaction, call: ChannelRequest) -> Result<Written, ChannelError> {
+    use ChannelRequest as C;
+    match call {
         C::Join {
             member,
             nick,
             machine,
-        } => ChannelAnswer::Member(presence::join(conn, &member, &nick, &machine)?),
-        C::Leave { member } => ChannelAnswer::Member(presence::leave(conn, &member)?),
-        C::SetMode { member, mode } => {
-            ChannelAnswer::Member(presence::set_mode(conn, &member, mode)?)
-        }
-        C::Presence => ChannelAnswer::Members(presence::list(conn)?),
+        } => presence::join(tx, &member, &nick, &machine),
+        C::Leave { member } => presence::leave(tx, &member),
+        C::SetMode { member, mode } => presence::set_mode(tx, &member, mode),
         C::ClaimPiece {
             member,
             piece,
             task,
             branch,
-        } => ChannelAnswer::Piece(pieces::claim(
-            conn,
-            &member,
-            piece.as_deref(),
-            &task,
-            &branch,
-        )?),
-        C::ReleasePiece { member, piece } => {
-            ChannelAnswer::Pieces(pieces::release(conn, &member, piece.as_deref())?)
-        }
-        C::Pieces => ChannelAnswer::Pieces(pieces::list(conn)?),
-        C::Send(message) => ChannelAnswer::Sent(messages::send(conn, &message)?),
-        C::Messages { reader, after } => {
-            ChannelAnswer::Messages(messages::read(conn, reader.as_deref(), after)?)
-        }
-        C::ReleaseHeld { member } => {
-            ChannelAnswer::Delivered(messages::release_held(conn, &member)?)
-        }
-        C::Append(entry) => ChannelAnswer::Entry(ledgers::append(conn, &entry)?),
-        C::ReadLedger { ledger, after } => {
-            ChannelAnswer::Entries(ledgers::read(conn, ledger, after)?)
-        }
-    })
+        } => pieces::claim(tx, &member, piece.as_deref(), &task, &branch),
+        C::ReleasePiece { member, piece } => pieces::release(tx, &member, piece.as_deref()),
+        C::Send(message) => messages::send(tx, &message),
+        C::ReleaseHeld { member } => messages::release_held(tx, &member),
+        C::Append(entry) => ledgers::append(tx, &entry),
+        C::Presence | C::Pieces | C::Messages { .. } | C::ReadLedger { .. } => Err(
+            ChannelError::Invalid("a read is not a channel write".into()),
+        ),
+    }
 }
 
-/// Opens a transaction that holds the write lock from its first read, so
-/// the read and the write it decides cannot interleave with another one.
-fn write_tx(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
-    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+/// A line for the project view and the given agents, by nick.
+fn line(event: &ChannelEvent, nicks: &[&str]) -> Result<ChannelLine, ChannelError> {
+    let detail =
+        serde_json::to_value(event).map_err(|err| ChannelError::Invalid(err.to_string()))?;
+    let recipients = nicks
+        .iter()
+        .map(|nick| AgentId::new(*nick).map_err(|err| ChannelError::Invalid(err.to_string())))
+        .collect::<Result<_, _>>()?;
+    Ok(ChannelLine { detail, recipients })
+}
+
+/// A line only the project view receives.
+fn project_line(event: &ChannelEvent) -> Result<ChannelLine, ChannelError> {
+    line(event, &[])
 }
 
 fn now_millis() -> i64 {

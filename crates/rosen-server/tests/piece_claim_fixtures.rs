@@ -4,9 +4,10 @@
 //! against the server's channel store, operation by operation.
 
 use rosen_protocol::channel::{ChannelAnswer, ChannelRequest, PieceOutcome};
-use rosen_server::channel::ChannelService;
+use rosen_server::channel;
+use rosen_server::events::EventLog;
 
-fn run(channel: &ChannelService, op: &str) -> String {
+fn run(log: &EventLog, op: &str) -> String {
     let (kind, rest) = op.split_at(1);
     let (member, piece) = rest.split_at(1);
     let member = member.to_owned();
@@ -23,7 +24,7 @@ fn run(channel: &ChannelService, op: &str) -> String {
         },
         _ => panic!("bad op {op:?}"),
     };
-    match channel.run(call).expect("channel call") {
+    match channel::run(log, call).expect("channel call") {
         ChannelAnswer::Piece(PieceOutcome::Granted { extended, .. }) => {
             if extended { "e" } else { "g" }.to_owned()
         }
@@ -33,8 +34,8 @@ fn run(channel: &ChannelService, op: &str) -> String {
     }
 }
 
-fn holders(channel: &ChannelService) -> String {
-    let ChannelAnswer::Pieces(held) = channel.run(ChannelRequest::Pieces).unwrap() else {
+fn holders(log: &EventLog) -> String {
+    let ChannelAnswer::Pieces(held) = channel::run(log, ChannelRequest::Pieces).unwrap() else {
         panic!("pieces answer");
     };
     ["a", "b"]
@@ -56,18 +57,18 @@ fn piece_claims_match_the_lean_fixture_table() {
         let [history, outcomes, expected] = line.split('\t').collect::<Vec<_>>()[..] else {
             panic!("bad row {line:?}");
         };
-        let channel = ChannelService::in_memory();
+        let log = EventLog::in_memory();
         for member in ["1", "2"] {
             let join = ChannelRequest::Join {
                 member: member.into(),
                 nick: format!("n{member}"),
                 machine: "fixture".into(),
             };
-            channel.run(join).unwrap();
+            channel::run(&log, join).unwrap();
         }
-        let got: Vec<String> = history.split(' ').map(|op| run(&channel, op)).collect();
+        let got: Vec<String> = history.split(' ').map(|op| run(&log, op)).collect();
         assert_eq!(got.join(" "), outcomes, "outcomes: {line}");
-        assert_eq!(holders(&channel), expected, "holders: {line}");
+        assert_eq!(holders(&log), expected, "holders: {line}");
         rows += 1;
     }
     assert!(rows > 0, "the fixture table is empty");

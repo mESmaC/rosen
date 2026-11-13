@@ -211,6 +211,43 @@ pub struct LedgerEntry {
     pub time: i64,
 }
 
+/// The `detail` of a `channel` event (R13): what changed in the channel.
+/// Every line reaches the project view. A message line also reaches its
+/// delivered recipients; no other line targets an agent, since Velocity F14
+/// pushes an agent only what it must act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "line", rename_all = "snake_case")]
+pub enum ChannelEvent {
+    Joined {
+        member: Member,
+    },
+    Left {
+        member: Member,
+    },
+    Mode {
+        member: Member,
+    },
+    Claim {
+        claim: PieceClaim,
+        extended: bool,
+    },
+    /// A claim lost to `holder`; `nick` is the refused claimant.
+    Refused {
+        nick: String,
+        holder: PieceClaim,
+    },
+    Released {
+        pieces: Vec<PieceClaim>,
+    },
+    /// A message delivered now: on send, or when a hold is released.
+    Message {
+        message: ChannelMessage,
+    },
+    Ledger {
+        entry: LedgerEntry,
+    },
+}
+
 /// The stored and wire spelling of the channel's unit enums, so the server
 /// can keep them in SQLite text columns.
 macro_rules! text_enum {

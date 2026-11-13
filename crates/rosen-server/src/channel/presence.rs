@@ -1,25 +1,24 @@
 //! Presence: the members joined, their machine and message mode (R13).
 
-use super::{enum_from, messages, now_millis, write_tx, ChannelError};
-use rosen_protocol::channel::{Member, MessageMode};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use super::{enum_from, messages, now_millis, project_line, ChannelError, Written};
+use rosen_protocol::channel::{ChannelAnswer, ChannelEvent, Member, MessageMode};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
 const COLUMNS: &str = "member, nick, machine, mode, joined_at, left_at";
 
 /// Joins or rejoins `member`. A rejoin keeps the member's mode, so a
 /// quarantine is not lifted by restarting the agent.
 pub fn join(
-    conn: &mut Connection,
+    tx: &Transaction,
     member: &str,
     nick: &str,
     machine: &str,
-) -> Result<Member, ChannelError> {
+) -> Result<Written, ChannelError> {
     for (name, value) in [("member", member), ("nick", nick), ("machine", machine)] {
         if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
             return Err(ChannelError::Invalid(format!("invalid {name} {value:?}")));
         }
     }
-    let tx = write_tx(conn)?;
     // A nick names one joined member, or a message to it would be ambiguous.
     let holder: Option<String> = tx
         .query_row(
@@ -48,42 +47,49 @@ pub fn join(
             now_millis()
         ],
     )?;
-    let joined = get(&tx, member)?;
-    tx.commit()?;
-    Ok(joined)
+    let member = get(tx, member)?;
+    let line = project_line(&ChannelEvent::Joined {
+        member: member.clone(),
+    })?;
+    Ok((ChannelAnswer::Member(member), vec![line]))
 }
 
 /// Marks the member gone. Its piece claims and held messages stay.
-pub fn leave(conn: &mut Connection, member: &str) -> Result<Member, ChannelError> {
-    let tx = write_tx(conn)?;
-    // Leaving twice keeps the first time it left.
-    tx.execute(
+pub fn leave(tx: &Transaction, member: &str) -> Result<Written, ChannelError> {
+    // Leaving twice keeps the first time it left, and posts one line.
+    let changed = tx.execute(
         "UPDATE channel_members SET left_at = ?2 WHERE member = ?1 AND left_at IS NULL",
         params![member, now_millis()],
     )?;
-    let left = get(&tx, member)?;
-    tx.commit()?;
-    Ok(left)
+    let member = get(tx, member)?;
+    let mut lines = Vec::new();
+    if changed > 0 {
+        lines.push(project_line(&ChannelEvent::Left {
+            member: member.clone(),
+        })?);
+    }
+    Ok((ChannelAnswer::Member(member), lines))
 }
 
 /// Sets the member's mode. Leaving heads-down for open delivers what it held.
 pub fn set_mode(
-    conn: &mut Connection,
+    tx: &Transaction,
     member: &str,
     mode: MessageMode,
-) -> Result<Member, ChannelError> {
-    let tx = write_tx(conn)?;
-    get(&tx, member)?;
+) -> Result<Written, ChannelError> {
+    get(tx, member)?;
     tx.execute(
         "UPDATE channel_members SET mode = ?2 WHERE member = ?1",
         params![member, mode.as_str()],
     )?;
+    let updated = get(tx, member)?;
+    let mut lines = vec![project_line(&ChannelEvent::Mode {
+        member: updated.clone(),
+    })?];
     if mode == MessageMode::Open {
-        messages::deliver_held(&tx, member)?;
+        lines.extend(messages::deliver_held(tx, &updated)?);
     }
-    let updated = get(&tx, member)?;
-    tx.commit()?;
-    Ok(updated)
+    Ok((ChannelAnswer::Member(updated), lines))
 }
 
 /// Every member that ever joined: joined ones first, then by nick.
