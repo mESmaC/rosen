@@ -259,10 +259,17 @@ pub(crate) fn land_rebase(
             return Ok(());
         }
         let base = match current.parent {
-            ChangeParent::Base(commit) => ctx.store.read_commit(&commit).map_err(failure)?.tree,
+            ChangeParent::Base(commit) => {
+                // Recovery can replay an older land after a later rebase.
+                // Moving back would discard the intervening base additions.
+                if commit != onto && descends_from(&ctx.store, commit, onto)? {
+                    return Ok(());
+                }
+                ctx.store.read_commit(&commit).map_err(failure)?.tree
+            }
             ChangeParent::Change(parent) => {
                 // Overlap alone cannot detach a child from its unlanded parent.
-                if !changes::get(&tx, parent)?.change.state.is_closed() {
+                if changes::get(&tx, parent)?.change.state != rosen_core::ChangeState::Landed {
                     return Ok(());
                 }
                 basis(&tx, id, parent)?
@@ -289,4 +296,28 @@ pub(crate) fn land_rebase(
         tx.commit()?;
         Ok(())
     })
+}
+
+fn descends_from(
+    store: &dyn rosen_store::ObjectStore,
+    mut commit: ObjectId,
+    ancestor: ObjectId,
+) -> Result<bool, ChangeError> {
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(commit) {
+        if commit == ancestor {
+            return Ok(true);
+        }
+        let Some(parent) = store
+            .read_commit(&commit)
+            .map_err(failure)?
+            .parents
+            .first()
+            .copied()
+        else {
+            return Ok(false);
+        };
+        commit = parent;
+    }
+    Err(ChangeError::Corrupt("cycle in base history".into()))
 }
