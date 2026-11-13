@@ -264,6 +264,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 - **Batches.** The server offers checkers the newest untested landed commit. One passing run marks every commit up to it **green**, and the server records the last green commit.
 - **Failure and bisect.** On a failing run, the server offers the commits between the last green and the failure for bisection, until one commit is found to break, the **culprit**.
 - **Auto-revert.** The server lands a revert of the culprit through R8, as a server-owned change that needs no receipt or approval. The culprit change goes back to `open` with its owner, carrying the failing check output, and gets a `reverted` event. Its commits and workspace are kept.
+  - The inverse merges against the current base, preserving later lands; an overlapping inverse that cannot merge cleanly refuses without moving the base. The inverse land, reopened change and durable failure output commit atomically. Repeating a confirmed culprit returns the same revert, and its reopened change can land again under the same change ID after repair.
 - A flaky result is the checker's concern: a revert happens only after the culprit fails twice and its parent passes.
 - **Accept when:** a landed commit that fails the full tests is reverted automatically, its change reopens with its work intact, and no other change is reverted.
 

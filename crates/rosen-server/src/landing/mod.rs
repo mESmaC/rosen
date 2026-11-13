@@ -19,6 +19,8 @@ mod overlap_targets;
 pub mod reach;
 mod reach_store;
 mod restack;
+pub mod revert;
+mod revert_store;
 mod review_gate;
 pub mod rules;
 pub mod service;

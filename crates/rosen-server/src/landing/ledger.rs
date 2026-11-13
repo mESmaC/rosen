@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS base_history (
     seq            INTEGER PRIMARY KEY AUTOINCREMENT,
     ref_name       TEXT NOT NULL,
     commit_id      TEXT NOT NULL,
-    change_id      TEXT UNIQUE,
+    change_id      TEXT,
     head           TEXT,
     tier           TEXT NOT NULL,
     post_land_done INTEGER NOT NULL DEFAULT 0,
@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS receipts (
 ";
 
 pub(crate) fn ensure_schema(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch(SCHEMA)
+    connection.execute_batch(SCHEMA)?;
+    super::revert_store::migrate_history(connection)
 }
 
 /// Tier recorded for a ref's initial commit; never counts as prose-only.
@@ -252,7 +253,7 @@ impl Ledger {
         let connection = self.lock()?;
         let commit = connection
             .query_row(
-                "SELECT commit_id FROM base_history WHERE change_id = ?1",
+                "SELECT commit_id FROM base_history WHERE change_id = ?1 AND NOT EXISTS (SELECT 1 FROM auto_reverts WHERE culprit=base_history.commit_id)",
                 params![change.to_string()],
                 |row| row.get::<_, String>(0),
             )
@@ -434,7 +435,7 @@ fn check_attempt(
 ) -> LandResult<Option<CasResult>> {
     let landed: Option<String> = tx
         .query_row(
-            "SELECT commit_id FROM base_history WHERE change_id = ?1",
+            "SELECT commit_id FROM base_history WHERE change_id = ?1 AND NOT EXISTS (SELECT 1 FROM auto_reverts WHERE culprit=base_history.commit_id)",
             params![record.change.to_string()],
             |row| row.get(0),
         )
