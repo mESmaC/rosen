@@ -90,6 +90,20 @@ async fn culprit_reopens_once_without_losing_later_work() {
         inverse
     );
     assert_eq!(ledger.base("main").unwrap(), Some(repaired));
+    assert_overlap_batches(&s, bad, repaired);
+}
+
+fn assert_overlap_batches(s: &ServerState, first: ObjectId, repaired: ObjectId) {
+    // R12 risk: the original ID's repaired land must capture fresh R8 targets.
+    let conn = rusqlite::Connection::open(s.config.metadata_path()).unwrap();
+    let batches: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM landing_overlap_batches WHERE landed IN (?1,?2)",
+            rusqlite::params![first.to_hex(), repaired.to_hex()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(batches, 2);
 }
 
 async fn approve_land(
