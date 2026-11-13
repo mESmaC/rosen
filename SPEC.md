@@ -198,7 +198,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
   - A claim or share covers every line of the paths it matches, so it overlaps another change's claim, share or edit there. A wait does not, because a waiter holds off. A set of paths in a query counts as a claim. A query that names a change and paths returns only that change's overlaps on those paths.
   - Edits are measured against the change's parent. Two changes on different parents are compared in one parent's lines, after carrying the other's edits across the lines both versions share. An added, deleted, binary or mode-changed file counts as edited throughout.
 - These are AIRC's file claims: `airc_claim` files, `airc_share` and `airc_wait` record path claims, shares and waits here (R13). There is one claim record per path, not one in AIRC and one in Rosen.
-- Claims release when their change lands or is abandoned. A wait is then signalled by an event.
+- Claims release when their change lands or is abandoned. Abandonment and removal of its claims, shares and waits commit together. Release transactions retain pending notifications until published, so a restart replays a wait's wake even after its record was removed. Delivery is at least once. A wait is then signalled by an event.
 - **Accept when:** two concurrent claims on one path never both succeed, and every released claim wakes its waiters.
 
 ### R7 · Review

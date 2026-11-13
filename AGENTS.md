@@ -13,6 +13,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Rust tests: `cargo test --workspace`. For one crate, use `cargo test -p <crate>`.
 - Proofs: `lake build` in `proofs/`.
 - Atomic transaction fixtures: `lake exe atomic-transactions-fixtures > fixtures/atomic-transactions.tsv` in `proofs/`.
+- Claim release fixtures: `lake exe claim-release-fixtures > fixtures/claim-release.tsv` in `proofs/`.
 - Re-check fixtures: `lake exe recheck-fixtures > fixtures/recheck.tsv` in `proofs/`.
 - Workspace deletion fixtures: `lake exe workspace-deletion-fixtures > fixtures/workspace-deletion.tsv` in `proofs/`.
 - Fixture tables, regenerated from `proofs/` after a model changes: `lake exe landing-fixtures > fixtures/landing.tsv` and `lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv`.

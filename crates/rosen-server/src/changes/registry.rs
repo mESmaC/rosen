@@ -156,7 +156,20 @@ pub(crate) fn update_in(
 }
 
 pub fn abandon(conn: &mut Connection, id: ChangeId) -> Result<ChangeRecord, ChangeError> {
-    update(conn, id, Change::abandon)
+    abandon_releasing(conn, id).map(|(record, _)| record)
+}
+
+/// Closing and freeing a change are indivisible: a failed release must not
+/// leave an abandoned change with waits that no future holder can wake.
+pub(super) fn abandon_releasing(
+    conn: &mut Connection,
+    id: ChangeId,
+) -> Result<(ChangeRecord, rosen_protocol::ReleaseOutcome), ChangeError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let record = update_in(&tx, id, Change::abandon)?;
+    let released = crate::claims::store::release_in(&tx, id, None)?;
+    tx.commit()?;
+    Ok((record, released))
 }
 
 /// Appends a snapshot or named commit; earlier ones are never touched (R2).
