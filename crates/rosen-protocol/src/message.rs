@@ -415,6 +415,9 @@ pub enum EventKind {
     Reverted,
     /// A git mirror push failed or recovered (R1). Sent to every subscriber.
     Mirror,
+    /// An AIRC channel line (R13), with its channel-specific payload in detail.
+    /// Uses the same sequence, subscription and acknowledgement as R9 events.
+    Channel,
 }
 
 /// One event. `seq` is the cursor a client resumes from after a reconnect.
