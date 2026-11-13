@@ -155,9 +155,7 @@ async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<Option<Base>, E
     if block_clones {
         sync_template(pool, client, &store, &base, &mut prose).await?;
     }
-    let mut state = pool.state.lock().await;
-    refresh_ready(&store, &mut state.ready, &base, &mut prose).await?;
-    drop(state);
+    refresh_ready(pool, &store, &base, &mut prose).await?;
     if block_clones {
         drop_unprepared(pool, &base).await?;
     }
@@ -287,15 +285,34 @@ async fn sync_template(
     Ok(())
 }
 
+/// Brings each ready slot behind the base to the tip, one at a time. Only
+/// the slot being refreshed is out of the pool: holding the pool lock for
+/// the whole pass made every take wait for every slot (#191).
 async fn refresh_ready(
+    pool: &WarmPool,
     store: &rosen_store::LooseObjectStore,
-    ready: &mut Vec<Slot>,
     base: &Base,
     prose: &mut ProseSince<'_>,
 ) -> Result<(), Error> {
-    let mut retained = Vec::new();
-    for mut slot in std::mem::take(ready) {
-        slot.prep = prose.carried(slot.prep, slot.commit).await?;
+    loop {
+        let mut slot = {
+            let mut state = pool.state.lock().await;
+            let behind = state.ready.iter().position(|slot| {
+                (slot.commit != base.commit || slot.tree != base.tree) && slot.prep != Prep::Running
+            });
+            let Some(index) = behind else {
+                return Ok(());
+            };
+            state.ready.remove(index)
+        };
+        let prep = match prose.carried(slot.prep, slot.commit).await {
+            Ok(prep) => prep,
+            Err(error) => {
+                pool.state.lock().await.ready.push(slot);
+                return Err(error);
+            }
+        };
+        slot.prep = prep;
         slot.commit = base.commit;
         let (store, tree) = (store.clone(), base.tree);
         let updated = tokio::task::spawn_blocking(move || {
@@ -310,11 +327,9 @@ async fn refresh_ready(
         .await
         .map_err(|error| Error::Unexpected(error.to_string()))?;
         if let Some(slot) = updated {
-            retained.push(slot);
+            pool.state.lock().await.ready.push(slot);
         }
     }
-    *ready = retained;
-    Ok(())
 }
 
 /// Once the template is prepared at the tip, swaps every unprepared ready

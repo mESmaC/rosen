@@ -46,6 +46,9 @@ impl Client {
     ) -> Result<Report, Error> {
         let sparse = options.sparse.chosen();
         let pooled = if options.sparse.is_all() && options.source.is_none() {
+            // A daemon may bring a ready workspace from another tree to the
+            // head, which needs the head's objects in its store (D8).
+            self.ensure_local(change.change.head).await?;
             self.take_workspace(change.change.head, dest).await?
         } else {
             None
