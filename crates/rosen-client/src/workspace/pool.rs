@@ -184,9 +184,19 @@ pub(super) fn refresh(
     let after = Layout::of_tree(store, tree, &Sparse::all())?;
     let changed = super::bring_to_tree(&slot.path, &before, &after)?;
     super::write_all(store, &slot.path, &changed)?;
+    seed_slot(store, &slot.path, tree);
     slot.tree = tree;
     slot.files = after.files.len() as u64;
     Ok(())
+}
+
+/// Fills a ready workspace's snapshot tree cache before any take, so the
+/// take does not spend seconds writing thousands of trees (R3: ready in
+/// under 2 s). A failure is only logged: the take seeds whatever is missing.
+pub(super) fn seed_slot(store: &LooseObjectStore, path: &Path, tree: ObjectId) {
+    if let Err(error) = crate::snapshot::seed_tree_cache(store, path, tree) {
+        eprintln!("rosen warm pool: seeding {}: {error}", path.display());
+    }
 }
 
 #[cfg(test)]

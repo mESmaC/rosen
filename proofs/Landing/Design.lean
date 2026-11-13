@@ -20,6 +20,8 @@ inductive Tier where
   | prose | normal | sensitive
   deriving DecidableEq, Repr
 inductive ReceiptCheck where
+  /-- `valid` binds the current head and the check-set name resolved at the
+  attempt's base; the tier below is also computed at that exact base (R8). -/
   | missing | invalid | valid
   deriving DecidableEq, Repr
 structure Input where
