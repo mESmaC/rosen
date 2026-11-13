@@ -46,7 +46,7 @@ Rosen is a version control system built so that many coding agents can work on o
 | D12 | Review | **Rosen-native review**: comments, approvals and receipts are Rosen objects. GitHub receives landed history as a mirror and is not in the landing path. |
 | D13 | Metadata store | Embedded SQLite in WAL mode, one database per server. |
 | D14 | Scale target *(revised)* | v1: at least 100 concurrent changes on one project, from agents on several machines, typically 30–40 agents per machine (see §5). |
-| D15 | Landed history | **One commit per change**: the change's final tree, with trailers for the change ID, receipt and approval. The agent's own commits stay in Rosen and are never rewritten. |
+| D15 | Landed history | **One commit per change**: the change's final tree, with trailers for the change ID, receipt and approval. The agent's own commits stay in Rosen and are never rewritten. The commit's only parent is the base it landed on, its author is the change's owner and its message is the change's newest `rosen commit` message. Its last paragraph holds git trailers: `Rosen-Change: <change ID>`; `Rosen-Receipt: <check set> <head> <base> <submitter>`, the receipt the land counted, omitted when none was needed; and one `Rosen-Approved-By: <reviewer>` per approval that holds. `rosen log` shows them. |
 | D16 | Workspace lifecycle | **Rosen owns it**: creation, a warm pool, and deletion behind a guard. |
 | D17 | Write-through snapshots *(revised)* | Every workspace write is snapshotted to the server automatically and within seconds, like jj's working-copy commit. There is no push or sync step. An edit that exists only on the client is the exception (offline, or inside the snapshot window), not the norm. This makes the deletion guard simple, gives the server live edit regions, and lets the server do every rebase. |
 | D18 | Changes are not refs *(revised)* | The base (and later, release refs) is the only ref. A change is a row in the metadata store, with no branch name to create, delete or collide. |
@@ -233,6 +233,8 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
    - The ref move, landed-history insertion and registry transition to `landed` commit in one SQLite transaction. A missing or moved registry entry refuses the attempt. Snapshots after that commit are refused, including before post-land recovery finishes.
    - If the compare-and-swap loses a race, the server retries the land itself with backoff, as long as no new receipt is needed. A land is never applied twice.
 3. A **stack** lands bottom first. A change cannot land before its parent change.
+   - The server remembers the parent tree each child was based on. A parent snapshot or server rebase automatically merges its new tree into live descendants in stack order, retaining each dependency, change ID and authored commit. Conflicts are stored on the child and stop propagation through that child until resolved. A restart resumes pending parent updates from the saved tree; workspaces apply the resulting head only when their owners ask (R2).
+   - A legacy edited stack with no recoverable parent-tree basis is refused rather than merged against a guessed basis that could delete intervening landed work.
 4. After a land:
    - claims are released;
    - the server rebases, without rewriting commits:

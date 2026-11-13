@@ -1,5 +1,5 @@
 name = "proofs"
-defaultTargets = ["Bisection", "Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "BatchGreen", "AutoRevert"]
+defaultTargets = ["Bisection", "Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "BatchGreen", "AutoRevert", "StackedChanges"]
 
 # One library per proof-list feature (SPEC.md §7). Each library also builds
 # its fixture exporter, so `lake build` type-checks it.
@@ -102,3 +102,11 @@ globs = ["AutoRevert.Design", "AutoRevert.Export"]
 [[lean_exe]]
 name = "auto-revert-fixtures"
 root = "AutoRevert.Export"
+
+[[lean_lib]]
+name = "StackedChanges"
+globs = ["StackedChanges.Design", "StackedChanges.Export"]
+
+[[lean_exe]]
+name = "stacked-changes-fixtures"
+root = "StackedChanges.Export"
