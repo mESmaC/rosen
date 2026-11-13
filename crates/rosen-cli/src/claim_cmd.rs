@@ -1,6 +1,5 @@
 //! `rosen claim|share|wait|release` (SPEC R6, R10).
 
-use crate::commands::ClaimArgs;
 use crate::server::Succeeded;
 use rosen_client::protocol::{ClaimHolder, ClaimOutcome, ClaimRequest};
 use rosen_client::{Client, Endpoint, Error};
@@ -24,11 +23,13 @@ pub async fn run(
     json: bool,
     endpoint: &Endpoint,
     verb: ClaimVerb,
-    args: &ClaimArgs,
+    change: Option<&str>,
+    paths: &[String],
 ) -> Result<Succeeded, Error> {
+    // An empty list asks a release for every record the change holds.
     let request = ClaimRequest {
-        change: change_of(args)?,
-        paths: args.paths.clone(),
+        change: change_of(change)?,
+        paths: paths.to_vec(),
     };
     let client = rosen_client::connect_or_start(endpoint).await?;
     match verb {
@@ -72,6 +73,9 @@ async fn release(json: bool, client: &Client, request: ClaimRequest) -> Result<S
         println!("{body}");
         return Ok(true);
     }
+    if outcome.released.is_empty() {
+        println!("nothing to release");
+    }
     for record in &outcome.released {
         println!("released {:?} {}", record.kind, record.path);
     }
@@ -84,9 +88,9 @@ async fn release(json: bool, client: &Client, request: ClaimRequest) -> Result<S
 
 /// The change comes from `--change`, then $ROSEN_CHANGE, which Velocity sets
 /// for each agent thread.
-fn change_of(args: &ClaimArgs) -> Result<String, Error> {
-    args.change
-        .clone()
+pub(crate) fn change_of(change: Option<&str>) -> Result<String, Error> {
+    change
+        .map(str::to_owned)
         .or_else(|| std::env::var("ROSEN_CHANGE").ok().filter(|v| !v.is_empty()))
         .ok_or_else(|| {
             Error::InvalidArgument("no change: pass --change or set ROSEN_CHANGE".into())
