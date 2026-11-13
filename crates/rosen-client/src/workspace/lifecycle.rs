@@ -138,8 +138,11 @@ impl Client {
                 Ok(_) => None,
                 Err(err) => Some(err.to_string()),
             };
-            // A finished cleanup already removed the registration.
-            if !matches!(result, Ok(true)) {
+            // A finished cleanup already removed the registration. A lost
+            // server connection says nothing about the workspace, so it
+            // neither records nor clears a reason.
+            let unreachable = matches!(result, Err(Error::Disconnected | Error::NotRunning(_)));
+            if !matches!(result, Ok(true)) && !unreachable {
                 if let Err(err) = self.set_kept_reason(&record, kept.clone()).await {
                     eprintln!(
                         "rosen workspace cleanup {}: recording reason: {err}",
