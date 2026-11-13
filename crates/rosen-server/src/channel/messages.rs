@@ -154,10 +154,16 @@ pub fn release_held(tx: &Transaction, member: &str) -> Result<Written, ChannelEr
 
 /// Re-inserts each held delivery as delivered, in message order, under new
 /// ids past every reader cursor, and posts each message to the member.
+///
+/// A quarantined member gets nothing from other agents (R13), so its held
+/// deliveries stay held, to be delivered once it returns to open mode.
 pub(super) fn deliver_held(
     tx: &Transaction,
     member: &Member,
 ) -> Result<Vec<ChannelLine>, ChannelError> {
+    if member.mode == MessageMode::Quarantined {
+        return Ok(Vec::new());
+    }
     let held: Vec<i64> = {
         let mut stmt = tx.prepare(
             "SELECT seq FROM channel_deliveries WHERE member = ?1 AND held = 1 ORDER BY seq",
