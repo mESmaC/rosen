@@ -1,9 +1,10 @@
 //! `rosen-stress verify`: merges every machine's report and checks §5's
 //! guarantees against the server's base, then prints the measurements.
 
+use crate::checker::CheckerReport;
 use crate::machine::base_tip;
 use crate::plan::Plan;
-use crate::report::{percentile, Report};
+use crate::report::{percentile, ChangeOutcome, Report};
 use anyhow::{bail, Context, Result};
 use rosen_client::protocol::{LogEntry, LogRequest, ReadAnswer, ReadRequest};
 use rosen_client::{ChangeId, Client, ObjectId};
@@ -16,10 +17,36 @@ const LAND_P95_MS: f64 = 200.0;
 /// Log entries asked for per page while walking the base.
 const LOG_PAGE: u32 = 500;
 
+/// The author of the server's own reverts (R12).
+const SERVER_AUTHOR: &str = "rosen-server <server@rosen>";
+
 /// A §5 guarantee or target the run missed.
 pub type Failures = Vec<String>;
 
-pub async fn verify(client: &Client, reports: &[Report]) -> Result<Failures> {
+/// Which of §5's targets a run is held to.
+pub struct Targets<'a> {
+    /// The p95 latency targets. A faulted run measures latency through
+    /// restarts and outages, so it is held to the guarantees only.
+    pub latency: bool,
+    /// The run's post-land checker, when this process ran it.
+    pub checker: Option<&'a CheckerReport>,
+}
+
+/// Everything the checks need, read once.
+struct Run<'a> {
+    plan: Plan,
+    reports: &'a [Report],
+    history: Vec<LogEntry>,
+    tip: ObjectId,
+    /// The culprit change's outcome, when the plan injected a failure.
+    culprit: Option<&'a ChangeOutcome>,
+}
+
+pub async fn verify(
+    client: &Client,
+    reports: &[Report],
+    targets: &Targets<'_>,
+) -> Result<Failures> {
     let plan = common_plan(reports)?;
     let mut failures = Failures::new();
     let tip = base_tip(client).await.context("reading the base tip")?;
@@ -27,11 +54,40 @@ pub async fn verify(client: &Client, reports: &[Report]) -> Result<Failures> {
     let history = walk_base(client, tip, &starts)
         .await
         .context("walking the base")?;
-    check_history(reports, &history, &mut failures);
-    check_lost_work(client, reports, tip, &mut failures).await?;
-    check_approvals(client, reports, &plan, &mut failures).await?;
-    check_measurements(reports, &plan, &mut failures);
+    let culprit = plan.culprit().and_then(|(agent, n)| {
+        landed(reports).find(|change| change.index == agent && change.n == n)
+    });
+    let run = Run {
+        plan,
+        reports,
+        history,
+        tip,
+        culprit,
+    };
+    check_history(&run, &mut failures);
+    check_lost_work(client, &run, &mut failures).await?;
+    check_gates(client, &run, &mut failures).await?;
+    crate::revert::check_revert(client, &run.revert_view(), targets.checker, &mut failures).await?;
+    check_measurements(&run, targets, &mut failures);
     Ok(failures)
+}
+
+impl Run<'_> {
+    fn revert_view(&self) -> crate::revert::RevertView<'_> {
+        crate::revert::RevertView {
+            plan: &self.plan,
+            history: &self.history,
+            tip: self.tip,
+            culprit: self.culprit,
+        }
+    }
+}
+
+fn landed(reports: &[Report]) -> impl Iterator<Item = &ChangeOutcome> {
+    reports
+        .iter()
+        .flat_map(|report| &report.changes)
+        .filter(|change| change.landed.is_some())
 }
 
 fn common_plan(reports: &[Report]) -> Result<Plan> {
@@ -81,16 +137,24 @@ async fn walk_base(
     bail!("walked the whole base without reaching every machine's starting tip")
 }
 
-/// No land applied twice; the base moved only by the run's own lands; and
-/// every land an agent was told about is on the base, as that commit.
-fn check_history(reports: &[Report], history: &[LogEntry], failures: &mut Failures) {
-    let landed: HashMap<ChangeId, ObjectId> = reports
-        .iter()
-        .flat_map(|report| &report.changes)
+/// A commit the server landed itself to revert a culprit (R12): it has no
+/// receipt or approval and the server as its author.
+pub fn is_server_revert(entry: &LogEntry) -> bool {
+    entry.receipt.is_none()
+        && entry.approvers.is_empty()
+        && entry.author == SERVER_AUTHOR
+        && entry.summary.starts_with("Revert ")
+}
+
+/// No land applied twice; the base moved only by the run's own lands and
+/// the server's reverts; and every land an agent was told about is on the
+/// base, as that commit.
+fn check_history(run: &Run, failures: &mut Failures) {
+    let landed: HashMap<ChangeId, ObjectId> = landed(run.reports)
         .filter_map(|change| change.landed.map(|commit| (change.change, commit)))
         .collect();
     let mut on_base: HashMap<ChangeId, ObjectId> = HashMap::new();
-    for entry in history {
+    for entry in run.history.iter().filter(|entry| !is_server_revert(entry)) {
         let Some(change) = entry.change else {
             failures.push(format!("base commit {} carries no change", entry.commit));
             continue;
@@ -120,22 +184,14 @@ fn check_history(reports: &[Report], history: &[LogEntry], failures: &mut Failur
 
 /// Every line a landed change wrote is in the final base (§5 "no edit is
 /// lost"). Later changes only ever rewrite other slots, so nothing a landed
-/// change wrote should be gone.
-async fn check_lost_work(
-    client: &Client,
-    reports: &[Report],
-    tip: ObjectId,
-    failures: &mut Failures,
-) -> Result<()> {
+/// change wrote should be gone, except the reverted culprit's.
+async fn check_lost_work(client: &Client, run: &Run<'_>, failures: &mut Failures) -> Result<()> {
     let mut files: HashMap<String, Option<String>> = HashMap::new();
-    let landed = reports
-        .iter()
-        .flat_map(|r| &r.changes)
-        .filter(|c| c.landed.is_some());
-    for change in landed {
+    let culprit = run.culprit.map(|change| change.change);
+    for change in landed(run.reports).filter(|change| Some(change.change) != culprit) {
         for (path, line) in &change.expected {
             if !files.contains_key(path) {
-                let text = read_at(client, tip, path).await?;
+                let text = read_at(client, &run.tip.to_string(), path).await?;
                 files.insert(path.clone(), text);
             }
             let present = files[path]
@@ -152,9 +208,10 @@ async fn check_lost_work(
     Ok(())
 }
 
-async fn read_at(client: &Client, tip: ObjectId, path: &str) -> Result<Option<String>> {
+/// The file at `at`, a commit or a change; `None` when it is not there.
+pub async fn read_at(client: &Client, at: &str, path: &str) -> Result<Option<String>> {
     let request = ReadRequest {
-        at: Some(tip.to_string()),
+        at: Some(at.to_owned()),
         path: path.to_owned(),
     };
     match client.read_file(request).await {
@@ -165,55 +222,76 @@ async fn read_at(client: &Client, tip: ObjectId, path: &str) -> Result<Option<St
     }
 }
 
-/// Each landed change carries an approval from the run's reviewers (R7).
-async fn check_approvals(
-    client: &Client,
-    reports: &[Report],
-    plan: &Plan,
-    failures: &mut Failures,
-) -> Result<()> {
-    let reviewers: HashSet<String> = reports
+/// The base moved only with a matching receipt and approval (§5): each
+/// agent land's receipt trailer is one the run's checker gave for that
+/// change's head and base, and a run reviewer approved that same head.
+async fn check_gates(client: &Client, run: &Run<'_>, failures: &mut Failures) -> Result<()> {
+    let reviewers: HashSet<String> = run
+        .reports
         .iter()
-        .map(|r| plan.reviewer_name(&r.machine))
+        .map(|r| run.plan.reviewer_name(&r.machine))
         .collect();
-    let landed = reports
+    let receipts: HashSet<(ChangeId, ObjectId, ObjectId)> = run
+        .reports
         .iter()
-        .flat_map(|r| &r.changes)
-        .filter(|c| c.landed.is_some());
-    for change in landed {
+        .flat_map(|r| &r.receipts)
+        .map(|r| (r.change, r.head, r.base))
+        .collect();
+    for entry in run.history.iter().filter(|entry| !is_server_revert(entry)) {
+        let (Some(change), Some(receipt)) = (entry.change, &entry.receipt) else {
+            failures.push(format!(
+                "base commit {} landed with no receipt",
+                entry.commit
+            ));
+            continue;
+        };
+        if !receipts.contains(&(change, receipt.head, receipt.base)) {
+            failures.push(format!(
+                "{change} landed as {} on a receipt the run never gave",
+                entry.commit
+            ));
+        }
         let approvals = client
-            .review_approvals(&change.change.to_string())
+            .review_approvals(&change.to_string())
             .await
             .context("reading approvals")?;
-        if !approvals
+        let approved = approvals
             .iter()
-            .any(|a| reviewers.contains(a.reviewer.as_str()))
-        {
+            .any(|a| a.head == receipt.head && reviewers.contains(a.reviewer.as_str()));
+        if !approved {
             failures.push(format!(
-                "{} landed with no approval from the run",
-                change.change
+                "{change} landed as {} with no run approval of its receipted head",
+                entry.commit
             ));
         }
     }
     Ok(())
 }
 
-fn check_measurements(reports: &[Report], plan: &Plan, failures: &mut Failures) {
-    let planned = plan.agents * plan.lands_per_agent;
-    let landed = reports
-        .iter()
-        .flat_map(|r| &r.changes)
-        .filter(|c| c.landed.is_some())
-        .count();
+fn check_measurements(run: &Run, targets: &Targets, failures: &mut Failures) {
+    let reports = run.reports;
+    let planned = run.plan.agents * run.plan.lands_per_agent;
+    let landed = landed(reports).count();
     if landed < planned {
         failures.push(format!("{landed} of {planned} planned changes landed"));
     }
     let ran: usize = reports.iter().map(|r| r.agent_count).sum();
-    if ran != plan.agents {
+    if ran != run.plan.agents {
         failures.push(format!(
             "reports cover {ran} agents of the plan's {}",
-            plan.agents
+            run.plan.agents
         ));
+    }
+    for report in reports {
+        failures.extend(
+            report
+                .claim_violations
+                .iter()
+                .map(|v| format!("claim: {v}")),
+        );
+    }
+    if !targets.latency {
+        return;
     }
     let starts: Vec<f64> = reports
         .iter()
@@ -232,14 +310,6 @@ fn check_measurements(reports: &[Report], plan: &Plan, failures: &mut Failures) 
         .collect();
     if let Some(p95) = percentile(&lands, 0.95).filter(|p95| *p95 >= LAND_P95_MS) {
         failures.push(format!("land p95 is {p95:.1} ms, over {LAND_P95_MS} ms"));
-    }
-    for report in reports {
-        failures.extend(
-            report
-                .claim_violations
-                .iter()
-                .map(|v| format!("claim: {v}")),
-        );
     }
 }
 
@@ -282,8 +352,9 @@ fn counters(reports: &[Report]) -> String {
         .flat_map(|r| &r.lands)
         .map(|l| l.attempts)
         .sum();
+    let landed = landed(reports).count();
     out.push_str(&format!(
-        "re-receipts {rechecks}, server CAS attempts {attempts}\n"
+        "changes landed {landed}, re-receipts {rechecks}, server CAS attempts {attempts}\n"
     ));
     let mut refusals: BTreeMap<&str, u64> = BTreeMap::new();
     for (reason, count) in reports.iter().flat_map(|r| &r.land_refusals) {
@@ -296,8 +367,9 @@ fn counters(reports: &[Report]) -> String {
         "hot claims granted {granted}, refused {refused}\n"
     ));
     let elapsed = reports.iter().map(|r| r.elapsed_ms).max().unwrap_or(0);
+    let restarts: u32 = reports.iter().map(|r| r.restarts).sum();
     out.push_str(&format!(
-        "slowest machine {:.1} s\n",
+        "slowest machine {:.1} s, agent process restarts {restarts}\n",
         elapsed as f64 / 1000.0
     ));
     let kept: Vec<&String> = reports.iter().flat_map(|r| &r.workspaces_kept).collect();

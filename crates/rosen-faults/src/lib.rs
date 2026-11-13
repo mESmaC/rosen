@@ -10,8 +10,10 @@
 //! - [`proxy`]: cuts one machine off from the server without a firewall.
 //! - [`process`]: a process that can be killed abruptly and restarted.
 //! - [`failing`]: the injected failure and the post-land check that sees it.
+//! - [`checker`]: the post-land checker loop that gets it bisected and reverted.
 //! - [`drill`]: a complete faulted run on one computer, with its checks.
 
+pub mod checker;
 pub mod drill;
 pub mod execute;
 pub mod failing;
