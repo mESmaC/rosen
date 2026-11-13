@@ -41,6 +41,7 @@ fn land(state: &ServerState, n: u8) -> ObjectId {
     let (name, base) = ledger.project_base().unwrap().unwrap();
     let tree = store.read_commit(&base).unwrap().tree;
     let change = ChangeId::from_bytes([n; 16]);
+    register_change(state, change, base, tree);
     let landed = LandedCommit {
         base,
         tree,
@@ -57,7 +58,7 @@ fn land(state: &ServerState, n: u8) -> ObjectId {
     let record = LandRecord {
         ref_name: name,
         change,
-        head: commit,
+        head: tree,
         commit,
         tier: Tier::ProseOnly,
     };
@@ -66,6 +67,21 @@ fn land(state: &ServerState, n: u8) -> ObjectId {
     let change = Some(change.to_string());
     state.events.publish(EventKind::Landed, change, json!({}));
     commit
+}
+
+fn register_change(state: &ServerState, change: ChangeId, base: ObjectId, tree: ObjectId) {
+    // The CAS closes a real registry entry in its transaction.
+    state
+        .changes
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO changes (id, owner, parent_base, state, head, created_at, updated_at)
+             VALUES (?1, 'agent', ?2, 'ready', ?3, 0, 0)",
+                rusqlite::params![change.to_string(), base.to_hex(), tree.to_hex()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
 }
 
 fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
