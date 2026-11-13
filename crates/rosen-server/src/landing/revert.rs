@@ -21,6 +21,11 @@ pub fn revert(state: &ServerState, culprit: ObjectId, output: &str) -> LandResul
         let (name, base) = ledger
             .project_base()?
             .ok_or_else(|| LandError::NoBase("main".into()))?;
+        // Reopening must follow the culprit's last post-land mutation, or an
+        // older worker could close it again after the inverse commits.
+        if !db::culprit_recovered(&conn, &name, culprit)? {
+            state.landing.recover(state).map_err(backend)?;
+        }
         let plan = prepare(state, culprit, base)?;
         let commit = plan.commit;
         if db::commit(&mut conn, &name, &plan, output)? {

@@ -46,23 +46,20 @@ pub(super) fn commit(
         tx.query_row("SELECT target FROM base_refs WHERE name=?1", [name], |r| {
             r.get(0)
         })?;
+    let (change, recovered) = culprit_change(&tx, name, p.culprit)?;
     if !eligible(
         completed(&tx, p.culprit)?.is_some(),
         current != p.base.to_hex(),
         true,
+        recovered,
     ) {
+        if !recovered {
+            return Err(LandError::Backend(
+                "culprit post-land work is pending; retry after recovery".into(),
+            ));
+        }
         return Ok(false);
     }
-    let change: Option<String> = tx
-        .query_row(
-            "SELECT change_id FROM base_history WHERE ref_name=?1 AND commit_id=?2",
-            params![name, p.culprit.to_hex()],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    let change = change
-        .ok_or_else(|| LandError::Backend("culprit is not an active landed change".into()))?;
     let moved = tx.execute(
         "UPDATE base_refs SET target=?1 WHERE name=?2 AND target=?3",
         params![p.commit.to_hex(), name, p.base.to_hex()],
@@ -79,8 +76,30 @@ pub(super) fn commit(
     Ok(true)
 }
 
-pub(super) fn eligible(already: bool, moved: bool, clean: bool) -> bool {
-    !already && !moved && clean
+fn culprit_change(conn: &Connection, name: &str, culprit: ObjectId) -> LandResult<(String, bool)> {
+    let row: Option<(Option<String>, bool)> = conn
+        .query_row(
+            "SELECT change_id,post_land_done FROM base_history WHERE ref_name=?1 AND commit_id=?2",
+            params![name, culprit.to_hex()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((Some(change), recovered)) => Ok((change, recovered)),
+        _ => Err(LandError::Backend("culprit is not a landed change".into())),
+    }
+}
+
+pub(super) fn culprit_recovered(
+    conn: &Connection,
+    name: &str,
+    culprit: ObjectId,
+) -> LandResult<bool> {
+    culprit_change(conn, name, culprit).map(|(_, recovered)| recovered)
+}
+
+pub(super) fn eligible(already: bool, moved: bool, clean: bool, recovered: bool) -> bool {
+    recovered && !already && !moved && clean
 }
 
 #[test]
@@ -91,7 +110,7 @@ fn inverse_gate_matches_proved_fixtures() {
         .skip(1)
     {
         let bits: Vec<bool> = row.split('\t').map(|s| s == "1").collect();
-        assert_eq!(eligible(bits[0], bits[1], bits[2]), bits[3]);
+        assert_eq!(eligible(bits[0], bits[1], bits[2], bits[3]), bits[4]);
     }
 }
 
