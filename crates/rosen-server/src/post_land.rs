@@ -6,7 +6,7 @@ use rosen_protocol::{
     ErrorBody, ErrorCode, EventKind, Outcome, PostLandJob, PostLandWork, Response,
 };
 use rusqlite::Connection;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 pub async fn handle(state: &Arc<ServerState>, passed: Option<PostLandJob>) -> Outcome {
     let state = Arc::clone(state);
@@ -92,7 +92,14 @@ pub fn recover(state: &ServerState) -> Result<(), ErrorBody> {
     deliver(state, &open(state)?)
 }
 
+/// Serialises delivery. Each pass reads the pending rows and deletes a row
+/// only after publishing it, so two concurrent passes (two checker requests,
+/// or startup recovery racing one) would both publish every row (#149).
+static DELIVERY: Mutex<()> = Mutex::new(());
+
 fn deliver(state: &ServerState, conn: &Connection) -> Result<(), ErrorBody> {
+    // A pass that panicked left no partial state the next pass cannot redo.
+    let _turn = DELIVERY.lock().unwrap_or_else(PoisonError::into_inner);
     for (seq, change, commit) in store::pending(conn).map_err(internal)? {
         let published = state.events.publish(
             EventKind::Green,

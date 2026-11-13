@@ -35,10 +35,15 @@ pub(super) fn load_or_capture(state: &ServerState, landed: ChangeId) -> LandResu
             if let Some(targets) = load(&tx, &key)? {
                 return Ok(targets);
             }
-            tx.execute(
-                "INSERT INTO landing_overlap_batches (landed) VALUES (?1)",
-                [&key],
-            )?;
+            // A stored target already shows that the selection was made, and
+            // every row commits together, so only an empty selection needs the
+            // marker (proofs/TargetedRebase: one row per target, at least one).
+            if targets.is_empty() {
+                tx.execute(
+                    "INSERT INTO landing_overlap_batches (landed) VALUES (?1)",
+                    [&key],
+                )?;
+            }
             for target in &targets {
                 tx.execute(
                     "INSERT INTO landing_overlap_targets (landed, target) VALUES (?1, ?2)",
@@ -53,7 +58,9 @@ pub(super) fn load_or_capture(state: &ServerState, landed: ChangeId) -> LandResu
 }
 
 fn ensure_schema(conn: &Connection) -> Result<(), ChangeError> {
-    // The batch marker distinguishes a completed empty selection from no selection.
+    // The batch marker distinguishes a completed empty selection from no
+    // selection. Batches captured before targets implied the selection still
+    // carry a marker beside their targets; `load` reads both forms.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS landing_overlap_batches (
         landed TEXT PRIMARY KEY NOT NULL);
@@ -65,7 +72,8 @@ fn ensure_schema(conn: &Connection) -> Result<(), ChangeError> {
 
 fn load(conn: &Connection, key: &str) -> Result<Option<Vec<ChangeId>>, ChangeError> {
     let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM landing_overlap_batches WHERE landed = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM landing_overlap_batches WHERE landed = ?1)
+             OR EXISTS(SELECT 1 FROM landing_overlap_targets WHERE landed = ?1)",
         [key],
         |row| row.get(0),
     )?;
@@ -133,19 +141,20 @@ mod tests {
             let cols: Vec<_> = row.split('\t').collect();
             let mut conn = Connection::open_in_memory().unwrap();
             ensure_schema(&conn).unwrap();
-            if cols[0] != "none" {
+            // The design's rows: a marker for an empty selection, else one
+            // row per target and no marker.
+            if cols[0] == "-" {
                 conn.execute(
                     "INSERT INTO landing_overlap_batches VALUES (?1)",
                     [id(0).to_string()],
                 )
                 .unwrap();
-                if cols[0] != "-" {
-                    conn.execute(
-                        "INSERT INTO landing_overlap_targets VALUES (?1, ?2)",
-                        params![id(0).to_string(), id(1).to_string()],
-                    )
-                    .unwrap();
-                }
+            } else if cols[0] != "none" {
+                conn.execute(
+                    "INSERT INTO landing_overlap_targets VALUES (?1, ?2)",
+                    params![id(0).to_string(), id(1).to_string()],
+                )
+                .unwrap();
             }
             conn.execute_batch("CREATE TABLE base_history(change_id TEXT, commit_id TEXT)")
                 .unwrap();

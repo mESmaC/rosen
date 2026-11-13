@@ -20,6 +20,10 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Workspace deletion fixtures: `lake exe workspace-deletion-fixtures > fixtures/workspace-deletion.tsv` in `proofs/`.
 - Piece claims fixtures: `lake exe piece-claims-fixtures > fixtures/piece-claims.tsv` in `proofs/`.
 - Crash recovery fixtures: `lake exe crash-recovery-fixtures > fixtures/crash-recovery.tsv` in `proofs/`.
+- Batch green fixtures: `lake exe batch-green-fixtures > fixtures/batch-green.tsv` in `proofs/`.
+- Conflict routing fixtures: `lake exe conflict-routing-fixtures > fixtures/conflict-routing.tsv` in `proofs/`.
+- Targeted rebase fixtures: `lake exe targeted-rebase-fixtures > fixtures/targeted-rebase.tsv` in `proofs/`.
+- Stacked changes fixtures: `lake exe stacked-changes-fixtures > fixtures/stacked-changes.tsv` in `proofs/`.
 - Fixture tables, regenerated from `proofs/` after a model changes: `lake exe landing-fixtures > fixtures/landing.tsv` and `lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv`.
 - §5 stress run on one machine: `cargo build --release -p rosen-server -p rosen-stress`, then `target/release/rosen-stress local --dir <new dir>` for three simulated machines; add `--faults --fault-seed <n>` for the kill and partition run. Across machines: `rosen-stress seed`, `rosen import` on the server, `rosen-stress agents` on each machine with `rosen-stress checker` on one, then `rosen-stress verify <reports…>`; `rosen-stress --help` has the flags.
 - Fault drill (SPEC.md §5): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed <n>`. It prints a JSON report, exits non-zero when a guarantee breaks, and replays exactly from its seed.

@@ -68,16 +68,33 @@ pub fn load(conn: &Connection, change_id: &str) -> Result<ConflictSet> {
     Ok(ConflictSet::from_stored(conflicts))
 }
 
-/// Replaces the stored conflicts of a change with `set`.
+/// Replaces the stored conflicts of a change with `set`, writing only the rows
+/// that differ. A conflict's ID is derived from its content, so a stored row
+/// with the same ID differs only in state. Rewriting unchanged rows would cost
+/// one write per stored conflict on every merge or resolve; the design proof
+/// (`proofs/ConflictRouting`) shows the differing rows are the minimum.
 pub(crate) fn save(tx: &Transaction<'_>, change_id: &str, set: &ConflictSet) -> Result<()> {
-    tx.execute("DELETE FROM conflicts WHERE change_id = ?1", [change_id])?;
-    let mut insert = tx.prepare_cached(
-        "INSERT INTO conflicts
+    let stored: std::collections::HashMap<String, String> = tx
+        .prepare_cached("SELECT conflict_id, state FROM conflicts WHERE change_id = ?1")?
+        .query_map([change_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let kept: std::collections::HashSet<String> =
+        set.all().iter().map(|c| c.id.to_string()).collect();
+    let mut delete =
+        tx.prepare_cached("DELETE FROM conflicts WHERE change_id = ?1 AND conflict_id = ?2")?;
+    for id in stored.keys().filter(|id| !kept.contains(*id)) {
+        delete.execute(params![change_id, id])?;
+    }
+    let mut upsert = tx.prepare_cached(
+        "INSERT OR REPLACE INTO conflicts
              (change_id, conflict_id, path, start_line, base, ours, theirs, state)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )?;
     for c in set.all() {
-        insert.execute(params![
+        if stored.get(&c.id.to_string()).map(String::as_str) == Some(c.state.as_str()) {
+            continue;
+        }
+        upsert.execute(params![
             change_id,
             c.id.to_string(),
             c.path,
