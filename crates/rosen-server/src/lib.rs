@@ -47,6 +47,7 @@ pub const SERVER_NAME: &str = concat!("rosen-server ", env!("CARGO_PKG_VERSION")
 
 /// State shared by every connection.
 pub struct ServerState {
+    pub machine_agents: std::sync::Mutex<machines::manage::Presence>,
     pub config: ServerConfig,
     pub pool: Arc<rosen_client::workspace::pool::WarmPool>,
     pub started: Instant,
@@ -76,6 +77,7 @@ impl ServerState {
     pub fn with_workspace_io(config: ServerConfig, cap: std::num::NonZeroUsize) -> Arc<Self> {
         // Cyclic because landing's adapters reach back into this state.
         let state = Arc::new_cyclic(|this| Self {
+            machine_agents: std::sync::Mutex::new(Default::default()),
             pool: rosen_client::workspace::pool::WarmPool::new(&config.data_dir),
             changes: changes::ChangeService::new(&config.data_dir),
             receipts: receipts::ReceiptService::new(config.clone()),

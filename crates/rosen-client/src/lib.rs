@@ -26,6 +26,7 @@ pub mod daemon;
 pub mod discovery;
 mod edits;
 pub mod enrollment;
+pub mod machines;
 pub mod events;
 pub mod history;
 pub mod identity;
