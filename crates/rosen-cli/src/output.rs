@@ -5,6 +5,10 @@ use serde::Serialize;
 /// Offline JSON Schema catalog for every emitted JSON line.
 pub const CATALOG: &str = include_str!("../schemas/v1.json");
 
+pub const MACHINE_SCHEMA: &str = "rosen.machine/v1";
+pub const MACHINES_SCHEMA: &str = "rosen.machines/v1";
+pub const MACHINE_KEY_SCHEMA: &str = "rosen.machine_key/v1";
+pub const MACHINE_KEYS_SCHEMA: &str = "rosen.machine_keys/v1";
 pub const CHANGE_LIST_SCHEMA: &str = "rosen.change.list/v1";
 pub const CHANGE_SCHEMA: &str = "rosen.change/v1";
 pub const CHANGE_WORKSPACE_SCHEMA: &str = "rosen.change.workspace/v1";

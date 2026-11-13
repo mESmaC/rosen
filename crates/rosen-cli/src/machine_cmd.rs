@@ -1,5 +1,6 @@
 //! Machine management and non-interactive enrollment (SPEC R14).
 use crate::commands::{MachineCommand, MachineKeyCommand};
+use crate::output::{MACHINES_SCHEMA, MACHINE_KEYS_SCHEMA, MACHINE_KEY_SCHEMA, MACHINE_SCHEMA};
 use rosen_client::protocol::machine::{CreateJoinKey, MachineRole};
 use rosen_client::{Client, Endpoint, Error};
 use serde_json::{json, Value};
@@ -13,19 +14,19 @@ pub async fn run(json: bool, endpoint: &Endpoint, command: &MachineCommand) -> R
     match command {
         MachineCommand::List => print(
             json,
-            "rosen.machines/v1",
+            MACHINES_SCHEMA,
             "machines",
             json!(client.machine_list().await?),
         ),
         MachineCommand::Approve { machine } => print(
             json,
-            "rosen.machine/v1",
+            MACHINE_SCHEMA,
             "machine",
             json!(client.machine_approve(machine).await?),
         ),
         MachineCommand::Revoke { machine } => print(
             json,
-            "rosen.machine/v1",
+            MACHINE_SCHEMA,
             "machine",
             json!(client.machine_revoke(machine).await?),
         ),
@@ -71,7 +72,7 @@ async fn join(json: bool, command: &MachineCommand) -> Result<bool, Error> {
         // Credential secrets stay in encrypted storage, never in command output.
         print(
             json,
-            "rosen.machine/v1",
+            MACHINE_SCHEMA,
             "machine",
             json!({"id":credential.machine_id}),
         );
@@ -93,17 +94,17 @@ async fn key_command(
             address,
         } => {
             let key = create_key(client, role, expires, *uses, address.as_deref()).await?;
-            print(json, "rosen.machine_key/v1", "key", json!(key));
+            print(json, MACHINE_KEY_SCHEMA, "key", json!(key));
         }
         MachineKeyCommand::List => print(
             json,
-            "rosen.machine_keys/v1",
+            MACHINE_KEYS_SCHEMA,
             "keys",
             json!(client.join_key_list().await?),
         ),
         MachineKeyCommand::Revoke { key } => print(
             json,
-            "rosen.machine_key/v1",
+            MACHINE_KEY_SCHEMA,
             "key",
             json!(client.join_key_revoke(key).await?),
         ),
