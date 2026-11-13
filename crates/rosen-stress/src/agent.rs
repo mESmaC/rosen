@@ -31,9 +31,14 @@ const MAX_LAND_ROUNDS: u32 = 200;
 const MAX_RECONNECTS: u32 = 120;
 
 /// Longest a request may take. A silent partition holds a request without
-/// closing it, so only this notices; it is longer than any planned
-/// partition, so it fires only on a request a fault left stranded.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+/// closing it, so only this notices; it is far longer than any planned
+/// partition or loaded answer, so it fires only on a request a fault left
+/// stranded. Retrying sooner would only add load to a busy server.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Longest a workspace creation may take, including its wait for a
+/// materialisation slot under the daemon's load limits (R3).
+const CREATE_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct Agent {
     pub index: usize,
@@ -202,8 +207,9 @@ impl Agent {
     }
 
     /// Creates the change and its workspace, measuring the start (R3). A
-    /// try a fault cut short may leave its change behind unused; the next
-    /// try makes a new change in a new directory.
+    /// try a fault cuts short is retried as a new change in a new
+    /// directory, and the change it left behind is abandoned, so outages
+    /// never pile empty changes up on the server.
     async fn create_workspace(&mut self, n: usize, on: Option<ChangeId>) -> Result<(ChangeId, PathBuf)> {
         let base = self
             .shared
@@ -216,22 +222,44 @@ impl Agent {
                 spec = spec.on(parent.to_string());
             }
             let started = Instant::now();
-            match attempt(self.session.create_workspace(spec)).await {
-                Ok(created) => {
+            let created = tokio::time::timeout(CREATE_TIMEOUT, self.session.create_workspace(spec));
+            let (err, left_behind) = match created.await {
+                Ok(Ok(created)) => {
                     let ms = started.elapsed().as_secs_f64() * 1000.0;
                     let method = created.report.method.as_str().to_owned();
                     self.shared.record(Record::Start(StartSample { ms, method }));
                     return Ok((created.change.change.id, root));
                 }
-                Err(Failure::Transient(why)) if tries < MAX_RECONNECTS => {
-                    self.note(format!("create workspace: {why}; reconnecting"));
-                    self.reconnect().await;
+                Ok(Err(err)) if !is_transient(&err) => {
+                    return Err(anyhow::Error::new(err).context("create workspace"));
                 }
-                Err(Failure::Transient(why)) => bail!("create workspace: {why}"),
-                Err(Failure::Fatal(err)) => return Err(err.context("create workspace")),
+                Ok(Err(err)) => {
+                    let left_behind = match &err {
+                        Error::WorkspaceNotCreated { change, .. } => Some(*change),
+                        _ => None,
+                    };
+                    (err.to_string(), left_behind)
+                }
+                Err(_) => (format!("no answer in {CREATE_TIMEOUT:?}"), None),
+            };
+            if tries == MAX_RECONNECTS {
+                bail!("create workspace: {err}");
+            }
+            self.note(format!("create workspace: {err}; reconnecting"));
+            self.reconnect().await;
+            if let Some(change) = left_behind {
+                self.abandon_left_behind(change).await;
             }
         }
         unreachable!("the loop returns on its last try")
+    }
+
+    /// Abandons the change a cut-short workspace creation left behind.
+    async fn abandon_left_behind(&mut self, change: ChangeId) {
+        let id = change.to_string();
+        if let Err(err) = retrying!(self, "abandon", |s| s.abandon(&id)) {
+            self.note(format!("{err:#}"));
+        }
     }
 
     /// Carries on a change an earlier process began: its edits and
