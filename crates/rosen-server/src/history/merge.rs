@@ -9,7 +9,8 @@
 use super::revision::{base_commit, stack_root, Revision};
 use super::trees::{apply, changed_files, content, Change, Entry};
 use super::{Ctx, HistoryError, HistoryResult};
-use rosen_core::{FileMode, ObjectId, Tree};
+use crate::ServerState;
+use rosen_core::{FileMode, ObjectId, ObjectKind, Tree};
 use rosen_merge::{merge_file, FileMerge, MergePolicy};
 use rosen_protocol::MergeResultAnswer;
 use rosen_store::ObjectStore;
@@ -29,28 +30,8 @@ pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer>
     }
     let (_, sits_on) = stack_root(ctx, &change)?;
     let base = base_commit(ctx)?;
-    let merged = if sits_on == base {
-        TreeMerge {
-            tree: Some(change.head),
-            ..TreeMerge::default()
-        }
-    } else {
-        // The configuration in force on the base decides how each path
-        // merges, as it will for the land onto that base.
-        let config = ctx.state.project_config.at_commit(&base)?.config;
-        let policy = |path: &str| {
-            if config.is_generated(path) {
-                MergePolicy::Generated
-            } else if config.is_registration_list(path) {
-                MergePolicy::RegistrationList
-            } else {
-                MergePolicy::Text
-            }
-        };
-        let merge_base = ctx.index.commit(&ctx.store, &sits_on)?.tree;
-        let onto = ctx.index.commit(&ctx.store, &base)?.tree;
-        merge_trees(ctx, [merge_base, onto, change.head], &policy)?
-    };
+    let merge_base = ctx.index.commit(&ctx.store, &sits_on)?.tree;
+    let merged = merge_onto_commit(ctx, merge_base, &base, change.head)?;
     Ok(MergeResultAnswer {
         change: change.id,
         head: change.head,
@@ -59,6 +40,59 @@ pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer>
         conflicts: merged.conflicts,
         regenerate: merged.regenerate,
     })
+}
+
+/// Merges a change onto a base commit for a land (R8 step 2), the same way
+/// [`merge_result`] does for its checker, so a receipt and the land it gates
+/// see one merge. `merge_base` is the commit or tree the change's edits are
+/// measured against: its base commit, or the head of the change below it.
+pub(crate) fn merge_for_land(
+    state: &ServerState,
+    merge_base: &ObjectId,
+    onto: &ObjectId,
+    head: &ObjectId,
+) -> HistoryResult<TreeMerge> {
+    let ctx = super::open(state)?;
+    let merge_base = match ctx.store.get_raw(merge_base)?.map(|raw| raw.kind) {
+        Some(ObjectKind::Commit) => ctx.index.commit(&ctx.store, merge_base)?.tree,
+        Some(ObjectKind::Tree) => *merge_base,
+        _ => {
+            return Err(HistoryError::NotFound(format!(
+                "merge base {merge_base} is not a stored commit or tree"
+            )))
+        }
+    };
+    merge_onto_commit(&ctx, merge_base, onto, *head)
+}
+
+/// Merges `head`'s edits since the tree `merge_base` onto commit `onto`.
+/// The configuration in force on `onto` decides how each path merges, as it
+/// will for the land onto that base.
+fn merge_onto_commit(
+    ctx: &Ctx,
+    merge_base: ObjectId,
+    onto: &ObjectId,
+    head: ObjectId,
+) -> HistoryResult<TreeMerge> {
+    let onto_tree = ctx.index.commit(&ctx.store, onto)?.tree;
+    if merge_base == onto_tree {
+        // Nothing landed under the change: its head is the merge.
+        return Ok(TreeMerge {
+            tree: Some(head),
+            ..TreeMerge::default()
+        });
+    }
+    let config = ctx.state.project_config.at_commit(onto)?.config;
+    let policy = |path: &str| {
+        if config.is_generated(path) {
+            MergePolicy::Generated
+        } else if config.is_registration_list(path) {
+            MergePolicy::RegistrationList
+        } else {
+            MergePolicy::Text
+        }
+    };
+    merge_trees(ctx, [merge_base, onto_tree, head], &policy)
 }
 
 /// The result of merging two trees.
