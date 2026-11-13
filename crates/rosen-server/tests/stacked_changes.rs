@@ -100,6 +100,11 @@ async fn parent_updates_flow_through_stack_and_parent_lands_first() {
     assert!(
         matches!(answer.outcome, rosen_protocol::LandStatus::Refused { ref reason, .. } if reason == "parent_unlanded")
     );
+    // Issue #146: a land between stack creation and the parent's land must
+    // survive both the child's restack and the child's eventual land.
+    let unrelated = create(&state, None).await;
+    write(&state, &unrelated, "unrelated", "keep\n").await;
+    land_parent(&state, &unrelated).await;
     land_parent(&state, &parent).await;
     assert!(matches!(
         state.changes.show(&child).unwrap().change.parent,
@@ -109,6 +114,22 @@ async fn parent_updates_flow_through_stack_and_parent_lands_first() {
         state.changes.show(&grandchild).unwrap().change.snapshots,
         before.snapshots
     );
+    land_parent(&state, &child).await;
+    assert_base_keeps_unrelated(&state, &store);
+}
+
+fn assert_base_keeps_unrelated(state: &ServerState, store: &dyn ObjectStore) {
+    let base = Ledger::open(&state.config.metadata_path())
+        .unwrap()
+        .base("main")
+        .unwrap()
+        .unwrap();
+    let landed = store.read_commit(&base).unwrap();
+    assert!(store
+        .read_tree(&landed.tree)
+        .unwrap()
+        .get(b"unrelated")
+        .is_some());
 }
 
 #[tokio::test]
