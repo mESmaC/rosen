@@ -396,11 +396,6 @@ async fn make_slot(
     let cloning = options.source.is_some();
     let report = client.materialise_tree(base.tree, &path, options).await?;
     drop(template);
-    let store = client.local_store().await?;
-    let (seed_path, tree) = (path.clone(), base.tree);
-    tokio::task::spawn_blocking(move || seed_slot(&store, &seed_path, tree))
-        .await
-        .map_err(|error| Error::Unexpected(error.to_string()))?;
     if cloning && report.method != Method::BlockClone {
         stop_template(pool, report.fallback.as_deref()).await?;
     }
