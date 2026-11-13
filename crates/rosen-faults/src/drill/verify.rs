@@ -2,6 +2,7 @@
 //! own store and metadata rather than from anything a client says.
 
 use super::agent::Ack;
+use crate::checker::CheckerReport;
 use crate::failing;
 use anyhow::anyhow;
 use rosen_core::{ChangeState, Commit, LandedTrailers, ObjectId};
@@ -11,6 +12,10 @@ use rosen_server::ServerConfig;
 use rosen_store::{LooseObjectStore, ObjectStore};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+
+/// How a server revert's message starts, followed by the culprit commit
+/// (R12's inverse land in `rosen_server::landing::revert`).
+const REVERT_PREFIX: &str = "Revert ";
 
 #[derive(Debug, Serialize)]
 pub struct Check {
@@ -44,20 +49,26 @@ struct World {
     changes: ChangeService,
 }
 
-pub fn verify(config: &ServerConfig, acks: &[(String, Ack)], failing: bool) -> anyhow::Result<Vec<Check>> {
+/// `checker` is the post-land checker's report when the run injected the
+/// failing commit, and `None` when it did not.
+pub fn verify(
+    config: &ServerConfig,
+    acks: &[(String, Ack)],
+    checker: Option<&CheckerReport>,
+) -> anyhow::Result<Vec<Check>> {
     let world = load(config)?;
     let culprit = acks.iter().find_map(|(_, ack)| match ack {
         Ack::Culprit { change } => Some(change.clone()),
         _ => None,
     });
     let mut checks = vec![
-        gated(&world, failing)?,
+        gated(&world, checker.is_some())?,
         applied_once(&world),
         acked_lands_kept(&world, acks),
         acked_edits_kept(&world, acks, culprit.as_deref())?,
     ];
-    if failing {
-        checks.push(culprit_reverted(&world, culprit.as_deref())?);
+    if let Some(checker) = checker {
+        checks.push(culprit_reverted(&world, culprit.as_deref(), checker)?);
     }
     Ok(checks)
 }
@@ -203,9 +214,9 @@ fn acked_edits_kept(world: &World, acks: &[(String, Ack)], culprit: Option<&str>
     })
 }
 
-/// The injected failure was bisected and reverted, and its change reopened
-/// with its work (SPEC.md §5, R12).
-fn culprit_reverted(world: &World, culprit: Option<&str>) -> anyhow::Result<Check> {
+/// The injected failure was bisected to its own land and reverted, and its
+/// change reopened with its work (SPEC.md §5, R12).
+fn culprit_reverted(world: &World, culprit: Option<&str>, checker: &CheckerReport) -> anyhow::Result<Check> {
     let mut problems = Vec::new();
     let Some(culprit) = culprit else {
         return Ok(Check {
@@ -214,12 +225,13 @@ fn culprit_reverted(world: &World, culprit: Option<&str>) -> anyhow::Result<Chec
             detail: "the culprit agent never wrote the failing commit".into(),
         });
     };
-    let landed = world
+    let land = world
         .history
         .iter()
-        .any(|l| l.gated() && l.trailers.as_ref().is_some_and(|t| t.change.to_string() == culprit));
-    if !landed {
-        problems.push("the culprit never landed".to_owned());
+        .find(|l| l.gated() && l.trailers.as_ref().is_some_and(|t| t.change.to_string() == culprit));
+    match land {
+        None => problems.push("the culprit never landed".to_owned()),
+        Some(land) => problems.extend(bisected_to(world, checker, land.id)),
     }
     if failing::fails(&world.store, &world.tip_tree)? {
         problems.push("the base still fails its post-land check".to_owned());
@@ -242,6 +254,39 @@ fn culprit_reverted(world: &World, culprit: Option<&str>) -> anyhow::Result<Chec
     })
 }
 
+/// What is wrong with the bisection, given the culprit's land. The server
+/// must have reverted exactly that land, so no other change was reverted.
+/// Reverts are read from the base, where the server names each culprit,
+/// because a kill can lose the checker's copy of the final answer.
+fn bisected_to(world: &World, checker: &CheckerReport, land: ObjectId) -> Vec<String> {
+    let mut problems = Vec::new();
+    if !checker.caught_up {
+        problems.push("the checker did not test every landed commit before the deadline".to_owned());
+    }
+    let reverted: Vec<&str> = world
+        .history
+        .iter()
+        .filter(|l| !l.gated())
+        .filter_map(|l| {
+            std::str::from_utf8(&l.commit.message)
+                .ok()?
+                .lines()
+                .next()?
+                .strip_prefix(REVERT_PREFIX)
+        })
+        .collect();
+    if reverted != [land.to_string()] {
+        problems.push(format!(
+            "the server reverted [{}], not the culprit's land {land}",
+            reverted.join(", ")
+        ));
+    }
+    if checker.log.flaky > 0 {
+        problems.push(format!("{} bisections stopped as flaky", checker.log.flaky));
+    }
+    problems
+}
+
 /// The bytes at a slash-separated path in a tree, if it holds a file there.
 fn read_path(store: &LooseObjectStore, tree: ObjectId, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
     let mut current = tree;
@@ -252,7 +297,9 @@ fn read_path(store: &LooseObjectStore, tree: ObjectId, path: &str) -> anyhow::Re
             return Ok(None);
         };
         if parts.peek().is_none() {
-            return Ok((!entry.mode.is_tree()).then(|| store.read_blob(&entry.id).map(|b| b.data)).transpose()?);
+            return Ok((!entry.mode.is_tree())
+                .then(|| store.read_blob(&entry.id).map(|b| b.data))
+                .transpose()?);
         }
         current = entry.id;
     }
