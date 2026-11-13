@@ -202,10 +202,26 @@ pub enum Command {
         change: String,
     },
     /// Mark conflicts in paths as resolved after editing the conflict markers.
+    ///
+    /// A conflict blocks its change from landing until it is resolved. Fix
+    /// each file first: replace the conflict markers with the content the
+    /// change should land. Run inside a workspace, this stores a snapshot of
+    /// it first, so the server has the fixed files, and takes paths relative
+    /// to the current directory. With --change, or $ROSEN_CHANGE outside a
+    /// workspace, paths are relative to the repository root.
+    ///
+    /// Every open conflict in each file is resolved, all or none; a path
+    /// with no conflict stored on the change fails. The next land merges the
+    /// change again, and a region that still does not merge becomes an open
+    /// conflict again. Prints the files whose conflicts are still open.
     Resolve {
-        /// Paths whose conflicts are resolved.
+        /// Files whose conflicts are resolved.
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+        /// Change whose conflicts to resolve: its ID or a unique prefix.
+        /// Defaults to the current workspace's change, then $ROSEN_CHANGE.
+        #[arg(long)]
+        change: Option<String>,
     },
     /// List or delete workspaces.
     #[command(subcommand)]

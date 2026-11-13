@@ -11,6 +11,7 @@ pub use bisect::{BisectCulprit, BisectJob, BisectResult, BisectState};
 pub mod channel;
 pub mod claim;
 pub mod config;
+pub mod conflict;
 pub mod edits;
 pub mod frame;
 pub mod history;
@@ -35,6 +36,7 @@ pub use claim::{
     OverlapRecord, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome, WokenWait,
 };
 pub use config::{ConfigQuery, ConfigRecord};
+pub use conflict::{ConflictsResolved, ResolveConflicts, ResolvedPath};
 pub use edits::{EditRegions, EditSpan, PathEdit, Regions};
 pub use history::{
     Blame, BlameRange, BlameRequest, Diff, DiffHunk, DiffLine, DiffRequest, DirEntry, FileDiff,
