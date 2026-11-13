@@ -289,11 +289,4 @@ theorem optimal (s : State) (m : Merge) (keys : List Region)
 #print axioms correct
 #print axioms cost_bound
 #print axioms optimal
-
-def fixtures : String :=
-  "same_head\tclosed\taccepted\n" ++ String.join (
-    [false, true].flatMap fun same => [false, true].map fun closed =>
-      s!"{if same then 1 else 0}\t{if closed then 1 else 0}\t{if accepts same closed then 1 else 0}\n")
 end ConflictRouting
-
-#print axioms ConflictRouting.fixtures
