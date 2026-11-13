@@ -8,7 +8,7 @@
 use super::trees::{self, Change as FileChange};
 use super::{Ctx, HistoryError, HistoryResult};
 use rosen_core::history::LandedTrailers;
-use rosen_core::{ChangeId, CommitGraph, ObjectId};
+use rosen_core::{AgentId, ChangeId, CommitGraph, ObjectId, ReceiptTrailer};
 use rosen_protocol::LogEntry;
 use rosen_store::{LooseObjectStore, ObjectStore};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS history_commits (
     time          INTEGER NOT NULL,
     summary       TEXT NOT NULL,
     change_id     TEXT,               -- the Rosen-Change trailer, if landed
+    receipt       TEXT,               -- the Rosen-Receipt trailer value
+    approvers     TEXT NOT NULL DEFAULT '', -- Rosen-Approved-By, space-separated
     paths_indexed INTEGER NOT NULL DEFAULT 0
 );
 -- The files each commit changed against its first parent (path history).
@@ -42,6 +44,24 @@ CREATE TABLE IF NOT EXISTS history_blame (
 ) WITHOUT ROWID;
 ";
 
+/// Creates the cache tables. A `history_commits` table from before the
+/// receipt and approval columns is dropped and re-derived: its rows are a
+/// cache of immutable commits, so dropping it loses nothing but time, while
+/// keeping it would show old rows without their trailers forever.
+fn create_schema(conn: &Connection) -> HistoryResult<()> {
+    let has_trailer_columns = conn
+        .prepare("SELECT 1 FROM pragma_table_info('history_commits') WHERE name = 'approvers'")?
+        .exists([])?;
+    let table_exists = conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'history_commits'")?
+        .exists([])?;
+    if table_exists && !has_trailer_columns {
+        conn.execute_batch("DROP TABLE history_commits;")?;
+    }
+    conn.execute_batch(SCHEMA)?;
+    Ok(())
+}
+
 /// A commit as the log shows it.
 #[derive(Debug, Clone)]
 pub struct CommitInfo {
@@ -52,6 +72,8 @@ pub struct CommitInfo {
     pub time: i64,
     pub summary: String,
     pub change: Option<ChangeId>,
+    pub receipt: Option<ReceiptTrailer>,
+    pub approvers: Vec<AgentId>,
 }
 
 impl CommitInfo {
@@ -68,6 +90,8 @@ impl CommitInfo {
             time: self.time,
             summary: self.summary.clone(),
             change: self.change,
+            receipt: self.receipt.clone(),
+            approvers: self.approvers.clone(),
         }
     }
 }
@@ -95,7 +119,7 @@ impl Index {
         }
         let conn = crate::metadata::open(path)?;
         if create {
-            conn.execute_batch(SCHEMA)?;
+            create_schema(&conn)?;
         }
         Ok(Index { conn })
     }
@@ -111,6 +135,7 @@ impl Index {
         }
         let commit = store.read_commit(id)?;
         let message = commit.message_text();
+        let trailers = LandedTrailers::parse(&commit.message);
         let info = CommitInfo {
             id: *id,
             tree: commit.tree,
@@ -122,13 +147,16 @@ impl Index {
             ),
             time: commit.author.seconds,
             summary: message.lines().next().unwrap_or_default().to_owned(),
-            change: LandedTrailers::parse(&commit.message).map(|t| t.change),
+            change: trailers.as_ref().map(|t| t.change),
+            receipt: trailers.as_ref().and_then(|t| t.receipt.clone()),
+            approvers: trailers.map(|t| t.approvers).unwrap_or_default(),
         };
         let parents: Vec<String> = info.parents.iter().map(ObjectId::to_hex).collect();
+        let approvers: Vec<&str> = info.approvers.iter().map(AgentId::as_str).collect();
         self.conn.execute(
             "INSERT OR IGNORE INTO history_commits
-             (commit_id, tree, parents, author, time, summary, change_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (commit_id, tree, parents, author, time, summary, change_id, receipt, approvers)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id.to_hex(),
                 info.tree.to_hex(),
@@ -137,6 +165,8 @@ impl Index {
                 info.time,
                 info.summary,
                 info.change.map(|c| c.to_string()),
+                info.receipt.as_ref().map(ReceiptTrailer::to_string),
+                approvers.join(" "),
             ],
         )?;
         Ok(info)
@@ -144,7 +174,7 @@ impl Index {
 
     fn cached_commit(&self, id: &ObjectId) -> HistoryResult<Option<CommitInfo>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT tree, parents, author, time, summary, change_id
+            "SELECT tree, parents, author, time, summary, change_id, receipt, approvers
              FROM history_commits WHERE commit_id = ?1",
         )?;
         let row = stmt
@@ -156,10 +186,12 @@ impl Index {
                     row.get::<_, i64>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })
             .optional()?;
-        let Some((tree, parents, author, time, summary, change)) = row else {
+        let Some((tree, parents, author, time, summary, change, receipt, approvers)) = row else {
             return Ok(None);
         };
         Ok(Some(CommitInfo {
@@ -173,6 +205,11 @@ impl Index {
             time,
             summary,
             change: change.map(|c| c.parse()).transpose()?,
+            receipt: receipt.map(|r| r.parse()).transpose()?,
+            approvers: approvers
+                .split_whitespace()
+                .map(AgentId::new)
+                .collect::<Result<_, _>>()?,
         }))
     }
 

@@ -2,7 +2,7 @@
 //! server, with no checkout.
 
 use crate::server::Succeeded;
-use rosen_client::protocol::{Diff, DiffRequest, FileDiff, LineKind, Log, LogRequest};
+use rosen_client::protocol::{Diff, DiffRequest, FileDiff, LineKind, Log, LogEntry, LogRequest};
 use rosen_client::snapshot::WorkspaceMarker;
 use rosen_client::{Endpoint, Error};
 use serde_json::json;
@@ -114,10 +114,32 @@ fn print_log(json: bool, log: &Log) {
             utc_date(entry.time),
             entry.summary
         );
+        if let Some(line) = landed_line(entry) {
+            println!("    {line}");
+        }
     }
     if log.truncated {
         println!("(more history: raise --limit)");
     }
+}
+
+/// What a landed commit's receipt and approval trailers say, or `None` for a
+/// commit that carries neither.
+fn landed_line(entry: &LogEntry) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(receipt) = &entry.receipt {
+        parts.push(format!(
+            "receipt {} by {} on {}",
+            receipt.check_set(),
+            receipt.submitter,
+            receipt.base
+        ));
+    }
+    if !entry.approvers.is_empty() {
+        let names: Vec<&str> = entry.approvers.iter().map(|a| a.as_str()).collect();
+        parts.push(format!("approved by {}", names.join(", ")));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 fn print_diff(json: bool, diff: &Diff) {
