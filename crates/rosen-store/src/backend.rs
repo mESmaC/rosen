@@ -39,6 +39,13 @@ pub trait ObjectStore: Send + Sync {
 
     fn contains(&self, id: &ObjectId) -> Result<bool, StoreError>;
 
+    /// The length of an object's body, for sizing work before reading it.
+    /// It is not checked against the object's hash; a later read is.
+    fn object_size(&self, id: &ObjectId) -> Result<u64, StoreError> {
+        let raw = self.get_raw(id)?.ok_or(StoreError::NotFound(*id))?;
+        Ok(raw.data.len() as u64)
+    }
+
     fn put(&self, object: &Object) -> Result<ObjectId, StoreError> {
         self.put_raw(object.kind(), &object.encode_body())
     }

@@ -31,5 +31,10 @@ rosen-platform.workspace = true
 rosen-server.workspace = true
 tempfile.workspace = true
 
+# Scripts from reviews and scouts, kept unchanged under stress/ (AGENTS.md).
+[[test]]
+name = "pool_take_during_scan"
+path = "../../stress/pool_take_during_scan.rs"
+
 [lints]
 workspace = true

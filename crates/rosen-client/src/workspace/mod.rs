@@ -180,11 +180,11 @@ fn reserve(
     let Some(budget) = budget else {
         return Ok(None);
     };
-    // Each read waits mostly on opening a file (and, on Windows, on the
-    // virus scanner), so threads overlap the waits as the copy does.
+    // Each header read waits mostly on opening a file (and, on Windows, on
+    // the virus scanner), so threads overlap the waits as the copy does.
     let total = AtomicU64::new(0);
     parallel::for_each::<_, MaterialiseError, _>(&target.files, |entry| {
-        let size = store.read_blob(&entry.blob)?.data.len() as u64;
+        let size = store.object_size(&entry.blob)?;
         total.fetch_add(size, Ordering::Relaxed);
         Ok(())
     })?;
