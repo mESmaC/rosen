@@ -35,7 +35,10 @@ impl Restacker<'_> {
         let targets = self.targets(landed)?;
         self.book.mark_landed(landed, commit)?;
         self.book.release_claims(landed)?;
-        let released = LandingEvent::Released { change: *landed };
+        let released = LandingEvent::Released {
+            change: *landed,
+            commit: *commit,
+        };
         if self.replay {
             self.events.emit_once(released);
         } else {

@@ -134,8 +134,10 @@ pub enum LandingEvent {
         change: ChangeId,
         paths: Vec<String>,
     },
+    /// Claims released by the land that made `commit`.
     Released {
         change: ChangeId,
+        commit: CommitId,
     },
 }
 

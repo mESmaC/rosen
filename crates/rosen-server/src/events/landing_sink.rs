@@ -43,8 +43,12 @@ fn parts(event: LandingEvent) -> (EventKind, crate::landing::ChangeId, serde_jso
         }
         // Waiters woken by the release get their own `released` events
         // from the claim store (`claims::release_landed`).
-        LandingEvent::Released { change } => {
-            (EventKind::Released, change, json!({ "reason": "landed" }))
-        }
+        // The commit tells two lands of one change apart (a reland after
+        // a revert), so a replay of the second is not taken for the first.
+        LandingEvent::Released { change, commit } => (
+            EventKind::Released,
+            change,
+            json!({ "reason": "landed", "commit": commit.to_hex() }),
+        ),
     }
 }

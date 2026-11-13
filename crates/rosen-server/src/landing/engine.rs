@@ -114,7 +114,7 @@ pub struct Landing {
     /// Lands whose post-land work is running now. A recovery pass and the
     /// land's own request, or two passes, never run it at once, so one land
     /// never releases, rebases or announces twice in parallel.
-    post_landing: Mutex<HashSet<ChangeId>>,
+    post_landing: Mutex<HashSet<CommitId>>,
 }
 
 impl Landing {
@@ -374,12 +374,15 @@ impl Landing {
     /// what the event log does not hold yet; a land's first run cannot have
     /// announced anything, and skips that lookup.
     fn post_land(&self, record: &LandRecord, replay: bool) -> LandResult<Option<RestackReport>> {
-        let Some(_running) = PostLandRun::start(&self.post_landing, record.change) else {
+        let Some(_running) = PostLandRun::start(&self.post_landing, record.commit) else {
             return Ok(None);
         };
         // Read again under the run: a run that finished between the pending
         // list being read and this one starting has nothing left to do.
-        if !self.ledger.post_land_pending(&record.change)? {
+        if !self
+            .ledger
+            .post_land_pending(&record.ref_name, &record.commit)?
+        {
             return Ok(Some(RestackReport::default()));
         }
         let landed = LandingEvent::Landed {
@@ -398,7 +401,8 @@ impl Landing {
             replay,
         };
         let report = restacker.after_land(&record.change, &record.commit)?;
-        self.ledger.mark_post_land_done(&record.change)?;
+        self.ledger
+            .mark_post_land_done(&record.ref_name, &record.commit)?;
         Ok(Some(report))
     }
 
@@ -417,24 +421,25 @@ impl Landing {
 }
 
 /// Marks one land's post-land work as running until dropped, including when
-/// the work fails or panics.
+/// the work fails or panics. Keyed by the landed commit, so a change that
+/// lands again after a revert (R12) runs its second land's work separately.
 struct PostLandRun<'a> {
-    running: &'a Mutex<HashSet<ChangeId>>,
-    change: ChangeId,
+    running: &'a Mutex<HashSet<CommitId>>,
+    commit: CommitId,
 }
 
 impl<'a> PostLandRun<'a> {
-    fn start(running: &'a Mutex<HashSet<ChangeId>>, change: ChangeId) -> Option<Self> {
+    fn start(running: &'a Mutex<HashSet<CommitId>>, commit: CommitId) -> Option<Self> {
         let mut set = running.lock().unwrap_or_else(PoisonError::into_inner);
-        set.insert(change)
-            .then_some(PostLandRun { running, change })
+        set.insert(commit)
+            .then_some(PostLandRun { running, commit })
     }
 }
 
 impl Drop for PostLandRun<'_> {
     fn drop(&mut self) {
         let mut set = self.running.lock().unwrap_or_else(PoisonError::into_inner);
-        set.remove(&self.change);
+        set.remove(&self.commit);
     }
 }
 
