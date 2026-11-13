@@ -4,6 +4,8 @@
 #   cargo test --workspace
 # Windows 11 is the shipped platform (D11), so it runs all three.
 # Linux is best-effort and only has to compile.
+# The proofs job runs `lake build` in proofs/ (SPEC.md §5) and the axiom audit
+# from AGENTS.md "Proofs" on every PR.
 name: CI
 
 on:
@@ -92,3 +94,34 @@ jobs:
       - name: cargo build
         if: steps.workspace.outputs.present == 'true'
         run: cargo build --workspace
+
+  proofs:
+    name: Proofs (lake build, axiom audit)
+    # Lean output does not depend on the OS, and Linux runners start fastest.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: proofs
+    env:
+      ELAN_VERSION: v4.2.4
+    steps:
+      - uses: actions/checkout@v4
+
+      # A pinned elan release; elan then installs the toolchain proofs/lean-toolchain names.
+      - name: Install elan
+        run: |
+          archive="elan-x86_64-unknown-linux-gnu.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$archive"             "https://github.com/leanprover/elan/releases/download/$ELAN_VERSION/$archive"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/elan-init" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      # No .lake cache: a clean build is under a minute, and it guarantees every
+      # warning is reported fresh rather than replayed from a stale trace.
+      # --wfail fails the build on warnings, including "declaration uses 'sorry'".
+      - name: lake build (zero warnings)
+        run: lake build --wfail
+
+      # Rejects sorry, admit, native_decide and declared axioms in every module.
+      - name: Axiom audit
+        run: ./audit-axioms.sh

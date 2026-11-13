@@ -11,7 +11,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Rust build: `cargo build --workspace`. For one crate, use `cargo build -p <crate>`.
 - Rust lint, zero warnings: `cargo clippy --workspace --all-targets -- -D warnings`. For one crate, use `-p <crate>` in place of `--workspace`.
 - Rust tests: `cargo test --workspace`. For one crate, use `cargo test -p <crate>`.
-- Proofs: `lake build` in `proofs/`.
+- Proofs: `lake build --wfail` in `proofs/`, then `proofs/audit-axioms.sh` to audit every declaration's axioms.
 - Atomic transaction fixtures: `lake exe atomic-transactions-fixtures > fixtures/atomic-transactions.tsv` in `proofs/`.
 - Claim release fixtures: `lake exe claim-release-fixtures > fixtures/claim-release.tsv` in `proofs/`.
 - Bisection fixtures: `lake exe bisection-fixtures > fixtures/bisection.tsv` in `proofs/`.
@@ -23,7 +23,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Fixture tables, regenerated from `proofs/` after a model changes: `lake exe landing-fixtures > fixtures/landing.tsv` and `lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv`.
 - §5 stress run on one machine: `cargo build --release -p rosen-server -p rosen-stress`, then `target/release/rosen-stress local --dir <new dir>`. Across machines: `rosen-stress seed`, `rosen import` on the server, `rosen-stress agents` on each machine, then `rosen-stress verify <reports…>`; `rosen-stress --help` has the flags.
 - Fault drill (SPEC.md §5): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed <n>`. It prints a JSON report, exits non-zero when a guarantee breaks, and replays exactly from its seed.
-- CI runs the Rust build, lint and tests on Windows, and the Rust build on Linux.
+- CI runs the Rust build, lint and tests on Windows, and the Rust build, `lake build --wfail` and the axiom audit on Linux.
 
 ## Code
 - Keep functions under 60 lines. Split anything longer.
