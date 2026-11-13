@@ -25,6 +25,7 @@ pub mod objects;
 pub mod overlaps;
 pub mod project_config;
 pub mod rebase;
+pub mod stacks;
 pub mod receipts;
 pub mod reviews;
 pub mod rpc;
@@ -253,6 +254,7 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
         if let Err(err) = recovering.landing.recover(&recovering) {
             eprintln!("rosen-server: landing recovery failed: {err}");
         }
+        stacks::refresh(&recovering);
     });
     let mirror = tokio::spawn(mirror::run(Arc::clone(&state)));
     let network_task = network.map(|(tcp, acceptor, identity, address)| {

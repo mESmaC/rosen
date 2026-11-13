@@ -25,6 +25,16 @@ pub(crate) fn ensure_change_schema(conn: &Connection) -> rusqlite::Result<()> {
          );
          CREATE INDEX IF NOT EXISTS changes_by_owner ON changes(owner);
          CREATE INDEX IF NOT EXISTS changes_by_parent ON changes(parent_change);
+         CREATE TABLE IF NOT EXISTS stack_bases (
+             change_id TEXT PRIMARY KEY REFERENCES changes(id),
+             tree TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS stack_delivery (
+             seq INTEGER PRIMARY KEY AUTOINCREMENT,
+             change_id TEXT NOT NULL,
+             conflicted INTEGER NOT NULL,
+             detail TEXT NOT NULL
+         );
          -- A change's own commits, append-only (R2). A NULL message marks an
          -- automatic snapshot; `rosen commit` stores its message.
          CREATE TABLE IF NOT EXISTS change_snapshots (
