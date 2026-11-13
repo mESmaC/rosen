@@ -3,27 +3,15 @@
 //! applied twice. Runs the real server path: registry, merge, store, ledger.
 
 use rosen_core::history::LandedTrailers;
-use rosen_core::{AgentId, Change, Commit, ObjectId, Signature, Tree};
+use rosen_core::{AgentId, Commit, ObjectId, Signature, Tree};
 use rosen_protocol::{
-    LandAnswer, LandStatus, NewChange, Outcome, Request, Response, SubmitReceipt, WorkspaceBytes,
+    ApproveRequest, LandAnswer, LandStatus, NewChange, Outcome, Request, Response, SubmitReceipt, WorkspaceBytes,
     WorkspaceWrite,
 };
-use rosen_server::landing::{CasResult, LandRecord, Ledger, ReviewGate, Tier};
+use rosen_server::landing::{CasResult, LandRecord, Ledger, Tier};
 use rosen_server::{rpc::dispatch, ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use std::sync::Arc;
-
-/// Approves every change at its current head, so these tests reach the
-/// receipt gate; review's own gate is tested with review.
-struct ApproveAll;
-impl ReviewGate for ApproveAll {
-    fn approval(&self, change: &Change) -> Result<Option<(ObjectId, Vec<AgentId>)>, String> {
-        Ok(Some((change.head, vec![AgentId::new("reviewer").unwrap()])))
-    }
-    fn tier(&self, _: &Change) -> Result<Tier, String> {
-        Ok(Tier::Normal)
-    }
-}
 
 fn setup() -> (tempfile::TempDir, Arc<ServerState>, ObjectId) {
     let temp = tempfile::tempdir().unwrap();
@@ -45,7 +33,6 @@ fn setup() -> (tempfile::TempDir, Arc<ServerState>, ObjectId) {
         .unwrap();
     let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
     ledger.init_base("main", &root).unwrap();
-    state.landing.set_review_gate(Arc::new(ApproveAll));
     (temp, state, root)
 }
 
@@ -96,15 +83,40 @@ async fn receipt(state: &Arc<ServerState>, change: &str, head: ObjectId, base: O
     call(state, request).await;
 }
 
+async fn show(state: &Arc<ServerState>, change: &str) -> rosen_core::Change {
+    let request = Request::ChangeShow {
+        change: change.into(),
+    };
+    match call(state, request).await {
+        Response::Change(record) => record.change,
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn approve(state: &Arc<ServerState>, change: &str, head: ObjectId) {
+    let request = Request::ReviewApprove(ApproveRequest {
+        change: change.into(),
+        reviewer: AgentId::new("reviewer").unwrap(),
+        head,
+    });
+    call(state, request).await;
+}
+
+/// Approves the change at its current head, while it can still take one,
+/// then lands it: these tests reach the gates after review.
 async fn land(state: &Arc<ServerState>, change: &str) -> LandAnswer {
-    match call(
-        state,
-        Request::Land {
-            change: change.into(),
-        },
-    )
-    .await
-    {
+    let current = show(state, change).await;
+    if !current.state.is_closed() {
+        approve(state, change, current.head).await;
+    }
+    land_as_is(state, change).await
+}
+
+async fn land_as_is(state: &Arc<ServerState>, change: &str) -> LandAnswer {
+    let request = Request::Land {
+        change: change.into(),
+    };
+    match call(state, request).await {
         Response::Land(answer) => answer,
         other => panic!("{other:?}"),
     }
@@ -268,4 +280,47 @@ async fn conflicted_land_routes_regions_and_files_to_its_owner() {
     let record = restarted.changes.show(&b).unwrap().change;
     assert_eq!(record.head, hb);
     assert_eq!(record.conflicts, vec![region.id]);
+}
+
+// Risk (SPEC R7 "Accept when"): a change lands only with an approval for its
+// current head. An author snapshot voids it for good, even one that puts the
+// head back where the approval and a racing land read it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_land_needs_an_approval_that_still_holds_for_the_current_head() {
+    let (_temp, state, root) = setup();
+    let a = new_change(&state).await;
+    let first = write(&state, &a, "a.txt", b"one
+").await;
+    receipt(&state, &a, first, root).await;
+    assert_eq!(refused(&land_as_is(&state, &a).await), Some("unapproved"));
+
+    approve(&state, &a, first).await;
+    write(&state, &a, "a.txt", b"two
+").await;
+    assert_eq!(write(&state, &a, "a.txt", b"one
+").await, first);
+    assert_eq!(refused(&land_as_is(&state, &a).await), Some("unapproved"));
+    // A land that read the approval before the author's snapshots loses its
+    // swap, though the head it decided on is the head again.
+    let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
+    let raced = LandRecord {
+        ref_name: "main".into(),
+        change: a.parse().unwrap(),
+        head: first,
+        commit: root,
+        tier: Tier::Normal,
+    };
+    let swap = ledger.compare_and_swap(&root, &raced).unwrap();
+    assert_eq!(
+        (swap, ledger.base("main").unwrap()),
+        (CasResult::ChangeMoved, Some(root))
+    );
+
+    approve(&state, &a, first).await;
+    let LandStatus::Landed { commit, .. } = land_as_is(&state, &a).await.outcome else {
+        panic!("an approval and a receipt for the current head land");
+    };
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let trailers = LandedTrailers::parse(&store.read_commit(&commit).unwrap().message).unwrap();
+    assert_eq!(trailers.approvers, [AgentId::new("reviewer").unwrap()]);
 }
