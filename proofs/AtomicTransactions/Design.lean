@@ -1,4 +1,4 @@
-/-! SPEC R8 and section 3: a SQLite commit publishes ref, history and registry
+/-! SPEC.md R8 step 2 and SPEC.md section 3: a SQLite commit publishes ref, history and registry
 closure together. Uncommitted work (including a crash) publishes none.
 The model assumes SQLite transaction isolation/durability, not its internals. -/
 namespace AtomicTransactions
@@ -17,7 +17,7 @@ def staged (s : State) (change commit : Nat) : State :=
 def publish (s : State) (expected change commit : Nat) (committed : Bool) : State :=
   if committed && allowed s expected change then staged s change commit else s
 
-/-- SPEC R8/section 3: every outcome is the complete old or complete new state;
+/-- SPEC.md R8 step 2 and SPEC.md section 3: every outcome is the complete old or complete new state;
 publication requires a matching base and a change absent from history. -/
 theorem correct (s : State) (expected change commit : Nat) (committed : Bool) :
     publish s expected change commit committed = s ∨
