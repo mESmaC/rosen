@@ -143,9 +143,12 @@ fn record(
     if request.tree != empty_tree() && !store.contains(&request.tree)? {
         return Err(SnapshotError::MissingTree(request.tree));
     }
+    let ctx = crate::history::open(state).map_err(history_failure)?;
     let mut outcome = None;
     state.changes.with_conn(|conn| {
-        outcome = Some(record_on(conn, store, request)?);
+        let current = changes::get(conn, changes::resolve(conn, &request.change)?)?;
+        let head = merge_snapshot(&ctx, &current.change, request)?;
+        outcome = Some(record_at(conn, store, request, &current.change, head)?);
         Ok(())
     })?;
     Ok(outcome.expect("set by every successful path above"))
@@ -159,6 +162,18 @@ pub(crate) fn record_on(
     request: &SnapshotRequest,
 ) -> Result<SnapshotOutcome, ChangeError> {
     let id = changes::resolve(conn, &request.change)?;
+    let current = changes::get(conn, id)?;
+    record_at(conn, store, request, &current.change, request.tree)
+}
+
+fn record_at(
+    conn: &mut Connection,
+    store: &dyn ObjectStore,
+    request: &SnapshotRequest,
+    expected: &Change,
+    head: ObjectId,
+) -> Result<SnapshotOutcome, ChangeError> {
+    let id = expected.id;
     let current = changes::get(conn, id)?;
     if request.message.is_none() && holds_tree(&current.change, request.tree) {
         let commit = current.change.snapshots.last().map(|s| s.commit);
@@ -179,7 +194,7 @@ pub(crate) fn record_on(
             .map_or(SnapshotKind::Automatic, SnapshotKind::Named),
     };
     Ok(SnapshotOutcome {
-        change: changes::record_snapshot(conn, id, snapshot)?,
+        change: changes::record_snapshot_merged(conn, expected, snapshot, head)?,
         commit: Some(commit_id),
         recorded: true,
     })
@@ -265,4 +280,34 @@ fn empty_tree() -> ObjectId {
 
 fn store_failure(err: StoreError) -> ChangeError {
     ChangeError::Io(std::io::Error::other(err.to_string()))
+}
+
+// Local snapshot commits retain exactly the author's tree. Only the change's
+// live head incorporates the server rebase, until its owner applies it.
+fn merge_snapshot(
+    ctx: &crate::history::Ctx,
+    current: &Change,
+    request: &SnapshotRequest,
+) -> Result<ObjectId, ChangeError> {
+    let from = request.from.ok_or_else(|| {
+        ChangeError::Base("snapshot must name its workspace basis; update the client".into())
+    })?;
+    if from == current.head {
+        return Ok(request.tree);
+    }
+    let merged =
+        crate::history::merge::merge_trees(ctx, [from, current.head, request.tree], &|_| {
+            rosen_merge::MergePolicy::Text
+        })
+        .map_err(|err| ChangeError::Io(std::io::Error::other(err.to_string())))?;
+    merged.tree.ok_or_else(|| {
+        ChangeError::Base(format!(
+            "snapshot conflicts with pending rebase in {}; local edits kept",
+            merged.conflicts.join(", ")
+        ))
+    })
+}
+
+fn history_failure(err: crate::history::HistoryError) -> SnapshotError {
+    SnapshotError::Change(ChangeError::Io(std::io::Error::other(err.to_string())))
 }

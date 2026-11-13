@@ -14,6 +14,7 @@ mod ignore;
 mod index;
 mod journal;
 mod marker;
+mod rebase;
 mod scan;
 mod upload;
 pub mod watch;
@@ -452,6 +453,7 @@ async fn send(
         .snapshot(SnapshotRequest {
             change: snapshotter.change().to_string(),
             tree: prepared.root,
+            from: Some(snapshotter.marker.tree),
             message,
         })
         .await?;

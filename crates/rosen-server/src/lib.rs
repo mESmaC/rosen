@@ -23,6 +23,7 @@ pub mod network;
 pub mod objects;
 pub mod overlaps;
 pub mod project_config;
+pub mod rebase;
 pub mod receipts;
 pub mod reviews;
 pub mod rpc;
