@@ -16,7 +16,7 @@ mod index;
 mod log;
 mod merge;
 mod revision;
-mod trees;
+pub(crate) mod trees;
 
 pub(crate) use merge::merge_for_land;
 

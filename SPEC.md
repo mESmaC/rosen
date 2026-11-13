@@ -193,6 +193,8 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - `rosen claim <paths…>` claims paths or globs for a change. The first claim wins. A refused claim names the holder. `share` and `wait` record the other two outcomes.
 - Edit regions update from each snapshot. Ignored paths (R2) have no edit regions.
 - An **overlap query** returns, for a change or a set of paths, every change that overlaps it. The channel (R13) and Velocity call it.
+  - A claim or share covers every line of the paths it matches, so it overlaps another change's claim, share or edit there. A wait does not, because a waiter holds off. A set of paths in a query counts as a claim.
+  - Edits are measured against the change's parent. Two changes on different parents are compared in one parent's lines, after carrying the other's edits across the lines both versions share. An added, deleted, binary or mode-changed file counts as edited throughout.
 - These are AIRC's file claims: `airc_claim` files, `airc_share` and `airc_wait` record path claims, shares and waits here (R13). There is one claim record per path, not one in AIRC and one in Rosen.
 - Claims release when their change lands or is abandoned. A wait is then signalled by an event.
 - **Accept when:** two concurrent claims on one path never both succeed, and every released claim wakes its waiters.
