@@ -62,6 +62,13 @@ pub trait ObjectStore: Send + Sync {
             .map_err(|error| StoreError::Malformed(*id, error))
     }
 
+    /// The byte length of a blob that must exist. Backends that can read the
+    /// length from an object header without reading the body override this;
+    /// the body is not hash-checked, so use it only to size, never to trust.
+    fn blob_size(&self, id: &ObjectId) -> Result<u64, StoreError> {
+        Ok(self.read_blob(id)?.data.len() as u64)
+    }
+
     fn read_blob(&self, id: &ObjectId) -> Result<Blob, StoreError> {
         match self.read(id)? {
             Object::Blob(blob) => Ok(blob),
