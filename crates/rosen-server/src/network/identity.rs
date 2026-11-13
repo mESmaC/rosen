@@ -1,5 +1,5 @@
 //! The server's network identity (SPEC R14): its TLS certificate and key,
-//! and the credential daemons on other machines present.
+//! created at project startup.
 //!
 //! The identity is created the first time a project's server starts and is
 //! never replaced, so the certificate fingerprint that daemons pin stays
@@ -22,7 +22,6 @@ const SUBJECT_NAME: &str = "rosen-server";
 pub struct Identity {
     certificate: Vec<u8>,
     private_key: Vec<u8>,
-    credential: String,
 }
 
 impl Identity {
@@ -56,12 +55,9 @@ impl Identity {
     fn generate() -> io::Result<Self> {
         let certified = rcgen::generate_simple_self_signed(vec![SUBJECT_NAME.to_owned()])
             .map_err(|err| io::Error::other(format!("could not create a certificate: {err}")))?;
-        let mut secret = [0u8; 32];
-        getrandom::fill(&mut secret).map_err(|err| io::Error::other(err.to_string()))?;
         Ok(Self {
             certificate: certified.cert.der().to_vec(),
             private_key: certified.signing_key.serialize_der(),
-            credential: hex(&secret),
         })
     }
 
@@ -69,7 +65,6 @@ impl Identity {
         let json = serde_json::json!({
             "certificate": STANDARD.encode(&self.certificate),
             "private_key": STANDARD.encode(&self.private_key),
-            "credential": self.credential,
         });
         serde_json::to_vec_pretty(&json).expect("a JSON value always serialises")
     }
@@ -87,7 +82,6 @@ impl Identity {
         Ok(Self {
             certificate: base64("certificate")?,
             private_key: base64("private_key")?,
-            credential: field("credential")?.to_owned(),
         })
     }
 
@@ -99,25 +93,8 @@ impl Identity {
         &self.private_key
     }
 
-    /// The credential daemons on other machines present in their hello.
-    pub fn credential(&self) -> &str {
-        &self.credential
-    }
-
     pub fn fingerprint(&self) -> Fingerprint {
         fingerprint_of(&self.certificate)
-    }
-
-    /// Compares digests rather than the strings, so the time taken does not
-    /// reveal how much of a guessed credential was right.
-    pub fn credential_matches(&self, presented: &str) -> bool {
-        let expected = Sha256::digest(self.credential.as_bytes());
-        let given = Sha256::digest(presented.as_bytes());
-        expected
-            .iter()
-            .zip(given.iter())
-            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
-            == 0
     }
 }
 
@@ -149,7 +126,7 @@ pub fn parse_fingerprint(text: &str) -> Result<Fingerprint, String> {
     Ok(out)
 }
 
-/// The file holds the TLS private key and the credential. On Unix it is
+/// The file holds the TLS private key. On Unix it is
 /// made readable by its owner only; on Windows it inherits the data
 /// directory's access list, which a user-profile directory already limits.
 #[cfg(unix)]

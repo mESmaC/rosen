@@ -18,11 +18,13 @@ pub mod import;
 pub mod landing;
 pub mod listener;
 pub mod load_limits;
+pub mod machines;
 pub mod metadata;
 pub mod mirror;
 pub mod network;
 pub mod objects;
 pub mod overlaps;
+pub mod post_land;
 pub mod project_config;
 pub mod rebase;
 pub mod receipts;
@@ -109,12 +111,9 @@ impl ServerState {
         ))
     }
 
-    /// True when `given` is the project's machine credential. Always false
-    /// before the network listener is up.
+    /// Revalidates a machine's credential, expiry and revocation status.
     pub fn credential_matches(&self, given: &str) -> bool {
-        self.network
-            .get()
-            .is_some_and(|info| info.identity.credential_matches(given))
+        machines::authenticate(&self.config.data_dir, given).unwrap_or(false)
     }
 
     pub fn open_connections(&self) -> u64 {
@@ -247,6 +246,9 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     // off the accept path so clients can connect meanwhile.
     let recovering = Arc::clone(&state);
     tokio::task::spawn_blocking(move || {
+        if let Err(err) = post_land::recover(&recovering) {
+            eprintln!("rosen-server: green notification recovery failed: {err}");
+        }
         if let Err(err) = claims::recover(&recovering) {
             eprintln!("rosen-server: claim release recovery failed: {err}");
         }
