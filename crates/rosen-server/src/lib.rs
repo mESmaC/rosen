@@ -21,6 +21,7 @@ pub mod load_limits;
 pub mod mirror;
 pub mod network;
 pub mod objects;
+pub mod overlaps;
 pub mod project_config;
 pub mod rebase;
 pub mod receipts;
