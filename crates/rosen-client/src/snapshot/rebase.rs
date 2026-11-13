@@ -8,6 +8,7 @@ impl Snapshotter {
         &mut self,
         store: &dyn ObjectStore,
         tree: ObjectId,
+        ignore: Vec<String>,
     ) -> Result<(), crate::Error> {
         self.hold_for_deletion()?;
         let _writer = self.journal.writer()?;
@@ -18,6 +19,7 @@ impl Snapshotter {
         }
         crate::workspace::rebase::apply(store, &self.root, &self.marker, tree)?;
         self.marker.tree = tree;
+        self.marker.ignore = ignore;
         self.marker.write(&self.root)?;
         // Cache the new tree metadata for the next offline watcher.
         super::open_index(store, &self.root, &self.journal, tree).map_err(crate::Error::from)?;

@@ -40,8 +40,13 @@ pub struct ProjectConfig {
     pub registration_lists: Vec<PathPattern>,
     /// Paths whose changes take the sensitive review tier (R7).
     pub sensitive: Vec<PathPattern>,
+    /// Untracked paths snapshots skip (R2), in `.gitignore` syntax relative
+    /// to the repository root, such as `target/`. They rank below every
+    /// `.gitignore` file, so a workspace's own `!` line can re-include one.
+    pub ignore: Vec<String>,
     pub checks: CheckSets,
     pub warm_pool: WarmPool,
+    pub prepare: Prepare,
     pub mirror: Mirror,
 }
 
@@ -136,6 +141,16 @@ impl Default for WarmPool {
     }
 }
 
+/// Steps each daemon runs in its ready workspaces (R3). Their results must
+/// not depend on the workspace's path or agent, because a prepared
+/// workspace is later taken by any agent at any destination.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Prepare {
+    /// Shell commands, run in order from the workspace root.
+    pub commands: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Mirror {
@@ -221,6 +236,13 @@ impl ProjectConfig {
                 )));
             }
         }
+        self.ignore
+            .iter()
+            .try_for_each(|line| single_line("ignore", line))?;
+        let prepare = &self.prepare.commands;
+        prepare
+            .iter()
+            .try_for_each(|line| single_line("prepare.commands", line))?;
         if self.warm_pool.size > MAX_WARM_POOL_SIZE {
             return Err(ConfigError(format!(
                 "warm_pool.size {} is over the limit of {MAX_WARM_POOL_SIZE}",
@@ -243,6 +265,17 @@ fn check_set_name(key: &str, name: &str) -> Result<(), ConfigError> {
     if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(ConfigError(format!(
             "{key}.name {name:?} must be non-empty with no spaces or control characters"
+        )));
+    }
+    Ok(())
+}
+
+/// An ignore line or a prepare command must be one non-empty line: a line
+/// break would smuggle a second rule or command past `rosen config show`.
+fn single_line(key: &str, line: &str) -> Result<(), ConfigError> {
+    if line.trim().is_empty() || line.chars().any(char::is_control) {
+        return Err(ConfigError(format!(
+            "{key} entry {line:?} must be one non-empty line with no control characters"
         )));
     }
     Ok(())

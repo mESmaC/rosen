@@ -1,9 +1,15 @@
 //! Which workspace paths snapshots skip (SPEC R2 "Ignored paths").
 //!
-//! A path is ignored when the workspace's `.gitignore` files say so, read
-//! the way git reads them: each file applies to its own directory and
-//! below, and a deeper file's match overrides a shallower one. `.git` and
-//! the workspace's own `.rosen` directory are always ignored.
+//! A path is ignored when the workspace's `.gitignore` files or the
+//! project's ignore list say so, read the way git reads them: each file
+//! applies to its own directory and below, and a deeper file's match
+//! overrides a shallower one. The project's list ranks below every
+//! `.gitignore`, as git's `info/exclude` does. `.git` and the workspace's
+//! own `.rosen` directory are always ignored.
+//!
+//! The project's list comes from the base's configuration, recorded in the
+//! workspace marker when the workspace is made or rebased, so a change that
+//! edits `rosen.toml` cannot change what its own snapshots skip.
 //!
 //! As in git, ignore rules apply only to untracked paths: a file the stored
 //! tree already holds stays in snapshots even if a pattern matches it.
@@ -17,14 +23,18 @@ use std::path::PathBuf;
 
 pub struct IgnoreRules {
     root: PathBuf,
+    /// The project's ignore list, rooted at the workspace root.
+    project: Option<Gitignore>,
     /// Parsed `.gitignore` per workspace-relative directory, or `None` where
     /// the directory has none. Filled lazily as paths are checked.
     per_dir: HashMap<String, Option<Gitignore>>,
 }
 
 impl IgnoreRules {
-    pub fn new(root: PathBuf) -> Self {
+    /// `project` is the project configuration's ignore list (SPEC R2).
+    pub fn new(root: PathBuf, project: &[String]) -> Self {
         Self {
+            project: project_rules(&root, project),
             root,
             per_dir: HashMap::new(),
         }
@@ -37,7 +47,10 @@ impl IgnoreRules {
             return true;
         }
         let parts: Vec<&str> = rel.split('/').collect();
-        let mut ignored = false;
+        let mut ignored = self
+            .project
+            .as_ref()
+            .is_some_and(|rules| rules.matched_path_or_any_parents(rel, is_dir).is_ignore());
         for depth in 0..parts.len() {
             let dir = parts[..depth].join("/");
             let rest = parts[depth..].join("/");
@@ -81,6 +94,18 @@ impl IgnoreRules {
         let _ = builder.add(&file);
         builder.build().ok()
     }
+}
+
+fn project_rules(root: &std::path::Path, lines: &[String]) -> Option<Gitignore> {
+    if lines.is_empty() {
+        return None;
+    }
+    let mut builder = GitignoreBuilder::new(root);
+    for line in lines {
+        // A malformed line is skipped, as git skips it; the rest still apply.
+        let _ = builder.add_line(None, line);
+    }
+    builder.build().ok()
 }
 
 /// `.git` anywhere (a nested repository's metadata) and the workspace's own
