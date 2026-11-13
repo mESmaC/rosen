@@ -1,5 +1,5 @@
 name = "proofs"
-defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase"]
+defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions"]
 
 # One library per proof-list feature (SPEC.md §7). Each library also builds
 # its fixture exporter, so `lake build` type-checks it.
@@ -62,3 +62,10 @@ globs = ["TargetedRebase.Design", "TargetedRebase.Export"]
 [[lean_exe]]
 name = "targeted-rebase-fixtures"
 root = "TargetedRebase.Export"
+
+[[lean_lib]]
+name = "AtomicTransactions"
+globs = ["AtomicTransactions.Design", "AtomicTransactions.Export"]
+[[lean_exe]]
+name = "atomic-transactions-fixtures"
+root = "AtomicTransactions.Export"

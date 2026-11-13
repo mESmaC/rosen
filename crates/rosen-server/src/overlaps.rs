@@ -79,7 +79,19 @@ pub fn find(state: &ServerState, subject: &Subject) -> Result<Vec<Overlap>, Over
             records.push(changes::get(conn, id)?);
         }
         let heads = parent_heads(conn, &records)?;
-        Ok((own_id, records, heads, crate::claims::live_records(conn)?))
+        let mut claims = crate::claims::live_records(conn)?;
+        // CAS closes the subject before post-land work. Its retained claims
+        // still select rebase targets until release, even though they no
+        // longer block new claimants.
+        if let Some(id) = own_id {
+            let retained = crate::claims::records_for(conn, id)?;
+            for claim in retained {
+                if !claims.contains(&claim) {
+                    claims.push(claim);
+                }
+            }
+        }
+        Ok((own_id, records, heads, claims))
     })?;
     let mut claimed: HashMap<ChangeId, Vec<PathPattern>> = HashMap::new();
     for record in claims.into_iter().filter(|r| r.kind != ClaimKind::Wait) {

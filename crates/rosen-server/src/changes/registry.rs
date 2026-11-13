@@ -135,14 +135,14 @@ pub fn update(
     apply: impl FnOnce(&mut Change) -> rosen_core::Result<()>,
 ) -> Result<ChangeRecord, ChangeError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let record = apply_and_save(&tx, id, apply)?;
+    let record = update_in(&tx, id, apply)?;
     tx.commit()?;
     Ok(record)
 }
 
 /// The body of [`update`], for callers that must check more inside the same
 /// write transaction first.
-fn apply_and_save(
+pub(crate) fn update_in(
     tx: &Connection,
     id: ChangeId,
     apply: impl FnOnce(&mut Change) -> rosen_core::Result<()>,
@@ -183,7 +183,7 @@ pub fn rebase(
     if let ChangeParent::Change(below) = parent {
         ensure_not_above(&tx, id, below)?;
     }
-    let record = apply_and_save(&tx, id, |change| change.rebase(parent, merged_head))?;
+    let record = update_in(&tx, id, |change| change.rebase(parent, merged_head))?;
     tx.commit()?;
     Ok(record)
 }
@@ -377,7 +377,7 @@ pub fn rebase_checked(
             "rebase inputs moved; retry the rebase".into(),
         ));
     }
-    let record = apply_and_save(&tx, expected.id, |c| {
+    let record = update_in(&tx, expected.id, |c| {
         c.rebase(ChangeParent::Base(onto), tree)
     })?;
     tx.commit()?;

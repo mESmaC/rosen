@@ -157,3 +157,12 @@ fn finish(joined: Result<Result<Response, ChangeError>, tokio::task::JoinError>)
         Err(join) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, join.to_string())),
     }
 }
+
+/// Retained records of one change, including a just-landed subject whose
+/// claims still select post-land rebase targets before release.
+pub fn records_for(
+    conn: &mut rusqlite::Connection,
+    id: rosen_core::ChangeId,
+) -> Result<Vec<rosen_protocol::PathClaim>, ChangeError> {
+    store::list(conn, Some(&id.to_string()))
+}
