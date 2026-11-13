@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use rosen_core::{ChangeId, LandedCommit, LandedTrailers, ObjectId, Signature};
 use rosen_protocol::{Endpoint, EventKind, Outcome};
 use rosen_server::landing::{CasResult, LandRecord, Ledger, Tier};
+use rosen_server::reviews::approvals;
 use rosen_server::{import::service, mirror, ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use serde_json::json;
@@ -41,6 +42,7 @@ fn land(state: &ServerState, n: u8) -> ObjectId {
     let (name, base) = ledger.project_base().unwrap().unwrap();
     let tree = store.read_commit(&base).unwrap().tree;
     let change = ChangeId::from_bytes([n; 16]);
+    register_change(state, change, base, tree);
     let landed = LandedCommit {
         base,
         tree,
@@ -57,7 +59,7 @@ fn land(state: &ServerState, n: u8) -> ObjectId {
     let record = LandRecord {
         ref_name: name,
         change,
-        head: commit,
+        head: tree,
         commit,
         tier: Tier::ProseOnly,
     };
@@ -66,6 +68,29 @@ fn land(state: &ServerState, n: u8) -> ObjectId {
     let change = Some(change.to_string());
     state.events.publish(EventKind::Landed, change, json!({}));
     commit
+}
+
+fn register_change(state: &ServerState, change: ChangeId, base: ObjectId, tree: ObjectId) {
+    // The CAS closes a real registry entry in its transaction, and needs an
+    // approval for its head (R7).
+    let approval = rosen_protocol::ApproveRequest {
+        change: change.to_string(),
+        reviewer: rosen_core::AgentId::new("reviewer").unwrap(),
+        head: tree,
+    };
+    state
+        .changes
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO changes (id, owner, parent_base, state, head, created_at, updated_at)
+             VALUES (?1, 'agent', ?2, 'ready', ?3, 0, 0)",
+                rusqlite::params![change.to_string(), base.to_hex(), tree.to_hex()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let approve = |conn: &mut rusqlite::Connection| Ok(approvals::approve(conn, &approval));
+    state.changes.with_conn(approve).unwrap().unwrap();
 }
 
 fn wait_for(what: &str, mut done: impl FnMut() -> bool) {

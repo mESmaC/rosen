@@ -358,55 +358,26 @@ impl Ledger {
     ) -> LandResult<CasResult> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let landed: Option<String> = tx
-            .query_row(
-                "SELECT commit_id FROM base_history WHERE change_id = ?1",
-                params![record.change.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(commit) = landed {
-            return Ok(CasResult::AlreadyLanded {
-                commit: parse_commit(commit)?,
-            });
+        if let Some(result) = check_attempt(&tx, expected, record)? {
+            return Ok(result);
         }
-        if !change_unmoved(&tx, record)? {
-            return Ok(CasResult::ChangeMoved);
-        }
-        match conflicts::check_landable(&tx, &record.change.to_string()) {
-            Ok(()) => {}
-            Err(ConflictStoreError::Conflict(_)) => return Ok(CasResult::OpenConflicts),
-            Err(ConflictStoreError::Sql(error)) => return Err(error.into()),
-        }
-        let current: String = tx
-            .query_row(
-                "SELECT target FROM base_refs WHERE name = ?1",
-                params![record.ref_name],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| LandError::NoBase(record.ref_name.clone()))?;
-        if current != expected.to_string() {
-            return Ok(CasResult::BaseMoved {
-                current: parse_commit(current)?,
-            });
-        }
-        tx.execute(
-            "INSERT INTO base_history (ref_name, commit_id, change_id, head, tier)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+        // The predicate is also on the write itself, rather than relying on
+        // the earlier read to be the compare half of compare-and-swap.
+        let changed = tx.execute(
+            "UPDATE base_refs SET target = ?1 WHERE name = ?2 AND target = ?3",
             params![
-                record.ref_name,
                 record.commit.to_string(),
-                record.change.to_string(),
-                record.head.to_string(),
-                record.tier.as_str()
+                record.ref_name,
+                expected.to_string()
             ],
         )?;
-        let seq = tx.last_insert_rowid();
-        tx.execute(
-            "UPDATE base_refs SET target = ?1 WHERE name = ?2",
-            params![record.commit.to_string(), record.ref_name],
-        )?;
+        if changed != 1 {
+            return Err(LandError::Store(
+                "base CAS did not update exactly one row".into(),
+            ));
+        }
+        let seq = record_land(&tx, record)?;
+        close_registered_change(&tx, record)?;
         tx.commit()?;
         Ok(CasResult::Swapped { seq })
     }
@@ -454,6 +425,91 @@ impl Ledger {
     }
 }
 
+/// Evaluate mutable gates under the same SQLite writer reservation as the
+/// ref move. Returning a refusal drops the transaction without any writes.
+fn check_attempt(
+    tx: &Connection,
+    expected: &CommitId,
+    record: &LandRecord,
+) -> LandResult<Option<CasResult>> {
+    let landed: Option<String> = tx
+        .query_row(
+            "SELECT commit_id FROM base_history WHERE change_id = ?1",
+            params![record.change.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(commit) = landed {
+        return Ok(Some(CasResult::AlreadyLanded {
+            commit: parse_commit(commit)?,
+        }));
+    }
+    if !change_unmoved(tx, record)? {
+        return Ok(Some(CasResult::ChangeMoved));
+    }
+    match conflicts::check_landable(tx, &record.change.to_string()) {
+        Ok(()) => {}
+        Err(ConflictStoreError::Conflict(_)) => return Ok(Some(CasResult::OpenConflicts)),
+        Err(ConflictStoreError::Sql(error)) => return Err(error.into()),
+    }
+    let current: String = tx
+        .query_row(
+            "SELECT target FROM base_refs WHERE name = ?1",
+            params![record.ref_name],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| LandError::NoBase(record.ref_name.clone()))?;
+    (current != expected.to_string())
+        .then(|| parse_commit(current).map(|current| CasResult::BaseMoved { current }))
+        .transpose()
+}
+
+/// Persist history before closing the registry, so any error in either
+/// operation rolls the ref, history and state back together.
+fn record_land(tx: &Connection, record: &LandRecord) -> LandResult<i64> {
+    tx.execute(
+        "INSERT INTO base_history (ref_name, commit_id, change_id, head, tier)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            record.ref_name,
+            record.commit.to_string(),
+            record.change.to_string(),
+            record.head.to_string(),
+            record.tier.as_str()
+        ],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+fn has_registry(tx: &Connection) -> LandResult<bool> {
+    Ok(tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'changes'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Use the registry's core state rules and persistence, inside this land's
+/// transaction. Otherwise a snapshot could be acknowledged after its head
+/// landed but before post-land recovery closed the change.
+fn close_registered_change(tx: &Connection, record: &LandRecord) -> LandResult<()> {
+    if !has_registry(tx)? {
+        return Ok(());
+    }
+    crate::changes::update_in(tx, record.change, |change| {
+        if change.state == rosen_core::ChangeState::Open {
+            change.mark_ready()?;
+        }
+        change.mark_landed()
+    })
+    .map_err(|error| LandError::Store(error.to_string()))?;
+    Ok(())
+}
+
 /// True while the change registry still holds the change at the head the
 /// land merged, in a state that may land, with an approval that still holds
 /// (R7). Read inside the land transaction: a snapshot stored between the
@@ -462,7 +518,7 @@ impl Ledger {
 /// carry the approval it voided onto the base.
 /// A ledger used without the change registry has nothing to contradict.
 fn change_unmoved(tx: &Connection, record: &LandRecord) -> LandResult<bool> {
-    if !has_table(tx, "changes")? {
+    if !has_registry(tx)? {
         return Ok(true);
     }
     let row: Option<(String, String)> = tx
@@ -472,10 +528,9 @@ fn change_unmoved(tx: &Connection, record: &LandRecord) -> LandResult<bool> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let Some((state, head)) = row else {
-        return Ok(true);
-    };
-    let unmoved = matches!(state.as_str(), "open" | "ready") && head == record.head.to_hex();
+    let unmoved = row.is_some_and(|(state, head)| {
+        matches!(state.as_str(), "open" | "ready") && head == record.head.to_hex()
+    });
     Ok(unmoved && approval_holds(tx, &record.change)?)
 }
 
@@ -484,7 +539,15 @@ fn change_unmoved(tx: &Connection, record: &LandRecord) -> LandResult<bool> {
 /// if the head left and came back. A registry without the review table
 /// holds no approvals, so it refuses.
 fn approval_holds(tx: &Connection, change: &ChangeId) -> LandResult<bool> {
-    if !has_table(tx, "review_approvals")? {
+    let has_reviews = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'review_approvals'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !has_reviews {
         return Ok(false);
     }
     Ok(tx.query_row(
@@ -492,17 +555,6 @@ fn approval_holds(tx: &Connection, change: &ChangeId) -> LandResult<bool> {
         params![change.to_string()],
         |row| row.get(0),
     )?)
-}
-
-fn has_table(tx: &Connection, name: &str) -> LandResult<bool> {
-    Ok(tx
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            params![name],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
 }
 
 /// Position of `commit` in the ref's history. The commit must be one the
