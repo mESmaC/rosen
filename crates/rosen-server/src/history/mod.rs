@@ -18,6 +18,8 @@ mod merge;
 mod revision;
 pub(crate) mod trees;
 
+pub(crate) use merge::merge_for_land;
+
 use crate::changes::ChangeError;
 use crate::ServerState;
 use index::Index;
