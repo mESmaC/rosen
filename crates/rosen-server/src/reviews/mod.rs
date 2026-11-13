@@ -11,6 +11,7 @@ mod anchor;
 mod store;
 
 pub mod approvals;
+pub mod tiers;
 
 pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     store::ensure_schema(conn)?;

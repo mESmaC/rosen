@@ -63,7 +63,9 @@ impl Client {
                     .await?
             }
         };
-        WorkspaceMarker::new(change.change.id, change.change.head, sparse)
+        // The base's ignore list, never the change's own `rosen.toml` (R2).
+        let ignore = self.base_config().await?.ignore;
+        WorkspaceMarker::new(change.change.id, change.change.head, sparse, ignore)
             .write(dest)
             .map_err(Error::Io)?;
         let store = self.local_store().await?;
