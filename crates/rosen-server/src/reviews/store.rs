@@ -279,11 +279,11 @@ impl ThreadRow {
     }
 }
 
-fn parse<T: std::str::FromStr>(text: &str, what: &str) -> Result<T, ReviewError> {
+pub(super) fn parse<T: std::str::FromStr>(text: &str, what: &str) -> Result<T, ReviewError> {
     text.parse().map_err(|_| corrupt(what, text))
 }
 
-fn agent(text: &str, what: &str) -> Result<AgentId, ReviewError> {
+pub(super) fn agent(text: &str, what: &str) -> Result<AgentId, ReviewError> {
     AgentId::new(text).map_err(|_| corrupt(what, text))
 }
 
@@ -293,7 +293,7 @@ fn corrupt(what: &str, text: &str) -> ReviewError {
     ))
 }
 
-fn now_millis() -> i64 {
+pub(super) fn now_millis() -> i64 {
     let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();

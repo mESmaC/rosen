@@ -55,6 +55,12 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::AckEvents { subscriber, seq } => {
             crate::events::acknowledge(state, subscriber, seq).await
         }
+        Request::ReviewApprove(req) => {
+            crate::reviews::handle(state, ReviewCall::Approve(req)).await
+        }
+        Request::ReviewApprovals { change } => {
+            crate::reviews::handle(state, ReviewCall::Approvals(change)).await
+        }
         Request::ReviewComment(req) => {
             crate::reviews::handle(state, ReviewCall::Comment(req)).await
         }
