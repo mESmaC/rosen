@@ -8,6 +8,7 @@ mod config_cmd;
 mod history_cmd;
 mod import;
 mod land_cmd;
+mod output;
 mod overlaps_cmd;
 mod receipt_cmd;
 mod review_cmd;
@@ -22,10 +23,6 @@ use clap::Parser;
 use commands::{Cli, Command, ServerCommand, WorkspaceCommand};
 use rosen_client::Endpoint;
 
-/// Schema tag for `--json` error output. Bump it when the shape changes, so
-/// agents parsing the output can detect the change (SPEC.md R10).
-const ERROR_SCHEMA: &str = "rosen.error/v1";
-
 /// Exit status for an invalid command line, as clap uses.
 const USAGE_EXIT: u8 = 2;
 
@@ -34,8 +31,19 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => return report_usage_error(&error),
     };
-    let operation = cli.command.path();
-    match run(&cli) {
+    if cli.json_schema {
+        println!("{}", output::CATALOG);
+        return ExitCode::SUCCESS;
+    }
+    let Some(command) = &cli.command else {
+        use clap::CommandFactory;
+        return report_usage_error(&Cli::command().error(
+            clap::error::ErrorKind::MissingSubcommand,
+            "a command is required",
+        ));
+    };
+    let operation = command.path();
+    match run(&cli, command) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {
@@ -45,16 +53,16 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
+fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> {
     let endpoint = cli
         .endpoint
         .clone()
         .map_or_else(Endpoint::resolve, Endpoint::new);
     let json = cli.json;
-    if let Some((verb, change, paths)) = path_record_call(&cli.command) {
+    if let Some((verb, change, paths)) = path_record_call(command) {
         return block_on(claim_cmd::run(json, &endpoint, verb, change, paths));
     }
-    match &cli.command {
+    match command {
         Command::Server(ServerCommand::Start) => block_on(server::start(json, &endpoint)),
         Command::Server(ServerCommand::Status) => block_on(server::status(json, &endpoint)),
         Command::Events { after, agent, all } => {
@@ -72,7 +80,7 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
             block_on(commit_cmd::watch(json, &endpoint, workspace.as_deref()))
         }
         Command::Workspace(command) => block_on(workspace_cmd::run(json, &endpoint, command)),
-        Command::Log { .. } | Command::Diff(_) => history(json, &endpoint, &cli.command),
+        Command::Log { .. } | Command::Diff(_) => history(json, &endpoint, command),
         Command::Review(review) => block_on(review_cmd::run(json, &endpoint, review)),
         Command::Receipt(receipt) => block_on(receipt_cmd::run(json, &endpoint, receipt)),
         Command::Land { change } => block_on(land_cmd::run(json, &endpoint, change)),
@@ -169,32 +177,20 @@ fn report_usage_error(error: &clap::Error) -> ExitCode {
     use clap::error::ErrorKind;
     let informational = matches!(
         error.kind(),
-        ErrorKind::DisplayHelp
-            | ErrorKind::DisplayVersion
-            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
     );
     if informational || !std::env::args_os().any(|arg| arg == "--json") {
         error.exit();
     }
     let rendered = error.to_string();
     let message = rendered.trim_end();
-    let body = serde_json::json!({
-        "schema": ERROR_SCHEMA,
-        "command": serde_json::Value::Null,
-        "error": message.strip_prefix("error: ").unwrap_or(message),
-    });
-    println!("{body}");
+    output::print_error(None, message.strip_prefix("error: ").unwrap_or(message));
     ExitCode::from(USAGE_EXIT)
 }
 
 fn report_error(json: bool, operation: &str, error: &rosen_client::Error) {
     if json {
-        let body = serde_json::json!({
-            "schema": ERROR_SCHEMA,
-            "command": operation,
-            "error": error.to_string(),
-        });
-        println!("{body}");
+        output::print_error(Some(operation), &error.to_string());
     } else {
         eprintln!("rosen: {error}");
     }

@@ -6,9 +6,8 @@ use rosen_client::{Client, Endpoint, Error};
 use rosen_core::AgentId;
 use serde_json::json;
 
-/// Schema tags for `--json` output (SPEC.md R10).
-const STATUS_SCHEMA: &str = "rosen.server.status/v1";
-const EVENT_SCHEMA: &str = "rosen.event/v1";
+use crate::output::EVENT_SCHEMA;
+use crate::output::SERVER_STATUS_SCHEMA as STATUS_SCHEMA;
 
 /// Whether a command succeeded, for the process exit status.
 pub type Succeeded = bool;

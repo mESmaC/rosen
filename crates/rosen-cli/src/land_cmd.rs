@@ -5,8 +5,7 @@ use rosen_client::protocol::{LandAnswer, LandStatus};
 use rosen_client::{Endpoint, Error};
 use serde_json::json;
 
-/// Schema tag for `--json` output (SPEC R10). Bump on any shape change.
-const LAND_SCHEMA: &str = "rosen.land/v1";
+use crate::output::LAND_SCHEMA;
 
 /// Exits unsuccessfully when the land is refused, so scripts can branch on
 /// the exit code alone.
