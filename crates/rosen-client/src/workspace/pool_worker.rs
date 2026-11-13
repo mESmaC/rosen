@@ -50,7 +50,10 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
 }
 
 async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<(), Error> {
+    // Read on every pass: a land can change the configured size.
+    let configured = client.base_config().await?.warm_pool.size as usize;
     let mut state = pool.state.lock().await;
+    state.size = state.requested.unwrap_or(configured);
     while state.ready.len() > state.size {
         let slot = state.ready.pop().expect("excess slot");
         std::fs::remove_dir_all(slot.path)?;
