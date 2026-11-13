@@ -195,7 +195,8 @@ fn refusal_status(
             "the change has stored conflicts; resolve them with `rosen resolve`".into()
         }
         Refusal::Unapproved => format!(
-            "no approval for the current head {head}; a reviewer reads that head and runs              `rosen review approve {} --head {head}`. A new head from the author voids an approval",
+            "no approval for the current head {head}; a reviewer reads that head and runs \
+             `rosen review approve {} --head {head}`. A new head from the author voids an approval",
             change.id
         ),
         Refusal::NoReceipt => format!("the change has no receipt: {submit}"),
