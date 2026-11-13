@@ -177,7 +177,7 @@ fn refusal_status(
     base: &CommitId,
     refusal: Refusal,
 ) -> Result<LandStatus, ErrorBody> {
-    let set = &engine.config().pre_land_check_set;
+    let set = engine.check_set_at(base).map_err(land_body)?;
     let head = change.head;
     let submit = format!(
         "a checker runs the `{set}` check set on the merge result and submits \
@@ -241,6 +241,14 @@ impl Adapters {
 }
 
 impl ChangeBook for Adapters {
+    fn tier_at(&self, facts: &ChangeFacts, base: &CommitId) -> LandResult<Tier> {
+        let state = self.state()?;
+        let store = LooseObjectStore::open(state.config.objects_dir())
+            .map_err(|error| LandError::Backend(error.to_string()))?;
+        crate::reviews::tiers::compute(&store, base, &facts.merge_base, &facts.head)
+            .map_err(LandError::Backend)
+    }
+
     fn facts(&self, id: &ChangeId) -> LandResult<Option<ChangeFacts>> {
         let state = self.state()?;
         let change = match state.changes.with_conn(|c| changes::get(c, *id)) {

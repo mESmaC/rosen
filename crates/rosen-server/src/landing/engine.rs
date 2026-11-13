@@ -126,8 +126,9 @@ impl Landing {
     /// same receipt was already stored.
     pub fn submit_receipt(&self, receipt: Receipt) -> LandResult<Receipt> {
         let facts = self.facts(&receipt.change)?;
+        let required = self.check_set_at(&self.current_base()?)?;
         receipt
-            .check_binding(&facts.head, facts.state, &self.config.pre_land_check_set)
+            .check_binding(&facts.head, facts.state, &required)
             .map_err(|refusal| LandError::InvalidReceipt(refusal.to_string()))?;
         let base_ref = &self.config.base_ref;
         if self.ledger.base_seq(base_ref, &receipt.base)?.is_none() {
@@ -181,8 +182,9 @@ impl Landing {
         if let Some(commit) = self.ledger.landing_of(change)? {
             return Ok(Attempt::Done(LandOutcome::AlreadyLanded { commit }));
         }
-        let facts = self.facts(change)?;
+        let mut facts = self.facts(change)?;
         let base = self.current_base()?;
+        facts.tier = self.deps.book.tier_at(&facts, &base)?;
         // A receipt on a base newer than the one read means the base moved
         // mid-attempt; retrying reads that base instead of failing the land.
         let Some(mut gathered) = self.gather(&facts, &base)? else {
@@ -252,7 +254,7 @@ impl Landing {
             &self.config.base_ref,
             &facts.id,
             &facts.head,
-            &self.config.pre_land_check_set,
+            &self.check_set_at(base)?,
             base,
         )?;
         let receipt = match lookup {
@@ -271,6 +273,17 @@ impl Landing {
             }
         };
         Ok(Some(Gathered { input, receipt }))
+    }
+
+    /// Resolve against the attempt's immutable base. A cached engine can
+    /// outlive a config land, including when its own CAS loses that race.
+    pub(crate) fn check_set_at(&self, base: &CommitId) -> LandResult<String> {
+        match &self.recheck_store {
+            Some(store) => crate::project_config::resolve(store.as_ref(), base)
+                .map(|resolved| resolved.config.checks.pre_land.name.clone())
+                .map_err(|error| LandError::Backend(error.to_string())),
+            None => Ok(self.config.pre_land_check_set.clone()),
+        }
     }
 
     fn independent_since(
