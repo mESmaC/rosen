@@ -2,8 +2,8 @@
 //! daemons from other machines on a TCP port with TLS, alongside the local
 //! transport, and serves them the same protocol.
 //!
-//! A network peer must present the project's machine credential in its
-//! hello; a local client needs none, because the local transport is already
+//! A network peer presents its own machine credential in its
+//! hello (an anonymous peer can only enroll); a local client needs none, because the local transport is already
 //! limited to the OS user.
 
 pub mod identity;
@@ -41,7 +41,7 @@ pub struct UpstreamConfig {
     pub address: String,
     /// The server certificate's fingerprint. The daemon talks to no other.
     pub fingerprint: Fingerprint,
-    /// The machine credential presented in each hello.
+    /// The credential or Credential Manager reference resolved for each hello.
     pub credential: String,
 }
 
