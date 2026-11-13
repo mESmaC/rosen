@@ -114,6 +114,18 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
+    JoinKeyCreate(crate::CreateJoinKey),
+    MachineEnroll {
+        key: String,
+        name: String,
+    },
+    MachineRotate {
+        credential: String,
+    },
+    MachinePending {
+        name: String,
+        role: crate::MachineRole,
+    },
     /// Offers the newest untested landed commit to an external checker (R12).
     PostLandNext,
     /// Marks the tested landed prefix green after the full check set passed.
@@ -250,6 +262,10 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
+    JoinKeyCreated {
+        key: String,
+    },
+    MachineCredential(crate::MachineCredential),
     PostLand(crate::post_land::PostLandWork),
     Pong,
     PoolSized,
