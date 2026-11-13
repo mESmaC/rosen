@@ -40,6 +40,8 @@ Output:
   line whose `schema` field names its shape and version, such as
   `rosen.change/v1`. A shape change bumps the version. Failures print
   `rosen.error/v1` objects with `command` and `error` fields.
+  Use --json-schema to print the complete validation catalog offline.
+  Help and version requests print text even with --json.
 
 Exit status:
   0  the command did what it was asked
@@ -68,13 +70,17 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Print the complete JSON Schema catalog offline and exit.
+    #[arg(long, global = true)]
+    pub json_schema: bool,
+
     /// Server pipe name (Windows) or socket path. Defaults to $ROSEN_ENDPOINT,
     /// then the per-user default, so normally you never set it.
     #[arg(long, global = true, value_name = "ENDPOINT")]
     pub endpoint: Option<String>,
 
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]

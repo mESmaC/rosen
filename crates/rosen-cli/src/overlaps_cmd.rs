@@ -7,8 +7,7 @@ use rosen_client::protocol::{OverlapAnswer, OverlapQuery};
 use rosen_client::{Endpoint, Error};
 use serde_json::json;
 
-/// Schema tag for `--json` output (SPEC R10). Bump on any shape change.
-const OVERLAPS_SCHEMA: &str = "rosen.overlaps/v1";
+use crate::output::OVERLAPS_SCHEMA;
 
 pub async fn run(json: bool, endpoint: &Endpoint, args: &OverlapArgs) -> Result<Succeeded, Error> {
     // Paths alone are a path query, so only a bare `rosen overlaps` falls
