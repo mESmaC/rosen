@@ -8,6 +8,45 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+/// The part of `rosen --help` an agent needs before its first command:
+/// the workflow, identity, output and exit conventions (SPEC.md R10).
+const AFTER_LONG_HELP: &str = "\
+Getting started:
+  rosen server start                      start this machine's daemon (most
+                                          commands start it on demand)
+  rosen change new --workspace <DIR>      new change with a local workspace
+  rosen workspace watch <DIR>             snapshot every write within 2 s
+  rosen claim --change <CHANGE> <PATHS>   claim what you will edit
+  rosen status                            your change, claims, conflicts and
+                                          unsnapshotted files
+  rosen commit -m <MESSAGE>               a named snapshot
+  rosen review approve <CHANGE>           (a reviewer) approve the head
+  rosen receipt submit <CHANGE> ...       (a checker) record passed checks
+  rosen land <CHANGE>                     move the base to the change
+
+Changes are named by their ID (32 letters k-z) or any unique prefix of it.
+A workspace is any directory `rosen change new --workspace` made; commands
+run inside one use its change when no change is given.
+
+Environment:
+  ROSEN_AGENT     your agent identity (owner, author, submitter); defaults
+                  to the OS user name
+  ROSEN_CHANGE    the change `claim`, `share`, `wait`, `release` and
+                  `status` act on when no --change is given
+  ROSEN_ENDPOINT  the daemon's pipe name or socket path
+
+Output:
+  Text is for people. With --json each command prints one JSON object per
+  line whose `schema` field names its shape and version, such as
+  `rosen.change/v1`. A shape change bumps the version. Failures print
+  `rosen.error/v1` objects with `command` and `error` fields.
+
+Exit status:
+  0  the command did what it was asked
+  1  it failed or was refused (a claim held by another change, a server
+     that is not running for `server status`, a server error)
+  2  the command line was invalid";
+
 /// Rosen: version control for many coding agents working at once.
 ///
 /// Each agent works on its own change, in its own workspace. Every write to
@@ -18,7 +57,12 @@ use clap::{Args, Parser, Subcommand};
 /// Typical flow: `rosen change new`, edit files, `rosen claim <paths>`,
 /// get a review and a receipt, then `rosen land <change>`.
 #[derive(Debug, Parser)]
-#[command(name = "rosen", version, propagate_version = true)]
+#[command(
+    name = "rosen",
+    version,
+    propagate_version = true,
+    after_long_help = AFTER_LONG_HELP
+)]
 pub struct Cli {
     /// Print machine-readable JSON with a versioned schema instead of text.
     #[arg(long, global = true)]
@@ -73,8 +117,16 @@ pub enum Command {
         #[arg(long, value_name = "DIR")]
         workspace: Option<PathBuf>,
     },
-    /// Show the current change, its state, conflicts and unsnapshotted files.
-    Status,
+    /// Show a change: its state, head, conflicts and path claims, and for a
+    /// local workspace, what is not yet stored on the server.
+    ///
+    /// Inside a workspace (or with --workspace) it also scans every file,
+    /// as `rosen workspace delete` would, and lists files that differ from
+    /// the last stored snapshot, snapshots still waiting in the offline
+    /// journal, and whether the server has rebased the change since this
+    /// workspace's last snapshot (apply it before relying on line numbers).
+    /// Reads only: it never snapshots or changes a file.
+    Status(StatusArgs),
     /// Show a change's diff against its parent, as the server holds it.
     ///
     /// The server diffs the change's head, the tree of its latest snapshot
@@ -118,8 +170,8 @@ pub enum Command {
     /// once for paths nobody claims.
     Wait(ClaimArgs),
     /// Drop a change's claims, shares and waits on paths, waking any change
-    /// waiting on them.
-    Release(ClaimArgs),
+    /// waiting on them. `--all` drops every record the change holds.
+    Release(ReleaseArgs),
     /// List changes that overlap a change or a set of paths.
     ///
     /// Two changes overlap when they claim the same path, or their edits in
@@ -177,6 +229,79 @@ pub enum Command {
         /// storing a cursor. For dashboards and the Velocity view.
         #[arg(long)]
         all: bool,
+    },
+    /// Enroll this machine in a project, or list, approve and revoke the
+    /// machines enrolled in it.
+    ///
+    /// One server holds each project; every other machine running agents
+    /// for it is enrolled once with a join key, and every agent on it works
+    /// under that machine's credential.
+    #[command(subcommand)]
+    Machine(MachineCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MachineCommand {
+    /// Join this machine to a project with a join key. Non-interactive, so
+    /// it runs from an install script or a machine image.
+    ///
+    /// The daemon connects to the server the key names (or finds it by
+    /// DNS-SD on the local network) and checks the server's certificate
+    /// against the key's fingerprint. On a mismatch it stops before sending
+    /// the key. Otherwise it exchanges the key for this machine's own
+    /// credential, stores it encrypted (DPAPI on Windows) and rotates it
+    /// before it expires. The key is never used again by this machine.
+    Join {
+        /// The join key, as `rosen machine key create` printed it.
+        key: String,
+    },
+    /// List enrolled and pending machines with their role, last contact and
+    /// running agents.
+    List,
+    /// Admit a machine that asked to join without a key and is pending.
+    Approve {
+        /// The machine, as `rosen machine list` names it.
+        machine: String,
+    },
+    /// Revoke a machine's credential. Its next request is refused. Its
+    /// changes, claims and workspaces are kept.
+    Revoke {
+        /// The machine, as `rosen machine list` names it.
+        machine: String,
+    },
+    /// Create, list or revoke join keys.
+    #[command(subcommand)]
+    Key(MachineKeyCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MachineKeyCommand {
+    /// Create a join key and print it. Anyone holding it can enroll
+    /// machines until it expires or is used up, so pass it only to the
+    /// machines' provisioning.
+    ///
+    /// The key carries the server's address and certificate fingerprint,
+    /// so a joining machine needs nothing else.
+    Create {
+        /// Role of the machines it enrolls: `agent` runs agents, `checker`
+        /// runs checks and submits receipts.
+        #[arg(long, value_parser = ["agent", "checker"])]
+        role: String,
+        /// How long the key stays valid, such as `30m`, `24h` or `7d`.
+        #[arg(long, value_name = "DURATION")]
+        expires: String,
+        /// How many machines can join with it.
+        #[arg(long, value_name = "N")]
+        uses: u32,
+    },
+    /// List join keys with their role, expiry and remaining uses. Never
+    /// prints the secret part of a key.
+    List,
+    /// Revoke a join key so no further machine can join with it. Machines
+    /// that already joined keep their own credentials.
+    Revoke {
+        /// The key's ID, as `rosen machine key list` prints it.
+        key: String,
     },
 }
 
@@ -388,6 +513,34 @@ pub struct ClaimArgs {
     pub paths: Vec<String>,
 }
 
+/// What `rosen release` drops: some paths, or every record with `--all`.
+#[derive(Debug, Args)]
+pub struct ReleaseArgs {
+    /// Change the records belong to: its ID or a unique prefix. Defaults to
+    /// $ROSEN_CHANGE.
+    #[arg(long)]
+    pub change: Option<String>,
+    /// Release every claim, share and wait the change holds.
+    #[arg(long, conflicts_with = "paths")]
+    pub all: bool,
+    /// Paths or globs to release, exactly as they were claimed.
+    #[arg(required_unless_present = "all")]
+    pub paths: Vec<String>,
+}
+
+/// Which change `rosen status` reports on.
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// Change to show: its ID or a unique prefix. Defaults to the change of
+    /// the workspace holding the current directory, then $ROSEN_CHANGE.
+    /// Given alone, no workspace is scanned.
+    #[arg(long)]
+    pub change: Option<String>,
+    /// Workspace to scan. Defaults to the one holding the current directory.
+    #[arg(long, value_name = "DIR")]
+    pub workspace: Option<PathBuf>,
+}
+
 /// A change and optional paths that narrow a query.
 #[derive(Debug, Args)]
 pub struct ChangePaths {
@@ -406,7 +559,7 @@ impl Command {
             Command::Import { .. } => "import",
             Command::Change(sub) => sub.path(),
             Command::Commit { .. } => "commit",
-            Command::Status => "status",
+            Command::Status(_) => "status",
             Command::Diff(_) => "diff",
             Command::Log { .. } => "log",
             Command::Claim(_) => "claim",
@@ -425,6 +578,21 @@ impl Command {
             Command::Server(ServerCommand::Status) => "server status",
             Command::Config(ConfigCommand::Show { .. }) => "config show",
             Command::Events { .. } => "events",
+            Command::Machine(sub) => sub.path(),
+        }
+    }
+}
+
+impl MachineCommand {
+    fn path(&self) -> &'static str {
+        match self {
+            MachineCommand::Join { .. } => "machine join",
+            MachineCommand::List => "machine list",
+            MachineCommand::Approve { .. } => "machine approve",
+            MachineCommand::Revoke { .. } => "machine revoke",
+            MachineCommand::Key(MachineKeyCommand::Create { .. }) => "machine key create",
+            MachineCommand::Key(MachineKeyCommand::List) => "machine key list",
+            MachineCommand::Key(MachineKeyCommand::Revoke { .. }) => "machine key revoke",
         }
     }
 }
