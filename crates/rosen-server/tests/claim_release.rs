@@ -73,7 +73,8 @@ async fn release_fixtures_cover_rollback_and_restart_delivery() {
         let wakes = state
             .events
             .page(0, Some(&AgentId::new("waiter").unwrap()), 100)
-            .unwrap();
+            .unwrap()
+            .events;
         let id = waiter.to_string();
         let woke = wakes
             .iter()

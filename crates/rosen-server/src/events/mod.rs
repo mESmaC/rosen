@@ -12,21 +12,27 @@
 //! Subscribers read the log from their cursor, then sleep on a watch channel
 //! until a newer sequence number is published, so delivery never depends on a
 //! bounded channel keeping up. Delivery is at least once: a subscriber's
-//! cursor moves only when it acknowledges what it has handled.
+//! cursor moves only when it acknowledges what it has handled, and an event
+//! whose write fails is queued and retried in order rather than dropped.
 
 pub mod audience;
 mod landing_sink;
+mod pending;
 mod store;
 
 pub use audience::Concern;
 pub use landing_sink::LandingEvents;
+pub use store::Page;
 
 use crate::ServerState;
+use pending::Pending;
 use rosen_core::AgentId;
 use rosen_protocol::{ErrorBody, ErrorCode, Event, EventCursor, EventKind, Outcome, Response};
 use rusqlite::{Connection, OpenFlags};
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use tokio::sync::watch;
 
 /// Why the log could not be read or written.
@@ -38,13 +44,33 @@ pub enum EventError {
     Io(#[from] std::io::Error),
 }
 
+/// Finds the owners of live changes whose edits overlap a change, by the
+/// SPEC §2 overlap rule. The server installs it: the log cannot compute it
+/// from its own tables, because edits live in the changes' trees.
+pub type OverlapOwners = dyn Fn(&str) -> Result<Vec<AgentId>, String> + Send + Sync;
+
 pub struct EventLog {
+    inner: Arc<Inner>,
+    overlap_owners: OnceLock<Box<OverlapOwners>>,
+}
+
+/// The log's state, shared with the thread that retries failed writes.
+pub(crate) struct Inner {
     /// `None` keeps the log in memory, for tests.
     db_path: Option<PathBuf>,
+    slot: Mutex<Slot>,
+    latest: watch::Sender<u64>,
+    /// True while a retry thread owns the queue's unstored events.
+    retrying: AtomicBool,
+}
+
+struct Slot {
     /// Opened on first use, like the change registry's, so a server that
     /// never publishes or reads an event never creates the database.
-    db: Mutex<Option<Connection>>,
-    latest: watch::Sender<u64>,
+    conn: Option<Connection>,
+    /// Events whose write failed, oldest first. Every new event queues
+    /// behind them so the log keeps publish order.
+    queue: VecDeque<Pending>,
 }
 
 impl EventLog {
@@ -59,16 +85,32 @@ impl EventLog {
     }
 
     fn with_path(db_path: Option<PathBuf>) -> Self {
-        Self {
+        let slot = Slot {
+            conn: None,
+            queue: VecDeque::new(),
+        };
+        let inner = Inner {
             db_path,
-            db: Mutex::new(None),
+            slot: Mutex::new(slot),
             latest: watch::Sender::new(0),
+            retrying: AtomicBool::new(false),
+        };
+        Self {
+            inner: Arc::new(inner),
+            overlap_owners: OnceLock::new(),
         }
+    }
+
+    /// Installs how to find the owners of changes whose edits overlap an
+    /// event's change. Only the first call takes effect.
+    pub fn set_overlap_owners(&self, find: Box<OverlapOwners>) {
+        let _ = self.overlap_owners.set(find);
     }
 
     /// Publishes an event about `change` to the agents it concerns, or to
     /// every subscriber when `change` is `None`. Returns its sequence number,
-    /// or 0 when it could not be stored (the failure is logged).
+    /// or 0 when its write failed: it is then queued and stored, in order,
+    /// by a retry.
     pub fn publish(
         &self,
         kind: EventKind,
@@ -87,45 +129,88 @@ impl EventLog {
         detail: serde_json::Value,
         concern: &Concern,
     ) -> u64 {
-        let stored = self.with_db(true, |conn| {
-            let audience = match &change {
-                Some(id) => audience_or_everyone(conn, id, concern),
-                None => None,
+        // Found before taking the log's lock: it reads the change registry
+        // and trees, and must not hold up the log's readers meanwhile.
+        let concern = change
+            .as_deref()
+            .and_then(|id| self.with_overlapping_owners(id, concern));
+        let inner = &self.inner;
+        inner.with_slot(|slot| {
+            let opened = inner.connection(&mut slot.conn, true);
+            // The audience is fixed now, from the state the publisher just
+            // committed, even if the write itself is retried later.
+            let audience = match (&change, &concern, &opened) {
+                (Some(id), Some(concern), Ok(Some(conn))) => {
+                    audience_or_everyone(conn, id, concern)
+                }
+                _ => None,
             };
-            let seq = store::append(conn, kind, change.as_deref(), &detail, audience.as_ref())?;
-            // Publish while holding the lock so subscribers see sequence
-            // numbers in order.
-            self.latest.send_replace(seq);
-            Ok(seq)
-        });
-        match stored {
-            Ok(seq) => seq.unwrap_or(0),
-            Err(err) => {
-                eprintln!("rosen-server: could not store a {kind:?} event: {err}");
-                0
+            slot.queue.push_back(Pending {
+                kind,
+                change,
+                detail,
+                audience,
+            });
+            let stored = match opened {
+                Ok(Some(conn)) => pending::flush(inner, conn, &mut slot.queue),
+                Ok(None) => Ok(0),
+                Err(err) => Err(err),
+            };
+            match stored {
+                Ok(seq) if slot.queue.is_empty() => seq,
+                outcome => {
+                    if let Err(err) = outcome {
+                        eprintln!("rosen-server: queued a {kind:?} event to retry: {err}");
+                    }
+                    pending::ensure_retrying(inner);
+                    0
+                }
+            }
+        })
+    }
+
+    /// `concern` plus the owners of changes whose edits overlap `change`, or
+    /// `None` (broadcast) when they cannot be found: delivery is at least
+    /// once, so an event goes to too many subscribers rather than too few.
+    fn with_overlapping_owners(&self, change: &str, concern: &Concern) -> Option<Concern> {
+        let mut concern = concern.clone();
+        if let Some(find) = self.overlap_owners.get() {
+            match find(change) {
+                Ok(owners) => concern.agents.extend(owners),
+                Err(err) => {
+                    eprintln!("rosen-server: broadcasting an event about {change}: {err}");
+                    return None;
+                }
             }
         }
+        Some(concern)
     }
 
     /// Every event after `cursor`, oldest first.
     pub fn after(&self, cursor: u64) -> Vec<Event> {
-        self.page(cursor, None, u64::MAX).unwrap_or_else(|err| {
-            eprintln!("rosen-server: could not read events: {err}");
-            Vec::new()
-        })
+        match self.page(cursor, None, u64::MAX) {
+            Ok(page) => page.events,
+            Err(err) => {
+                eprintln!("rosen-server: could not read events: {err}");
+                Vec::new()
+            }
+        }
     }
 
-    /// Up to `limit` events after `cursor` for one subscriber: broadcasts
-    /// and events that concern it, or every event when `subscriber` is `None`.
+    /// Up to `limit` rows after `cursor` for one subscriber: broadcasts and
+    /// events that concern it, or every event when `subscriber` is `None`.
     pub fn page(
         &self,
         cursor: u64,
         subscriber: Option<&AgentId>,
         limit: u64,
-    ) -> Result<Vec<Event>, EventError> {
+    ) -> Result<Page, EventError> {
         let agent = subscriber.map(AgentId::as_str);
-        let events = self.with_db(false, |conn| Ok(store::page(conn, cursor, agent, limit)?))?;
-        Ok(events.unwrap_or_default())
+        let page = self.with_db(false, |conn| Ok(store::page(conn, cursor, agent, limit)?))?;
+        Ok(page.unwrap_or(Page {
+            scanned_to: cursor,
+            ..Page::default()
+        }))
     }
 
     /// Where the subscriber resumes when it names no cursor: after the last
@@ -144,19 +229,19 @@ impl EventLog {
         Ok(stored.unwrap_or(0))
     }
 
-    /// The newest sequence number, 0 when the log is empty.
+    /// The newest stored sequence number, 0 when the log is empty.
     pub fn last_seq(&self) -> u64 {
         // Opening reads the stored sequence, so a restarted server reports
         // the log's real tip rather than 0.
         if let Err(err) = self.with_db(false, |_| Ok(())) {
             eprintln!("rosen-server: could not open the event log: {err}");
         }
-        *self.latest.borrow()
+        *self.inner.latest.borrow()
     }
 
-    /// A receiver that changes whenever a new event is published.
+    /// A receiver that changes whenever a new event is stored.
     pub fn watch(&self) -> watch::Receiver<u64> {
-        self.latest.subscribe()
+        self.inner.latest.subscribe()
     }
 
     /// Runs `work` on the log's connection. Returns `Ok(None)` without
@@ -167,14 +252,31 @@ impl EventLog {
         create: bool,
         work: impl FnOnce(&mut Connection) -> Result<T, EventError>,
     ) -> Result<Option<T>, EventError> {
-        let mut slot = self.db.lock().unwrap_or_else(PoisonError::into_inner);
-        if slot.is_none() {
-            match self.connect(create)? {
-                Some(conn) => *slot = Some(conn),
-                None => return Ok(None),
-            }
+        let inner = &self.inner;
+        inner.with_slot(|slot| match inner.connection(&mut slot.conn, create)? {
+            Some(conn) => work(conn).map(Some),
+            None => Ok(None),
+        })
+    }
+}
+
+impl Inner {
+    fn with_slot<T>(&self, work: impl FnOnce(&mut Slot) -> T) -> T {
+        let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        work(&mut slot)
+    }
+
+    /// The open connection, opening it first if needed. `Ok(None)` when
+    /// `create` is false and no database exists yet.
+    fn connection<'a>(
+        &self,
+        conn: &'a mut Option<Connection>,
+        create: bool,
+    ) -> Result<Option<&'a mut Connection>, EventError> {
+        if conn.is_none() {
+            *conn = self.connect(create)?;
         }
-        work(slot.as_mut().expect("connection opened above")).map(Some)
+        Ok(conn.as_mut())
     }
 
     fn connect(&self, create: bool) -> Result<Option<Connection>, EventError> {

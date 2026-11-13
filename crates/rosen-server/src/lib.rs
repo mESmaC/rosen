@@ -91,6 +91,7 @@ impl ServerState {
         });
         let base = import::base::LedgerBase::new(state.config.clone());
         state.changes.set_base_source(Arc::new(base));
+        state.events.set_overlap_owners(overlap_owners(&state));
         state
     }
 
@@ -155,6 +156,26 @@ impl ServerState {
 struct NetworkInfo {
     identity: Identity,
     address: SocketAddr,
+}
+
+/// The owners of changes whose edits overlap an event's change, which R9
+/// counts among its audience. Weak, because the log lives in the state.
+fn overlap_owners(state: &Arc<ServerState>) -> Box<events::OverlapOwners> {
+    let state = Arc::downgrade(state);
+    Box::new(move |change| {
+        let Some(state) = state.upgrade() else {
+            return Ok(Vec::new());
+        };
+        let subject = overlaps::Subject::Change(change.to_string());
+        match overlaps::find(&state, &subject) {
+            Ok(found) => Ok(found.into_iter().map(|overlap| overlap.owner).collect()),
+            // No such change has no edits, so nothing overlaps it.
+            Err(overlaps::OverlapError::Change(changes::ChangeError::NotFound(_))) => {
+                Ok(Vec::new())
+            }
+            Err(err) => Err(err.to_string()),
+        }
+    })
 }
 
 pub(crate) struct ConnectionGuard(Arc<ServerState>);

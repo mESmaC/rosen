@@ -2,6 +2,11 @@
 //! reviewers, the owners of changes stacked on it, and the holders of
 //! overlapping changes or claims.
 //!
+//! This module reads what the metadata tables record: owners, reviews,
+//! stacks and path claims. Owners of changes whose edits overlap come from
+//! the §2 overlap rule, which the server installs with
+//! [`super::EventLog::set_overlap_owners`], since edits live in trees.
+//!
 //! The audience is fixed when the event is published, from the state the
 //! publishing operation just committed, so a later release or land never
 //! changes who an already-published event reaches.
@@ -49,16 +54,19 @@ fn owner(conn: &Connection, change: &str) -> rusqlite::Result<Option<String>> {
     rows.next().transpose()
 }
 
-/// Everyone who has commented on or resolved a review thread on the change
-/// (R7): the change model records no reviewer list, so taking part in its
-/// review is what makes an agent a reviewer.
+/// Everyone who has commented on, resolved or approved the change (R7): the
+/// change model records no reviewer list, so taking part in its review is
+/// what makes an agent a reviewer. An approval a later snapshot voided still
+/// counts, since that reviewer is the one who must look again.
 fn reviewers(conn: &Connection, change: &str) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare_cached(
         "SELECT rc.author FROM review_comments rc
              JOIN review_threads rt ON rt.id = rc.thread_id WHERE rt.change_id = ?1
          UNION
          SELECT resolved_by FROM review_threads
-             WHERE change_id = ?1 AND resolved_by IS NOT NULL",
+             WHERE change_id = ?1 AND resolved_by IS NOT NULL
+         UNION
+         SELECT reviewer FROM review_approvals WHERE change_id = ?1",
     )?;
     let rows = stmt.query_map([change], |row| row.get(0))?;
     rows.collect()

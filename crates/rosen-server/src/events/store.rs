@@ -74,22 +74,36 @@ pub fn append(
     Ok(to_seq(seq))
 }
 
-/// Up to `limit` events after `cursor`, oldest first. With a subscriber,
-/// only broadcasts and the events whose audience names it.
+/// One read of the log: the events a subscriber should see, and how far the
+/// read got, which is past any row it skipped.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Page {
+    pub events: Vec<Event>,
+    /// The highest sequence number the read scanned, or the starting cursor
+    /// when it found nothing. Resume after this, not after the last event:
+    /// a run of rows this build cannot read must be passed for good, or a
+    /// subscriber would re-read it forever and never see newer events.
+    pub scanned_to: u64,
+    /// True when the read hit its limit, so more rows may be waiting.
+    pub full: bool,
+}
+
+/// Up to `limit` rows after `cursor`, oldest first. With a subscriber, only
+/// broadcasts and the events whose audience names it.
 pub fn page(
     conn: &Connection,
     cursor: u64,
     subscriber: Option<&str>,
     limit: u64,
-) -> rusqlite::Result<Vec<Event>> {
-    let cursor = i64::try_from(cursor).unwrap_or(i64::MAX);
-    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+) -> rusqlite::Result<Page> {
+    let from = i64::try_from(cursor).unwrap_or(i64::MAX);
+    let max_rows = i64::try_from(limit).unwrap_or(i64::MAX);
     let columns = "SELECT seq, kind, change_id, detail FROM events";
     let rows = match subscriber {
         None => {
             let sql = format!("{columns} WHERE seq > ?1 ORDER BY seq LIMIT ?2");
             let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(params![cursor, limit], read_event)?;
+            let rows = stmt.query_map(params![from, max_rows], read_event)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         }
         Some(agent) => {
@@ -99,11 +113,15 @@ pub fn page(
                  ORDER BY seq LIMIT ?3"
             );
             let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(params![cursor, agent, limit], read_event)?;
+            let rows = stmt.query_map(params![from, agent, max_rows], read_event)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         }
     };
-    Ok(rows.into_iter().flatten().collect())
+    Ok(Page {
+        scanned_to: rows.last().map_or(cursor, |(seq, _)| *seq),
+        full: rows.len() as u64 >= limit,
+        events: rows.into_iter().filter_map(|(_, event)| event).collect(),
+    })
 }
 
 /// The subscriber's stored cursor, if it ever acknowledged an event.
@@ -133,23 +151,25 @@ pub fn acknowledge(conn: &Connection, subscriber: &str, seq: u64) -> rusqlite::R
     .map(to_seq)
 }
 
-/// Reads one row. A row whose kind this build does not know (written by a
-/// newer server) is skipped rather than failing the whole page.
-fn read_event(row: &Row) -> rusqlite::Result<Option<Event>> {
-    let seq: i64 = row.get(0)?;
+/// Reads one row with its sequence number. A row whose kind this build does
+/// not know (written by a newer server) has no event rather than failing the
+/// whole page.
+fn read_event(row: &Row) -> rusqlite::Result<(u64, Option<Event>)> {
+    let seq = to_seq(row.get(0)?);
     let kind: String = row.get(1)?;
     let change: Option<String> = row.get(2)?;
     let detail: String = row.get(3)?;
     let Ok(kind) = serde_json::from_value::<EventKind>(serde_json::Value::String(kind)) else {
-        return Ok(None);
+        return Ok((seq, None));
     };
     let detail = serde_json::from_str(&detail).unwrap_or(serde_json::Value::Null);
-    Ok(Some(Event {
-        seq: to_seq(seq),
+    let event = Event {
+        seq,
         kind,
         change,
         detail,
-    }))
+    };
+    Ok((seq, Some(event)))
 }
 
 fn kind_text(kind: EventKind) -> String {
