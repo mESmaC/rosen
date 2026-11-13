@@ -19,6 +19,9 @@ pub struct Slot {
     log: Option<PathBuf>,
     pub starts: u32,
     pub kills: u32,
+    /// Exits the process made by itself before a planned kill reached it.
+    /// Kept, because the kill replaces the child and its status with it.
+    pub own_exits: Vec<std::process::ExitStatus>,
 }
 
 impl Slot {
@@ -30,6 +33,7 @@ impl Slot {
             log: None,
             starts: 0,
             kills: 0,
+            own_exits: Vec::new(),
         }
     }
 
@@ -69,9 +73,12 @@ impl Slot {
             .child
             .take()
             .with_context(|| format!("{} is not running", self.name))?;
-        if child.try_wait()?.is_none() {
-            child.kill().await?;
-            self.kills += 1;
+        match child.try_wait()? {
+            Some(status) => self.own_exits.push(status),
+            None => {
+                child.kill().await?;
+                self.kills += 1;
+            }
         }
         Ok(())
     }

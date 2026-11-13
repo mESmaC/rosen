@@ -129,12 +129,19 @@ impl Harness {
         Ok(())
     }
 
-    /// Daemons and the server must still be running when the run ends: one
-    /// that exited by itself crashed under the faults.
+    /// The server and daemons never exit by themselves, so any exit the plan
+    /// did not cause is a crash, whether it happened before a planned kill
+    /// or after the last restart. An agent only crashes when it fails.
     pub fn crashed(&mut self) -> Vec<String> {
         let mut crashed = Vec::new();
         for slot in std::iter::once(&mut self.server).chain(self.daemons.iter_mut()) {
-            if let Some(status) = slot.exited() {
+            let last = slot.exited();
+            for status in slot.own_exits.iter().chain(&last) {
+                crashed.push(format!("{} exited with {status}", slot.name));
+            }
+        }
+        for slot in self.agents.iter().flatten() {
+            for status in slot.own_exits.iter().filter(|status| !status.success()) {
                 crashed.push(format!("{} exited with {status}", slot.name));
             }
         }
