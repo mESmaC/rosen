@@ -3,6 +3,21 @@
 //! Velocity links this crate directly, and the `rosen` CLI is a thin layer
 //! over it. It covers daemon discovery and start, workspace
 //! materialisation, the file watcher and snapshots, and the offline journal.
+//!
+//! # Stable API
+//!
+//! - [`Session`] is the entry point: one agent's connection to its machine's
+//!   daemon, which it finds or starts. It creates, watches, snapshots and
+//!   deletes workspaces, and claims, reviews and submits receipts under the
+//!   agent's identity.
+//! - [`Client`] holds one typed method per protocol request, for everything a
+//!   session does not wrap. Its request and answer types are in
+//!   [`protocol`], whose wire format is versioned, and the model types they
+//!   carry are re-exported here.
+//! - [`Error`] is non-exhaustive, so a new failure is not a breaking change.
+//! - The [`workspace`] and [`snapshot`] modules are the lower-level pieces
+//!   sessions are built from. The daemon uses them directly; a host should
+//!   not need to.
 
 pub mod changes;
 pub mod claims;
@@ -10,23 +25,30 @@ pub mod connection;
 pub mod daemon;
 pub mod events;
 pub mod history;
+pub mod identity;
 mod import;
 pub mod project_config;
 pub mod receipts;
 pub mod reviews;
 pub mod server_workspace;
+mod session;
 pub mod snapshot;
 pub mod workspace;
 
 pub use connection::Client;
 pub use daemon::connect_or_start;
+pub use rosen_core::{AgentId, ChangeId, ChangeParent, ChangeState, ObjectId};
 pub use rosen_protocol as protocol;
 pub use rosen_protocol::Endpoint;
+pub use session::{CreatedWorkspace, Session, SessionBuilder, WorkspaceSpec, WorkspaceWatch};
+pub use snapshot::{SnapshotReport, WatchEvent};
+pub use workspace::{Report as MaterialiseReport, Sparse};
 
 use rosen_protocol::ErrorBody;
 
 /// Errors a client operation can return.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The operation exists in the CLI and API surface but has no
     /// implementation in this build yet.
@@ -58,6 +80,14 @@ pub enum Error {
     /// A local workspace could not be materialised.
     #[error(transparent)]
     Workspace(workspace::MaterialiseError),
+    /// [`Session::create_workspace`] created the change but not its
+    /// workspace. The change still exists, so the caller can retry with
+    /// [`Session::open_workspace`] or abandon it.
+    #[error("created change {change} but not its workspace: {source}")]
+    WorkspaceNotCreated {
+        change: ChangeId,
+        source: Box<Error>,
+    },
     /// A workspace could not be scanned or snapshotted.
     #[error(transparent)]
     Snapshot(#[from] snapshot::SnapshotError),
@@ -69,10 +99,13 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Runs a client operation by its command path, for example `change new`.
+/// CLI scaffolding for commands whose feature has not landed, not part of
+/// the stable API.
 ///
 /// Every operation without a typed method yet reports
 /// [`Error::NotImplemented`]; each feature replaces its operation with a typed
 /// method as it lands.
+#[doc(hidden)]
 pub fn run_operation(operation: &str) -> Result<()> {
     Err(Error::NotImplemented {
         operation: operation.to_owned(),
