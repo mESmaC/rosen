@@ -56,9 +56,13 @@ pub async fn serve_connection(stream: BoxStream, state: Arc<ServerState>) {
 pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, access: Access) {
     let _open = state.track_connection();
     let (mut reader, mut writer) = tokio::io::split(stream);
+    let mut presented = None;
     let admit = |credential: Option<&str>| match access {
         Access::Local => true,
-        Access::Network => credential.is_some_and(|given| state.credential_matches(given)),
+        Access::Network => {
+            presented = credential.map(str::to_owned);
+            credential.is_none() || credential.is_some_and(|given| state.credential_matches(given))
+        }
     };
     match handshake(&mut reader, &mut writer, admit).await {
         Ok(true) => {}
@@ -73,6 +77,7 @@ pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, acces
     let mut session = Session {
         state,
         access,
+        credential: presented,
         outbox,
         subscription: None,
     };
@@ -135,6 +140,7 @@ struct Session {
     state: Arc<ServerState>,
     access: Access,
     outbox: Outbox,
+    credential: Option<String>,
     subscription: Option<JoinHandle<()>>,
 }
 
@@ -162,6 +168,14 @@ impl Session {
     /// Acts on one frame. Returns false when the client broke the protocol and
     /// the connection should close.
     async fn handle_frame(&mut self, body: &[u8]) -> bool {
+        if self.access == Access::Network
+            && self
+                .credential
+                .as_deref()
+                .is_some_and(|c| !self.state.credential_matches(c))
+        {
+            return false;
+        }
         match decode_body::<ClientFrame>(body) {
             // Only the server's own machine may stop it: a cache answers its
             // clients' shutdown itself, so this only refuses a stray peer.
@@ -180,21 +194,51 @@ impl Session {
                 self.outbox.send(response).await.is_ok()
             }
             Ok(ClientFrame::Request { id, request }) => {
-                let state = Arc::clone(&self.state);
-                let outbox = self.outbox.clone();
-                tokio::spawn(async move {
-                    let outcome = rpc::dispatch(&state, request).await;
-                    let _ = outbox.send(ServerFrame::Response { id, outcome }).await;
-                });
+                self.dispatch(id, request);
                 true
             }
             Ok(ClientFrame::Subscribe { after, subscriber }) => {
+                if self.access == Access::Network
+                    && !self
+                        .credential
+                        .as_deref()
+                        .is_some_and(|c| self.state.credential_matches(c))
+                {
+                    return false;
+                }
                 self.subscribe(after, subscriber);
                 true
             }
             Ok(ClientFrame::Hello { .. }) => false,
             Err(err) => self.answer_undecodable(body, &err.to_string()).await,
         }
+    }
+
+    fn dispatch(&self, id: u64, request: Request) {
+        let state = Arc::clone(&self.state);
+        let outbox = self.outbox.clone();
+        let credential = self.credential.clone();
+        let network = self.access == Access::Network;
+        tokio::spawn(async move {
+            let allowed = !network
+                || match &request {
+                    Request::MachineEnroll { .. }
+                    | Request::MachineRotate { .. }
+                    | Request::MachinePending { .. } => true,
+                    _ => credential
+                        .as_deref()
+                        .is_some_and(|c| state.credential_matches(c)),
+                };
+            let outcome = if allowed {
+                rpc::dispatch(&state, request).await
+            } else {
+                Outcome::Error(ErrorBody::new(
+                    ErrorCode::Refused,
+                    "machine credential required or revoked",
+                ))
+            };
+            let _ = outbox.send(ServerFrame::Response { id, outcome }).await;
+        });
     }
 
     /// A request this build cannot decode still gets an answer under its id, so
