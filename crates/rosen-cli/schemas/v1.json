@@ -80,6 +80,9 @@
     },
     {
       "$ref": "#/$defs/rosen.config~1v2"
+    },
+    {
+      "$ref": "#/$defs/rosen.log~1v2"
     }
   ],
   "$defs": {
@@ -541,6 +544,15 @@
               "type": "null"
             }
           ]
+        },
+        "receipt": {
+          "$ref": "#/$defs/ReceiptTrailer"
+        },
+        "approvers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentId"
+          }
         }
       },
       "required": [
@@ -1488,7 +1500,7 @@
           "const": "rosen.log/v1"
         },
         "log": {
-          "$ref": "#/$defs/Log"
+          "$ref": "#/$defs/LogV1"
         }
       },
       "required": [
@@ -2176,6 +2188,114 @@
       "additionalProperties": false,
       "x-commands": [
         "config show"
+      ]
+    },
+    "LogEntryV1": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "parents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ObjectId"
+          }
+        },
+        "tree": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "author": {
+          "type": "string"
+        },
+        "time": {
+          "type": "integer"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "change": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChangeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "commit",
+        "parents",
+        "tree",
+        "author",
+        "time",
+        "summary",
+        "change"
+      ],
+      "additionalProperties": false
+    },
+    "LogV1": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LogEntryV1"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "ReceiptTrailer": {
+      "type": "object",
+      "properties": {
+        "check_set": {
+          "type": "string"
+        },
+        "head": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "base": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "submitter": {
+          "$ref": "#/$defs/AgentId"
+        }
+      },
+      "required": [
+        "check_set",
+        "head",
+        "base",
+        "submitter"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.log/v2": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.log/v2"
+        },
+        "log": {
+          "$ref": "#/$defs/Log"
+        }
+      },
+      "required": [
+        "schema",
+        "log"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "log"
       ]
     }
   }
