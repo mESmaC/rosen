@@ -1,7 +1,7 @@
 name = "proofs"
 defaultTargets = ["Bisection", "Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "StackedChanges", "AutoRevert", "BatchGreen", "CrashRecovery", "PieceClaims"]
 
-# One library per proof-list feature (SPEC.md ง7). Each library also builds
+# One library per proof-list feature (SPEC.md ยง7). Each library also builds
 # its fixture exporter, so `lake build` type-checks it.
 
 [[lean_lib]]
