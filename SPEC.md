@@ -303,7 +303,7 @@ Machines join a project with no login, monitor or remote desktop on the joining 
   2. It exchanges the key for the machine's own **machine credential**.
   3. It stores the credential encrypted (Windows: DPAPI through Credential Manager). The client rotates it automatically before it expires.
 
-  The machine never uses the join key again.
+  The machine never uses the join key again. Credentials last 30 days; the daemon checks hourly and renews during the final seven days. A lost rotation response can be retried with the prior credential until its original expiry. The server stores only credential hashes. Windows Credential Manager holds the encrypted enrollment; `upstream.json` holds only a reference, address and certificate fingerprint. Enrollment and pending requests alone are accepted without an authenticated machine; every other network request rechecks the machine's current status.
 - **Approval.** A machine that joins with a valid key is admitted at once. A machine that asks to join without one waits as **pending** until the owner approves it from an enrolled machine.
 - **Machine list and revocation.** The server lists every machine with its role, last contact and running agents. Revoking a machine refuses its credential on its next request. Its changes, claims and workspaces are kept, as for a failed change.
 - **Discovery.** On a local network, daemons find the server by DNS-SD (mDNS), so a key without a reachable address still works there.

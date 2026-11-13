@@ -36,3 +36,6 @@ workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+rosen-platform.workspace = true
