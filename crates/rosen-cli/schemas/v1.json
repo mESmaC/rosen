@@ -146,7 +146,8 @@
         "released",
         "green",
         "reverted",
-        "mirror"
+        "mirror",
+        "channel"
       ]
     },
     "ChangeParent": {
