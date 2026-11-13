@@ -140,6 +140,16 @@ fn change(n: u8, tier: Tier, parent: ChangeParent) -> ChangeFacts {
     }
 }
 
+fn receipt(n: u8, base: CommitId) -> Receipt {
+    Receipt {
+        change: cid(n),
+        head: oid(HEAD, n),
+        base,
+        check_set: "pre-land".into(),
+        submitter: AgentId::new("checker").unwrap(),
+    }
+}
+
 #[test]
 fn concurrent_lands_apply_once_on_a_linear_base() {
     let ids: Vec<u8> = (0..100).collect();
@@ -183,13 +193,6 @@ fn receipt_counts_only_across_prose_lands() {
         change(b, Tier::Normal, ChangeParent::Base(root())),
         change(on_a, Tier::Normal, ChangeParent::Change(cid(a))),
     ]);
-    let receipt = |n: u8, base: CommitId| Receipt {
-        change: cid(n),
-        head: oid(HEAD, n),
-        base,
-        check_set: "pre-land".into(),
-        submitter: AgentId::new("checker").unwrap(),
-    };
     for n in [a, b, on_a] {
         landing.submit_receipt(receipt(n, root())).unwrap();
     }
@@ -217,4 +220,35 @@ fn receipt_counts_only_across_prose_lands() {
     assert!(events
         .iter()
         .any(|e| matches!(e, LandingEvent::Rebased { change, .. } if *change == cid(on_a))));
+}
+
+/// Risk: a checker submits a receipt for a base that moved after a land
+/// attempt read it. That attempt must retry on the moved base; deciding on
+/// the stale base failed the land with an internal store error.
+#[test]
+fn receipt_on_a_base_newer_than_the_attempt_retries() {
+    // The interleaving cannot be forced, so the scenario runs several times.
+    for _ in 0..4 {
+        let mut changes: Vec<_> = (0..=200)
+            .map(|n| change(n, Tier::ProseOnly, ChangeParent::Base(root())))
+            .collect();
+        // Normal and unapproved, so every land reads its receipt and none
+        // succeeds; the other 200 are prose and land at once.
+        (changes[200].tier, changes[200].approved_head) = (Tier::Normal, None);
+        let (_, landing) = setup(changes);
+        // Each land moves the base and a checker answers with a receipt for it.
+        let helper = landing.clone();
+        let helper = thread::spawn(move || {
+            for n in 0..200 {
+                helper.land(&cid(n)).unwrap();
+                let base = helper.ledger().base("main").unwrap().unwrap();
+                helper.submit_receipt(receipt(200, base)).unwrap();
+            }
+        });
+        while !helper.is_finished() {
+            let refused = LandOutcome::Refused(Refusal::Unapproved);
+            assert_eq!(landing.land(&cid(200)).unwrap(), refused);
+        }
+        helper.join().unwrap();
+    }
 }

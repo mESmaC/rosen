@@ -182,7 +182,11 @@ impl Landing {
         }
         let facts = self.facts(change)?;
         let base = self.current_base()?;
-        let mut gathered = self.gather(&facts, &base)?;
+        // A receipt on a base newer than the one read means the base moved
+        // mid-attempt; retrying reads that base instead of failing the land.
+        let Some(mut gathered) = self.gather(&facts, &base)? else {
+            return Ok(Attempt::BaseMoved);
+        };
         if !rules::needs_merge(&gathered.input) {
             return Ok(Attempt::Done(refused(rules::decide(&gathered.input))));
         }
@@ -213,7 +217,9 @@ impl Landing {
         }
     }
 
-    fn gather(&self, facts: &ChangeFacts, base: &CommitId) -> LandResult<Gathered> {
+    /// Reads the decision inputs, or `None` when the change's newest receipt
+    /// is bound to a base the ref reached after `base` was read.
+    fn gather(&self, facts: &ChangeFacts, base: &CommitId) -> LandResult<Option<Gathered>> {
         let parent_landed = match &facts.parent {
             ChangeParent::Base(_) => true,
             ChangeParent::Change(parent) => self.ledger.landing_of(parent)?.is_some(),
@@ -231,18 +237,20 @@ impl Landing {
             merge_clean: true,
         };
         if facts.tier == Tier::ProseOnly {
-            return Ok(Gathered {
+            return Ok(Some(Gathered {
                 input,
                 receipt: None,
-            });
+            }));
         }
         let lookup = self.ledger.best_receipt(
             &self.config.base_ref,
             &facts.id,
             &facts.head,
             &self.config.pre_land_check_set,
+            base,
         )?;
         let receipt = match lookup {
+            ReceiptLookup::Ahead => return Ok(None),
             ReceiptLookup::Missing => None,
             ReceiptLookup::Invalid => {
                 input.receipt = ReceiptCheck::Invalid;
@@ -256,7 +264,7 @@ impl Landing {
                 Some(receipt)
             }
         };
-        Ok(Gathered { input, receipt })
+        Ok(Some(Gathered { input, receipt }))
     }
 
     fn independent_since(
