@@ -3,7 +3,7 @@
 use super::ignore::{always_ignored, IgnoreRules};
 use super::index::Index;
 use super::{upload, SnapshotError, Snapshotter, WorkspaceMarker};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -16,6 +16,22 @@ impl Snapshotter {
     /// an index advanced by a failed snapshot is not evidence of durability.
     /// The snapshot index and workspace marker remain unchanged.
     pub fn unstored_paths(&mut self) -> Result<Vec<String>, SnapshotError> {
+        Ok(self.differences()?.into_keys().collect())
+    }
+
+    /// Like [`Snapshotter::unstored_paths`], but leaves out stored files
+    /// that are missing from disk. Only for a workspace staged for deletion,
+    /// where an interrupted verified removal may already have deleted them.
+    pub(crate) fn unstored_paths_on_disk(&mut self) -> Result<Vec<String>, SnapshotError> {
+        let differences = self.differences()?;
+        Ok(differences
+            .into_iter()
+            .filter_map(|(path, on_disk)| on_disk.then_some(path))
+            .collect())
+    }
+
+    /// Each differing path, and whether a file exists on disk at it.
+    fn differences(&mut self) -> Result<BTreeMap<String, bool>, SnapshotError> {
         if self.index.build_trees()?.root != self.marker.tree {
             return Err(invalid(
                 &self.root,
@@ -49,7 +65,7 @@ impl Snapshotter {
         Ok(paths
             .into_iter()
             .filter(|path| file_identity(&self.index, path) != file_identity(&scanned, path))
-            .cloned()
+            .map(|path| (path.clone(), scanned.files.contains_key(path)))
             .collect())
     }
 }
