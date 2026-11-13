@@ -21,10 +21,14 @@ use edits::EditedFile;
 use rosen_core::{
     AgentId, ChangeId, ChangeParent, ChangeState, ObjectId, PathPattern, ProjectConfig,
 };
-use rosen_protocol::{ChangeFilter, ChangeRecord, ClaimKind};
+use rosen_protocol::{
+    ChangeFilter, ChangeRecord, ClaimKind, ErrorBody, ErrorCode, Outcome, OverlapAnswer,
+    OverlapQuery, OverlapRecord, Response,
+};
 use rosen_store::{LooseObjectStore, ObjectStore, StoreError};
 use rusqlite::Connection;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 /// What to find overlaps for.
 #[derive(Debug, Clone)]
@@ -56,6 +60,82 @@ pub enum OverlapError {
     Config(String),
     #[error("change {0} is stacked on change {1}, which the store lacks")]
     MissingParent(ChangeId, ChangeId),
+    #[error("{0}")]
+    Invalid(String),
+}
+
+impl OverlapError {
+    fn code(&self) -> ErrorCode {
+        match self {
+            OverlapError::Change(err) => crate::rpc::change_error_code(err),
+            OverlapError::History(err) => err.code(),
+            OverlapError::Invalid(_) => ErrorCode::InvalidArgument,
+            OverlapError::Store(_) | OverlapError::Config(_) | OverlapError::MissingParent(..) => {
+                ErrorCode::Internal
+            }
+        }
+    }
+}
+
+/// Answers [`rosen_protocol::Request::Overlaps`] for the channel and Velocity.
+/// Reading every live change's edits is SQLite and store I/O, so it runs on
+/// the blocking pool.
+pub async fn handle(state: &Arc<ServerState>, query: OverlapQuery) -> Outcome {
+    let state = Arc::clone(state);
+    let joined = tokio::task::spawn_blocking(move || answer(&state, &query)).await;
+    match joined {
+        Ok(Ok(answer)) => Outcome::Ok(Response::Overlaps(answer)),
+        Ok(Err(err)) => Outcome::Error(ErrorBody::new(err.code(), err.to_string())),
+        Err(join) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, join.to_string())),
+    }
+}
+
+fn answer(state: &ServerState, query: &OverlapQuery) -> Result<OverlapAnswer, OverlapError> {
+    let patterns = query
+        .paths
+        .iter()
+        .map(|text| PathPattern::new(text).map_err(|err| OverlapError::Invalid(err.to_string())))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (subject, change) = match &query.change {
+        Some(text) => {
+            let id = state
+                .changes
+                .with_conn(|conn| changes::resolve(conn, text))?;
+            (Subject::Change(id.to_string()), Some(id))
+        }
+        None if patterns.is_empty() => {
+            return Err(OverlapError::Invalid(
+                "an overlap query names a change or at least one path".into(),
+            ))
+        }
+        None => (Subject::Paths(patterns.clone()), None),
+    };
+    let mut found = find(state, &subject)?;
+    if change.is_some() && !patterns.is_empty() {
+        narrow(&mut found, &patterns);
+    }
+    let overlaps = found
+        .into_iter()
+        .map(|overlap| OverlapRecord {
+            change: overlap.change,
+            owner: overlap.owner,
+            paths: overlap.paths,
+        })
+        .collect();
+    Ok(OverlapAnswer { change, overlaps })
+}
+
+/// Keeps only the overlap paths some pattern matches, then drops changes
+/// left with none. An overlap path may be a claimed glob, so it is matched
+/// as a pattern: `src/*.rs` stays under a filter of `src/lib.rs`.
+fn narrow(found: &mut Vec<Overlap>, patterns: &[PathPattern]) {
+    for overlap in found.iter_mut() {
+        overlap.paths.retain(|path| {
+            PathPattern::new(path)
+                .is_ok_and(|ours| patterns.iter().any(|filter| filter.overlaps(&ours)))
+        });
+    }
+    found.retain(|overlap| !overlap.paths.is_empty());
 }
 
 /// Every open or ready change other than the subject that overlaps it, in ID
