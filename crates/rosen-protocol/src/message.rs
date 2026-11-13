@@ -145,6 +145,10 @@ pub enum Request {
     ReleasePaths(ClaimRequest),
     /// Lists claims, shares and waits on live changes.
     ClaimList(ClaimFilter),
+    /// Reads the latest snapshotted paths and edit regions (R6).
+    EditRegions {
+        change: String,
+    },
     /// Lists the live changes that overlap a change or a set of paths (R6).
     Overlaps(OverlapQuery),
     /// Stores the subscriber's event cursor: it has handled every event up
@@ -257,6 +261,7 @@ pub enum Response {
     Waiting(WaitOutcome),
     Released(ReleaseOutcome),
     PathClaims(Vec<PathClaim>),
+    EditRegions(crate::edits::EditRegions),
     Overlaps(OverlapAnswer),
     ObjectsStored(ObjectsStored),
     Snapshot(SnapshotOutcome),

@@ -12,7 +12,7 @@
 //! follow every snapshot and rebase. Ignored paths are never uploaded (R2),
 //! so they never appear among them.
 
-mod edits;
+pub mod edits;
 
 use crate::changes::{self, ChangeError};
 use crate::history::HistoryError;
@@ -317,7 +317,7 @@ impl Finder<'_> {
             if theirs.claims.iter().any(|pattern| pattern.matches(path)) {
                 paths.insert(path.clone());
             } else if let Some(other) = theirs.edits.get(path) {
-                if edits::edits_overlap(self.store, edit, other)? {
+                if edits::edits_overlap(edit, other) {
                     paths.insert(path.clone());
                 }
             }

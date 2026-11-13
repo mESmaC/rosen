@@ -23,6 +23,7 @@ pub mod changes;
 pub mod claims;
 pub mod connection;
 pub mod daemon;
+mod edits;
 pub mod events;
 pub mod history;
 pub mod identity;
