@@ -106,3 +106,36 @@ pub struct ReleaseOutcome {
     /// Waits on other changes that the release unblocked.
     pub woken: Vec<WokenWait>,
 }
+
+/// Parameters of [`crate::Request::Overlaps`] (R6): the channel (R13) and
+/// Velocity ask which live changes overlap a change or a set of paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlapQuery {
+    /// A change ID or unique prefix of one: its claims, shares and edits are
+    /// compared with every other live change's.
+    #[serde(default)]
+    pub change: Option<String>,
+    /// Repository-relative paths or globs. Without `change` they are queried
+    /// as if a change claimed them. With `change` they narrow the answer to
+    /// overlaps on paths some pattern here matches.
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// One live change that overlaps the query's subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlapRecord {
+    pub change: ChangeId,
+    pub owner: AgentId,
+    /// The edited paths and claimed patterns the overlap is on, sorted.
+    pub paths: Vec<String>,
+}
+
+/// The answer to [`crate::Request::Overlaps`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlapAnswer {
+    /// The queried change, resolved from its prefix; `None` for a path query.
+    pub change: Option<ChangeId>,
+    /// Every open or ready change that overlaps it, in change ID order.
+    pub overlaps: Vec<OverlapRecord>,
+}
