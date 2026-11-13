@@ -3,10 +3,12 @@
 //! Each simulated machine is a data directory and a local endpoint. Machine
 //! 0 runs the server; every other machine runs a cache daemon that reaches
 //! the server through its own [`PartitionProxy`](crate::proxy::PartitionProxy).
-//! Agents are separate processes. A seeded plan kills and restarts all of
-//! them and cuts machines off, then the drill checks §5's guarantees. The
-//! full multi-machine stress harness drives the same plan through
-//! [`crate::execute::Faults`].
+//! Agents are separate processes. One agent lands the injected failing
+//! commit, and a post-land checker beside the agents gets it bisected and
+//! reverted (R12). A seeded plan kills and restarts all of them and cuts
+//! machines off, then the drill checks §5's guarantees. The full
+//! multi-machine stress harness drives the same plan through
+//! [`crate::execute::Faults`] and the same [`crate::checker`] loop.
 
 pub mod agent;
 mod enroll;
@@ -14,12 +16,18 @@ mod harness;
 mod setup;
 mod verify;
 
+use crate::checker::{self, CheckerReport, InjectedFailure, Until};
 use crate::execute::execute;
+use crate::failing;
 use crate::plan::{Plan, Shape};
 use crate::rng::Rng;
+use anyhow::Context;
 use harness::{Harness, Spec};
 use serde_json::json;
+use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, clap::Args)]
@@ -41,8 +49,10 @@ pub struct DrillArgs {
     /// Seconds the run may take after the window before it counts as hung.
     #[arg(long, default_value_t = 180)]
     pub settle: u64,
-    /// Inject a failing commit and check it is bisected and reverted (R12).
-    #[arg(long)]
+    /// Skip the injected failing commit. By default one agent lands it, a
+    /// post-land checker runs beside the agents, and the drill checks the
+    /// server bisected and reverted it (R12).
+    #[arg(long = "no-failing-commit", action = clap::ArgAction::SetFalse)]
     pub failing_commit: bool,
     /// Defaults to the `rosen-server` next to this binary.
     #[arg(long)]
@@ -88,8 +98,12 @@ pub async fn run(args: DrillArgs) -> anyhow::Result<bool> {
     );
     let mut harness = Harness::start(&spec).await?;
     let start = tokio::time::Instant::now();
+    let agents_done = Arc::new(AtomicBool::new(false));
+    let checker = tokio::spawn(checker_task(&spec, &args, Arc::clone(&agents_done)));
     let log = execute(&plan, &mut harness, start).await;
     let settled = harness.wait_for_agents(Duration::from_secs(args.settle)).await;
+    agents_done.store(true, Ordering::SeqCst);
+    let checker = checker.await.context("the checker task panicked")?;
     let elapsed = start.elapsed();
     let crashed = harness.crashed();
     harness.stop().await;
@@ -97,7 +111,8 @@ pub async fn run(args: DrillArgs) -> anyhow::Result<bool> {
         eprintln!("drill: could not remove a machine credential: {problem}");
     }
     let acks = harness.acks.lock().expect("acks lock").clone();
-    let checks = verify::verify(&spec.layout.server_config(), &acks, args.failing_commit)?;
+    let failing = args.failing_commit.then_some(&checker);
+    let checks = verify::verify(&spec.layout.server_config(), &acks, failing)?;
     let ok = settled.is_ok() && crashed.is_empty() && checks.iter().all(|check| check.ok);
     let report = json!({
         "seed": seed,
@@ -107,6 +122,7 @@ pub async fn run(args: DrillArgs) -> anyhow::Result<bool> {
         "settled": settled.as_ref().map(|_| "every agent finished".to_owned()).map_err(|err| format!("{err:#}")),
         "crashed": crashed,
         "checks": checks,
+        "checker": checker,
         "processes": harness.counts(),
         "faults": log,
     });
@@ -115,6 +131,26 @@ pub async fn run(args: DrillArgs) -> anyhow::Result<bool> {
         let _ = std::fs::remove_dir_all(&spec.layout.root);
     }
     Ok(ok)
+}
+
+/// The post-land checker (R12), run beside the agents. It reaches the
+/// server directly, as a checker machine's daemon would forward to it, so
+/// server kills interrupt it mid-check and mid-bisection. Its test fails
+/// any landed tree holding the culprit agent's injected file.
+fn checker_task(spec: &Spec, args: &DrillArgs, done: Arc<AtomicBool>) -> impl Future<Output = CheckerReport> {
+    let endpoint = rosen_protocol::Endpoint::new(spec.layout.endpoint(0));
+    let path = spec
+        .culprit
+        .map(|(machine, index, _)| format!("{}/{}", setup::unit(machine, index), failing::FILE_NAME));
+    let settle = Duration::from_secs(args.settle);
+    async move {
+        let until = Until {
+            agents_done: &done,
+            quiet: None,
+            settle,
+        };
+        checker::run(&endpoint, &InjectedFailure { path }, until).await
+    }
 }
 
 fn spec(args: &DrillArgs, seed: u64) -> anyhow::Result<Spec> {
