@@ -95,6 +95,9 @@
     },
     {
       "$ref": "#/$defs/rosen.machine_keys~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.change.workspace~1v2"
     }
   ],
   "$defs": {
@@ -1315,7 +1318,7 @@
       ],
       "additionalProperties": false
     },
-    "WorkspaceMaterialisation": {
+    "WorkspaceMaterialisationV1": {
       "type": "object",
       "properties": {
         "path": {
@@ -1364,6 +1367,62 @@
         "written",
         "bytes_written",
         "fallback"
+      ],
+      "additionalProperties": false
+    },
+    "WorkspaceMaterialisation": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cloned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "copied": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "written": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes_written": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fallback": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prepared": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "method",
+        "files",
+        "cloned",
+        "copied",
+        "written",
+        "bytes_written",
+        "fallback",
+        "prepared"
       ],
       "additionalProperties": false
     },
@@ -1734,7 +1793,7 @@
           "$ref": "#/$defs/ChangeRecord"
         },
         "workspace": {
-          "$ref": "#/$defs/WorkspaceMaterialisation"
+          "$ref": "#/$defs/WorkspaceMaterialisationV1"
         }
       },
       "required": [
@@ -2491,6 +2550,29 @@
       "additionalProperties": false,
       "x-commands": [
         "machine key list"
+      ]
+    },
+    "rosen.change.workspace/v2": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.change.workspace/v2"
+        },
+        "change": {
+          "$ref": "#/$defs/ChangeRecord"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceMaterialisation"
+        }
+      },
+      "required": [
+        "schema",
+        "change",
+        "workspace"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "change new --workspace"
       ]
     }
   }

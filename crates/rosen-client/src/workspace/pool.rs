@@ -1,14 +1,19 @@
 //! Machine-local ready workspaces (SPEC R3). The daemon owns this manager.
 use super::{layout::Layout, MaterialiseError, Sparse};
 use rosen_core::ObjectId;
-use rosen_protocol::{ErrorBody, ErrorCode, Outcome, Response};
+use rosen_protocol::{ErrorBody, ErrorCode, Outcome, PooledWorkspace, Response};
 use rosen_store::LooseObjectStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 pub struct WarmPool {
     pub(super) state: Mutex<State>,
+    /// The prepared template on a block-cloning volume. Its own lock lets a
+    /// take clone from it while the worker refreshes ready slots; the worker
+    /// writes its files only under the write lock or while it is `Running`,
+    /// which takes never clone from.
+    pub(super) template: Arc<RwLock<Option<Slot>>>,
     pub(super) wake: Notify,
 }
 
@@ -22,12 +27,31 @@ pub(super) struct State {
     pub requested: Option<usize>,
     pub next: u64,
     pub ready: Vec<Slot>,
+    /// The ready root's volume block clones, so ready workspaces are clones
+    /// of one prepared template rather than each prepared on its own.
+    pub block_clones: bool,
 }
 
 pub(super) struct Slot {
     pub path: PathBuf,
     pub tree: ObjectId,
+    /// The base commit whose tree the slot holds.
+    pub commit: ObjectId,
     pub files: u64,
+    pub prep: Prep,
+}
+
+/// Where a workspace stands with the project's prepare commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Prep {
+    /// The commands have not run since its last non-prose land.
+    Needed,
+    /// The commands are running in it now, so nothing may take or clone it.
+    Running,
+    /// Every command succeeded, at `commit` or before only prose landed.
+    Done,
+    /// A command failed at `commit`; retried when the base next moves.
+    Failed,
 }
 
 impl WarmPool {
@@ -40,7 +64,9 @@ impl WarmPool {
                 requested: None,
                 next: 0,
                 ready: Vec::new(),
+                block_clones: false,
             }),
+            template: Arc::new(RwLock::new(None)),
             wake: Notify::new(),
         })
     }
@@ -77,21 +103,27 @@ impl WarmPool {
         if state.size == 0 {
             return Outcome::Ok(Response::PoolTaken(None));
         }
-        let Some(index) = state.ready.iter().position(|slot| slot.tree == tree) else {
-            return Outcome::Ok(Response::PoolTaken(None));
+        let Some(index) = pick(&state.ready, tree) else {
+            let root = state.root.clone();
+            drop(state);
+            return super::template::take_clone(&pool.template, &root, tree, dest).await;
         };
         let slot = state.ready.remove(index);
         // Removing the slot under the same lock as refresh makes ownership
         // exclusive even when two clients ask for the same tree together.
         let result = publish_slot(&slot, dest, &state.root).await;
-        let files = slot.files;
+        let taken = PooledWorkspace {
+            files: slot.files,
+            prepared: slot.prep == Prep::Done,
+            from_template: false,
+        };
         if result.is_err() {
             state.ready.push(slot);
         }
         drop(state);
         pool.wake.notify_one();
         match result {
-            Ok(()) => Outcome::Ok(Response::PoolTaken(Some(files))),
+            Ok(()) => Outcome::Ok(Response::PoolTaken(Some(taken))),
             Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
                 Outcome::Ok(Response::PoolTaken(None))
             }
@@ -101,6 +133,20 @@ impl WarmPool {
             )),
         }
     }
+}
+
+/// A ready slot holding `tree`, prepared ones first. A slot whose prepare
+/// is running is never offered: its commands are still writing into it.
+fn pick(ready: &[Slot], tree: ObjectId) -> Option<usize> {
+    let holds = |slot: &Slot| slot.tree == tree;
+    ready
+        .iter()
+        .position(|slot| holds(slot) && slot.prep == Prep::Done)
+        .or_else(|| {
+            ready
+                .iter()
+                .position(|slot| holds(slot) && slot.prep != Prep::Running)
+        })
 }
 
 async fn publish_slot(slot: &Slot, dest: String, pool_root: &Path) -> std::io::Result<()> {
@@ -127,6 +173,8 @@ fn publish(source: &Path, dest: &Path, limits_root: &Path) -> std::io::Result<()
         .rename_workspace(source, dest)
 }
 
+/// Rewrites only the tracked files that differ between the slot's tree and
+/// `tree`. Untracked files, such as prepared build output, are kept.
 pub(super) fn refresh(
     store: &LooseObjectStore,
     slot: &mut Slot,
@@ -183,7 +231,9 @@ mod tests {
         let mut slot = Slot {
             path,
             tree: before,
+            commit: before,
             files: 1,
+            prep: Prep::Needed,
         };
         refresh(&store, &mut slot, after).unwrap();
         pool.state.lock().await.ready.push(slot);
@@ -193,7 +243,7 @@ mod tests {
             pool.take(after, first.display().to_string()),
             pool.take(after, second.display().to_string())
         );
-        let transferred = |result| matches!(result, Outcome::Ok(Response::PoolTaken(Some(1))));
+        let transferred = |result| matches!(result, Outcome::Ok(Response::PoolTaken(Some(taken))) if taken.files == 1);
         assert_ne!(transferred(a), transferred(b));
         let taken = if first.exists() { first } else { second };
         assert_eq!(std::fs::read(taken.join("file")).unwrap(), b"after");

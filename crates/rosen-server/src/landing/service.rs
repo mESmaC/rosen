@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::time::Duration;
 
 use rosen_core::{AgentId, Change, ChangeParent, ChangeState, SnapshotKind};
-use rosen_protocol::{ErrorBody, ErrorCode, LandAnswer, LandStatus, Outcome, Response};
+use rosen_protocol::{
+    ErrorBody, ErrorCode, LandAnswer, LandStatus, LandedProseQuery, Outcome, Response,
+};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use rusqlite::params;
 
@@ -58,6 +60,18 @@ pub async fn land(state: &Arc<ServerState>, change: String) -> Outcome {
     let state = Arc::clone(state);
     match tokio::task::spawn_blocking(move || state.landing.land(&state, &change)).await {
         Ok(Ok(answer)) => Outcome::Ok(Response::Land(answer)),
+        Ok(Err(body)) => Outcome::Error(body),
+        Err(join) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, join.to_string())),
+    }
+}
+
+/// Answers `landed_prose` for a daemon's warm pool (R3), on the blocking
+/// pool because it reads SQLite.
+pub async fn landed_prose(state: &Arc<ServerState>, query: LandedProseQuery) -> Outcome {
+    let state = Arc::clone(state);
+    let answer = tokio::task::spawn_blocking(move || state.landing.landed_prose(&state, query));
+    match answer.await {
+        Ok(Ok(prose)) => Outcome::Ok(Response::LandedProse(prose)),
         Ok(Err(body)) => Outcome::Error(body),
         Err(join) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, join.to_string())),
     }
@@ -167,6 +181,32 @@ impl LandingService {
             base,
             outcome,
         })
+    }
+
+    /// True when every land after `since` through `through` on the base was
+    /// prose-only. A commit the base never held, or a `through` older than
+    /// `since`, answers false, so a caller that cannot tell re-prepares.
+    pub fn landed_prose(
+        &self,
+        state: &ServerState,
+        query: LandedProseQuery,
+    ) -> Result<bool, ErrorBody> {
+        let engine = self.engine(state)?;
+        let ledger = engine.ledger();
+        let base_ref = &engine.config().base_ref;
+        let Some(since) = ledger.base_seq(base_ref, &query.since).map_err(land_body)? else {
+            return Ok(false);
+        };
+        let through = ledger
+            .base_seq(base_ref, &query.through)
+            .map_err(land_body)?;
+        if through.is_none_or(|through| through < since) {
+            return Ok(false);
+        }
+        let lands = ledger
+            .lands_between(base_ref, since, &query.through)
+            .map_err(land_body)?;
+        Ok(lands.iter().all(|(_, tier)| *tier == Tier::ProseOnly))
     }
 
     /// Replays post-land work a crash or a failed step interrupted (R8 step

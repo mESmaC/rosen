@@ -117,10 +117,15 @@ async fn new_workspace(
     } else {
         print_change(false, record);
         println!(
-            "workspace: {} ({}, {} files)",
+            "workspace: {} ({}, {} files, {})",
             call.dir.display(),
             report.method.as_str(),
-            report.files
+            report.files,
+            if report.prepared {
+                "prepared"
+            } else {
+                "unprepared"
+            }
         );
         if let Some(reason) = &report.fallback {
             println!("note:      not block cloned: {reason}");
@@ -139,6 +144,7 @@ fn workspace_json(dir: &Path, report: &Report) -> serde_json::Value {
         "written": report.written,
         "bytes_written": report.bytes_written,
         "fallback": report.fallback,
+        "prepared": report.prepared,
     })
 }
 
