@@ -4,7 +4,8 @@ use crate::change_cmd::resolve_owner;
 use crate::commands::ReviewCommand;
 use crate::server::Succeeded;
 use rosen_client::protocol::{
-    CommentRequest, CommentTarget, ResolveRequest, ReviewThread, ThreadFilter,
+    Approval, ApproveRequest, CommentRequest, CommentTarget, ResolveRequest, ReviewThread,
+    ThreadFilter,
 };
 use rosen_client::{Endpoint, Error};
 use rosen_core::{ObjectId, ThreadState};
@@ -17,6 +18,8 @@ const THREAD_LIST_SCHEMA: &str = "rosen.review.list/v1";
 /// A review command with its arguments checked, ready to send.
 enum ReviewCall {
     Comment(CommentRequest),
+    Approve(ApproveRequest),
+    Approvals(String),
     Resolve(ResolveRequest),
     List(ThreadFilter),
 }
@@ -27,22 +30,22 @@ pub async fn run(
     command: &ReviewCommand,
 ) -> Result<Succeeded, Error> {
     // Parse arguments before starting a daemon, so a typo costs nothing.
-    let call = match parse(command)? {
-        Some(call) => call,
-        None => return rosen_client::run_operation("review approve").map(|()| true),
-    };
+    let call = parse(command)?;
     let client = rosen_client::connect_or_start(endpoint).await?;
     match call {
+        ReviewCall::Approve(req) => print_approval(json, &client.review_approve(req).await?),
         ReviewCall::Comment(req) => print_thread(json, &client.review_comment(req).await?),
         ReviewCall::Resolve(req) => print_thread(json, &client.review_resolve(req).await?),
+        ReviewCall::Approvals(change) => {
+            print_approvals(json, &client.review_approvals(&change).await?)
+        }
         ReviewCall::List(filter) => print_list(json, &client.review_list(filter).await?),
     }
     Ok(true)
 }
 
-/// `None` for `approve`, which approvals will implement.
-fn parse(command: &ReviewCommand) -> Result<Option<ReviewCall>, Error> {
-    Ok(Some(match command {
+fn parse(command: &ReviewCommand) -> Result<ReviewCall, Error> {
+    Ok(match command {
         ReviewCommand::Comment {
             change,
             path,
@@ -62,12 +65,25 @@ fn parse(command: &ReviewCommand) -> Result<Option<ReviewCall>, Error> {
             thread: *thread,
             by: resolve_owner(by.as_deref())?,
         }),
-        ReviewCommand::List { change, state } => ReviewCall::List(ThreadFilter {
+        ReviewCommand::List {
+            change,
+            approvals: true,
+            ..
+        } => ReviewCall::Approvals(change.clone()),
+        ReviewCommand::List { change, state, .. } => ReviewCall::List(ThreadFilter {
             change: change.clone(),
             state: state.as_deref().map(parse_state).transpose()?,
         }),
-        ReviewCommand::Approve { .. } => return Ok(None),
-    }))
+        ReviewCommand::Approve {
+            change,
+            head,
+            reviewer,
+        } => ReviewCall::Approve(ApproveRequest {
+            change: change.clone(),
+            head: parse_head(head)?,
+            reviewer: resolve_owner(reviewer.as_deref())?,
+        }),
+    })
 }
 
 /// Clap already requires either --thread or both --path and --line; this
@@ -140,5 +156,36 @@ fn print_thread_text(thread: &ReviewThread) {
             format!(" (at head {})", comment.head)
         };
         println!("  {}{later}: {}", comment.author, comment.body);
+    }
+}
+
+fn print_approval(json: bool, approval: &Approval) {
+    if json {
+        println!(
+            "{}",
+            json!({"schema": "rosen.review.approval/v1", "approval": approval})
+        );
+    } else {
+        println!(
+            "approval {}: {} approved change {} at {}",
+            approval.id, approval.reviewer, approval.change, approval.head
+        );
+    }
+}
+
+fn print_approvals(json: bool, approvals: &[Approval]) {
+    if json {
+        println!(
+            "{}",
+            json!({"schema": "rosen.review.approvals/v1", "approvals": approvals})
+        );
+    } else {
+        for approval in approvals {
+            let status = if approval.valid { "valid" } else { "void" };
+            println!(
+                "{}: {} approved {} at {} ({status})",
+                approval.id, approval.reviewer, approval.change, approval.head
+            );
+        }
     }
 }

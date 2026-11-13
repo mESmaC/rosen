@@ -20,7 +20,9 @@ use crate::history::{
 use crate::land::LandAnswer;
 use crate::objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal};
 use crate::receipt::{ReceiptRecord, SubmitReceipt};
-use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
+use crate::review::{
+    Approval, ApproveRequest, CommentRequest, ResolveRequest, ReviewThread, ThreadFilter,
+};
 use crate::snapshot::{ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest};
 use rosen_core::AgentId;
 use serde::{Deserialize, Serialize};
@@ -155,6 +157,10 @@ pub enum Request {
     /// Starts a review thread on a line of a change's head, or replies in
     /// one (R7). Answered with the whole thread.
     ReviewComment(CommentRequest),
+    ReviewApprove(ApproveRequest),
+    ReviewApprovals {
+        change: String,
+    },
     /// Marks a review thread resolved. Resolving a resolved thread is a no-op.
     ReviewResolve(ResolveRequest),
     /// Lists a change's review threads with their comments, oldest first.
@@ -258,6 +264,8 @@ pub enum Response {
     /// The answer to `review_comment` and `review_resolve`.
     ReviewThread(ReviewThread),
     ReviewThreads(Vec<ReviewThread>),
+    Approval(Approval),
+    Approvals(Vec<Approval>),
     Receipt(ReceiptRecord),
     Land(LandAnswer),
     Objects(ObjectBatch),
