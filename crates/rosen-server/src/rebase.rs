@@ -63,5 +63,6 @@ pub fn rebase(state: &ServerState, change: &str) -> HistoryResult<ChangeRecord> 
         Some(record.change.id.to_string()),
         serde_json::json!({"onto": merged.base, "tree": tree, "regenerate": merged.regenerate}),
     );
+    crate::stacks::refresh(state);
     Ok(record)
 }
