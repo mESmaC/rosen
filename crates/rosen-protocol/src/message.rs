@@ -8,6 +8,7 @@
 //! Responses may arrive out of order, and event frames are interleaved with them.
 
 use crate::change::{ChangeFilter, ChangeRecord, NewChange};
+use crate::channel::{ChannelAnswer, ChannelRequest};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, OverlapAnswer, OverlapQuery, PathClaim,
     ReleaseOutcome, ShareOutcome, WaitOutcome,
@@ -261,6 +262,9 @@ pub enum Request {
         tree: rosen_core::ObjectId,
         dest: String,
     },
+    /// An AIRC channel operation (R13). Answered only by the server, never
+    /// from a machine's local copy.
+    Channel(ChannelRequest),
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -313,6 +317,7 @@ pub enum Response {
     MergeResult(MergeResultAnswer),
     /// Boxed: a configuration is far larger than every other answer.
     Config(Box<ConfigRecord>),
+    Channel(ChannelAnswer),
 }
 
 /// The answer to [`Request::AckEvents`]: the cursor now stored, which is

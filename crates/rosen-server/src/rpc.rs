@@ -124,6 +124,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         }
         Request::WorkspaceWrite(req) => crate::workspaces::write(state, req).await,
         Request::ConfigShow(query) => crate::project_config::show(state, query).await,
+        Request::Channel(call) => crate::channel::handle(state, call).await,
     }
 }
 

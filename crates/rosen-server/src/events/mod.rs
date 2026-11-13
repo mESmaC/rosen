@@ -22,6 +22,7 @@ mod pending;
 mod store;
 
 pub use audience::Concern;
+pub use channel::ChannelLine;
 pub use landing_sink::LandingEvents;
 pub use store::Page;
 
