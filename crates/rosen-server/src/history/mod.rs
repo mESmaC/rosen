@@ -14,8 +14,8 @@ mod blame;
 mod diff;
 mod index;
 mod log;
-mod merge;
-mod revision;
+pub(crate) mod merge;
+pub(crate) mod revision;
 mod trees;
 
 use crate::changes::ChangeError;
@@ -52,7 +52,7 @@ pub enum HistoryError {
 }
 
 impl HistoryError {
-    fn code(&self) -> ErrorCode {
+    pub(crate) fn code(&self) -> ErrorCode {
         match self {
             HistoryError::Change(err) => crate::rpc::change_error_code(err),
             HistoryError::NotFound(_) | HistoryError::Store(StoreError::NotFound(_)) => {
@@ -143,7 +143,7 @@ fn run(state: &ServerState, call: HistoryCall) -> HistoryResult<Response> {
     })
 }
 
-fn open(state: &ServerState) -> HistoryResult<Ctx<'_>> {
+pub(crate) fn open(state: &ServerState) -> HistoryResult<Ctx<'_>> {
     let store = LooseObjectStore::open(state.config.objects_dir())?;
     let fresh = !state.history.schema_ready.load(Ordering::Acquire);
     let index = Index::open(&state.config.metadata_path(), fresh)?;

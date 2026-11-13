@@ -14,6 +14,7 @@ mod ignore;
 mod index;
 mod journal;
 mod marker;
+mod rebase;
 mod scan;
 mod upload;
 pub mod watch;

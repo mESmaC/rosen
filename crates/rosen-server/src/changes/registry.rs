@@ -360,3 +360,26 @@ fn now_millis() -> i64 {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
         })
 }
+
+/// Commit a computed rebase only while both inputs still match. The write
+/// transaction prevents a concurrent snapshot or land from losing edits.
+pub fn rebase_checked(
+    conn: &mut Connection,
+    expected: &Change,
+    onto: ObjectId,
+    tree: ObjectId,
+) -> Result<ChangeRecord, ChangeError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = load(&tx, expected.id)?;
+    let base: String = tx.query_row("SELECT target FROM base_refs LIMIT 1", [], |r| r.get(0))?;
+    if current.change != *expected || base != onto.to_hex() {
+        return Err(ChangeError::Base(
+            "rebase inputs moved; retry the rebase".into(),
+        ));
+    }
+    let record = apply_and_save(&tx, expected.id, |c| {
+        c.rebase(ChangeParent::Base(onto), tree)
+    })?;
+    tx.commit()?;
+    Ok(record)
+}

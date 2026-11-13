@@ -22,6 +22,7 @@ pub mod mirror;
 pub mod network;
 pub mod objects;
 pub mod project_config;
+pub mod rebase;
 pub mod receipts;
 pub mod reviews;
 pub mod rpc;
