@@ -209,7 +209,8 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - An approval is tied to the head it approved. A new head by the author voids the approval. A rebase done by the server (R8, D19) keeps it, because it changes only the parent.
 - **Review tiers** follow Anthropic's semantic approval rules and Velocity F7:
   - The server tiers each change from its diff: prose-only, normal, or sensitive.
-  - Sensitive paths are listed in project configuration and read from the base, so a change cannot lower its own tier.
+  - Sensitive paths are listed in project configuration and read from the base, so a change cannot lower its own tier. Sensitive matches take precedence, including removed paths.
+  - Prose-only means all changed files are regular UTF-8 `.md`, `.markdown`, `.txt` or `.rst` files without NUL bytes on either side. Generated files, registration lists and configured workspace inputs take normal review. Other edits, including source comments and executable or symlink modes, conservatively take normal review. The diff is against the parent (the stack parent for a stacked change); an empty diff is prose-only.
   - Every tier still needs an approval.
 - Velocity's PR duty reviews through `rosen-client`.
 - **Accept when:** a change cannot land without an approval for its current head.
@@ -277,6 +278,7 @@ The server holds each project's AIRC channel, so agents on every machine coordin
   - the **Discoveries** and **Past work** ledgers.
 - **Piece claims** are first-claim-wins, each in one transaction, like path claims. A refusal names the holder and the time of its claim. A claim is kept through failure and disconnects, and released as Velocity F14 says.
 - **One log.** Channel events and Rosen's events share one ordered log and one cursor per subscriber (R9). Targeted delivery follows Velocity F14: an agent receives only the lines it must act on.
+  - Channel lines use the `channel` event kind with the channel payload in `detail`. Their recipient agent identities are fixed at publication; an empty audience reaches only the project view. They use the same subscription and acknowledgement API as Rosen events, including over the network transport.
 - **Velocity keeps the tools.** Velocity serves AIRC's tools to every agent as now, with the member ID and nick fixed at launch, and calls the server through `rosen-client` for each one. No machine keeps channel state of its own beyond its delivery cursors.
 - **Server unreachable.** Claims and messages need the server, as landing does. A tool call made while the server is unreachable fails with that reason. It is never answered from a local copy.
 - **Accept when:** two agents on different machines that claim the same piece or path at the same moment never both succeed; an event or message reaches its recipient on another machine within 1 s while both machines reach the server; and no two machines ever see different claim holders.

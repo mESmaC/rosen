@@ -173,8 +173,8 @@ async fn moved_base_reuses_only_independent_receipts_through_server() {
 async fn base_moves_only_with_a_receipt_for_the_exact_head_and_a_trusted_base() {
     let (_temp, state, root) = setup();
     let (a, b) = (new_change(&state).await, new_change(&state).await);
-    let first_head = write(&state, &a, "a.txt", b"one\n").await;
-    let head_b = write(&state, &b, "b.txt", b"bee\n").await;
+    let first_head = write(&state, &a, "a.rs", b"one\n").await;
+    let head_b = write(&state, &b, "b.rs", b"bee\n").await;
     receipt(&state, &b, head_b, root).await;
 
     let missing = land(&state, &a).await;
@@ -184,7 +184,7 @@ async fn base_moves_only_with_a_receipt_for_the_exact_head_and_a_trusted_base() 
     );
 
     receipt(&state, &a, first_head, root).await;
-    let head_a = write(&state, &a, "a.txt", b"two\n").await;
+    let head_a = write(&state, &a, "a.rs", b"two\n").await;
     let stale = land(&state, &a).await;
     assert_eq!((refused(&stale), stale.base), (Some("receipt_stale"), root));
     // A land that decided on the old head loses its swap once a snapshot
@@ -244,7 +244,7 @@ async fn base_moves_only_with_a_receipt_for_the_exact_head_and_a_trusted_base() 
     assert_eq!(merged.parents, vec![commit]);
     let tree = store.read_tree(&merged.tree).unwrap();
     let names: Vec<_> = tree.entries().iter().map(|e| e.name.clone()).collect();
-    assert_eq!(names, [b"a.txt".to_vec(), b"b.txt".to_vec()]);
+    assert_eq!(names, [b"a.rs".to_vec(), b"b.rs".to_vec()]);
 }
 
 // Risk (SPEC R8 step 2): a refused land must durably retain the owner's
@@ -253,12 +253,12 @@ async fn base_moves_only_with_a_receipt_for_the_exact_head_and_a_trusted_base() 
 async fn conflicted_land_routes_regions_and_files_to_its_owner() {
     let (temp, state, root) = setup();
     let (a, b) = (new_change(&state).await, new_change(&state).await);
-    let ha = write(&state, &a, "shared.txt", b"first\n").await;
+    let ha = write(&state, &a, "shared.rs", b"first\n").await;
     receipt(&state, &a, ha, root).await;
     let tip = land(&state, &a).await.base;
     // Edit after A lands: B had no overlap to rebase then, so its own land
     // still exercises R8 step 2 conflict routing against a moved base.
-    let hb = write(&state, &b, "shared.txt", b"second\n").await;
+    let hb = write(&state, &b, "shared.rs", b"second\n").await;
     receipt(&state, &b, hb, root).await;
     let answer = land(&state, &b).await;
     assert_eq!(answer.base, tip);
@@ -266,14 +266,14 @@ async fn conflicted_land_routes_regions_and_files_to_its_owner() {
     let LandStatus::Refused { paths, .. } = answer.outcome else {
         unreachable!()
     };
-    assert_eq!(paths, ["shared.txt"]);
+    assert_eq!(paths, ["shared.rs"]);
     let events = state.events.after(0);
     let event = events
         .iter()
         .find(|e| e.kind == rosen_protocol::EventKind::Conflict)
         .unwrap();
     assert_eq!(event.change.as_deref(), Some(b.as_str()));
-    assert_eq!(event.detail["paths"], serde_json::json!(["shared.txt"]));
+    assert_eq!(event.detail["paths"], serde_json::json!(["shared.rs"]));
     let conn = rusqlite::Connection::open(state.config.metadata_path()).unwrap();
     let set = rosen_server::conflicts::load(&conn, &b).unwrap();
     let region = set.open().next().unwrap();
@@ -305,7 +305,7 @@ async fn a_land_needs_an_approval_that_still_holds_for_the_current_head() {
     let (_temp, state, root) = setup();
     let a = new_change(&state).await;
     let first = write(
-        &state, &a, "a.txt", b"one
+        &state, &a, "a.rs", b"one
 ",
     )
     .await;
@@ -314,13 +314,13 @@ async fn a_land_needs_an_approval_that_still_holds_for_the_current_head() {
 
     approve(&state, &a, first).await;
     write(
-        &state, &a, "a.txt", b"two
+        &state, &a, "a.rs", b"two
 ",
     )
     .await;
     assert_eq!(
         write(
-            &state, &a, "a.txt", b"one
+            &state, &a, "a.rs", b"one
 "
         )
         .await,

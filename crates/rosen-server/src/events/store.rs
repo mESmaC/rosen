@@ -51,7 +51,21 @@ pub fn append(
     audience: Option<&BTreeSet<String>>,
 ) -> rusqlite::Result<u64> {
     let tx = conn.transaction()?;
-    tx.execute(
+    let seq = append_in(&tx, kind, change, detail, audience)?;
+    tx.commit()?;
+    Ok(seq)
+}
+
+/// Appends inside the caller's transaction, allowing channel state and its
+/// notification to become durable together.
+pub(super) fn append_in(
+    conn: &Connection,
+    kind: EventKind,
+    change: Option<&str>,
+    detail: &serde_json::Value,
+    audience: Option<&BTreeSet<String>>,
+) -> rusqlite::Result<u64> {
+    conn.execute(
         "INSERT INTO events (kind, change_id, detail, broadcast, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
@@ -63,14 +77,13 @@ pub fn append(
         ],
     )?;
     // Rows are never deleted, so the row id is always one past the newest.
-    let seq = tx.last_insert_rowid();
+    let seq = conn.last_insert_rowid();
     for agent in audience.into_iter().flatten() {
-        tx.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO event_audience (agent, seq) VALUES (?1, ?2)",
             params![agent, seq],
         )?;
     }
-    tx.commit()?;
     Ok(to_seq(seq))
 }
 
