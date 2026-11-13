@@ -114,6 +114,18 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
+    JoinKeyCreate(crate::CreateJoinKey),
+    MachineEnroll {
+        key: String,
+        name: String,
+    },
+    MachineRotate {
+        credential: String,
+    },
+    MachinePending {
+        name: String,
+        role: crate::MachineRole,
+    },
     /// Liveness check.
     Ping,
     /// The server's identity, uptime and load.
@@ -246,6 +258,10 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
+    JoinKeyCreated {
+        key: String,
+    },
+    MachineCredential(crate::MachineCredential),
     Pong,
     PoolSized,
     /// Number of tracked files, or None when no matching slot is ready.

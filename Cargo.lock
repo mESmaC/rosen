@@ -924,6 +924,7 @@ name = "rosen-client"
 version = "0.1.0"
 dependencies = [
  "atomicwrites",
+ "base64",
  "ignore",
  "mdns-sd",
  "notify",
@@ -933,11 +934,14 @@ dependencies = [
  "rosen-protocol",
  "rosen-server",
  "rosen-store",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -989,6 +993,7 @@ dependencies = [
  "rosen-client",
  "rosen-core",
  "rosen-merge",
+ "rosen-platform",
  "rosen-protocol",
  "rosen-store",
  "rusqlite",

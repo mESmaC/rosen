@@ -8,6 +8,10 @@ repository.workspace = true
 
 [dependencies]
 rosen-core.workspace = true
+base64.workspace = true
+sha2.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
 rosen-protocol.workspace = true
 rosen-store.workspace = true
 reflink-copy.workspace = true

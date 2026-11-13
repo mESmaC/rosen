@@ -35,7 +35,6 @@ async fn only_the_pinned_server_and_a_credentialed_peer_get_through() {
     let reloaded = Identity::load_or_create(dir.path()).unwrap();
     assert_eq!(identity.fingerprint(), reloaded.fingerprint());
     let pin = identity.fingerprint();
-    let credential = identity.credential().to_owned();
 
     let acceptor = tls::acceptor(&identity).unwrap();
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -45,6 +44,26 @@ async fn only_the_pinned_server_and_a_credentialed_peer_get_through() {
         endpoint: Endpoint::new(format!("rosen-network-test-{}", std::process::id())),
     });
     state.set_network(identity, address);
+    let key = rosen_server::machines::keys::create(
+        &state,
+        rosen_protocol::CreateJoinKey {
+            address: address.to_string(),
+            expires_at: rosen_server::machines::now() + 3600,
+            use_limit: 1,
+            role: rosen_protocol::MachineRole::Agent,
+        },
+    )
+    .unwrap();
+    use base64::Engine as _;
+    let key: rosen_protocol::JoinKey = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(key)
+            .unwrap(),
+    )
+    .unwrap();
+    let credential = rosen_server::machines::credentials::enroll(dir.path(), &key.secret, "test")
+        .unwrap()
+        .secret;
     tokio::spawn(network::serve(tcp, acceptor, Arc::clone(&state)));
     let address = address.to_string();
 
@@ -56,7 +75,7 @@ async fn only_the_pinned_server_and_a_credentialed_peer_get_through() {
     );
     assert!(matches!(
         hello(&address, pin, None).await,
-        ServerFrame::Reject { .. }
+        ServerFrame::Welcome { .. }
     ));
     assert!(matches!(
         hello(&address, pin, Some("guess")).await,
