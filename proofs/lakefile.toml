@@ -62,4 +62,3 @@ globs = ["TargetedRebase.Design", "TargetedRebase.Export"]
 [[lean_exe]]
 name = "targeted-rebase-fixtures"
 root = "TargetedRebase.Export"
-
