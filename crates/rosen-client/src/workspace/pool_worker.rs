@@ -161,7 +161,7 @@ async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<Option<Base>, E
     if block_clones {
         drop_unprepared(pool, &base).await?;
     }
-    fill(pool, client, &base).await?;
+    fill(pool, client, &store, &base).await?;
     Ok(Some(base))
 }
 
@@ -338,7 +338,12 @@ async fn drop_unprepared(pool: &WarmPool, base: &Base) -> Result<(), Error> {
     Ok(())
 }
 
-async fn fill(pool: &Arc<WarmPool>, client: &Client, base: &Base) -> Result<(), Error> {
+async fn fill(
+    pool: &Arc<WarmPool>,
+    client: &Client,
+    store: &rosen_store::LooseObjectStore,
+    base: &Base,
+) -> Result<(), Error> {
     let mut state = pool.state.lock().await;
     // Bound one refill pass so a busy launch cannot starve landed events.
     let missing = state.size.saturating_sub(state.ready.len());
@@ -356,6 +361,11 @@ async fn fill(pool: &Arc<WarmPool>, client: &Client, base: &Base) -> Result<(), 
         // Existing ready slots remain available while a replacement copies.
         drop(state);
         let slot = make_slot(pool, client, base, path).await?;
+        // Seed the snapshot tree cache now, so a take does not write it.
+        let (seed_store, seed_path, tree) = (store.clone(), slot.path.clone(), slot.tree);
+        tokio::task::spawn_blocking(move || seed_slot(&seed_store, &seed_path, tree))
+            .await
+            .map_err(|error| Error::Unexpected(error.to_string()))?;
         state = pool.state.lock().await;
         state.ready.push(slot);
     }
