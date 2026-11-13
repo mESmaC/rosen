@@ -226,6 +226,9 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     // off the accept path so clients can connect meanwhile.
     let recovering = Arc::clone(&state);
     tokio::task::spawn_blocking(move || {
+        if let Err(err) = claims::recover(&recovering) {
+            eprintln!("rosen-server: claim release recovery failed: {err}");
+        }
         if let Err(err) = recovering.landing.recover(&recovering) {
             eprintln!("rosen-server: landing recovery failed: {err}");
         }
