@@ -212,8 +212,8 @@ pub enum Command {
     /// conflict, updated, review, claim, released, green, reverted and mirror.
     ///
     /// You get an event when it is about a change you own, review, or stack
-    /// on, or one whose claims overlap yours; `mirror` events go to everyone.
-    /// Each event carries a sequence number. The server stores how far you
+    /// on, or one whose claims or edits overlap yours; `mirror` events go to
+    /// everyone. Each event carries a sequence number. The server stores how far you
     /// have read, once each event is printed, so rerunning `rosen events`
     /// resumes where you stopped, even after a server restart. Delivery is at
     /// least once: after a crash you may see an event again, never miss one.

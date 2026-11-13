@@ -2,6 +2,11 @@
 //! reviewers, the owners of changes stacked on it, and the holders of
 //! overlapping changes or claims.
 //!
+//! This module reads what the metadata tables record: owners, reviews,
+//! stacks and path claims. Owners of changes whose edits overlap come from
+//! the §2 overlap rule, which the server installs with
+//! [`super::EventLog::set_overlap_owners`], since edits live in trees.
+//!
 //! The audience is fixed when the event is published, from the state the
 //! publishing operation just committed, so a later release or land never
 //! changes who an already-published event reaches.

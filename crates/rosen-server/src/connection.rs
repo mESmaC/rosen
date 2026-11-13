@@ -5,12 +5,12 @@
 //! the client matches answers by id. A single writer task owns the write half,
 //! so frames from requests and events never interleave mid-frame.
 
-use crate::events::EventError;
+use crate::events::{EventError, Page};
 use crate::{rpc, ServerState, SERVER_NAME};
 use rosen_core::AgentId;
 use rosen_protocol::frame::{decode_body, read_frame, read_frame_body, write_frame};
 use rosen_protocol::{
-    negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Event, Outcome, Request,
+    negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Outcome, Request,
     RequestEnvelope, ServerFrame, SUPPORTED_VERSIONS,
 };
 use std::io;
@@ -254,15 +254,16 @@ async fn forward_events(
         // published between the read and the wait still wakes this loop.
         published.borrow_and_update();
         let page = read_page(&state, cursor, subscriber.clone()).await;
-        let full = page.len() as u64 == EVENT_PAGE;
-        for event in page {
-            cursor = event.seq;
+        for event in page.events {
             if outbox.send(ServerFrame::Event(event)).await.is_err() {
                 return;
             }
         }
+        // Past every row the page scanned, including any this build could
+        // not read, so a run of them cannot hold the stream back.
+        cursor = page.scanned_to;
         // A full page means more may be waiting; read on without sleeping.
-        if !full && published.changed().await.is_err() {
+        if !page.full && published.changed().await.is_err() {
             return;
         }
     }
@@ -294,11 +295,7 @@ async fn starting_cursor(
 
 /// Reads the next page on the blocking pool: SQLite I/O must not stall the
 /// async workers that carry every other connection.
-async fn read_page(
-    state: &Arc<ServerState>,
-    cursor: u64,
-    subscriber: Option<AgentId>,
-) -> Vec<Event> {
+async fn read_page(state: &Arc<ServerState>, cursor: u64, subscriber: Option<AgentId>) -> Page {
     retrying(|| {
         let state = Arc::clone(state);
         let subscriber = subscriber.clone();
