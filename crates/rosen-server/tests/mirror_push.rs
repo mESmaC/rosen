@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use rosen_core::{ChangeId, LandedCommit, LandedTrailers, ObjectId, Signature};
 use rosen_protocol::{Endpoint, EventKind, Outcome};
 use rosen_server::landing::{CasResult, LandRecord, Ledger, Tier};
+use rosen_server::reviews::approvals;
 use rosen_server::{import::service, mirror, ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use serde_json::json;
@@ -70,7 +71,13 @@ fn land(state: &ServerState, n: u8) -> ObjectId {
 }
 
 fn register_change(state: &ServerState, change: ChangeId, base: ObjectId, tree: ObjectId) {
-    // The CAS closes a real registry entry in its transaction.
+    // The CAS closes a real registry entry in its transaction, and needs an
+    // approval for its head (R7).
+    let approval = rosen_protocol::ApproveRequest {
+        change: change.to_string(),
+        reviewer: rosen_core::AgentId::new("reviewer").unwrap(),
+        head: tree,
+    };
     state
         .changes
         .with_conn(|conn| {
@@ -82,6 +89,8 @@ fn register_change(state: &ServerState, change: ChangeId, base: ObjectId, tree: 
             Ok(())
         })
         .unwrap();
+    let approve = |conn: &mut rusqlite::Connection| Ok(approvals::approve(conn, &approval));
+    state.changes.with_conn(approve).unwrap().unwrap();
 }
 
 fn wait_for(what: &str, mut done: impl FnMut() -> bool) {

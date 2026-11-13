@@ -78,6 +78,13 @@ fn new_attempt() -> (tempfile::TempDir, Ledger, Connection, LandRecord) {
     )
     .unwrap()
     .change;
+    // The swap also needs an approval that still holds (R7).
+    let approval = rosen_protocol::ApproveRequest {
+        change: change.id.to_string(),
+        reviewer: AgentId::new("reviewer").unwrap(),
+        head: change.head,
+    };
+    rosen_server::reviews::approvals::approve(&mut conn, &approval).unwrap();
     let record = LandRecord {
         ref_name: "main".into(),
         change: change.id,

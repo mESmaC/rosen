@@ -511,9 +511,11 @@ fn close_registered_change(tx: &Connection, record: &LandRecord) -> LandResult<(
 }
 
 /// True while the change registry still holds the change at the head the
-/// land merged and in a state that may land. Read inside the land
-/// transaction: a snapshot stored between the land's read and its swap
-/// would otherwise be marked landed without ever reaching the base.
+/// land merged, in a state that may land, with an approval that still holds
+/// (R7). Read inside the land transaction: a snapshot stored between the
+/// land's read and its swap would otherwise be marked landed without ever
+/// reaching the base, and one that left the head where it was read would
+/// carry the approval it voided onto the base.
 /// A ledger used without the change registry has nothing to contradict.
 fn change_unmoved(tx: &Connection, record: &LandRecord) -> LandResult<bool> {
     if !has_registry(tx)? {
@@ -526,9 +528,33 @@ fn change_unmoved(tx: &Connection, record: &LandRecord) -> LandResult<bool> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    Ok(row.is_some_and(|(state, head)| {
+    let unmoved = row.is_some_and(|(state, head)| {
         matches!(state.as_str(), "open" | "ready") && head == record.head.to_hex()
-    }))
+    });
+    Ok(unmoved && approval_holds(tx, &record.change)?)
+}
+
+/// An author snapshot sets every approval it voids to invalid for good, so
+/// a valid row means an approval covers the change's current content even
+/// if the head left and came back. A registry without the review table
+/// holds no approvals, so it refuses.
+fn approval_holds(tx: &Connection, change: &ChangeId) -> LandResult<bool> {
+    let has_reviews = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'review_approvals'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !has_reviews {
+        return Ok(false);
+    }
+    Ok(tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM review_approvals WHERE change_id = ?1 AND valid = 1)",
+        params![change.to_string()],
+        |row| row.get(0),
+    )?)
 }
 
 /// Position of `commit` in the ref's history. The commit must be one the

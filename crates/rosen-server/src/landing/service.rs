@@ -14,6 +14,7 @@ use rosen_protocol::{ErrorBody, ErrorCode, LandAnswer, LandStatus, Outcome, Resp
 use rosen_store::{LooseObjectStore, ObjectStore};
 use rusqlite::params;
 
+use super::review_gate::StoredReviews;
 use super::{
     ChangeBook, ChangeFacts, ChangeId, CommitId, CommitWriter, EventSink, LandError, LandOutcome,
     LandResult, LandedCommit, Landing, LandingConfig, LandingDeps, LandingEvent, Ledger,
@@ -24,27 +25,14 @@ use crate::events::LandingEvents;
 use crate::rpc::change_error_code;
 use crate::ServerState;
 
-/// Approvals and review tiers, as landing reads them (SPEC R7). Review owns
-/// both; it installs its own with [`LandingService::set_review_gate`].
+/// Approvals and review tiers, as landing reads them (SPEC R7). The server
+/// reads stored approvals ([`StoredReviews`]); tests and the tiering piece
+/// install their own with [`LandingService::set_review_gate`].
 pub trait ReviewGate: Send + Sync {
-    /// The head the change's latest approval was given at, and who approved
-    /// it there. A land needs it to equal the change's current head.
-    fn approval(&self, change: &Change) -> Result<Option<(TreeId, Vec<AgentId>)>, String>;
+    /// The head the change's approvals cover, and who approved it there. A
+    /// land needs it to equal the change's current head.
+    fn approval(&self, change: &Change) -> Result<Option<(CommitId, Vec<AgentId>)>, String>;
     fn tier(&self, change: &Change) -> Result<Tier, String>;
-}
-
-/// The gate until review installs its own: nothing is approved, so nothing
-/// lands, and every change is `normal`, so every change needs a receipt.
-/// Both defaults refuse rather than admit.
-pub struct NoReviews;
-
-impl ReviewGate for NoReviews {
-    fn approval(&self, _: &Change) -> Result<Option<(TreeId, Vec<AgentId>)>, String> {
-        Ok(None)
-    }
-    fn tier(&self, _: &Change) -> Result<Tier, String> {
-        Ok(Tier::Normal)
-    }
 }
 
 pub struct LandingService {
@@ -69,9 +57,9 @@ pub async fn land(state: &Arc<ServerState>, change: String) -> Outcome {
 impl LandingService {
     pub fn new(state: Weak<ServerState>) -> Self {
         Self {
+            gate: RwLock::new(Arc::new(StoredReviews(state.clone()))),
             state,
             engine: Mutex::new(None),
-            gate: RwLock::new(Arc::new(NoReviews)),
         }
     }
 
@@ -206,7 +194,11 @@ fn refusal_status(
             paths = super::conflict_routes::paths(state, change.id).map_err(land_body)?;
             "the change has stored conflicts; resolve them with `rosen resolve`".into()
         }
-        Refusal::Unapproved => format!("no approval for the current head {head}"),
+        Refusal::Unapproved => format!(
+            "no approval for the current head {head}; a reviewer reads that head and runs \
+             `rosen review approve {} --head {head}`. A new head from the author voids an approval",
+            change.id
+        ),
         Refusal::NoReceipt => format!("the change has no receipt: {submit}"),
         Refusal::ReceiptStale => format!(
             "no receipt is bound to the current head {head} and the `{set}` check set: {submit}"
