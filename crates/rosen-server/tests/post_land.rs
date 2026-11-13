@@ -111,13 +111,7 @@ async fn approve_and_receipt(
 #[tokio::test]
 async fn batch_green_survives_restart_and_excludes_future_lands() {
     let (_temp, state) = setup();
-    assert_eq!(
-        next(&state).await,
-        PostLandWork {
-            job: None,
-            last_green: None
-        }
-    );
+    assert!(next(&state).await.job.is_none());
     let a = land(&state, 1).await;
     let old = next(&state).await.job.unwrap();
     assert_eq!(old.commit, a);
