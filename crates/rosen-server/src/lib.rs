@@ -18,6 +18,7 @@ pub mod import;
 pub mod landing;
 pub mod listener;
 pub mod load_limits;
+pub mod machines;
 pub mod metadata;
 pub mod mirror;
 pub mod network;
@@ -110,12 +111,9 @@ impl ServerState {
         ))
     }
 
-    /// True when `given` is the project's machine credential. Always false
-    /// before the network listener is up.
+    /// Revalidates a machine's credential, expiry and revocation status.
     pub fn credential_matches(&self, given: &str) -> bool {
-        self.network
-            .get()
-            .is_some_and(|info| info.identity.credential_matches(given))
+        machines::authenticate(&self.config.data_dir, given).unwrap_or(false)
     }
 
     pub fn open_connections(&self) -> u64 {
