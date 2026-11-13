@@ -1,3 +1,4 @@
+/-! # Design proof: post-land bisection (SPEC.md R12). -/
 namespace Bisection
 
 def midpoint (lo hi : Nat) := lo + (hi - lo) / 2
@@ -38,7 +39,8 @@ theorem cost_bound (lo hi culprit : Nat) (h : lo < hi) :
 into k and n-k; cost is the worst remaining candidate count after one query.
 No such split has smaller worst-case cost than this balanced split. -/
 theorem optimal (n k : Nat) (hk : k <= n) :
-    max (n / 2) (n - n / 2) <= max k (n - k) := by
+    max (midpoint 0 n) (n - midpoint 0 n) <= max k (n - k) := by
+  dsimp [midpoint]
   have h1 := Nat.le_max_left k (n-k)
   have h2 := Nat.le_max_right k (n-k)
   apply Nat.max_le.mpr; constructor <;> omega

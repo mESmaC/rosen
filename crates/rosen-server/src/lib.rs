@@ -249,6 +249,9 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     // off the accept path so clients can connect meanwhile.
     let recovering = Arc::clone(&state);
     tokio::task::spawn_blocking(move || {
+        if let Err(err) = bisect::recover(&recovering) {
+            eprintln!("rosen-server: confirmed bisection recovery failed: {err}");
+        }
         if let Err(err) = post_land::recover(&recovering) {
             eprintln!("rosen-server: green notification recovery failed: {err}");
         }

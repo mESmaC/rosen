@@ -151,13 +151,16 @@ pub async fn handle(
     id: i64,
     result: Option<BisectResult>,
 ) -> rosen_protocol::Outcome {
+    let state = std::sync::Arc::clone(state);
     let path = state.config.metadata_path();
     let work = tokio::task::spawn_blocking(move || {
         let mut conn = crate::metadata::open(&path).map_err(internal)?;
-        match result {
-            Some(result) => submit(&mut conn, &result),
-            None => next(&conn, id),
-        }
+        let answer = match result {
+            Some(result) => submit(&mut conn, &result)?,
+            None => next(&conn, id)?,
+        };
+        apply_confirmed(&state, &answer)?;
+        Ok::<_, ErrorBody>(answer)
     })
     .await;
     match work {
@@ -165,4 +168,30 @@ pub async fn handle(
         Ok(Err(error)) => rosen_protocol::Outcome::Error(error),
         Err(error) => rosen_protocol::Outcome::Error(internal(error)),
     }
+}
+
+fn apply_confirmed(state: &crate::ServerState, answer: &BisectState) -> Result<()> {
+    if let Some(culprit) = &answer.culprit {
+        crate::landing::revert::revert(state, culprit.commit, &culprit.output).map_err(internal)?;
+    }
+    Ok(())
+}
+
+/// Confirmation commits before the inverse land. Replay covers that crash gap;
+/// the inverse land itself is idempotent by culprit commit.
+pub fn recover(state: &crate::ServerState) -> Result<()> {
+    let conn = crate::metadata::open(&state.config.metadata_path()).map_err(internal)?;
+    storage::ensure_schema(&conn).map_err(internal)?;
+    let mut query = conn
+        .prepare("SELECT id FROM bisections WHERE phase='done' ORDER BY id")
+        .map_err(internal)?;
+    let ids = query
+        .query_map([], |r| r.get::<_, i64>(0))
+        .map_err(internal)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(internal)?;
+    for id in ids {
+        apply_confirmed(state, &next(&conn, id)?)?;
+    }
+    Ok(())
 }
