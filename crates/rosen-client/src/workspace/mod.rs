@@ -25,7 +25,7 @@ mod registry;
 pub use lifecycle::{deletion_permitted, CleanupReport};
 pub use registry::WorkspaceRecord;
 pub mod limits;
-mod parallel;
+pub(crate) mod parallel;
 pub mod pool;
 mod pool_worker;
 mod sparse;
@@ -175,10 +175,15 @@ fn reserve(
     let Some(budget) = budget else {
         return Ok(None);
     };
-    let mut bytes = 0u64;
-    for entry in &target.files {
-        bytes = bytes.saturating_add(store.read_blob(&entry.blob)?.data.len() as u64);
-    }
+    // Each read waits mostly on opening a file (and, on Windows, on the
+    // virus scanner), so threads overlap the waits as the copy does.
+    let total = AtomicU64::new(0);
+    parallel::for_each::<_, MaterialiseError, _>(&target.files, |entry| {
+        let size = store.read_blob(&entry.blob)?.data.len() as u64;
+        total.fetch_add(size, Ordering::Relaxed);
+        Ok(())
+    })?;
+    let mut bytes = total.into_inner();
     if let Some(source) = &options.source {
         bytes = bytes.saturating_add(
             limits::disk_bytes(&source.dir)
