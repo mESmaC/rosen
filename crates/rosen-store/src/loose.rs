@@ -175,9 +175,24 @@ impl ObjectStore for LooseObjectStore {
             }
             Err(error) => return Err(error.into()),
         };
-        read_header_len(id, ZlibDecoder::new(file))
+        let compressed = file.metadata()?.len();
+        let len = read_header_len(id, ZlibDecoder::new(file))?;
+        // Callers reserve disk for this length before any validating read,
+        // so a corrupt header claiming more than the file could inflate to
+        // must fail here rather than wait forever for room.
+        if len > compressed.saturating_mul(MAX_DEFLATE_RATIO) {
+            return Err(StoreError::Corrupt {
+                id: *id,
+                reason: format!("header claims {len} bytes from {compressed} compressed"),
+            });
+        }
+        Ok(len)
     }
 }
+
+/// Deflate expands at most about 1032 to 1, so no honest object inflates
+/// to more than this many times its compressed size.
+const MAX_DEFLATE_RATIO: u64 = 1032;
 
 /// The longest header is a kind name, a space and a 20-digit u64 length.
 const MAX_HEADER: usize = 32;
