@@ -1,5 +1,6 @@
 name = "proofs"
-defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "StackedChanges", "AutoRevert", "BatchGreen"]
+defaultTargets = ["Landing", "ThreeWayMerge", "Claims", "WorkspaceDeletion", "ConflictRouting", "Recheck", "TargetedRebase", "AtomicTransactions", "ClaimRelease", "StackedChanges", "AutoRevert", "BatchGreen", "CrashRecovery"]
+
 
 # One library per proof-list feature (SPEC.md §7). Each library also builds
 # its fixture exporter, so `lake build` type-checks it.
@@ -102,3 +103,13 @@ globs = ["BatchGreen.Design", "BatchGreen.Export"]
 [[lean_exe]]
 name = "batch-green-fixtures"
 root = "BatchGreen.Export"
+
+[[lean_lib]]
+name = "CrashRecovery"
+globs = ["CrashRecovery.Design", "CrashRecovery.Export"]
+
+# Prints the crash recovery fixture table:
+# `lake exe crash-recovery-fixtures > fixtures/crash-recovery.tsv`
+[[lean_exe]]
+name = "crash-recovery-fixtures"
+root = "CrashRecovery.Export"

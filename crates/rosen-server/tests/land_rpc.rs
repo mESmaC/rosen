@@ -129,6 +129,30 @@ fn refused(answer: &LandAnswer) -> Option<&str> {
     }
 }
 
+// Risk (R8 step 1): prose may skip the receipt only; it must retain approval,
+// and editing the check-set config must not exempt code in the same change.
+#[tokio::test(flavor = "multi_thread")]
+async fn prose_skips_only_receipts_and_base_selects_the_check_set() {
+    let (_temp, state, _) = setup();
+    let prose = new_change(&state).await;
+    write(&state, &prose, "README.md", b"Guide\n").await;
+    assert_eq!(refused(&land_as_is(&state, &prose).await), Some("unapproved"));
+    assert!(matches!(land(&state, &prose).await.outcome, LandStatus::Landed { .. }));
+    let change = new_change(&state).await;
+    let config = b"[checks.pre_land]\nname='build-lint'\ncommands=['build','lint']\n";
+    let head_config = write(&state, &change, "rosen.toml", config).await;
+    assert_eq!(refused(&land(&state, &change).await), Some("no_receipt"));
+    let base = Ledger::open(&state.config.metadata_path()).unwrap().base("main").unwrap().unwrap();
+    receipt(&state, &change, head_config, base).await;
+    assert!(matches!(land(&state, &change).await.outcome, LandStatus::Landed { .. }));
+    let code = new_change(&state).await;
+    write(&state, &code, "code.rs", b"fn main() {}\n").await;
+    let answer = land(&state, &code).await;
+    assert_eq!(refused(&answer), Some("no_receipt"));
+    let LandStatus::Refused { message, .. } = answer.outcome else { unreachable!() };
+    assert!(message.contains("`build-lint`"));
+}
+
 // Risk: the production adapter must reuse independent receipts while still
 // refusing clean textual merges whose changes share a build unit (SPEC R8).
 #[tokio::test(flavor = "multi_thread")]

@@ -68,9 +68,16 @@ impl Client {
         WorkspaceMarker::new(change.change.id, change.change.head, sparse, ignore)
             .write(dest)
             .map_err(Error::Io)?;
-        let store = self.local_store().await?;
         // Seed tree metadata so a watcher can start during a server outage.
-        crate::snapshot::Snapshotter::open(&store, dest)?;
+        // A warm-pool workspace was seeded before the take, so this finds
+        // the head tree cached and returns at once.
+        let store = self.local_store().await?;
+        let (root, head) = (dest.to_path_buf(), change.change.head);
+        tokio::task::spawn_blocking(move || {
+            crate::snapshot::seed_tree_cache(&store, &root, head)
+        })
+        .await
+        .map_err(|error| Error::Unexpected(format!("tree cache seeding stopped: {error}")))??;
         self.register_workspace(change.change.id, dest).await?;
         Ok(report)
     }

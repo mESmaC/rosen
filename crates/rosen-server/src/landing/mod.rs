@@ -27,11 +27,11 @@ pub mod service;
 
 use std::fmt;
 
-pub use engine::{LandOutcome, Landing, LandingConfig, LandingDeps, MergePreview};
+pub use engine::{LandOutcome, Landing, LandingConfig, LandingDeps, MergePreview, RecoveryReport};
 pub use ledger::{CasResult, InitBase, LandRecord, Ledger};
 pub use restack::RestackReport;
-pub use rules::{LandInput, ReceiptCheck, Refusal, Verdict};
 pub use review_gate::StoredReviews;
+pub use rules::{LandInput, ReceiptCheck, Refusal, Verdict};
 pub use service::{LandingService, ReviewGate};
 
 pub use rosen_core::{
@@ -110,6 +110,17 @@ pub enum Routing {
     ChangeMoved,
 }
 
+/// What [`ChangeBook::reparent`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reparent {
+    Moved,
+    /// The change already sits on `onto` or a later base: a replayed or
+    /// slower post-land run must not move it back, so its rebase is dropped.
+    AlreadyPast,
+    /// A snapshot moved the head after the merge read it; merge again.
+    HeadMoved,
+}
+
 /// Events landing emits (SPEC R9). Routing to subscribers is the event bus's job.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LandingEvent {
@@ -125,8 +136,10 @@ pub enum LandingEvent {
         change: ChangeId,
         paths: Vec<String>,
     },
+    /// Claims released by the land that made `commit`.
     Released {
         change: ChangeId,
+        commit: CommitId,
     },
 }
 
@@ -178,6 +191,11 @@ pub type LandResult<T> = Result<T, LandError>;
 /// The change model, as landing sees it.
 pub trait ChangeBook: Send + Sync {
     fn facts(&self, id: &ChangeId) -> LandResult<Option<ChangeFacts>>;
+    /// Classify the immutable diff using this attempt's base configuration.
+    /// Adapters without a project store retain their supplied tier.
+    fn tier_at(&self, facts: &ChangeFacts, _base: &CommitId) -> LandResult<Tier> {
+        Ok(facts.tier)
+    }
     /// Changes whose parent is `id`, bottom of each stack first.
     fn stacked_on(&self, id: &ChangeId) -> LandResult<Vec<ChangeId>>;
     /// Unlanded changes that overlap `id` (SPEC §2 "Overlap").
@@ -201,8 +219,16 @@ pub trait ChangeBook: Send + Sync {
     }
 
     /// Moves a change onto `onto` without rewriting its commits (R8 step 4).
-    /// `merged` is the clean merge result, or `None` when it conflicted.
-    fn reparent(&self, id: &ChangeId, onto: &CommitId, merged: Option<&TreeId>) -> LandResult<()>;
+    /// `head` is the head the merge read; `merged` is the clean merge result,
+    /// or `None` when it conflicted, which only asks what a move would do.
+    /// Never moves a change backwards or from a head it no longer has.
+    fn reparent(
+        &self,
+        id: &ChangeId,
+        onto: &CommitId,
+        head: &CommitId,
+        merged: Option<&TreeId>,
+    ) -> LandResult<Reparent>;
     fn release_claims(&self, id: &ChangeId) -> LandResult<()>;
 }
 
@@ -223,4 +249,11 @@ pub trait CommitWriter: Send + Sync {
 
 pub trait EventSink: Send + Sync {
     fn emit(&self, event: LandingEvent);
+
+    /// Emits an event that happens once per land (`Landed`, `Released`)
+    /// unless it was already emitted, so replaying a land's post-land work
+    /// after a crash does not announce the land twice.
+    fn emit_once(&self, event: LandingEvent) {
+        self.emit(event);
+    }
 }

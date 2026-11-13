@@ -19,6 +19,36 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         ));
     }
     match request {
+        Request::MachineList => {
+            crate::machines::manage::handle(state, |c| {
+                crate::machines::manage::list(c).map(Response::Machines)
+            })
+            .await
+        }
+        Request::MachineApprove { machine } => {
+            crate::machines::manage::handle(state, move |c| {
+                crate::machines::manage::approve(c, &machine).map(Response::Machine)
+            })
+            .await
+        }
+        Request::MachineRevoke { machine } => {
+            crate::machines::manage::handle(state, move |c| {
+                crate::machines::manage::revoke(c, &machine).map(Response::Machine)
+            })
+            .await
+        }
+        Request::JoinKeyList => {
+            crate::machines::manage::handle(state, |c| {
+                crate::machines::manage::keys(c).map(Response::JoinKeys)
+            })
+            .await
+        }
+        Request::JoinKeyRevoke { key } => {
+            crate::machines::manage::handle(state, move |c| {
+                crate::machines::manage::revoke_key(c, &key).map(Response::JoinKey)
+            })
+            .await
+        }
         Request::JoinKeyCreate(req) => crate::machines::create(state, req).await,
         Request::MachineEnroll { key, name } => crate::machines::enroll(state, key, name).await,
         Request::MachinePending { name, role } => crate::machines::pending(state, name, role).await,
