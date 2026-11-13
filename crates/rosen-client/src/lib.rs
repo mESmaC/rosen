@@ -2,14 +2,18 @@
 //!
 //! Velocity links this crate directly, and the `rosen` CLI is a thin layer
 //! over it. It covers daemon discovery and start, workspace
-//! materialisation, the file watcher and snapshots, and the offline journal.
+//! materialisation, the file watcher and snapshots, the offline journal,
+//! and every step of an agent's flow from claim to land (SPEC.md §5).
 //!
 //! # Stable API
 //!
 //! - [`Session`] is the entry point: one agent's connection to its machine's
 //!   daemon, which it finds or starts. It creates, watches, snapshots and
-//!   deletes workspaces, and claims, reviews and submits receipts under the
-//!   agent's identity.
+//!   deletes workspaces, and claims, reviews, submits receipts, lands and
+//!   applies rebases under the agent's identity.
+//! - [`ChannelMembership`] is the agent joined to the project's AIRC channel
+//!   (R13) under the member ID and nick Velocity gave it: piece claims,
+//!   messages and ledgers.
 //! - [`Client`] holds one typed method per protocol request, for everything a
 //!   session does not wrap. Its request and answer types are in
 //!   [`protocol`], whose wire format is versioned, and the model types they
@@ -28,12 +32,12 @@ pub mod daemon;
 pub mod discovery;
 mod edits;
 pub mod enrollment;
-pub mod machines;
 pub mod events;
 pub mod history;
 pub mod identity;
 mod import;
 mod land;
+pub mod machines;
 mod pinned_tls;
 pub mod post_land;
 pub mod project_config;
@@ -50,7 +54,10 @@ pub use land::land_reconnecting;
 pub use rosen_core::{AgentId, ChangeId, ChangeParent, ChangeState, ObjectId};
 pub use rosen_protocol as protocol;
 pub use rosen_protocol::Endpoint;
-pub use session::{CreatedWorkspace, Session, SessionBuilder, WorkspaceSpec, WorkspaceWatch};
+pub use session::{
+    ChannelMembership, CreatedWorkspace, MergeCheckout, Session, SessionBuilder, WorkClaim,
+    WorkspaceSpec, WorkspaceWatch,
+};
 pub use snapshot::{SnapshotReport, WatchEvent};
 pub use workspace::{Report as MaterialiseReport, Sparse};
 
