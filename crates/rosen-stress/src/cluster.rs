@@ -53,7 +53,8 @@ impl Layout {
     }
 
     pub fn report(&self, machine: Machine) -> PathBuf {
-        self.root.join(format!("report-{}.json", Self::machine_name(machine)))
+        self.root
+            .join(format!("report-{}.json", Self::machine_name(machine)))
     }
 
     pub fn logs(&self) -> PathBuf {
@@ -114,7 +115,8 @@ impl Cluster {
             let proxy = PartitionProxy::start("127.0.0.1:0".parse()?, listen).await?;
             route_through(&dir, proxy.address())?;
             let log = self.logs.join(format!("daemon-{machine}.log"));
-            let mut daemon = Slot::new(format!("daemon-{machine}"), daemon_recipe(layout, machine)).log_to(log);
+            let mut daemon =
+                Slot::new(format!("daemon-{machine}"), daemon_recipe(layout, machine)).log_to(log);
             daemon.start()?;
             connect_when_up(&layout.endpoint(machine), Duration::from_secs(30)).await?;
             self.proxies.push(proxy);
@@ -144,7 +146,10 @@ impl Cluster {
             tokio::spawn(async move {
                 let mut output = Vec::new();
                 let _ = stdout.read_to_end(&mut output).await;
-                let file = std::fs::OpenOptions::new().create(true).append(true).open(&log);
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log);
                 if let Ok(mut file) = file {
                     let _ = std::io::Write::write_all(&mut file, &output);
                 }
@@ -270,10 +275,12 @@ fn server_recipe(layout: &Layout, listen: SocketAddr) -> Recipe {
     let endpoint = layout.endpoint(0);
     Box::new(move || {
         let mut command = Command::new(&bin);
-        command
-            .arg("--data-dir")
-            .arg(&dir)
-            .args(["--endpoint", endpoint.as_str(), "--listen", &listen.to_string()]);
+        command.arg("--data-dir").arg(&dir).args([
+            "--endpoint",
+            endpoint.as_str(),
+            "--listen",
+            &listen.to_string(),
+        ]);
         command
     })
 }

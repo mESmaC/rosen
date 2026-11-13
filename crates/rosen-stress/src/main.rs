@@ -263,11 +263,18 @@ fn print_local(outcome: &local::Outcome) -> bool {
         checker.passed,
         checker.failed,
         checker.bisect_steps,
-        checker.culprits.iter().map(|c| c.commit).collect::<Vec<_>>(),
+        checker
+            .culprits
+            .iter()
+            .map(|c| c.commit)
+            .collect::<Vec<_>>(),
         outcome.checker.interrupted
     );
     let faults = outcome.faults.iter().filter(|f| f.error.is_some()).count();
-    println!("faults played {}, failed to apply {faults}", outcome.faults.len());
+    println!(
+        "faults played {}, failed to apply {faults}",
+        outcome.faults.len()
+    );
     for (name, kills, starts) in &outcome.processes {
         println!("  {name}: killed {kills}, started {starts}");
     }

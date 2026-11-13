@@ -63,7 +63,9 @@ fn progress_of(records: &[Record]) -> HashMap<usize, Progress> {
             }
             Record::Outcome(outcome) => {
                 let progress = agents.entry(outcome.index).or_default();
-                progress.finished.insert(outcome.n, outcome.landed.is_some());
+                progress
+                    .finished
+                    .insert(outcome.n, outcome.landed.is_some());
             }
             _ => {}
         }

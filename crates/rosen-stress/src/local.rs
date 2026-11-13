@@ -76,7 +76,10 @@ pub struct Outcome {
 
 pub async fn run_local(plan: &Plan, local: &LocalRun) -> Result<Outcome> {
     if local.dir.exists() {
-        bail!("{} already exists; give a new directory", local.dir.display());
+        bail!(
+            "{} already exists; give a new directory",
+            local.dir.display()
+        );
     }
     std::fs::create_dir_all(&local.dir)?;
     let layout = Layout::new(&std::path::absolute(&local.dir)?, local.machines.max(1));
@@ -105,7 +108,11 @@ async fn run_cluster(
     cluster.start_daemons(layout, listen).await?;
     cluster.start_agents(agent_recipes(plan, local, layout)?)?;
     let agents_done = Arc::new(AtomicBool::new(false));
-    let checker = tokio::spawn(checker_task(layout.endpoint(0), plan.clone(), Arc::clone(&agents_done)));
+    let checker = tokio::spawn(checker_task(
+        layout.endpoint(0),
+        plan.clone(),
+        Arc::clone(&agents_done),
+    ));
     let faults = match &local.faults {
         Some(args) => play_faults(args, layout.machines, cluster).await,
         None => Vec::new(),
@@ -117,7 +124,12 @@ async fn run_cluster(
     if let Err(err) = waited {
         failures.push(format!("agents: {err:#}"));
     }
-    failures.extend(cluster.crashed().into_iter().map(|crash| format!("crash: {crash}")));
+    failures.extend(
+        cluster
+            .crashed()
+            .into_iter()
+            .map(|crash| format!("crash: {crash}")),
+    );
     let reports = read_reports(layout, &mut failures);
     let targets = Targets {
         latency: local.faults.is_none(),
@@ -136,7 +148,9 @@ async fn run_cluster(
 
 /// Plays a seeded fault plan through the cluster and returns its log.
 async fn play_faults(args: &FaultArgs, machines: usize, cluster: &mut Cluster) -> Vec<Logged> {
-    let seed = args.fault_seed.unwrap_or_else(rosen_faults::rng::Rng::fresh_seed);
+    let seed = args
+        .fault_seed
+        .unwrap_or_else(rosen_faults::rng::Rng::fresh_seed);
     let plan = FaultPlan::draw(seed, &args.shape(machines));
     println!(
         "fault seed {seed}: {} kills, {} partitions in {} s",
@@ -149,7 +163,11 @@ async fn play_faults(args: &FaultArgs, machines: usize, cluster: &mut Cluster) -
 
 /// The checker reaches the server directly, as a checker machine's daemon
 /// would forward to it.
-async fn checker_task(endpoint: rosen_client::Endpoint, plan: Plan, done: Arc<AtomicBool>) -> CheckerReport {
+async fn checker_task(
+    endpoint: rosen_client::Endpoint,
+    plan: Plan,
+    done: Arc<AtomicBool>,
+) -> CheckerReport {
     let until = Until {
         agents_done: &done,
         quiet: None,

@@ -83,7 +83,11 @@ pub async fn run_checker(endpoint: &Endpoint, plan: &Plan, until: Until<'_>) -> 
 
 /// The run's full test: a landed tree fails when it holds the injected
 /// failure.
-async fn holds_failure(client: &Client, plan: &Plan, commit: ObjectId) -> anyhow::Result<Option<String>> {
+async fn holds_failure(
+    client: &Client,
+    plan: &Plan,
+    commit: ObjectId,
+) -> anyhow::Result<Option<String>> {
     let Some(path) = plan.failure_path() else {
         return Ok(None);
     };

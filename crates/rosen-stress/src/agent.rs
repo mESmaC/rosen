@@ -12,8 +12,8 @@ use crate::machine::{Progress, Shared};
 use crate::report::{Began, ChangeOutcome, LandSample, ReceiptSample, Record, StartSample};
 use anyhow::{anyhow, bail, Result};
 use rosen_client::protocol::{
-    ApproveRequest, ClaimOutcome, ErrorCode, LandStatus, LogRequest, MergeResultAnswer,
-    ReadAnswer, ReadRequest,
+    ApproveRequest, ClaimOutcome, ErrorCode, LandStatus, LogRequest, MergeResultAnswer, ReadAnswer,
+    ReadRequest,
 };
 use rosen_client::{AgentId, ChangeId, Error, ObjectId, Session, WorkspaceSpec};
 use rosen_core::receipt::PRE_LAND_CHECK_SET;
@@ -210,13 +210,17 @@ impl Agent {
     /// try a fault cuts short is retried as a new change in a new
     /// directory, and the change it left behind is abandoned, so outages
     /// never pile empty changes up on the server.
-    async fn create_workspace(&mut self, n: usize, on: Option<ChangeId>) -> Result<(ChangeId, PathBuf)> {
+    async fn create_workspace(
+        &mut self,
+        n: usize,
+        on: Option<ChangeId>,
+    ) -> Result<(ChangeId, PathBuf)> {
         let base = self
             .shared
             .work_dir
             .join(self.shared.plan.agent_name(self.index));
         for tries in 0..=MAX_RECONNECTS {
-            let root = fresh_root(&base, n);
+            let root = fresh_root(&base, n, tries);
             let mut spec = WorkspaceSpec::new(&root);
             if let Some(parent) = on {
                 spec = spec.on(parent.to_string());
@@ -227,10 +231,17 @@ impl Agent {
                 Ok(Ok(created)) => {
                     let ms = started.elapsed().as_secs_f64() * 1000.0;
                     let method = created.report.method.as_str().to_owned();
-                    self.shared.record(Record::Start(StartSample { ms, method }));
+                    self.shared
+                        .record(Record::Start(StartSample { ms, method }));
                     return Ok((created.change.change.id, root));
                 }
-                Ok(Err(err)) if !is_transient(&err) => {
+                // A creation that made its change but not its directory is
+                // retried in a fresh directory whatever the cause: an earlier
+                // try may still be writing the old one, or a sibling's
+                // deletion may have raced it (#161).
+                Ok(Err(err))
+                    if !is_transient(&err) && !matches!(err, Error::WorkspaceNotCreated { .. }) =>
+                {
                     return Err(anyhow::Error::new(err).context("create workspace"));
                 }
                 Ok(Err(err)) => {
@@ -331,7 +342,8 @@ impl Agent {
     async fn snapshot(&mut self, began: &Began) -> Result<()> {
         let message = format!("{} change {}", self.name, began.n);
         let root = began.root.clone();
-        retrying!(self, "snapshot", |s| s.snapshot(&root, Some(message.clone())))?;
+        retrying!(self, "snapshot", |s| s
+            .snapshot(&root, Some(message.clone())))?;
         Ok(())
     }
 
@@ -390,14 +402,19 @@ impl Agent {
             if merge.tree.is_none() {
                 bail!("merge conflict in {:?}", merge.conflicts);
             }
-            if !self.check_and_review(work.change, &merge, &mut approved).await? {
+            if !self
+                .check_and_review(work.change, &merge, &mut approved)
+                .await?
+            {
                 continue;
             }
             let started = Instant::now();
             let answer = match retrying!(self, "land", |s| s.client().land(&id)) {
                 Ok(answer) => answer,
                 Err(err) if is_contended(&err) => {
-                    self.shared.record(Record::Refusal { reason: "contended".into() });
+                    self.shared.record(Record::Refusal {
+                        reason: "contended".into(),
+                    });
                     tokio::time::sleep(contention_backoff(self.index, round)).await;
                     continue;
                 }
@@ -408,13 +425,22 @@ impl Agent {
                 LandStatus::Landed { commit, attempts } => {
                     let change = work.change;
                     let rechecks = round;
-                    let sample = LandSample { change, ms, attempts, rechecks };
+                    let sample = LandSample {
+                        change,
+                        ms,
+                        attempts,
+                        rechecks,
+                    };
                     self.shared.record(Record::Land(sample));
                     return Ok(commit);
                 }
                 LandStatus::AlreadyLanded { commit } => return Ok(commit),
-                LandStatus::Refused { reason, message, .. } => {
-                    self.shared.record(Record::Refusal { reason: reason.clone() });
+                LandStatus::Refused {
+                    reason, message, ..
+                } => {
+                    self.shared.record(Record::Refusal {
+                        reason: reason.clone(),
+                    });
                     match reason.as_str() {
                         "needs_recheck" | "receipt_stale" | "no_receipt" => {}
                         "unapproved" => approved = None,
@@ -580,18 +606,21 @@ fn is_contended(err: &anyhow::Error) -> bool {
 /// A pause that grows with the land's rounds and differs between agents,
 /// so agents the server turned away together do not return together.
 fn contention_backoff(agent: usize, round: u32) -> Duration {
-    let mixed = (agent as u64 + 1).wrapping_mul(2_654_435_761) ^ u64::from(round).wrapping_mul(40_503);
+    let mixed =
+        (agent as u64 + 1).wrapping_mul(2_654_435_761) ^ u64::from(round).wrapping_mul(40_503);
     let spread = mixed % 250;
     Duration::from_millis(100 * u64::from(round.min(10)) + spread)
 }
 
-/// A workspace directory for change `n` that no earlier try used.
-fn fresh_root(agent_dir: &std::path::Path, n: usize) -> PathBuf {
+/// A workspace directory for try `tries` of change `n` that no earlier try
+/// used. Each try in a process starts its search at its own number, so a
+/// timed-out try still writing its directory never shares it with the next.
+fn fresh_root(agent_dir: &std::path::Path, n: usize, tries: u32) -> PathBuf {
     let first = agent_dir.join(format!("{n:04}"));
-    if !first.exists() {
+    if tries == 0 && !first.exists() {
         return first;
     }
-    (1..)
+    (u64::from(tries).max(1)..)
         .map(|k| agent_dir.join(format!("{n:04}.{k}")))
         .find(|root| !root.exists())
         .expect("some directory name is free")

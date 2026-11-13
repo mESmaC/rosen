@@ -109,18 +109,30 @@ pub struct Began {
 #[serde(tag = "record", rename_all = "snake_case")]
 pub enum Record {
     /// The `agents` process started, with the base tip it saw.
-    Started { base: ObjectId },
+    Started {
+        base: ObjectId,
+    },
     Began(Began),
     Start(StartSample),
     Land(LandSample),
     Receipt(ReceiptSample),
     Outcome(ChangeOutcome),
-    Refusal { reason: String },
-    HotClaim { granted: bool },
-    Violation { line: String },
-    Error { line: String },
+    Refusal {
+        reason: String,
+    },
+    HotClaim {
+        granted: bool,
+    },
+    Violation {
+        line: String,
+    },
+    Error {
+        line: String,
+    },
     /// The process finished its agents after running this long.
-    Ran { ms: u64 },
+    Ran {
+        ms: u64,
+    },
 }
 
 impl Report {

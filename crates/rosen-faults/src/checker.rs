@@ -87,7 +87,11 @@ where
         state = client.bisect_submit(result).await?;
     }
     if let Some(culprit) = state.culprit {
-        if !log.culprits.iter().any(|seen| seen.commit == culprit.commit) {
+        if !log
+            .culprits
+            .iter()
+            .any(|seen| seen.commit == culprit.commit)
+        {
             log.culprits.push(culprit);
         }
     }

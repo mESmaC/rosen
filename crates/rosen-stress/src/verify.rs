@@ -42,7 +42,11 @@ struct Run<'a> {
     culprit: Option<&'a ChangeOutcome>,
 }
 
-pub async fn verify(client: &Client, reports: &[Report], targets: &Targets<'_>) -> Result<Failures> {
+pub async fn verify(
+    client: &Client,
+    reports: &[Report],
+    targets: &Targets<'_>,
+) -> Result<Failures> {
     let plan = common_plan(reports)?;
     let mut failures = Failures::new();
     let tip = base_tip(client).await.context("reading the base tip")?;
@@ -53,7 +57,13 @@ pub async fn verify(client: &Client, reports: &[Report], targets: &Targets<'_>) 
     let culprit = plan.culprit().and_then(|(agent, n)| {
         landed(reports).find(|change| change.index == agent && change.n == n)
     });
-    let run = Run { plan, reports, history, tip, culprit };
+    let run = Run {
+        plan,
+        reports,
+        history,
+        tip,
+        culprit,
+    };
     check_history(&run, &mut failures);
     check_lost_work(client, &run, &mut failures).await?;
     check_gates(client, &run, &mut failures).await?;
@@ -229,7 +239,10 @@ async fn check_gates(client: &Client, run: &Run<'_>, failures: &mut Failures) ->
         .collect();
     for entry in run.history.iter().filter(|entry| !is_server_revert(entry)) {
         let (Some(change), Some(receipt)) = (entry.change, &entry.receipt) else {
-            failures.push(format!("base commit {} landed with no receipt", entry.commit));
+            failures.push(format!(
+                "base commit {} landed with no receipt",
+                entry.commit
+            ));
             continue;
         };
         if !receipts.contains(&(change, receipt.head, receipt.base)) {
@@ -270,7 +283,12 @@ fn check_measurements(run: &Run, targets: &Targets, failures: &mut Failures) {
         ));
     }
     for report in reports {
-        failures.extend(report.claim_violations.iter().map(|v| format!("claim: {v}")));
+        failures.extend(
+            report
+                .claim_violations
+                .iter()
+                .map(|v| format!("claim: {v}")),
+        );
     }
     if !targets.latency {
         return;
@@ -285,7 +303,11 @@ fn check_measurements(run: &Run, targets: &Targets, failures: &mut Failures) {
             "workspace start p95 is {p95:.0} ms, over {START_P95_MS} ms"
         ));
     }
-    let lands: Vec<f64> = reports.iter().flat_map(|r| &r.lands).map(|l| l.ms).collect();
+    let lands: Vec<f64> = reports
+        .iter()
+        .flat_map(|r| &r.lands)
+        .map(|l| l.ms)
+        .collect();
     if let Some(p95) = percentile(&lands, 0.95).filter(|p95| *p95 >= LAND_P95_MS) {
         failures.push(format!("land p95 is {p95:.1} ms, over {LAND_P95_MS} ms"));
     }
@@ -307,7 +329,11 @@ pub fn summary(reports: &[Report]) -> String {
     for (method, samples) in &by_method {
         out.push_str(&line(&format!("  via {method}"), samples));
     }
-    let lands: Vec<f64> = reports.iter().flat_map(|r| &r.lands).map(|l| l.ms).collect();
+    let lands: Vec<f64> = reports
+        .iter()
+        .flat_map(|r| &r.lands)
+        .map(|l| l.ms)
+        .collect();
     out.push_str(&line("land (ms)", &lands));
     out.push_str(&counters(reports));
     out
@@ -316,8 +342,16 @@ pub fn summary(reports: &[Report]) -> String {
 /// Contention and failure counts: how hard the run pushed, and what it hit.
 fn counters(reports: &[Report]) -> String {
     let mut out = String::new();
-    let rechecks: u32 = reports.iter().flat_map(|r| &r.lands).map(|l| l.rechecks).sum();
-    let attempts: u32 = reports.iter().flat_map(|r| &r.lands).map(|l| l.attempts).sum();
+    let rechecks: u32 = reports
+        .iter()
+        .flat_map(|r| &r.lands)
+        .map(|l| l.rechecks)
+        .sum();
+    let attempts: u32 = reports
+        .iter()
+        .flat_map(|r| &r.lands)
+        .map(|l| l.attempts)
+        .sum();
     let landed = landed(reports).count();
     out.push_str(&format!(
         "changes landed {landed}, re-receipts {rechecks}, server CAS attempts {attempts}\n"
@@ -329,7 +363,9 @@ fn counters(reports: &[Report]) -> String {
     out.push_str(&format!("land refusals {refusals:?}\n"));
     let granted: u64 = reports.iter().map(|r| r.hot_claims_granted).sum();
     let refused: u64 = reports.iter().map(|r| r.hot_claims_refused).sum();
-    out.push_str(&format!("hot claims granted {granted}, refused {refused}\n"));
+    out.push_str(&format!(
+        "hot claims granted {granted}, refused {refused}\n"
+    ));
     let elapsed = reports.iter().map(|r| r.elapsed_ms).max().unwrap_or(0);
     let restarts: u32 = reports.iter().map(|r| r.restarts).sum();
     out.push_str(&format!(
@@ -337,7 +373,10 @@ fn counters(reports: &[Report]) -> String {
         elapsed as f64 / 1000.0
     ));
     let kept: Vec<&String> = reports.iter().flat_map(|r| &r.workspaces_kept).collect();
-    out.push_str(&format!("closed changes' workspaces not deleted {}\n", kept.len()));
+    out.push_str(&format!(
+        "closed changes' workspaces not deleted {}\n",
+        kept.len()
+    ));
     for workspace in kept.iter().take(5) {
         out.push_str(&format!("  {workspace}\n"));
     }
