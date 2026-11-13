@@ -19,6 +19,10 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         ));
     }
     match request {
+        Request::BisectNext { session } => crate::bisect::handle(state, session, None).await,
+        Request::BisectSubmit(result) => {
+            crate::bisect::handle(state, result.job.session, Some(result)).await
+        }
         Request::PoolSize { size } => state.pool.set_size(size).await,
         Request::PoolTake { tree, dest } => state.pool.take(tree, dest).await,
         Request::Ping => Outcome::Ok(Response::Pong),

@@ -19,6 +19,7 @@
 //!   sessions are built from. The daemon uses them directly; a host should
 //!   not need to.
 
+pub mod bisect;
 pub mod changes;
 pub mod claims;
 pub mod connection;

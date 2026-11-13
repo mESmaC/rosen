@@ -7,6 +7,7 @@
 //! listener (R14). On every other machine it runs as the tier-1 object cache
 //! in [`cache`], forwarding every other request to the server.
 
+pub mod bisect;
 pub mod cache;
 pub mod changes;
 pub mod claims;

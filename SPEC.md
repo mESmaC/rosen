@@ -263,6 +263,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
 - The project configures a **post-land check set** (the full tests). External checkers run it, as with receipts (D9).
 - **Batches.** The server offers checkers the newest untested landed commit. One passing run marks every commit up to it **green**, and the server records the last green commit.
 - **Failure and bisect.** On a failing run, the server offers the commits between the last green and the failure for bisection, until one commit is found to break, the **culprit**.
+  - Bisection jobs persist their captured landed interval and a step token. Each result must name the exact offered commit and token; duplicate or stale results are refused. The server splits the remaining interval at its midpoint, then requests a second failure of the culprit and a fresh passing run of its parent. Contradictory confirmation stops the session for the checker to investigate. Sessions resume after restart.
 - **Auto-revert.** The server lands a revert of the culprit through R8, as a server-owned change that needs no receipt or approval. The culprit change goes back to `open` with its owner, carrying the failing check output, and gets a `reverted` event. Its commits and workspace are kept.
 - A flaky result is the checker's concern: a revert happens only after the culprit fails twice and its parent passes.
 - **Accept when:** a landed commit that fails the full tests is reverted automatically, its change reopens with its work intact, and no other change is reverted.

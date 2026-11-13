@@ -5,7 +5,9 @@
 //! Both `rosen-server` and `rosen-client` depend on this crate, so the client never
 //! links server code and the server never links client code.
 
+pub mod bisect;
 pub mod change;
+pub use bisect::{BisectCulprit, BisectJob, BisectResult, BisectState};
 pub mod claim;
 pub mod config;
 pub mod edits;

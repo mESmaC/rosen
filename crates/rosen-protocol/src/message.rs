@@ -114,6 +114,12 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
+    /// Reads the next persisted checker job for a failed batch (R12).
+    BisectNext {
+        session: i64,
+    },
+    /// Submits one exact bisection job; stale results are refused.
+    BisectSubmit(crate::BisectResult),
     /// Liveness check.
     Ping,
     /// The server's identity, uptime and load.
@@ -246,6 +252,7 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
+    Bisection(crate::BisectState),
     Pong,
     PoolSized,
     /// Number of tracked files, or None when no matching slot is ready.
