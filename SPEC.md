@@ -233,6 +233,8 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
    - The ref move, landed-history insertion and registry transition to `landed` commit in one SQLite transaction. A missing or moved registry entry refuses the attempt. Snapshots after that commit are refused, including before post-land recovery finishes.
    - If the compare-and-swap loses a race, the server retries the land itself with backoff, as long as no new receipt is needed. A land is never applied twice.
 3. A **stack** lands bottom first. A change cannot land before its parent change.
+   - The server remembers the parent tree each child was based on. A parent snapshot or server rebase automatically merges its new tree into live descendants in stack order, retaining each dependency, change ID and authored commit. Conflicts are stored on the child and stop propagation through that child until resolved. A restart resumes pending parent updates from the saved tree; workspaces apply the resulting head only when their owners ask (R2).
+   - A legacy edited stack with no recoverable parent-tree basis is refused rather than merged against a guessed basis that could delete intervening landed work.
 4. After a land:
    - claims are released;
    - the server rebases, without rewriting commits:

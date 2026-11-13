@@ -37,6 +37,9 @@ pub fn create(
     };
     let now = now_millis();
     let id = insert_with_fresh_id(&tx, owner, parent, start_tree, now)?;
+    if matches!(parent, ChangeParent::Change(_)) {
+        crate::stacks::track(&tx, id, start_tree)?;
+    }
     tx.commit()?;
     Ok(ChangeRecord {
         change: Change::new(id, owner.clone(), parent, start_tree),
