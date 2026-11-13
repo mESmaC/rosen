@@ -7,11 +7,17 @@
 //!
 //! Every typed request is still reachable through [`Session::client`]. The
 //! session adds the operations that need the identity or span several
-//! requests: making a workspace, watching it, claims, review and receipts.
+//! requests, so Velocity's whole agent flow runs through it alone (§5):
+//! workspaces in place of `git worktree`, the AIRC channel in place of local
+//! AIRC files, and review, receipts and landing in place of a GitHub PR.
 
+mod channel;
+mod landing;
 mod watch;
 mod workspace;
 
+pub use channel::{ChannelMembership, WorkClaim};
+pub use landing::MergeCheckout;
 pub use watch::WorkspaceWatch;
 pub use workspace::{CreatedWorkspace, WorkspaceSpec};
 
