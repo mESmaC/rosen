@@ -13,6 +13,7 @@
 
 mod engine;
 mod ledger;
+mod overlap_targets;
 mod restack;
 pub mod rules;
 pub mod service;

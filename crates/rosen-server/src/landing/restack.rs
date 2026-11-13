@@ -24,11 +24,13 @@ pub(crate) struct Restacker<'a> {
 
 impl Restacker<'_> {
     pub fn after_land(&self, landed: &ChangeId, commit: &CommitId) -> LandResult<RestackReport> {
+        // Capture durably before closing the subject or deleting its claims.
+        let targets = self.targets(landed)?;
         self.book.mark_landed(landed, commit)?;
         self.book.release_claims(landed)?;
         self.events.emit(LandingEvent::Released { change: *landed });
         let mut report = RestackReport::default();
-        for target in self.targets(landed)? {
+        for target in targets {
             self.rebase_one(&target, commit, &mut report)?;
         }
         Ok(report)

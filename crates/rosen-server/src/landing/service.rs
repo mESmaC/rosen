@@ -293,10 +293,8 @@ impl ChangeBook for Adapters {
         })
     }
 
-    /// Overlap detection (R6) is not built yet, so no overlapping change is
-    /// rebased after a land; each rebases at its own land instead (R8 step 4).
-    fn overlapping(&self, _: &ChangeId) -> LandResult<Vec<ChangeId>> {
-        Ok(Vec::new())
+    fn overlapping(&self, id: &ChangeId) -> LandResult<Vec<ChangeId>> {
+        super::overlap_targets::load_or_capture(&*self.state()?, *id)
     }
 
     fn mark_landed(&self, id: &ChangeId, _: &CommitId) -> LandResult<()> {
