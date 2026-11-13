@@ -4,10 +4,11 @@ use super::pool::{refresh, seed_slot, Prep, Slot, WarmPool};
 use super::{prepare, template, Method, Options};
 use crate::{Client, Error};
 use rosen_core::ObjectId;
-use rosen_protocol::{Endpoint, EventKind, LogRequest};
+use rosen_protocol::{Endpoint, Event, EventKind, LogRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{self, error::TryRecvError};
 use tokio::time::Instant;
 
 /// Bounds on the delay before a refused workspace cleanup is retried.
@@ -54,6 +55,7 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
     // covered by reading each registration's current change state.
     let mut schedule = CleanupSchedule::default();
     loop {
+        schedule.take_queued(&mut events)?;
         if schedule.due {
             schedule.ran(cleanup(&client).await?);
         }
@@ -71,8 +73,9 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
                 continue;
             }
         };
-        // One prepare per pass, then refill again, so a land that arrived
-        // during a long prepare is followed before the next one starts.
+        // One prepare per pass, then clean up and refill again, so a land
+        // that arrived during a long prepare is followed before the next one
+        // starts.
         if let Some(base) = &base {
             if prepare_next(pool, base).await {
                 continue;
@@ -122,6 +125,25 @@ impl CleanupSchedule {
             self.retry_at = None;
             self.delay = CLEANUP_RETRY_MIN;
         }
+    }
+
+    /// Notes events queued while the worker was busy, without waiting. A
+    /// pass that ran a prepare skips the wait below, so without this a
+    /// steady run of prepares postpones cleanup after every land (R4). It
+    /// also keeps the bounded event buffer from filling, which would stall
+    /// the connection reader and with it this worker's own replies.
+    fn take_queued(&mut self, events: &mut mpsc::Receiver<Event>) -> Result<(), Error> {
+        loop {
+            match events.try_recv() {
+                Ok(event) => self.due |= may_close_or_reopen(event.kind),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return Err(Error::Disconnected),
+            }
+        }
+        if self.retry_at.is_some_and(|at| at <= Instant::now()) {
+            self.due = true;
+        }
+        Ok(())
     }
 }
 
