@@ -13,26 +13,38 @@ pub struct LandingEvents(pub Arc<ServerState>);
 
 impl EventSink for LandingEvents {
     fn emit(&self, event: LandingEvent) {
-        let (kind, change, detail) = match event {
-            LandingEvent::Landed { change, commit } => (
-                EventKind::Landed,
-                change,
-                json!({ "commit": commit.to_hex() }),
-            ),
-            LandingEvent::Rebased { change, onto } => {
-                (EventKind::Rebased, change, json!({ "onto": onto.to_hex() }))
-            }
-            LandingEvent::Conflict { change, paths } => {
-                (EventKind::Conflict, change, json!({ "paths": paths }))
-            }
-            // Waiters woken by the release get their own `released` events
-            // from the claim store (`claims::release_landed`).
-            LandingEvent::Released { change } => {
-                (EventKind::Released, change, json!({ "reason": "landed" }))
-            }
-        };
+        let (kind, change, detail) = parts(event);
         self.0
             .events
             .publish(kind, Some(change.to_string()), detail);
+    }
+
+    fn emit_once(&self, event: LandingEvent) {
+        let (kind, change, detail) = parts(event);
+        let change = change.to_string();
+        if !self.0.events.holds(kind, &change, &detail) {
+            self.0.events.publish(kind, Some(change), detail);
+        }
+    }
+}
+
+fn parts(event: LandingEvent) -> (EventKind, crate::landing::ChangeId, serde_json::Value) {
+    match event {
+        LandingEvent::Landed { change, commit } => (
+            EventKind::Landed,
+            change,
+            json!({ "commit": commit.to_hex() }),
+        ),
+        LandingEvent::Rebased { change, onto } => {
+            (EventKind::Rebased, change, json!({ "onto": onto.to_hex() }))
+        }
+        LandingEvent::Conflict { change, paths } => {
+            (EventKind::Conflict, change, json!({ "paths": paths }))
+        }
+        // Waiters woken by the release get their own `released` events
+        // from the claim store (`claims::release_landed`).
+        LandingEvent::Released { change } => {
+            (EventKind::Released, change, json!({ "reason": "landed" }))
+        }
     }
 }

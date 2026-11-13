@@ -39,6 +39,7 @@ pub mod workspace;
 
 pub use connection::Client;
 pub use daemon::connect_or_start;
+pub use land::land_reconnecting;
 pub use rosen_core::{AgentId, ChangeId, ChangeParent, ChangeState, ObjectId};
 pub use rosen_protocol as protocol;
 pub use rosen_protocol::Endpoint;

@@ -201,6 +201,76 @@ pub fn rebase(
     Ok(record)
 }
 
+/// What [`rebase_after_land`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterLand {
+    /// The change moved onto the landed commit, or would have when only asked.
+    Rebased,
+    /// The change already sits on the landed commit or a later base.
+    AlreadyPast,
+    /// A snapshot moved the head after the merge read it.
+    HeadMoved,
+}
+
+/// Moves a change onto base commit `onto` after a land (R8 step 4), but only
+/// forward and only from the head the merge read. Writes nothing when the
+/// change already sits on `onto` or a later base: lands finish their
+/// post-land work in any order, and recovery replays a land after later
+/// lands finished theirs, so without this check the older one would move the
+/// change back. Writes nothing either when a snapshot moved the head, which
+/// recovery makes likely because daemons upload their offline journals as
+/// the restarted server comes up; storing the merge of the older head would
+/// drop that snapshot's edits from the head. `merged` `None` only asks.
+pub fn rebase_after_land(
+    conn: &mut Connection,
+    id: ChangeId,
+    onto: ObjectId,
+    read_head: ObjectId,
+    merged: Option<ObjectId>,
+) -> Result<AfterLand, ChangeError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = load(&tx, id)?.change;
+    if !behind_base(&tx, current.parent, onto)? {
+        return Ok(AfterLand::AlreadyPast);
+    }
+    if current.head != read_head {
+        return Ok(AfterLand::HeadMoved);
+    }
+    if let Some(head) = merged {
+        update_in(&tx, id, |change| {
+            change.rebase(ChangeParent::Base(onto), head)
+        })?;
+        tx.commit()?;
+    }
+    Ok(AfterLand::Rebased)
+}
+
+/// True when `parent` is earlier in the base history than `onto`. A stacked
+/// change is always behind: the land of its parent is what moves it.
+fn behind_base(
+    conn: &Connection,
+    parent: ChangeParent,
+    onto: ObjectId,
+) -> Result<bool, ChangeError> {
+    let ChangeParent::Base(current) = parent else {
+        return Ok(true);
+    };
+    let position = |commit: ObjectId| {
+        conn.query_row(
+            "SELECT seq FROM base_history WHERE commit_id = ?1",
+            params![commit.to_hex()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+    };
+    // A parent the base history never held cannot be ordered; moving it onto
+    // a commit the base did hold is how it gets back on the base.
+    Ok(match (position(current)?, position(onto)?) {
+        (Some(at), Some(target)) => at < target,
+        _ => current != onto,
+    })
+}
+
 /// Walks down from `below` to the base; meeting `id` on the way means stacking
 /// `id` on `below` would close a loop. The visited set makes the walk end even
 /// if a damaged store already holds a loop.

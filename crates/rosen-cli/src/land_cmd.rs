@@ -11,8 +11,7 @@ const LAND_SCHEMA: &str = "rosen.land/v1";
 /// Exits unsuccessfully when the land is refused, so scripts can branch on
 /// the exit code alone.
 pub async fn run(json: bool, endpoint: &Endpoint, change: &str) -> Result<Succeeded, Error> {
-    let client = rosen_client::connect_or_start(endpoint).await?;
-    let answer = client.land(change).await?;
+    let answer = rosen_client::land_reconnecting(endpoint, change).await?;
     print_answer(json, &answer);
     Ok(!matches!(answer.outcome, LandStatus::Refused { .. }))
 }

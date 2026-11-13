@@ -415,6 +415,19 @@ impl Ledger {
         Ok(records)
     }
 
+    /// True while `change` has landed and its post-land work has not finished.
+    pub fn post_land_pending(&self, change: &ChangeId) -> LandResult<bool> {
+        let connection = self.lock()?;
+        let pending = connection
+            .query_row(
+                "SELECT post_land_done = 0 FROM base_history WHERE change_id = ?1",
+                params![change.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(pending.unwrap_or(false))
+    }
+
     pub fn mark_post_land_done(&self, change: &ChangeId) -> LandResult<()> {
         let connection = self.lock()?;
         connection.execute(
