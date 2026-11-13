@@ -14,11 +14,18 @@ pub async fn run(
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({"schema":"rosen.workspace.list/v1", "workspaces":records})
+                    serde_json::json!({"schema":crate::output::WORKSPACE_LIST_SCHEMA, "workspaces":records})
                 );
             } else {
                 for record in records {
-                    println!("{}  {}", record.change, record.path.display());
+                    match &record.kept {
+                        Some(reason) => println!(
+                            "{}  {}  (kept: {reason})",
+                            record.change,
+                            record.path.display()
+                        ),
+                        None => println!("{}  {}", record.change, record.path.display()),
+                    }
                 }
             }
         }
@@ -29,7 +36,7 @@ pub async fn run(
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({"schema":"rosen.workspace.delete/v1", "path":workspace})
+                    serde_json::json!({"schema":crate::output::WORKSPACE_DELETE_SCHEMA, "path":workspace})
                 );
             }
         }
