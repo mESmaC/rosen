@@ -96,6 +96,15 @@ pub enum MergeOutcome {
     Conflicted(Vec<String>),
 }
 
+/// Whether [`ChangeBook::record_conflicts_at`] attached the conflicts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Routing {
+    Stored,
+    /// A snapshot moved the head, or the change closed, after the merge read
+    /// it. Nothing was stored.
+    ChangeMoved,
+}
+
 /// Events landing emits (SPEC R9). Routing to subscribers is the event bus's job.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LandingEvent {
@@ -171,6 +180,9 @@ pub trait ChangeBook: Send + Sync {
     fn mark_landed(&self, id: &ChangeId, commit: &CommitId) -> LandResult<()>;
     fn record_conflicts(&self, id: &ChangeId, paths: &[String]) -> LandResult<()>;
     /// Records conflicts against the exact immutable inputs of this attempt.
+    /// Stores nothing and returns [`Routing::ChangeMoved`] when the change
+    /// no longer has `head` or has closed, so the caller retries on its new
+    /// state instead of attaching conflicts from an older head.
     fn record_conflicts_at(
         &self,
         id: &ChangeId,
@@ -178,9 +190,9 @@ pub trait ChangeBook: Send + Sync {
         onto: &CommitId,
         head: &CommitId,
         paths: &[String],
-    ) -> LandResult<()> {
+    ) -> LandResult<Routing> {
         let _ = (merge_base, onto, head);
-        self.record_conflicts(id, paths)
+        self.record_conflicts(id, paths).map(|()| Routing::Stored)
     }
 
     /// Moves a change onto `onto` without rewriting its commits (R8 step 4).
