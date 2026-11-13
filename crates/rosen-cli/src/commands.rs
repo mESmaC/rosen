@@ -256,7 +256,19 @@ pub enum MachineCommand {
     /// before it expires. The key is never used again by this machine.
     Join {
         /// The join key, as `rosen machine key create` printed it.
-        key: String,
+        key: Option<String>,
+        /// Server address for a pending join without a key.
+        #[arg(long, requires = "fingerprint", conflicts_with = "key")]
+        address: Option<String>,
+        /// Trusted server certificate fingerprint for a pending join.
+        #[arg(long, requires = "address", conflicts_with = "key")]
+        fingerprint: Option<String>,
+        /// Machine name; defaults to the host name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Local daemon data directory holding the encrypted credential.
+        #[arg(long, default_value = ".rosen")]
+        data_dir: PathBuf,
     },
     /// List enrolled and pending machines with their role, last contact and
     /// running agents.
@@ -296,6 +308,9 @@ pub enum MachineKeyCommand {
         /// How many machines can join with it.
         #[arg(long, value_name = "N")]
         uses: u32,
+        /// Reachable server address to put in the key; defaults to its listener.
+        #[arg(long)]
+        address: Option<String>,
     },
     /// List join keys with their role, expiry and remaining uses. Never
     /// prints the secret part of a key.
