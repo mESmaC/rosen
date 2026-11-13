@@ -83,6 +83,18 @@
     },
     {
       "$ref": "#/$defs/rosen.log~1v2"
+    },
+    {
+      "$ref": "#/$defs/rosen.machine~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.machines~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.machine_key~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.machine_keys~1v1"
     }
   ],
   "$defs": {
@@ -2296,6 +2308,189 @@
       "additionalProperties": false,
       "x-commands": [
         "log"
+      ]
+    },
+    "MachineRole": {
+      "enum": [
+        "agent",
+        "checker"
+      ]
+    },
+    "MachineStatus": {
+      "enum": [
+        "active",
+        "pending",
+        "revoked"
+      ]
+    },
+    "MachineRecord": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/MachineRole"
+        },
+        "status": {
+          "$ref": "#/$defs/MachineStatus"
+        },
+        "last_contact": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "running_agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "role",
+        "status",
+        "last_contact",
+        "running_agents"
+      ],
+      "additionalProperties": false
+    },
+    "JoinKeyRecord": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "role": {
+          "$ref": "#/$defs/MachineRole"
+        }
+      },
+      "required": [
+        "id",
+        "expires_at",
+        "remaining",
+        "role"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.machine/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.machine/v1"
+        },
+        "machine": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "$ref": "#/$defs/MachineRecord"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "machine"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "machine join",
+        "machine approve",
+        "machine revoke"
+      ]
+    },
+    "rosen.machines/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.machines/v1"
+        },
+        "machines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MachineRecord"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "machines"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "machine list"
+      ]
+    },
+    "rosen.machine_key/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.machine_key/v1"
+        },
+        "key": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/JoinKeyRecord"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "key"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "machine key create",
+        "machine key revoke"
+      ]
+    },
+    "rosen.machine_keys/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.machine_keys/v1"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JoinKeyRecord"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "keys"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "machine key list"
       ]
     }
   }
