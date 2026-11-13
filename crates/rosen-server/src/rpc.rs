@@ -19,6 +19,13 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         ));
     }
     match request {
+        Request::BisectNext { session } => crate::bisect::handle(state, session, None).await,
+        Request::BisectSubmit(result) => {
+            crate::bisect::handle(state, result.job.session, Some(result)).await
+        }
+        Request::PostLandFailed { job, output } => {
+            crate::bisect::failure::handle(state, job, output).await
+        }
         Request::MachineList => {
             crate::machines::manage::handle(state, |c| {
                 crate::machines::manage::list(c).map(Response::Machines)

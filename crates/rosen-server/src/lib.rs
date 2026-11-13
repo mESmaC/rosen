@@ -7,6 +7,7 @@
 //! listener (R14). On every other machine it runs as the tier-1 object cache
 //! in [`cache`], forwarding every other request to the server.
 
+pub mod bisect;
 pub mod cache;
 pub mod changes;
 pub mod channel;
@@ -253,6 +254,9 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     let landing_recovery = tokio::spawn(async move {
         let first = Arc::clone(&recovering);
         let replayed = tokio::task::spawn_blocking(move || {
+            if let Err(err) = bisect::recover(&first) {
+                eprintln!("rosen-server: confirmed bisection recovery failed: {err}");
+            }
             if let Err(err) = post_land::recover(&first) {
                 eprintln!("rosen-server: green notification recovery failed: {err}");
             }

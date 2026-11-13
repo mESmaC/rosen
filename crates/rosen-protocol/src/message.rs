@@ -115,6 +115,12 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
+    /// Reads the next persisted checker job for a failed batch (R12).
+    BisectNext {
+        session: i64,
+    },
+    /// Submits one exact bisection job; stale results are refused.
+    BisectSubmit(crate::BisectResult),
     MachineList,
     MachineApprove { machine: String },
     MachineRevoke { machine: String },
@@ -134,6 +140,11 @@ pub enum Request {
     },
     /// Offers the newest untested landed commit to an external checker (R12).
     PostLandNext,
+    /// Starts bisection from the stored green boundary after a batch failure.
+    PostLandFailed {
+        job: crate::PostLandJob,
+        output: String,
+    },
     /// Marks the tested landed prefix green after the full check set passed.
     PostLandPassed(crate::post_land::PostLandJob),
     /// Liveness check.
@@ -275,6 +286,7 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
+    Bisection(crate::BisectState),
     Machines(Vec<crate::machine::MachineRecord>),
     Machine(crate::machine::MachineRecord),
     JoinKeys(Vec<crate::machine::JoinKeyRecord>),

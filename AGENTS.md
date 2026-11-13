@@ -14,6 +14,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Proofs: `lake build` in `proofs/`.
 - Atomic transaction fixtures: `lake exe atomic-transactions-fixtures > fixtures/atomic-transactions.tsv` in `proofs/`.
 - Claim release fixtures: `lake exe claim-release-fixtures > fixtures/claim-release.tsv` in `proofs/`.
+- Bisection fixtures: `lake exe bisection-fixtures > fixtures/bisection.tsv` in `proofs/`.
 - Auto-revert fixtures: `lake exe auto-revert-fixtures > fixtures/auto-revert.tsv` in `proofs/`.
 - Re-check fixtures: `lake exe recheck-fixtures > fixtures/recheck.tsv` in `proofs/`.
 - Workspace deletion fixtures: `lake exe workspace-deletion-fixtures > fixtures/workspace-deletion.tsv` in `proofs/`.
