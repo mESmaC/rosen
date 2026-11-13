@@ -14,6 +14,7 @@
 mod conflict_routes;
 mod engine;
 mod ledger;
+pub(crate) use ledger::ensure_schema;
 mod overlap_targets;
 pub mod reach;
 mod reach_store;
