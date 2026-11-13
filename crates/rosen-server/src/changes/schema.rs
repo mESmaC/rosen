@@ -6,6 +6,10 @@ use rusqlite::Connection;
 /// IDs are stored in their 32-letter text form so that resolving a short
 /// prefix typed by an agent is one range scan on the primary key.
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    crate::metadata::ensure_schema(conn)
+}
+
+pub(crate) fn ensure_change_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS changes (
              id            TEXT PRIMARY KEY CHECK (length(id) = 32),
@@ -31,8 +35,5 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
              message   TEXT,
              PRIMARY KEY (change_id, seq)
          ) WITHOUT ROWID;",
-    )?;
-    crate::conflicts::ensure_schema(conn)?;
-    crate::claims::ensure_schema(conn)?;
-    crate::reviews::ensure_schema(conn)
+    )
 }

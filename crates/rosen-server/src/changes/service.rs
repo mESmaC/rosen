@@ -5,7 +5,6 @@ use rosen_protocol::{ChangeFilter, ChangeRecord, NewChange};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::Duration;
 
 /// File name of the metadata database inside the server's data directory
 /// (D13). Landing, import and conflicts share this one database.
@@ -119,14 +118,11 @@ impl ChangeService {
                 if let Some(dir) = path.parent() {
                     std::fs::create_dir_all(dir)?;
                 }
-                let conn = Connection::open(path)?;
-                conn.pragma_update(None, "journal_mode", "WAL")?;
-                conn
+                return Ok(crate::metadata::open(path)?);
             }
             None => Connection::open_in_memory()?,
         };
-        conn.busy_timeout(Duration::from_secs(5))?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+        crate::metadata::configure(&conn)?;
         super::schema::migrate(&conn)?;
         Ok(conn)
     }
