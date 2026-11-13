@@ -20,7 +20,7 @@ Getting started:
   rosen status                            your change, claims, conflicts and
                                           unsnapshotted files
   rosen commit -m <MESSAGE>               a named snapshot
-  rosen review approve <CHANGE>           (a reviewer) approve the head
+  rosen review approve <CHANGE> --head <HEAD>  approve the head you read
   rosen receipt submit <CHANGE> ...       (a checker) record passed checks
   rosen land <CHANGE>                     move the base to the change
 
@@ -395,6 +395,12 @@ pub enum ReviewCommand {
     Approve {
         /// Change to approve.
         change: String,
+        /// Exact head read by the reviewer.
+        #[arg(long)]
+        head: String,
+        /// Reviewer identity. Defaults to $ROSEN_AGENT, then the OS user name.
+        #[arg(long)]
+        reviewer: Option<String>,
     },
     /// Mark a review thread resolved. Resolving a resolved thread does
     /// nothing; a reply reopens it.
@@ -409,6 +415,9 @@ pub enum ReviewCommand {
     List {
         /// Change whose threads to list: its ID or a unique prefix.
         change: String,
+        /// List approval history instead of threads.
+        #[arg(long, conflicts_with = "state")]
+        approvals: bool,
         /// Only threads in this state: open or resolved.
         #[arg(long)]
         state: Option<String>,

@@ -10,7 +10,12 @@
 mod anchor;
 mod store;
 
-pub use store::ensure_schema;
+pub mod approvals;
+
+pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
+    store::ensure_schema(conn)?;
+    approvals::ensure_schema(conn)
+}
 
 use crate::changes::{self, ChangeError};
 use crate::ServerState;
@@ -62,6 +67,8 @@ impl From<rosen_core::Error> for ReviewError {
 /// One review operation, as received from a client.
 pub enum ReviewCall {
     Comment(CommentRequest),
+    Approve(rosen_protocol::ApproveRequest),
+    Approvals(String),
     Resolve(ResolveRequest),
     List(ThreadFilter),
 }
@@ -80,6 +87,22 @@ pub async fn handle(state: &Arc<ServerState>, call: ReviewCall) -> Outcome {
 
 fn run(state: &ServerState, call: ReviewCall) -> Result<Response, ReviewError> {
     match call {
+        ReviewCall::Approve(req) => {
+            let approval = on_conn(state, |c| approvals::approve(c, &req))?;
+            state.events.publish(
+                EventKind::Review,
+                Some(approval.change.to_string()),
+                json!({"action": "approve", "head": approval.head, "by": approval.reviewer}),
+            );
+            Ok(Response::Approval(approval))
+        }
+        ReviewCall::Approvals(change) => {
+            let approvals = on_conn(state, |c| {
+                let id = changes::resolve(c, &change)?;
+                approvals::list(c, id)
+            })?;
+            Ok(Response::Approvals(approvals))
+        }
         ReviewCall::Comment(req) => comment(state, req).map(Response::ReviewThread),
         ReviewCall::Resolve(req) => {
             let (thread, changed) = on_conn(state, |c| store::resolve(c, req.thread, &req.by))?;

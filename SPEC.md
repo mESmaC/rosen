@@ -205,6 +205,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - Review comments anchor to file, line and change head, and form threads with an open or resolved state.
   - A new thread anchors to a line of a file in the change's current head, and the server refuses a path that is not a file there or a line the file lacks. A comment that names the head it was written against is refused once the change has a different head. The anchor never moves; each reply records the head it was written at.
   - Only open and ready changes take comments. Anyone can resolve a thread. A reply to a resolved thread reopens it. Each comment, resolve and reopen publishes a `review` event.
+- `review approve <change> --head <head> [--reviewer <agent>]` refuses stale heads and closed changes, stores the reviewer and timestamp, and publishes a `review` event. `review list <change> --approvals` lists durable approval history, including void approvals.
 - An approval is tied to the head it approved. A new head by the author voids the approval. A rebase done by the server (R8, D19) keeps it, because it changes only the parent.
 - **Review tiers** follow Anthropic's semantic approval rules and Velocity F7:
   - The server tiers each change from its diff: prose-only, normal, or sensitive.

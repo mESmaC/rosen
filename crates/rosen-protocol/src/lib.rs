@@ -38,7 +38,8 @@ pub use message::*;
 pub use objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal, WireKind, WireObject};
 pub use receipt::{ReceiptRecord, SubmitReceipt};
 pub use review::{
-    CommentRequest, CommentTarget, ResolveRequest, ReviewComment, ReviewThread, ThreadFilter,
+    Approval, ApproveRequest, CommentRequest, CommentTarget, ResolveRequest, ReviewComment,
+    ReviewThread, ThreadFilter,
 };
 pub use snapshot::{
     ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest, UploadKind, UploadObject,
