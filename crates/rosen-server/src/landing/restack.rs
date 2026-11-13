@@ -51,6 +51,21 @@ impl Restacker<'_> {
         Ok(report)
     }
 
+    /// Rebases only the changes stacked on `landed`, in stack order. A
+    /// later [`Restacker::after_land`] finds them already moved and skips
+    /// them, so running this first only changes when they move.
+    pub fn rebase_stacked(
+        &self,
+        landed: &ChangeId,
+        commit: &CommitId,
+    ) -> LandResult<RestackReport> {
+        let mut report = RestackReport::default();
+        for child in self.book.stacked_on(landed)? {
+            self.rebase_one(&child, commit, &mut report)?;
+        }
+        Ok(report)
+    }
+
     /// Stacked changes first, in stack order, then overlapping changes in ID
     /// order. Order is only set between changes that are stacked or overlap.
     fn targets(&self, landed: &ChangeId) -> LandResult<Vec<ChangeId>> {

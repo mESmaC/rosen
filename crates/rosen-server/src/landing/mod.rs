@@ -27,7 +27,10 @@ pub mod service;
 
 use std::fmt;
 
-pub use engine::{LandOutcome, Landing, LandingConfig, LandingDeps, MergePreview, RecoveryReport};
+pub use engine::{
+    CommittedLand, Decision, LandOutcome, Landing, LandingConfig, LandingDeps, MergePreview,
+    RecoveryReport,
+};
 pub use ledger::{CasResult, InitBase, LandRecord, Ledger};
 pub use restack::RestackReport;
 pub use review_gate::StoredReviews;

@@ -7,7 +7,7 @@
 //! so lands of unrelated changes proceed in parallel and only lose a race,
 //! never wait in a queue.
 
-use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock, Weak};
 use std::time::Duration;
 
 use rosen_core::{AgentId, Change, ChangeParent, ChangeState, SnapshotKind};
@@ -19,9 +19,9 @@ use rusqlite::params;
 
 use super::review_gate::StoredReviews;
 use super::{
-    ChangeBook, ChangeFacts, ChangeId, CommitId, CommitWriter, EventSink, LandError, LandOutcome,
-    LandResult, LandedCommit, Landing, LandingConfig, LandingDeps, LandingEvent, Ledger,
-    MergeOutcome, Merger, RecoveryReport, Refusal, Reparent, Tier, TreeId,
+    ChangeBook, ChangeFacts, ChangeId, CommitId, CommitWriter, CommittedLand, Decision, EventSink,
+    LandError, LandOutcome, LandResult, LandedCommit, Landing, LandingConfig, LandingDeps,
+    LandingEvent, Ledger, MergeOutcome, Merger, RecoveryReport, Refusal, Reparent, Tier, TreeId,
 };
 use crate::changes::{self, ChangeError};
 use crate::events::LandingEvents;
@@ -47,7 +47,42 @@ pub struct LandingService {
     /// Wakes [`keep_recovering`] when a land's post-land work fails. A
     /// failure while a pass runs leaves a permit, so it is never missed.
     retry: tokio::sync::Notify,
+    /// How many land requests' after-answer work is still running.
+    finishing: Mutex<usize>,
+    finished: Condvar,
 }
+
+/// Counts one land request's after-answer work as running until dropped:
+/// when the work ends, panics, or is dropped unrun by a stopping runtime.
+struct Finishing(Arc<ServerState>);
+
+impl Finishing {
+    fn start(state: Arc<ServerState>) -> Self {
+        *state
+            .landing
+            .finishing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) += 1;
+        Finishing(state)
+    }
+}
+
+impl Drop for Finishing {
+    fn drop(&mut self) {
+        let landing = &self.0.landing;
+        let mut count = landing
+            .finishing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *count -= 1;
+        if *count == 0 {
+            landing.finished.notify_all();
+        }
+    }
+}
+
+/// A land request's status, or the refusal still to be explained.
+type Decided = Result<LandStatus, Refusal>;
 
 /// First wait before retrying post-land work that failed, doubled up to
 /// [`RETRY_CAP`] while it keeps failing.
@@ -125,6 +160,8 @@ impl LandingService {
             state,
             engine: Mutex::new(None),
             retry: tokio::sync::Notify::new(),
+            finishing: Mutex::new(0),
+            finished: Condvar::new(),
         }
     }
 
@@ -149,31 +186,16 @@ impl LandingService {
                 .map_err(change_body)?;
         }
         let engine = self.engine(state)?;
-        let outcome = engine.land(&id).map_err(land_body)?;
-        crate::stacks::refresh(state);
+        let status = self.decide(&engine, &id)?;
         let base_ref = engine.config().base_ref.clone();
         let base = engine
             .ledger()
             .base(&base_ref)
             .map_err(land_body)?
             .ok_or_else(|| land_body(LandError::NoBase(base_ref.clone())))?;
-        let outcome = match outcome {
-            LandOutcome::Landed {
-                commit,
-                attempts,
-                restack,
-            } => {
-                // The land stands either way; recovery replays the rebase.
-                if let Err(why) = restack {
-                    eprintln!("rosen-server: post-land work for {id} failed: {why}");
-                    self.retry.notify_one();
-                }
-                LandStatus::Landed { commit, attempts }
-            }
-            LandOutcome::AlreadyLanded { commit } => LandStatus::AlreadyLanded { commit },
-            LandOutcome::Refused(refusal) => {
-                refusal_status(state, &engine, &record.change, &base, refusal)?
-            }
+        let outcome = match status {
+            Ok(status) => status,
+            Err(refusal) => refusal_status(state, &engine, &record.change, &base, refusal)?,
         };
         Ok(LandAnswer {
             change: id,
@@ -181,6 +203,82 @@ impl LandingService {
             base,
             outcome,
         })
+    }
+
+    /// Lands `id` up to its base move, or the refusal that stops it, rebases
+    /// the changes stacked on it, and hands what is left to a background
+    /// task. The base move, landed history and `landed` state commit in one
+    /// transaction that also marks the post-land work pending, so the
+    /// requester is answered before the overlap rebases run (R8 accept:
+    /// 200 ms) and a crash leaves them to recovery.
+    fn decide(&self, engine: &Arc<Landing>, id: &ChangeId) -> Result<Decided, ErrorBody> {
+        let (status, land) = match engine.decide(id).map_err(land_body)? {
+            Decision::Committed(land) => {
+                // A failure is retried by the post-land run handed off below.
+                if let Err(why) = engine.restack_stacked(&land) {
+                    let change = land.record.change;
+                    eprintln!("rosen-server: stack rebase after {change} landed failed: {why}");
+                }
+                let commit = land.record.commit;
+                let attempts = land.attempts;
+                (Ok(LandStatus::Landed { commit, attempts }), Some(land))
+            }
+            // `decide` reports a land it committed as `Committed`.
+            Decision::Decided(LandOutcome::Landed {
+                commit, attempts, ..
+            }) => (Ok(LandStatus::Landed { commit, attempts }), None),
+            Decision::Decided(LandOutcome::AlreadyLanded { commit }) => {
+                (Ok(LandStatus::AlreadyLanded { commit }), None)
+            }
+            Decision::Decided(LandOutcome::Refused(refusal)) => (Err(refusal), None),
+        };
+        self.after_answer(Arc::clone(engine), land);
+        Ok(status)
+    }
+
+    /// Runs, off the request's thread, the work a land request leaves after
+    /// its answer: the post-land work of the land it committed, then the
+    /// stack refresh that carries parent updates into children (R8 steps 3
+    /// and 4). Runs inline when there is no runtime to hand it to.
+    fn after_answer(&self, engine: Arc<Landing>, land: Option<CommittedLand>) {
+        // A stopping server finishes the land at its next start (recovery).
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        // Counted before the hand-off, so `settle` never misses queued work.
+        let finishing = Finishing::start(state);
+        let work = move || {
+            let state = &finishing.0;
+            state.landing.finish(state, &engine, land);
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => drop(runtime.spawn_blocking(work)),
+            Err(_) => work(),
+        }
+    }
+
+    /// Blocks until every land request answered so far has finished its
+    /// after-answer work, so a caller can read its rebases, released claims
+    /// and events. Recovery still owns work that failed.
+    pub fn settle(&self) {
+        let count = self
+            .finishing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let idle = self.finished.wait_while(count, |count| *count > 0);
+        drop(idle.unwrap_or_else(PoisonError::into_inner));
+    }
+
+    fn finish(&self, state: &ServerState, engine: &Landing, land: Option<CommittedLand>) {
+        if let Some(land) = land {
+            // The land stands either way; recovery replays the rebase.
+            if let Err(why) = engine.finish_land(&land) {
+                let change = land.record.change;
+                eprintln!("rosen-server: post-land work for {change} failed: {why}");
+                self.retry.notify_one();
+            }
+        }
+        crate::stacks::refresh(state);
     }
 
     /// True when every land after `since` through `through` on the base was

@@ -156,6 +156,8 @@ async fn approve_land(
     let Response::Land(a) = call(s, Request::Land { change: id }).await else {
         panic!()
     };
+    // A land answers before its post-land work runs (issue #190).
+    s.landing.settle();
     let LandStatus::Landed { commit, .. } = a.outcome else {
         panic!("{a:?}")
     };

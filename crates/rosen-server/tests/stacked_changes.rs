@@ -234,6 +234,8 @@ async fn land_parent(state: &Arc<ServerState>, parent: &str) {
     else {
         panic!()
     };
+    // A land answers before its post-land work runs (issue #190).
+    state.landing.settle();
     assert!(matches!(
         answer.outcome,
         rosen_protocol::LandStatus::Landed { .. }

@@ -116,7 +116,10 @@ async fn land_as_is(state: &Arc<ServerState>, change: &str) -> LandAnswer {
     let request = Request::Land {
         change: change.into(),
     };
-    match call(state, request).await {
+    let answer = call(state, request).await;
+    // A land answers before its post-land work runs (issue #190).
+    state.landing.settle();
+    match answer {
         Response::Land(answer) => answer,
         other => panic!("{other:?}"),
     }
