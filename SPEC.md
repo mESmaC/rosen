@@ -97,6 +97,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - **Independent.** Two changes are independent when their reaches share no unit. Then no unit's build sees both changes.
 - **Project configuration.** The file `rosen.toml` at the repository root. The server reads it from the base, never from a change, so a change takes effect only once it lands.
   - It lists generated files, registration lists and sensitive paths as path globs, the pre-land and post-land check sets (a name and the commands checkers run), the warm pool size and the mirror remote. Each part is optional and has a default: no paths, check sets named `pre-land` and `post-land` with no commands, a pool of 4 and no remote.
+  - Optional `[build_units.<name>]` tables contain `paths` globs and `dependencies` unit names; absent units are discovered from Cargo workspace manifests, including target, build and dev dependencies. `workspace_inputs` adds shared input globs. Unknown dependency names conservatively reach every unit.
   - Unknown keys are refused, so a misspelt key cannot drop a list silently.
   - An invalid file never takes effect. The configuration in force is the one in the nearest first-parent ancestor of the base whose file is valid, or the defaults. The change that fixes the file still lands under the last valid configuration.
   - `rosen config show` prints the configuration in force and why the base's file was refused, if it was.

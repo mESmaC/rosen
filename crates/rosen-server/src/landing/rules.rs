@@ -29,9 +29,9 @@ pub struct LandInput {
     pub receipt: ReceiptCheck,
     /// The base has moved since the receipt's base B.
     pub base_moved: bool,
-    /// Every change landed since B is prose-only. Vacuously true when the
+    /// Every change landed since B has disjoint build-unit reach. Vacuously true when the
     /// base has not moved.
-    pub landed_since_all_prose: bool,
+    pub landed_since_all_independent: bool,
     /// Merging the change onto the current base is clean.
     pub merge_clean: bool,
 }
@@ -49,7 +49,7 @@ pub enum Refusal {
     /// The merge onto the current base conflicts; the change gets stored
     /// conflicts.
     MergeConflict,
-    /// The base moved past a non-prose land: a new receipt on the new merge
+    /// The base moved past a dependent land: a new receipt on the new merge
     /// result is required.
     NeedsRecheck,
 }
@@ -97,7 +97,7 @@ pub fn decide(input: &LandInput) -> Verdict {
     }
     // A prose-only change needs no receipt, so no re-check either (R8 step 1).
     let receipt_counts =
-        input.tier == Tier::ProseOnly || !input.base_moved || input.landed_since_all_prose;
+        input.tier == Tier::ProseOnly || !input.base_moved || input.landed_since_all_independent;
     if receipt_counts {
         Verdict::Land
     } else {
