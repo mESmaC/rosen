@@ -1,0 +1,38 @@
+[package]
+name = "rosen-server"
+description = "The Rosen daemon: protocol, metadata store, snapshots, rebase, landing, claims, review, events and history."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rosen-server"
+path = "src/main.rs"
+
+[dependencies]
+rosen-core.workspace = true
+rosen-client.workspace = true
+rosen-store.workspace = true
+rosen-merge.workspace = true
+rosen-protocol.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+clap.workspace = true
+rcgen.workspace = true
+rusqlite.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+atomicwrites.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

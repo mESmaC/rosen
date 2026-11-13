@@ -1,0 +1,301 @@
+//! Read build inputs from immutable base objects; never trust the candidate's
+//! configuration or collapse intervening lands into a net diff (reverts count).
+use super::reach::{independent, BuildGraph};
+use super::{ChangeFacts, CommitId, LandError, LandResult, Tier};
+use rosen_core::claim::PathPattern;
+use rosen_core::project_config::BuildUnit;
+use rosen_core::{Object, ObjectId, ProjectConfig};
+use rosen_store::ObjectStore;
+use std::collections::BTreeMap;
+
+type Files = BTreeMap<String, (rosen_core::FileMode, ObjectId)>;
+
+pub fn reusable(
+    store: &dyn ObjectStore,
+    base: &CommitId,
+    facts: &ChangeFacts,
+    lands: &[(CommitId, Tier)],
+) -> LandResult<bool> {
+    let config = crate::project_config::resolve(store, base)
+        .map_err(error)?
+        .config;
+    let base_files = files(store, base)?;
+    let graph = graph(store, &base_files, &config)?;
+    let own = graph.reach(
+        &changed(
+            &files(store, &facts.merge_base)?,
+            &files(store, &facts.head)?,
+        ),
+        facts.tier == Tier::ProseOnly,
+    );
+    for (commit, tier) in lands {
+        if *tier == Tier::ProseOnly {
+            continue;
+        }
+        let record = store.read_commit(commit).map_err(error)?;
+        let Some(parent) = record.parents.first() else {
+            return Ok(false);
+        };
+        let paths = changed(&files(store, parent)?, &files(store, commit)?);
+        if !independent(&own, &graph.reach(&paths, false)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn error(e: impl std::fmt::Display) -> LandError {
+    LandError::Backend(e.to_string())
+}
+
+fn files(store: &dyn ObjectStore, id: &ObjectId) -> LandResult<Files> {
+    let tree = match store.read(id).map_err(error)? {
+        Object::Commit(c) => c.tree,
+        Object::Tree(_) => *id,
+        _ => return Err(error("build reach expects a commit or tree")),
+    };
+    let mut out = Files::new();
+    walk(store, tree, "", &mut out)?;
+    Ok(out)
+}
+
+fn walk(store: &dyn ObjectStore, tree: ObjectId, prefix: &str, out: &mut Files) -> LandResult<()> {
+    for entry in store.read_tree(&tree).map_err(error)?.entries() {
+        let name = std::str::from_utf8(&entry.name).map_err(error)?;
+        let path = format!("{prefix}{name}");
+        if entry.mode.is_tree() {
+            walk(store, entry.id, &format!("{path}/"), out)?;
+        } else {
+            out.insert(path, (entry.mode, entry.id));
+        }
+    }
+    Ok(())
+}
+
+fn changed(old: &Files, new: &Files) -> Vec<String> {
+    old.keys()
+        .chain(new.keys())
+        .filter(|p| old.get(*p) != new.get(*p))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn graph(store: &dyn ObjectStore, files: &Files, config: &ProjectConfig) -> LandResult<BuildGraph> {
+    let units = if config.build_units.is_empty() {
+        cargo_units(store, files)?
+    } else {
+        config.build_units.clone()
+    };
+    Ok(BuildGraph {
+        units,
+        workspace_inputs: config.workspace_inputs.clone(),
+    })
+}
+
+fn manifest(store: &dyn ObjectStore, id: &ObjectId) -> LandResult<toml::Value> {
+    let blob = store.read_blob(id).map_err(error)?;
+    toml::from_str(std::str::from_utf8(&blob.data).map_err(error)?).map_err(error)
+}
+
+fn cargo_units(store: &dyn ObjectStore, files: &Files) -> LandResult<BTreeMap<String, BuildUnit>> {
+    let Some((_, root)) = files.get("Cargo.toml") else {
+        return Ok(BTreeMap::new());
+    };
+    let root = manifest(store, root)?;
+    let mut packages = BTreeMap::new();
+    for (path, (_, id)) in files {
+        if path != "Cargo.toml" && !path.ends_with("/Cargo.toml") {
+            continue;
+        }
+        if !member(&root, path) {
+            continue;
+        }
+        let value = manifest(store, id)?;
+        if let Some(name) = value
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(|v| v.as_str())
+        {
+            if packages
+                .insert(name.to_owned(), (path.clone(), value))
+                .is_some()
+            {
+                return Err(error("duplicate Cargo package name in base"));
+            }
+        }
+    }
+    let mut units = BTreeMap::new();
+    for (name, (path, value)) in &packages {
+        let prefix = path.strip_suffix("Cargo.toml").unwrap();
+        let pattern = format!("{prefix}**");
+        let deps = dependencies(value, &root)
+            .into_iter()
+            .filter(|d| packages.contains_key(d))
+            .collect();
+        units.insert(
+            name.clone(),
+            BuildUnit {
+                paths: vec![PathPattern::new(&pattern)?],
+                dependencies: deps,
+            },
+        );
+    }
+    Ok(units)
+}
+
+fn member(root: &toml::Value, path: &str) -> bool {
+    if path == "Cargo.toml" {
+        return true;
+    }
+    let Some(workspace) = root.get("workspace") else {
+        return false;
+    };
+    let dir = path.strip_suffix("/Cargo.toml").unwrap_or("");
+    let matches = |key: &str| {
+        workspace
+            .get(key)
+            .and_then(|v| v.as_array())
+            .is_some_and(|ps| {
+                ps.iter()
+                    .filter_map(|p| p.as_str())
+                    .any(|p| PathPattern::new(p).is_ok_and(|p| p.matches(dir)))
+            })
+    };
+    matches("members") && !matches("exclude")
+}
+
+fn dependencies(value: &toml::Value, root: &toml::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(table) = value.get(key).and_then(|v| v.as_table()) {
+            for (name, dep) in table {
+                let dep = if dep.get("workspace").and_then(|v| v.as_bool()) == Some(true) {
+                    root.get("workspace")
+                        .and_then(|w| w.get("dependencies"))
+                        .and_then(|d| d.get(name))
+                        .unwrap_or(dep)
+                } else {
+                    dep
+                };
+                out.push(
+                    dep.get("package")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(name)
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    if let Some(targets) = value.get("target").and_then(|v| v.as_table()) {
+        for target in targets.values() {
+            out.extend(dependencies(target, root));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rosen_core::{
+        AgentId, ChangeId, ChangeParent, ChangeState, Commit, FileMode, Signature, Tree, TreeEntry,
+    };
+    use rosen_store::MemoryObjectStore;
+
+    fn tree(store: &dyn ObjectStore, a: &str, b: &str, config: &str) -> ObjectId {
+        let entries = [("a.rs", a), ("b.rs", b), ("rosen.toml", config)];
+        let entries = entries
+            .into_iter()
+            .map(|(name, data)| TreeEntry {
+                name: name.as_bytes().to_vec(),
+                mode: FileMode::Regular,
+                id: store.put_blob(data.as_bytes()).unwrap(),
+            })
+            .collect();
+        store.put_tree(&Tree::new(entries).unwrap()).unwrap()
+    }
+
+    fn commit(store: &dyn ObjectStore, tree: ObjectId, parents: Vec<ObjectId>) -> ObjectId {
+        let signature = Signature::new("test", "test@rosen", 0);
+        store
+            .put_commit(&Commit {
+                tree,
+                parents,
+                author: signature.clone(),
+                committer: signature,
+                message: b"test\n".to_vec(),
+                extra_headers: vec![],
+            })
+            .unwrap()
+    }
+
+    // Risk: reusing a receipt for independent file edits that feed a common
+    // dependent build, or ignoring a reverted input, lands unchecked code (R8).
+    #[test]
+    fn stored_objects_recheck_complete_land_interval() {
+        let store = MemoryObjectStore::new();
+        let config = "[build_units.a]\npaths=['a.rs']\n[build_units.b]\npaths=['b.rs']\n";
+        let root = commit(&store, tree(&store, "a", "b", config), vec![]);
+        let landed = commit(&store, tree(&store, "a", "new b", config), vec![root]);
+        let facts = ChangeFacts {
+            id: ChangeId::from_bytes([1; 16]),
+            owner: AgentId::new("test").unwrap(),
+            description: "a".into(),
+            state: ChangeState::Ready,
+            parent: ChangeParent::Base(root),
+            head: tree(&store, "new a", "b", config),
+            merge_base: root,
+            tier: Tier::Normal,
+            has_conflicts: false,
+            approved_head: None,
+            approvers: vec![],
+        };
+        assert!(reusable(&store, &landed, &facts, &[(landed, Tier::Normal)]).unwrap());
+        let shared =
+            format!("{config}[build_units.app]\npaths=['app/**']\ndependencies=['a','b']\n");
+        let base = commit(&store, tree(&store, "a", "b", &shared), vec![landed]);
+        assert!(!reusable(&store, &base, &facts, &[(landed, Tier::Normal)]).unwrap());
+        let changed_a = commit(&store, tree(&store, "changed a", "b", config), vec![root]);
+        let reverted = commit(&store, tree(&store, "a", "b", config), vec![changed_a]);
+        assert!(!reusable(
+            &store,
+            &reverted,
+            &facts,
+            &[(changed_a, Tier::Normal), (reverted, Tier::Normal)]
+        )
+        .unwrap());
+    }
+
+    // Risk: missing inherited or target-specific dependencies makes unrelated
+    // paths appear independent even though a common consumer builds both.
+    #[test]
+    fn cargo_manifests_include_inherited_and_target_dependencies() {
+        let store = MemoryObjectStore::new();
+        let sources = [
+            ("Cargo.toml", "[workspace]\nmembers=['crates/*']\n[workspace.dependencies]\naliased={package='a',path='crates/a'}\n"),
+            ("crates/a/Cargo.toml", "[package]\nname='a'\n"),
+            ("crates/b/Cargo.toml", "[package]\nname='b'\n"),
+            ("crates/app/Cargo.toml", "[package]\nname='app'\n[dependencies]\naliased={workspace=true}\n[target.'cfg(windows)'.build-dependencies]\nb={path='../b'}\n"),
+        ];
+        let files = sources
+            .into_iter()
+            .map(|(p, text)| {
+                (
+                    p.into(),
+                    (FileMode::Regular, store.put_blob(text.as_bytes()).unwrap()),
+                )
+            })
+            .collect();
+        let graph = graph(&store, &files, &ProjectConfig::default()).unwrap();
+        let a = graph.reach(&["crates/a/src/lib.rs".into()], false);
+        let b = graph.reach(&["crates/b/src/lib.rs".into()], false);
+        assert!(a.contains("app") && b.contains("app"));
+        assert!(!independent(&a, &b));
+        assert!(!independent(
+            &a,
+            &graph.reach(&["Cargo.lock".into()], false)
+        ));
+    }
+}
