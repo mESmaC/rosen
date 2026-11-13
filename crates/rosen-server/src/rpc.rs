@@ -118,6 +118,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         }
         Request::ReceiptSubmit(req) => crate::receipts::submit(state, req).await,
         Request::Land { change } => crate::landing::service::land(state, change).await,
+        Request::ConflictResolve(req) => crate::conflict_resolve::handle(state, req).await,
         Request::GetObjects(query) => crate::objects::get(state, query).await,
         Request::EnsureObjects(ensure) => crate::objects::ensure(state, ensure).await,
         Request::Log(req) => crate::history::handle(state, HistoryCall::Log(req)).await,

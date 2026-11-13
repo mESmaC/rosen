@@ -1043,6 +1043,8 @@ dependencies = [
  "clap",
  "rosen-client",
  "rosen-core",
+ "rosen-faults",
+ "rosen-platform",
  "serde",
  "serde_json",
  "tokio",

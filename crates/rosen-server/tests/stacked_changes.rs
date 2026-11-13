@@ -173,6 +173,30 @@ async fn pending_parent_update_recovers_and_conflicts_keep_all_sides() {
     assert_eq!(restarted.changes.show(&child).unwrap().change, after);
 }
 
+#[tokio::test]
+async fn stale_child_merge_result_never_reverts_landed_work() {
+    // Risk (#146): a checker receipts the merge result. When a child's head
+    // still sits on its parent's pre-rebase tree, measuring it from the
+    // parent's new base commit turns every intervening land into a deletion.
+    let (_temp, state) = setup();
+    let parent = create(&state, None).await;
+    write(&state, &parent, "shared", "original\n").await;
+    let child = create(&state, Some(&parent)).await;
+    write(&state, &child, "shared", "child\n").await;
+    // The parent update conflicts in the child, so propagation stops there.
+    write(&state, &parent, "shared", "parent\n").await;
+    let unrelated = create(&state, None).await;
+    write(&state, &unrelated, "unrelated", "keep\n").await;
+    land_parent(&state, &unrelated).await;
+    call(&state, Request::ChangeRebase { change: parent }).await;
+    let Response::MergeResult(answer) = call(&state, Request::MergeResult { change: child }).await
+    else {
+        panic!()
+    };
+    assert_eq!(answer.conflicts, ["shared"]);
+    assert_eq!(answer.tree, None);
+}
+
 async fn land_parent(state: &Arc<ServerState>, parent: &str) {
     let head = state.changes.show(parent).unwrap().change.head;
     let base = Ledger::open(&state.config.metadata_path())

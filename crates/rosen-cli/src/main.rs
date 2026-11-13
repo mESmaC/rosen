@@ -12,6 +12,7 @@ mod machine_cmd;
 mod output;
 mod overlaps_cmd;
 mod receipt_cmd;
+mod resolve_cmd;
 mod review_cmd;
 mod server;
 mod status_cmd;
@@ -86,6 +87,9 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
         Command::Review(review) => block_on(review_cmd::run(json, &endpoint, review)),
         Command::Receipt(receipt) => block_on(receipt_cmd::run(json, &endpoint, receipt)),
         Command::Land { change } => block_on(land_cmd::run(json, &endpoint, change)),
+        Command::Resolve { paths, change } => {
+            block_on(resolve_cmd::run(json, &endpoint, change.as_deref(), paths))
+        }
         Command::Overlaps(args) => block_on(overlaps_cmd::run(json, &endpoint, args)),
         Command::Status(args) => block_on(status_cmd::run(json, &endpoint, args)),
         Command::Import {

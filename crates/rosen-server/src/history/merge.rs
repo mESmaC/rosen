@@ -1,6 +1,7 @@
-//! A change's merge result: its edits since the base commit its stack sits
-//! on, merged onto the current base (R5), written to the store so a checker
-//! can build and test it without a workspace (R11, R8 step 1).
+//! A change's merge result: its stack's unlanded edits, each measured from
+//! the tree it was built on, merged onto the current base (R5), written to
+//! the store so a checker can build and test it without a workspace (R11,
+//! R8 step 1).
 //!
 //! Only files both sides changed are read and merged line by line; every
 //! other file keeps the side that changed it, so the cost follows the size
@@ -10,7 +11,10 @@ use super::revision::{base_commit, stack_root, Revision};
 use super::trees::{apply, changed_files, content, Change, Entry};
 use super::{Ctx, HistoryError, HistoryResult};
 use crate::ServerState;
-use rosen_core::{FileMode, ObjectId, ObjectKind, Tree};
+use rosen_core::{
+    Change as StackedChange, ChangeParent, ChangeState, FileMode, ObjectId, ObjectKind,
+    ProjectConfig, Tree,
+};
 use rosen_merge::{merge_file, FileMerge, MergePolicy};
 use rosen_protocol::MergeResultAnswer;
 use rosen_store::ObjectStore;
@@ -28,10 +32,8 @@ pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer>
             change.id, change.state
         )));
     }
-    let (_, sits_on) = stack_root(ctx, &change)?;
     let base = base_commit(ctx)?;
-    let merge_base = ctx.index.commit(&ctx.store, &sits_on)?.tree;
-    let merged = merge_onto_commit(ctx, merge_base, &base, change.head)?;
+    let merged = merge_stack_onto(ctx, &change, &base)?;
     Ok(MergeResultAnswer {
         change: change.id,
         head: change.head,
@@ -40,6 +42,66 @@ pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer>
         conflicts: merged.conflicts,
         regenerate: merged.regenerate,
     })
+}
+
+/// Merges `change` and every unlanded change below it onto commit `onto`,
+/// bottom first. Each change is measured from the tree it was built on: its
+/// base commit's tree, or the parent tree the server recorded for it (R8
+/// step 3). A child's head can lag its parent's (a stored conflict stops
+/// propagation, or a restart is pending), so measuring it from the stack's
+/// root commit would read every land since the child's basis as a deletion
+/// (#146). Once the parent has landed this is exactly the land's merge.
+fn merge_stack_onto(
+    ctx: &Ctx,
+    change: &StackedChange,
+    onto: &ObjectId,
+) -> HistoryResult<TreeMerge> {
+    let (stack, _) = stack_root(ctx, change)?;
+    // A landed change is already in the base; nothing below it is merged.
+    let unlanded = stack
+        .iter()
+        .position(|c| c.state == ChangeState::Landed)
+        .unwrap_or(stack.len());
+    let config = ctx.state.project_config.at_commit(onto)?.config;
+    let policy = |path: &str| policy_for(&config, path);
+    let mut tree = ctx.index.commit(&ctx.store, onto)?.tree;
+    let mut regenerate = Vec::new();
+    for change in stack[..unlanded].iter().rev() {
+        let measured_from = built_on(ctx, change)?;
+        let step = if measured_from == tree {
+            // Nothing landed under the change: its head is the merge.
+            TreeMerge {
+                tree: Some(change.head),
+                ..TreeMerge::default()
+            }
+        } else {
+            merge_trees(ctx, [measured_from, tree, change.head], &policy)?
+        };
+        let Some(merged) = step.tree else {
+            // A change below conflicts: the stack has no buildable result.
+            return Ok(step);
+        };
+        tree = merged;
+        regenerate.extend(step.regenerate);
+    }
+    regenerate.sort();
+    regenerate.dedup();
+    Ok(TreeMerge {
+        tree: Some(tree),
+        conflicts: Vec::new(),
+        regenerate,
+    })
+}
+
+/// The tree a change's edits are measured from, as the land measures them.
+fn built_on(ctx: &Ctx, change: &StackedChange) -> HistoryResult<ObjectId> {
+    match change.parent {
+        ChangeParent::Base(commit) => Ok(ctx.index.commit(&ctx.store, &commit)?.tree),
+        ChangeParent::Change(parent) => Ok(ctx
+            .state
+            .changes
+            .with_conn(|conn| crate::stacks::basis(conn, change.id, parent))?),
+    }
 }
 
 /// Merges a change onto a base commit for a land (R8 step 2), the same way
@@ -83,16 +145,19 @@ fn merge_onto_commit(
         });
     }
     let config = ctx.state.project_config.at_commit(onto)?.config;
-    let policy = |path: &str| {
-        if config.is_generated(path) {
-            MergePolicy::Generated
-        } else if config.is_registration_list(path) {
-            MergePolicy::RegistrationList
-        } else {
-            MergePolicy::Text
-        }
-    };
+    let policy = |path: &str| policy_for(&config, path);
     merge_trees(ctx, [merge_base, onto_tree, head], &policy)
+}
+
+/// How `path` merges under the configuration in force on the target base.
+fn policy_for(config: &ProjectConfig, path: &str) -> MergePolicy {
+    if config.is_generated(path) {
+        MergePolicy::Generated
+    } else if config.is_registration_list(path) {
+        MergePolicy::RegistrationList
+    } else {
+        MergePolicy::Text
+    }
 }
 
 /// The result of merging two trees.
