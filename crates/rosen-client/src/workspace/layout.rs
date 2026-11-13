@@ -1,8 +1,9 @@
 //! A tree flattened into the directories and files a workspace holds.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rosen_core::{FileMode, ObjectId};
+use rosen_core::{FileMode, ObjectId, TreeEntry};
 use rosen_store::ObjectStore;
 
 use super::{MaterialiseError, Sparse};
@@ -39,18 +40,81 @@ impl Layout {
         sparse: &Sparse,
     ) -> Result<Self, MaterialiseError> {
         let mut layout = Layout::default();
-        let mut pending = vec![(Vec::new(), tree)];
-        while let Some((dir, tree)) = pending.pop() {
-            if is_empty_tree(&tree) {
+        layout.walk(store, vec![(Vec::new(), tree)], sparse)?;
+        Ok(layout)
+    }
+
+    /// The whole-tree layouts of `old` and `new`, restricted to the parts
+    /// that differ: `.0` holds what `old` has there and `.1` what `new` has.
+    /// Directories present in both with different contents are listed in
+    /// both. Subtrees with equal IDs are never read, so the cost follows the
+    /// size of the change rather than of the tree; a ready workspace behind
+    /// the base by a few lands catches up in milliseconds (R3).
+    pub fn diff(
+        store: &dyn ObjectStore,
+        old: ObjectId,
+        new: ObjectId,
+    ) -> Result<(Self, Self), MaterialiseError> {
+        let all = Sparse::all();
+        let (mut before, mut after) = (Layout::default(), Layout::default());
+        let (mut only_old, mut only_new) = (Vec::new(), Vec::new());
+        let mut pending = vec![(Vec::new(), old, new)];
+        while let Some((dir, old, new)) = pending.pop() {
+            if old == new {
                 continue;
             }
-            for entry in store.read_tree(&tree)?.entries() {
-                check_component(&entry.name)?;
-                let path = join(&dir, &entry.name);
-                layout.add(path, entry.mode, entry.id, sparse, &mut pending);
+            let (old_tree, new_tree) = (read_entries(store, old)?, read_entries(store, new)?);
+            let mut names: BTreeMap<&[u8], (Option<&TreeEntry>, Option<&TreeEntry>)> =
+                BTreeMap::new();
+            for entry in &old_tree {
+                names.entry(&entry.name).or_default().0 = Some(entry);
+            }
+            for entry in &new_tree {
+                names.entry(&entry.name).or_default().1 = Some(entry);
+            }
+            for (name, (was, now)) in names {
+                if was == now {
+                    continue;
+                }
+                check_component(name)?;
+                let path = join(&dir, name);
+                match (was, now) {
+                    (Some(a), Some(b)) if a.mode.is_tree() && b.mode.is_tree() => {
+                        before.dirs.push(path.clone());
+                        after.dirs.push(path.clone());
+                        pending.push((path, a.id, b.id));
+                    }
+                    _ => {
+                        if let Some(a) = was {
+                            before.add(path.clone(), a.mode, a.id, &all, &mut only_old);
+                        }
+                        if let Some(b) = now {
+                            after.add(path, b.mode, b.id, &all, &mut only_new);
+                        }
+                    }
+                }
             }
         }
-        Ok(layout)
+        before.walk(store, only_old, &all)?;
+        after.walk(store, only_new, &all)?;
+        Ok((before, after))
+    }
+
+    /// Adds every directory and file under each pending `(path, tree)`.
+    fn walk(
+        &mut self,
+        store: &dyn ObjectStore,
+        mut pending: Vec<(Vec<u8>, ObjectId)>,
+        sparse: &Sparse,
+    ) -> Result<(), MaterialiseError> {
+        while let Some((dir, tree)) = pending.pop() {
+            for entry in read_entries(store, tree)? {
+                check_component(&entry.name)?;
+                let path = join(&dir, &entry.name);
+                self.add(path, entry.mode, entry.id, sparse, &mut pending);
+            }
+        }
+        Ok(())
     }
 
     fn add(
@@ -95,6 +159,16 @@ impl Layout {
 /// has it as its head, and nothing ever had to store it.
 fn is_empty_tree(id: &ObjectId) -> bool {
     *id == ObjectId::hash_object("tree", b"")
+}
+
+fn read_entries(
+    store: &dyn ObjectStore,
+    tree: ObjectId,
+) -> Result<Vec<TreeEntry>, MaterialiseError> {
+    if is_empty_tree(&tree) {
+        return Ok(Vec::new());
+    }
+    Ok(store.read_tree(&tree)?.entries().to_vec())
 }
 
 fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
