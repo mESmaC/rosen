@@ -8,11 +8,13 @@ use crate::ServerState;
 use rusqlite::{params, Connection, TransactionBehavior};
 
 pub(super) fn load_or_capture(state: &ServerState, landed: ChangeId) -> LandResult<Vec<ChangeId>> {
-    let cached = state
+    let (key, cached) = state
         .changes
         .with_conn(|conn| {
             ensure_schema(conn)?;
-            load(conn, landed)
+            let key = active_landing(conn, landed)?;
+            adopt_legacy(conn, landed, &key)?;
+            Ok((key.clone(), load(conn, &key)?))
         })
         .map_err(backend)?;
     if let Some(targets) = cached {
@@ -24,21 +26,26 @@ pub(super) fn load_or_capture(state: &ServerState, landed: ChangeId) -> LandResu
         .changes
         .with_conn(|conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if active_landing(&tx, landed)? != key {
+                return Err(ChangeError::Corrupt(
+                    "land changed during overlap capture".into(),
+                ));
+            }
             // Concurrent recovery may have captured first; preserve its complete set.
-            if let Some(targets) = load(&tx, landed)? {
+            if let Some(targets) = load(&tx, &key)? {
                 return Ok(targets);
             }
             tx.execute(
                 "INSERT INTO landing_overlap_batches (landed) VALUES (?1)",
-                [landed.to_string()],
+                [&key],
             )?;
             for target in &targets {
                 tx.execute(
                     "INSERT INTO landing_overlap_targets (landed, target) VALUES (?1, ?2)",
-                    params![landed.to_string(), target.change.to_string()],
+                    params![key, target.change.to_string()],
                 )?;
             }
-            let saved = load(&tx, landed)?.unwrap_or_default();
+            let saved = load(&tx, &key)?.unwrap_or_default();
             tx.commit()?;
             Ok(saved)
         })
@@ -56,10 +63,10 @@ fn ensure_schema(conn: &Connection) -> Result<(), ChangeError> {
     Ok(())
 }
 
-fn load(conn: &Connection, landed: ChangeId) -> Result<Option<Vec<ChangeId>>, ChangeError> {
+fn load(conn: &Connection, key: &str) -> Result<Option<Vec<ChangeId>>, ChangeError> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM landing_overlap_batches WHERE landed = ?1)",
-        [landed.to_string()],
+        [key],
         |row| row.get(0),
     )?;
     if !exists {
@@ -69,12 +76,46 @@ fn load(conn: &Connection, landed: ChangeId) -> Result<Option<Vec<ChangeId>>, Ch
         "SELECT target FROM landing_overlap_targets WHERE landed = ?1 ORDER BY target",
     )?;
     let ids = stmt
-        .query_map([landed.to_string()], |row| row.get::<_, String>(0))?
+        .query_map([key], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     ids.into_iter()
         .map(|text| text.parse().map_err(|_| ChangeError::Corrupt(text)))
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
+}
+
+fn active_landing(conn: &Connection, id: ChangeId) -> Result<String, ChangeError> {
+    Ok(conn.query_row(
+        "SELECT commit_id FROM base_history WHERE change_id=?1
+         AND NOT EXISTS(SELECT 1 FROM auto_reverts WHERE culprit=base_history.commit_id)
+         ORDER BY seq DESC LIMIT 1",
+        [id.to_string()],
+        |r| r.get(0),
+    )?)
+}
+
+/// Legacy batches used ChangeId. Adopt one only for a change with exactly one
+/// historical land, because after a revert its old targets belong to that land.
+/// Both copies and the marker commit together, including empty selections.
+fn adopt_legacy(conn: &mut Connection, id: ChangeId, key: &str) -> Result<(), ChangeError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if load(&tx, key)?.is_some() {
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO landing_overlap_targets(landed,target)
+        SELECT ?1,target FROM landing_overlap_targets WHERE landed=?2
+        AND (SELECT COUNT(*) FROM base_history WHERE change_id=?2)=1",
+        params![key, id.to_string()],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO landing_overlap_batches(landed)
+        SELECT ?1 FROM landing_overlap_batches WHERE landed=?2
+        AND (SELECT COUNT(*) FROM base_history WHERE change_id=?2)=1",
+        params![key, id.to_string()],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 fn backend(err: ChangeError) -> LandError {
@@ -90,7 +131,7 @@ mod tests {
         let id = |n| ChangeId::from_bytes([n; 16]);
         for row in include_str!("../../../../proofs/fixtures/targeted-rebase.tsv").lines() {
             let cols: Vec<_> = row.split('\t').collect();
-            let conn = Connection::open_in_memory().unwrap();
+            let mut conn = Connection::open_in_memory().unwrap();
             ensure_schema(&conn).unwrap();
             if cols[0] != "none" {
                 conn.execute(
@@ -106,7 +147,17 @@ mod tests {
                     .unwrap();
                 }
             }
-            let selected = load(&conn, id(0)).unwrap().unwrap_or_else(|| vec![id(2)]);
+            conn.execute_batch("CREATE TABLE base_history(change_id TEXT, commit_id TEXT)")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO base_history VALUES(?1,'commit')",
+                [id(0).to_string()],
+            )
+            .unwrap();
+            adopt_legacy(&mut conn, id(0), "commit").unwrap();
+            let selected = load(&conn, "commit")
+                .unwrap()
+                .unwrap_or_else(|| vec![id(2)]);
             let expected = match cols[2] {
                 "-" => vec![],
                 "1" => vec![id(1)],
