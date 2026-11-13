@@ -18,3 +18,5 @@ pub use registry::{
 };
 pub use schema::migrate;
 pub use service::{BaseSource, BaseTip, ChangeService, NoBase, METADATA_DB};
+
+pub(crate) use registry::update_in;
