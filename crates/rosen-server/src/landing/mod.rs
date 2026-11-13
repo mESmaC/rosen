@@ -17,6 +17,7 @@ pub mod reach;
 mod reach_store;
 mod restack;
 pub mod rules;
+pub mod service;
 
 use std::fmt;
 
@@ -24,6 +25,7 @@ pub use engine::{LandOutcome, Landing, LandingConfig, LandingDeps, MergePreview}
 pub use ledger::{CasResult, InitBase, LandRecord, Ledger};
 pub use restack::RestackReport;
 pub use rules::{LandInput, ReceiptCheck, Refusal, Verdict};
+pub use service::{LandingService, NoReviews, ReviewGate};
 
 pub use rosen_core::{
     AgentId, ChangeId, ChangeParent, ChangeState, LandedCommit, ObjectId, Receipt,

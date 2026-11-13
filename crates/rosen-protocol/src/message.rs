@@ -16,6 +16,7 @@ use crate::history::{
     Blame, BlameRequest, Diff, DiffRequest, Log, LogRequest, MergeBaseAnswer, MergeResultAnswer,
     ReadAnswer, ReadRequest,
 };
+use crate::land::LandAnswer;
 use crate::objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal};
 use crate::receipt::{ReceiptRecord, SubmitReceipt};
 use crate::review::{CommentRequest, ResolveRequest, ReviewThread, ThreadFilter};
@@ -155,6 +156,14 @@ pub enum Request {
     /// base commit (R8 step 1). Refused unless it names the change's current
     /// head, the pre-land check set and a commit the base ref has held.
     ReceiptSubmit(SubmitReceipt),
+    /// Lands a change onto the base (R8 step 2): one commit, moved onto the
+    /// base by compare-and-swap, only with no conflicts, an approval for the
+    /// current head and a receipt that counts on the current base. Marks an
+    /// open change ready first: asking to land is what `ready` means.
+    Land {
+        /// A change ID or unique prefix of one.
+        change: String,
+    },
     /// Loads a git repository's history and makes one of its branches the
     /// project's base (SPEC R1). Refused once the project has a base.
     Import {
@@ -242,6 +251,7 @@ pub enum Response {
     ReviewThread(ReviewThread),
     ReviewThreads(Vec<ReviewThread>),
     Receipt(ReceiptRecord),
+    Land(LandAnswer),
     Objects(ObjectBatch),
     ObjectsLocal(ObjectsLocal),
     Log(Log),

@@ -299,7 +299,10 @@ impl Landing {
                     restack,
                 }))
             }
-            CasResult::BaseMoved { .. } => Ok(Attempt::BaseMoved),
+            // A moved change is decided afresh, like a moved base: the retry
+            // reads its new head and state, and refuses if the receipt or
+            // approval no longer covers them.
+            CasResult::BaseMoved { .. } | CasResult::ChangeMoved => Ok(Attempt::BaseMoved),
             CasResult::OpenConflicts => Ok(Attempt::Done(LandOutcome::Refused(Refusal::Conflicts))),
             CasResult::AlreadyLanded { commit } => {
                 Ok(Attempt::Done(LandOutcome::AlreadyLanded { commit }))

@@ -50,6 +50,7 @@ pub struct ServerState {
     pub events: EventLog,
     pub changes: changes::ChangeService,
     pub receipts: receipts::ReceiptService,
+    pub landing: landing::LandingService,
     /// The TLS identity and bound address, once the network listener is up.
     network: OnceLock<NetworkInfo>,
     pub history: history::HistoryService,
@@ -70,10 +71,12 @@ impl ServerState {
 
     /// Creates a server with an explicit positive workspace I/O cap.
     pub fn with_workspace_io(config: ServerConfig, cap: std::num::NonZeroUsize) -> Arc<Self> {
-        let state = Arc::new(Self {
+        // Cyclic because landing's adapters reach back into this state.
+        let state = Arc::new_cyclic(|this| Self {
             pool: rosen_client::workspace::pool::WarmPool::new(&config.data_dir),
             changes: changes::ChangeService::new(&config.data_dir),
             receipts: receipts::ReceiptService::new(config.clone()),
+            landing: landing::LandingService::new(this.clone()),
             history: history::HistoryService::new(),
             workspace_io: load_limits::workspace_io(cap),
             project_config: project_config::ConfigService::new(config.clone()),
@@ -217,6 +220,14 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     };
     let state = ServerState::new(config.clone());
     let pool_worker = state.pool.start(config.endpoint.clone());
+    // Finishes post-land work (claim release, rebases) a crash cut short,
+    // off the accept path so clients can connect meanwhile.
+    let recovering = Arc::clone(&state);
+    tokio::task::spawn_blocking(move || {
+        if let Err(err) = recovering.landing.recover(&recovering) {
+            eprintln!("rosen-server: landing recovery failed: {err}");
+        }
+    });
     let mirror = tokio::spawn(mirror::run(Arc::clone(&state)));
     let network_task = network.map(|(tcp, acceptor, identity, address)| {
         state.set_network(identity, address);

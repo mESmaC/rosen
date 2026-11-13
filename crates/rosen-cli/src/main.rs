@@ -7,6 +7,7 @@ mod commit_cmd;
 mod config_cmd;
 mod history_cmd;
 mod import;
+mod land_cmd;
 mod receipt_cmd;
 mod review_cmd;
 mod server;
@@ -73,6 +74,7 @@ fn run(cli: &Cli) -> rosen_client::Result<server::Succeeded> {
         Command::Log { .. } | Command::Diff(_) => history(json, &endpoint, &cli.command),
         Command::Review(review) => block_on(review_cmd::run(json, &endpoint, review)),
         Command::Receipt(receipt) => block_on(receipt_cmd::run(json, &endpoint, receipt)),
+        Command::Land { change } => block_on(land_cmd::run(json, &endpoint, change)),
         Command::Status(args) => block_on(status_cmd::run(json, &endpoint, args)),
         Command::Import {
             repo,
