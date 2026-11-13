@@ -6,7 +6,9 @@ use crate::claims::HotClaims;
 use crate::machine::Shared;
 use crate::report::{ChangeOutcome, LandSample, StartSample};
 use anyhow::{anyhow, bail, Result};
-use rosen_client::protocol::{ApproveRequest, ClaimOutcome, ErrorCode, LandStatus};
+use rosen_client::protocol::{
+    ApproveRequest, ClaimOutcome, ErrorCode, LandStatus, MergeResultAnswer,
+};
 use rosen_client::{AgentId, ChangeId, Error, ObjectId, Session, WorkspaceSpec};
 use rosen_core::receipt::PRE_LAND_CHECK_SET;
 use std::path::PathBuf;
@@ -182,21 +184,8 @@ impl Agent {
             if merge.tree.is_none() {
                 bail!("merge conflict in {:?}", merge.conflicts);
             }
-            if let Err(err) = self.receipt(&id, merge.head, merge.base).await {
-                if !self.head_moved(&id, merge.head, &err).await {
-                    return Err(err);
-                }
-                self.shared.record(|report| {
-                    *report
-                        .land_refusals
-                        .entry("receipt_head_moved".into())
-                        .or_default() += 1;
-                });
+            if !self.check_and_review(&id, &merge, &mut approved).await? {
                 continue;
-            }
-            if approved != Some(merge.head) {
-                self.approve(&id, merge.head).await?;
-                approved = Some(merge.head);
             }
             let started = Instant::now();
             let answer = retrying!(self, "land", |s| s.client().land(&id))?;
@@ -230,6 +219,38 @@ impl Agent {
         bail!("still not landed after {MAX_LAND_ROUNDS} receipts")
     }
 
+    /// Receipts the merge result and approves its head, unless it has
+    /// approved that head already. `Ok(false)` means the server rebased the
+    /// change after the merge result was read (R8 step 4), so the agent
+    /// reads it again.
+    async fn check_and_review(
+        &mut self,
+        id: &str,
+        merge: &MergeResultAnswer,
+        approved: &mut Option<ObjectId>,
+    ) -> Result<bool> {
+        let mut result = self.receipt(id, merge.head, merge.base).await;
+        if result.is_ok() && *approved != Some(merge.head) {
+            result = self.approve(id, merge.head).await;
+            if result.is_ok() {
+                *approved = Some(merge.head);
+            }
+        }
+        let Err(err) = result else {
+            return Ok(true);
+        };
+        if !self.head_moved(id, merge.head, &err).await {
+            return Err(err);
+        }
+        self.shared.record(|report| {
+            *report
+                .land_refusals
+                .entry("head_moved_before_land".into())
+                .or_default() += 1;
+        });
+        Ok(false)
+    }
+
     /// The checker's part (D9): it would build and lint the merge result;
     /// the harness measures Rosen, not a build, so it receipts at once.
     async fn receipt(&mut self, id: &str, head: ObjectId, base: ObjectId) -> Result<()> {
@@ -243,9 +264,8 @@ impl Agent {
         Ok(())
     }
 
-    /// Whether a refused receipt was refused only because the server
-    /// rebased the change after its merge result was read (R8 step 4), so
-    /// the agent should read the merge result again.
+    /// Whether a receipt or approval was refused only because the change
+    /// has another head than the one the agent read.
     async fn head_moved(&mut self, id: &str, receipted: ObjectId, err: &anyhow::Error) -> bool {
         let refused = matches!(
             err.downcast_ref::<Error>(),
