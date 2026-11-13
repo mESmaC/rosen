@@ -223,6 +223,14 @@ fn ensure_not_above(conn: &Connection, id: ChangeId, below: ChangeId) -> Result<
 fn save(conn: &Connection, record: &ChangeRecord, stored: usize) -> Result<(), ChangeError> {
     let change = &record.change;
     let (base, below) = parent_columns(change.parent);
+    if change.snapshots.len() > stored {
+        // Only an authored head change voids review; server rebases append no snapshots.
+        conn.execute(
+            "UPDATE review_approvals SET valid = 0 WHERE change_id = ?1
+             AND EXISTS (SELECT 1 FROM changes WHERE id = ?1 AND head <> ?2)",
+            params![change.id.to_string(), change.head.to_hex()],
+        )?;
+    }
     conn.execute(
         "UPDATE changes SET parent_base = ?1, parent_change = ?2, state = ?3, head = ?4,
                             updated_at = ?5
