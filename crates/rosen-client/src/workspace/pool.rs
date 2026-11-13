@@ -1,5 +1,5 @@
 //! Machine-local ready workspaces (SPEC R3). The daemon owns this manager.
-use super::{layout::Layout, MaterialiseError, Sparse};
+use super::{layout::Layout, MaterialiseError};
 use rosen_core::ObjectId;
 use rosen_protocol::{ErrorBody, ErrorCode, Outcome, PooledWorkspace, Response};
 use rosen_store::LooseObjectStore;
@@ -90,9 +90,14 @@ impl WarmPool {
         Outcome::Ok(Response::PoolSized)
     }
 
+    /// Serves a take, in order of preference: a ready slot already holding
+    /// `tree`, a block clone of the template at `tree`, or any other ready
+    /// slot brought to `tree` by rewriting only the files that differ. The
+    /// last keeps takes served while lands arrive faster than the worker
+    /// refreshes the pool, as when a change starts from a base the worker
+    /// has not yet followed.
     pub async fn take(self: &Arc<Self>, tree: ObjectId, dest: String) -> Outcome {
-        let pool = Arc::clone(self);
-        let mut state = pool.state.lock().await;
+        let mut state = self.state.lock().await;
         let destination = Path::new(&dest);
         if !destination.is_absolute() || destination.starts_with(&state.root) {
             return Outcome::Error(ErrorBody::new(
@@ -103,35 +108,68 @@ impl WarmPool {
         if state.size == 0 {
             return Outcome::Ok(Response::PoolTaken(None));
         }
-        let Some(index) = pick(&state.ready, tree) else {
-            let root = state.root.clone();
+        let root = state.root.clone();
+        if let Some(index) = pick(&state.ready, tree) {
+            // Removing the slot under the same lock as refresh makes
+            // ownership exclusive even when two clients ask together.
+            let slot = state.ready.remove(index);
+            let result = publish_slot(&slot, dest, &root).await;
+            let prepared = slot.prep == Prep::Done;
+            let files = slot.files;
+            if result.is_err() {
+                state.ready.push(slot);
+            }
             drop(state);
-            return super::template::take_clone(&pool.template, &root, tree, dest).await;
-        };
-        let slot = state.ready.remove(index);
-        // Removing the slot under the same lock as refresh makes ownership
-        // exclusive even when two clients ask for the same tree together.
-        let result = publish_slot(&slot, dest, &state.root).await;
-        let taken = PooledWorkspace {
-            files: slot.files,
-            prepared: slot.prep == Prep::Done,
-            from_template: false,
-        };
-        if result.is_err() {
-            state.ready.push(slot);
+            self.wake.notify_one();
+            return taken(result, files, prepared);
         }
         drop(state);
-        pool.wake.notify_one();
-        match result {
-            Ok(()) => Outcome::Ok(Response::PoolTaken(Some(taken))),
-            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-                Outcome::Ok(Response::PoolTaken(None))
-            }
-            Err(error) => Outcome::Error(ErrorBody::new(
-                ErrorCode::InvalidArgument,
-                error.to_string(),
-            )),
+        match super::template::take_clone(&self.template, &root, tree, dest.clone()).await {
+            Outcome::Ok(Response::PoolTaken(None)) => self.take_stale(&root, tree, dest).await,
+            served => served,
         }
+    }
+
+    /// Takes a ready slot holding another tree out of the pool and brings
+    /// it to `tree` outside the pool lock, so other takes are not held up.
+    /// It is reported unprepared: its prepare ran at another tree.
+    async fn take_stale(&self, root: &Path, tree: ObjectId, dest: String) -> Outcome {
+        let mut state = self.state.lock().await;
+        let Some(index) = pick_stale(&state.ready) else {
+            return Outcome::Ok(Response::PoolTaken(None));
+        };
+        let slot = state.ready.remove(index);
+        drop(state);
+        self.wake.notify_one();
+        let Some(mut slot) = catch_up(root, slot, tree).await else {
+            return Outcome::Ok(Response::PoolTaken(None));
+        };
+        let result = publish_slot(&slot, dest, root).await;
+        let files = slot.files;
+        if result.is_err() {
+            // Its prepare ran at another tree; the worker refreshes it and
+            // prepares it again before a take reports it prepared.
+            slot.prep = Prep::Needed;
+            self.state.lock().await.ready.push(slot);
+        }
+        taken(result, files, false)
+    }
+}
+
+fn taken(result: std::io::Result<()>, files: u64, prepared: bool) -> Outcome {
+    match result {
+        Ok(()) => Outcome::Ok(Response::PoolTaken(Some(PooledWorkspace {
+            files,
+            prepared,
+            from_template: false,
+        }))),
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            Outcome::Ok(Response::PoolTaken(None))
+        }
+        Err(error) => Outcome::Error(ErrorBody::new(
+            ErrorCode::InvalidArgument,
+            error.to_string(),
+        )),
     }
 }
 
@@ -147,6 +185,40 @@ fn pick(ready: &[Slot], tree: ObjectId) -> Option<usize> {
                 .iter()
                 .position(|slot| holds(slot) && slot.prep != Prep::Running)
         })
+}
+
+/// Any ready slot a take may bring to another tree, prepared ones first:
+/// their build output still spares most of a first build.
+fn pick_stale(ready: &[Slot]) -> Option<usize> {
+    ready
+        .iter()
+        .position(|slot| slot.prep == Prep::Done)
+        .or_else(|| ready.iter().position(|slot| slot.prep != Prep::Running))
+}
+
+/// Brings a slot already removed from the ready list to `tree`. A slot
+/// whose catch-up fails is deleted, never handed to an agent half-written.
+async fn catch_up(pool_root: &Path, mut slot: Slot, tree: ObjectId) -> Option<Slot> {
+    let objects = pool_root
+        .parent()
+        .expect("pool data directory")
+        .join("objects");
+    tokio::task::spawn_blocking(move || {
+        let refreshed = LooseObjectStore::open(&objects)
+            .map_err(MaterialiseError::Store)
+            .and_then(|store| refresh(&store, &mut slot, tree));
+        match refreshed {
+            Ok(()) => Some(slot),
+            Err(error) => {
+                eprintln!("rosen warm pool: catching a slot up for a take: {error}");
+                let _ = std::fs::remove_dir_all(&slot.path);
+                None
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn publish_slot(slot: &Slot, dest: String, pool_root: &Path) -> std::io::Result<()> {
@@ -180,13 +252,14 @@ pub(super) fn refresh(
     slot: &mut Slot,
     tree: ObjectId,
 ) -> Result<(), MaterialiseError> {
-    let before = Layout::of_tree(store, slot.tree, &Sparse::all())?;
-    let after = Layout::of_tree(store, tree, &Sparse::all())?;
+    // Only the differing subtrees: walking both whole trees for every slot
+    // after every land kept the pool behind a steady stream of lands.
+    let (before, after) = Layout::diff(store, slot.tree, tree)?;
     let changed = super::bring_to_tree(&slot.path, &before, &after)?;
     super::write_all(store, &slot.path, &changed)?;
     seed_slot(store, &slot.path, tree);
     slot.tree = tree;
-    slot.files = after.files.len() as u64;
+    slot.files = (slot.files + after.files.len() as u64).saturating_sub(before.files.len() as u64);
     Ok(())
 }
 
@@ -207,8 +280,14 @@ mod tests {
 
     // R3 critical contract: two simultaneous takes must not give agents the
     // same directory, where either agent could overwrite the other's work.
+    // Covers a slot the worker refreshed and one a take must catch up.
     #[tokio::test]
-    async fn concurrent_takes_transfer_a_refreshed_slot_once() {
+    async fn concurrent_takes_transfer_a_slot_once() {
+        two_takes_of_one_slot(true).await;
+        two_takes_of_one_slot(false).await;
+    }
+
+    async fn two_takes_of_one_slot(refreshed: bool) {
         let dir = tempfile::tempdir().unwrap();
         let store = LooseObjectStore::open(dir.path().join("objects")).unwrap();
         let make_tree = |bytes: &[u8]| {
@@ -235,7 +314,9 @@ mod tests {
             files: 1,
             prep: Prep::Needed,
         };
-        refresh(&store, &mut slot, after).unwrap();
+        if refreshed {
+            refresh(&store, &mut slot, after).unwrap();
+        }
         pool.state.lock().await.ready.push(slot);
         let first = dir.path().join("first");
         let second = dir.path().join("second");

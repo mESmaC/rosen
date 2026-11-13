@@ -39,6 +39,13 @@ pub trait ObjectStore: Send + Sync {
 
     fn contains(&self, id: &ObjectId) -> Result<bool, StoreError>;
 
+    /// The length of an object's body, for sizing work before reading it.
+    /// It is not checked against the object's hash; a later read is.
+    fn object_size(&self, id: &ObjectId) -> Result<u64, StoreError> {
+        let raw = self.get_raw(id)?.ok_or(StoreError::NotFound(*id))?;
+        Ok(raw.data.len() as u64)
+    }
+
     fn put(&self, object: &Object) -> Result<ObjectId, StoreError> {
         self.put_raw(object.kind(), &object.encode_body())
     }
@@ -60,13 +67,6 @@ pub trait ObjectStore: Send + Sync {
         let raw = self.get_raw(id)?.ok_or(StoreError::NotFound(*id))?;
         raw.decode()
             .map_err(|error| StoreError::Malformed(*id, error))
-    }
-
-    /// The byte length of a blob that must exist. Backends that can read the
-    /// length from an object header without reading the body override this;
-    /// the body is not hash-checked, so use it only to size, never to trust.
-    fn blob_size(&self, id: &ObjectId) -> Result<u64, StoreError> {
-        Ok(self.read_blob(id)?.data.len() as u64)
     }
 
     fn read_blob(&self, id: &ObjectId) -> Result<Blob, StoreError> {

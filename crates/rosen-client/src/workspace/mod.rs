@@ -184,7 +184,7 @@ fn reserve(
     // the virus scanner), so threads overlap the waits as the copy does.
     let total = AtomicU64::new(0);
     parallel::for_each::<_, MaterialiseError, _>(&target.files, |entry| {
-        let size = store.blob_size(&entry.blob)?;
+        let size = store.object_size(&entry.blob)?;
         total.fetch_add(size, Ordering::Relaxed);
         Ok(())
     })?;

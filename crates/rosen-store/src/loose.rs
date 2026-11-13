@@ -91,43 +91,6 @@ fn create_temp(fan_out: &Path) -> io::Result<(PathBuf, File)> {
     Err(last_error.expect("at least one attempt was made"))
 }
 
-/// Splits a `<kind> <len>` header into its kind and body length.
-fn parse_header(id: &ObjectId, header: &[u8]) -> Result<(ObjectKind, usize), StoreError> {
-    let corrupt = |reason: String| StoreError::Corrupt { id: *id, reason };
-    let header = std::str::from_utf8(header).map_err(|_| corrupt("bad header".into()))?;
-    let (kind, len) = header
-        .split_once(' ')
-        .ok_or_else(|| corrupt("bad header".into()))?;
-    let kind = ObjectKind::parse(kind.as_bytes()).map_err(|error| corrupt(error.to_string()))?;
-    let len = len.parse().map_err(|_| corrupt("bad length".into()))?;
-    Ok((kind, len))
-}
-
-/// Inflates only as far as the header's NUL, so sizing a large blob costs a
-/// few compressed bytes instead of the whole body.
-fn read_header(id: &ObjectId, file: File) -> Result<(ObjectKind, usize), StoreError> {
-    // "commit " plus a 20-digit length and the NUL fit comfortably.
-    const MAX_HEADER: usize = 32;
-    let mut decoder = ZlibDecoder::new(file);
-    let mut header = Vec::with_capacity(MAX_HEADER);
-    let mut byte = [0u8; 1];
-    while header.len() < MAX_HEADER {
-        let read = decoder.read(&mut byte).map_err(|error| StoreError::Corrupt {
-            id: *id,
-            reason: format!("zlib: {error}"),
-        })?;
-        match (read, byte[0]) {
-            (0, _) => break,
-            (_, 0) => return parse_header(id, &header),
-            (_, value) => header.push(value),
-        }
-    }
-    Err(StoreError::Corrupt {
-        id: *id,
-        reason: "missing header".into(),
-    })
-}
-
 /// Inflates a loose object file and checks it against the ID it is stored under.
 fn decode_loose(id: &ObjectId, compressed: &[u8]) -> Result<RawObject, StoreError> {
     let corrupt = |reason: String| StoreError::Corrupt { id: *id, reason };
@@ -139,7 +102,12 @@ fn decode_loose(id: &ObjectId, compressed: &[u8]) -> Result<RawObject, StoreErro
         .iter()
         .position(|&byte| byte == 0)
         .ok_or_else(|| corrupt("missing header".into()))?;
-    let (kind, len) = parse_header(id, &inflated[..nul])?;
+    let header = std::str::from_utf8(&inflated[..nul]).map_err(|_| corrupt("bad header".into()))?;
+    let (kind, len) = header
+        .split_once(' ')
+        .ok_or_else(|| corrupt("bad header".into()))?;
+    let kind = ObjectKind::parse(kind.as_bytes()).map_err(|error| corrupt(error.to_string()))?;
+    let len: usize = len.parse().map_err(|_| corrupt("bad length".into()))?;
     let data = inflated.split_off(nul + 1);
     if data.len() != len {
         return Err(corrupt(format!(
@@ -189,24 +157,6 @@ impl ObjectStore for LooseObjectStore {
         }
     }
 
-    fn blob_size(&self, id: &ObjectId) -> Result<u64, StoreError> {
-        let file = match File::open(self.object_path(id)) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(StoreError::NotFound(*id))
-            }
-            Err(error) => return Err(error.into()),
-        };
-        match read_header(id, file)? {
-            (ObjectKind::Blob, len) => Ok(len as u64),
-            (found, _) => Err(StoreError::WrongKind {
-                id: *id,
-                expected: ObjectKind::Blob,
-                found,
-            }),
-        }
-    }
-
     fn contains(&self, id: &ObjectId) -> Result<bool, StoreError> {
         match fs::metadata(self.object_path(id)) {
             Ok(metadata) => Ok(metadata.is_file()),
@@ -214,4 +164,59 @@ impl ObjectStore for LooseObjectStore {
             Err(error) => Err(error.into()),
         }
     }
+
+    /// Inflates only the `<kind> <len>\0` header, so sizing a large blob
+    /// costs one small read instead of reading and hashing all of it.
+    fn object_size(&self, id: &ObjectId) -> Result<u64, StoreError> {
+        let file = match File::open(self.object_path(id)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(StoreError::NotFound(*id))
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let compressed = file.metadata()?.len();
+        let len = read_header_len(id, ZlibDecoder::new(file))?;
+        // Callers reserve disk for this length before any validating read,
+        // so a corrupt header claiming more than the file could inflate to
+        // must fail here rather than wait forever for room.
+        if len > compressed.saturating_mul(MAX_DEFLATE_RATIO) {
+            return Err(StoreError::Corrupt {
+                id: *id,
+                reason: format!("header claims {len} bytes from {compressed} compressed"),
+            });
+        }
+        Ok(len)
+    }
+}
+
+/// Deflate expands at most about 1032 to 1, so no honest object inflates
+/// to more than this many times its compressed size.
+const MAX_DEFLATE_RATIO: u64 = 1032;
+
+/// The longest header is a kind name, a space and a 20-digit u64 length.
+const MAX_HEADER: usize = 32;
+
+fn read_header_len(id: &ObjectId, mut inflated: impl Read) -> Result<u64, StoreError> {
+    let corrupt = |reason: String| StoreError::Corrupt { id: *id, reason };
+    let mut header = Vec::with_capacity(MAX_HEADER);
+    let mut byte = [0u8; 1];
+    loop {
+        let read = inflated
+            .read(&mut byte)
+            .map_err(|error| corrupt(format!("zlib: {error}")))?;
+        if read == 0 || header.len() == MAX_HEADER {
+            return Err(corrupt("missing header".into()));
+        }
+        if byte[0] == 0 {
+            break;
+        }
+        header.push(byte[0]);
+    }
+    let header = std::str::from_utf8(&header).map_err(|_| corrupt("bad header".into()))?;
+    let (kind, len) = header
+        .split_once(' ')
+        .ok_or_else(|| corrupt("bad header".into()))?;
+    ObjectKind::parse(kind.as_bytes()).map_err(|error| corrupt(error.to_string()))?;
+    len.parse().map_err(|_| corrupt("bad length".into()))
 }
