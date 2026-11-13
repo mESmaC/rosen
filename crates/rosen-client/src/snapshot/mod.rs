@@ -16,11 +16,13 @@ mod journal;
 mod marker;
 mod rebase;
 mod scan;
+mod seed;
 mod upload;
 pub mod watch;
 
 pub use journal::pending_journal;
 pub use marker::{WorkspaceMarker, STATE_DIR};
+pub use seed::seed_tree_cache;
 pub use upload::{Sent, MAX_FILE_BYTES};
 pub use watch::{watch, WatchEvent};
 
@@ -287,12 +289,10 @@ fn open_index(
     stored: ObjectId,
 ) -> Result<(Index, HashSet<ObjectId>), SnapshotError> {
     let index = Index::from_tree(store, stored)?;
+    seed_tree_cache(store, root, stored)?;
     let cache = journal::cache(root)?;
     let mut known_trees = HashSet::from([stored]);
-    for (id, body) in index.build_trees()?.trees {
-        cache.put_raw(rosen_core::ObjectKind::Tree, &body)?;
-        known_trees.insert(id);
-    }
+    known_trees.extend(index.build_trees()?.trees.into_iter().map(|(id, _)| id));
     let io = |err| SnapshotError::io(root, err);
     let Some(last) = journal.pending().map_err(io)?.last().copied() else {
         return Ok((index, known_trees));
