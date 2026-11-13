@@ -85,6 +85,7 @@ impl LandingService {
         }
         let engine = self.engine(state)?;
         let outcome = engine.land(&id).map_err(land_body)?;
+        crate::stacks::refresh(state);
         let base_ref = engine.config().base_ref.clone();
         let base = engine
             .ledger()
@@ -251,7 +252,7 @@ impl ChangeBook for Adapters {
         let merge_base = match change.parent {
             ChangeParent::Base(commit) => commit,
             ChangeParent::Change(below) => {
-                self.with_changes(|c| changes::get(c, below))?.change.head
+                self.with_changes(|c| crate::stacks::basis(c, change.id, below))?
             }
         };
         let gate = state.landing.gate();
@@ -322,12 +323,10 @@ impl ChangeBook for Adapters {
     fn reparent(&self, id: &ChangeId, onto: &CommitId, merged: Option<&TreeId>) -> LandResult<()> {
         // A conflicted change stays on its old parent, so its head never
         // holds a half-merged tree; it merges again when it lands.
-        let Some(tree) = merged else {
+        let Some(_) = merged else {
             return Ok(());
         };
-        let parent = ChangeParent::Base(*onto);
-        self.with_changes(|conn| changes::rebase(conn, *id, parent, *tree))
-            .map(drop)
+        crate::stacks::land_rebase(&*self.state()?, *id, *onto).map_err(backend)
     }
 
     fn release_claims(&self, id: &ChangeId) -> LandResult<()> {

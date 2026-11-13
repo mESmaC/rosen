@@ -19,7 +19,7 @@ pub use change::{AgentId, Change, ChangeId, ChangeParent, ChangeState, Snapshot,
 pub use claim::{blockers, Blocker, HeldClaim, PathPattern};
 pub use conflict::{Conflict, ConflictId, ConflictSet};
 pub use hash::ObjectId;
-pub use history::{CommitGraph, LandedCommit, LandedTrailers};
+pub use history::{CommitGraph, LandedCommit, LandedTrailers, ReceiptTrailer};
 pub use object::{Blob, Commit, FileMode, Object, ObjectKind, Signature, Tree, TreeEntry};
 pub use project_config::{ConfigError, ProjectConfig, CONFIG_PATH};
 pub use receipt::{Receipt, ReceiptRefusal, PRE_LAND_CHECK_SET};
@@ -39,6 +39,9 @@ pub enum Error {
     InvalidTreeEntry(String),
     /// An agent identity was empty or contained characters a trailer cannot hold.
     InvalidAgentId(String),
+    /// A check-set name, or a receipt trailer holding one, was empty or not a
+    /// single token.
+    InvalidCheckSet(String),
     /// A change state name that is not one of the four states.
     InvalidState(String),
     /// A change state transition that the state machine forbids.
@@ -67,6 +70,7 @@ impl fmt::Display for Error {
             Error::MalformedObject(s) => write!(f, "malformed object: {s}"),
             Error::InvalidTreeEntry(s) => write!(f, "invalid tree entry: {s}"),
             Error::InvalidAgentId(s) => write!(f, "invalid agent id: {s:?}"),
+            Error::InvalidCheckSet(s) => write!(f, "invalid check set or receipt: {s:?}"),
             Error::InvalidState(s) => write!(f, "unknown change state {s:?}"),
             Error::InvalidTransition { from, action } => {
                 write!(f, "cannot {action} a change that is {from}")
