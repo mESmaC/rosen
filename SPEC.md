@@ -276,6 +276,13 @@ The server holds each project's AIRC channel, so agents on every machine coordin
   - **presence**: the nicks joined, their machine, and each one's message mode;
   - the **Discoveries** and **Past work** ledgers.
 - **Piece claims** are first-claim-wins, each in one transaction, like path claims. A refusal names the holder and the time of its claim. A claim is kept through failure and disconnects, and released as Velocity F14 says.
+  - A piece is locked by its identity, or by its task text when it has none. The holder claiming again extends its claim and keeps the original claim time.
+  - A release drops only the caller's own pieces: one, or all of them.
+- **Presence.** A member joins with the member ID, nick and machine Velocity gave it. A nick names one joined member at a time. Leaving keeps the member's piece claims. Rejoining keeps its message mode, so a restart does not lift a quarantine.
+- **Messages.** Recipients are resolved and fixed when a message is sent.
+  - A message naming an unknown nick is refused whole. Only the user's comments may name no one, and they then reach every joined member.
+  - A heads-down member's messages from other agents are held until Velocity releases them or the member returns to open mode. They are delivered after its read cursor, so none is skipped.
+  - A quarantined member gets nothing from other agents and its messages reach nobody. Its piece claims are frozen: it cannot take, extend or release one.
 - **One log.** Channel events and Rosen's events share one ordered log and one cursor per subscriber (R9). Targeted delivery follows Velocity F14: an agent receives only the lines it must act on.
 - **Velocity keeps the tools.** Velocity serves AIRC's tools to every agent as now, with the member ID and nick fixed at launch, and calls the server through `rosen-client` for each one. No machine keeps channel state of its own beyond its delivery cursors.
 - **Server unreachable.** Claims and messages need the server, as landing does. A tool call made while the server is unreachable fails with that reason. It is never answered from a local copy.

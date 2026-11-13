@@ -20,6 +20,7 @@
 //!   not need to.
 
 pub mod changes;
+pub mod channel;
 pub mod claims;
 pub mod connection;
 pub mod daemon;

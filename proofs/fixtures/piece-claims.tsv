@@ -1,0 +1,585 @@
+history	outcomes	holders
+c1a	g	a=1 b=-
+c1b	g	a=- b=1
+c2a	g	a=2 b=-
+c2b	g	a=- b=2
+r1a	0	a=- b=-
+r2a	0	a=- b=-
+r1*	0	a=- b=-
+r2*	0	a=- b=-
+c1a c1a	g e	a=1 b=-
+c1a c1b	g g	a=1 b=1
+c1a c2a	g r1	a=1 b=-
+c1a c2b	g g	a=1 b=2
+c1a r1a	g 1	a=- b=-
+c1a r2a	g 0	a=1 b=-
+c1a r1*	g 1	a=- b=-
+c1a r2*	g 0	a=1 b=-
+c1b c1a	g g	a=1 b=1
+c1b c1b	g e	a=- b=1
+c1b c2a	g g	a=2 b=1
+c1b c2b	g r1	a=- b=1
+c1b r1a	g 0	a=- b=1
+c1b r2a	g 0	a=- b=1
+c1b r1*	g 1	a=- b=-
+c1b r2*	g 0	a=- b=1
+c2a c1a	g r2	a=2 b=-
+c2a c1b	g g	a=2 b=1
+c2a c2a	g e	a=2 b=-
+c2a c2b	g g	a=2 b=2
+c2a r1a	g 0	a=2 b=-
+c2a r2a	g 1	a=- b=-
+c2a r1*	g 0	a=2 b=-
+c2a r2*	g 1	a=- b=-
+c2b c1a	g g	a=1 b=2
+c2b c1b	g r2	a=- b=2
+c2b c2a	g g	a=2 b=2
+c2b c2b	g e	a=- b=2
+c2b r1a	g 0	a=- b=2
+c2b r2a	g 0	a=- b=2
+c2b r1*	g 0	a=- b=2
+c2b r2*	g 1	a=- b=-
+r1a c1a	0 g	a=1 b=-
+r1a c1b	0 g	a=- b=1
+r1a c2a	0 g	a=2 b=-
+r1a c2b	0 g	a=- b=2
+r1a r1a	0 0	a=- b=-
+r1a r2a	0 0	a=- b=-
+r1a r1*	0 0	a=- b=-
+r1a r2*	0 0	a=- b=-
+r2a c1a	0 g	a=1 b=-
+r2a c1b	0 g	a=- b=1
+r2a c2a	0 g	a=2 b=-
+r2a c2b	0 g	a=- b=2
+r2a r1a	0 0	a=- b=-
+r2a r2a	0 0	a=- b=-
+r2a r1*	0 0	a=- b=-
+r2a r2*	0 0	a=- b=-
+r1* c1a	0 g	a=1 b=-
+r1* c1b	0 g	a=- b=1
+r1* c2a	0 g	a=2 b=-
+r1* c2b	0 g	a=- b=2
+r1* r1a	0 0	a=- b=-
+r1* r2a	0 0	a=- b=-
+r1* r1*	0 0	a=- b=-
+r1* r2*	0 0	a=- b=-
+r2* c1a	0 g	a=1 b=-
+r2* c1b	0 g	a=- b=1
+r2* c2a	0 g	a=2 b=-
+r2* c2b	0 g	a=- b=2
+r2* r1a	0 0	a=- b=-
+r2* r2a	0 0	a=- b=-
+r2* r1*	0 0	a=- b=-
+r2* r2*	0 0	a=- b=-
+c1a c1a c1a	g e e	a=1 b=-
+c1a c1a c1b	g e g	a=1 b=1
+c1a c1a c2a	g e r1	a=1 b=-
+c1a c1a c2b	g e g	a=1 b=2
+c1a c1a r1a	g e 1	a=- b=-
+c1a c1a r2a	g e 0	a=1 b=-
+c1a c1a r1*	g e 1	a=- b=-
+c1a c1a r2*	g e 0	a=1 b=-
+c1a c1b c1a	g g e	a=1 b=1
+c1a c1b c1b	g g e	a=1 b=1
+c1a c1b c2a	g g r1	a=1 b=1
+c1a c1b c2b	g g r1	a=1 b=1
+c1a c1b r1a	g g 1	a=- b=1
+c1a c1b r2a	g g 0	a=1 b=1
+c1a c1b r1*	g g 2	a=- b=-
+c1a c1b r2*	g g 0	a=1 b=1
+c1a c2a c1a	g r1 e	a=1 b=-
+c1a c2a c1b	g r1 g	a=1 b=1
+c1a c2a c2a	g r1 r1	a=1 b=-
+c1a c2a c2b	g r1 g	a=1 b=2
+c1a c2a r1a	g r1 1	a=- b=-
+c1a c2a r2a	g r1 0	a=1 b=-
+c1a c2a r1*	g r1 1	a=- b=-
+c1a c2a r2*	g r1 0	a=1 b=-
+c1a c2b c1a	g g e	a=1 b=2
+c1a c2b c1b	g g r2	a=1 b=2
+c1a c2b c2a	g g r1	a=1 b=2
+c1a c2b c2b	g g e	a=1 b=2
+c1a c2b r1a	g g 1	a=- b=2
+c1a c2b r2a	g g 0	a=1 b=2
+c1a c2b r1*	g g 1	a=- b=2
+c1a c2b r2*	g g 1	a=1 b=-
+c1a r1a c1a	g 1 g	a=1 b=-
+c1a r1a c1b	g 1 g	a=- b=1
+c1a r1a c2a	g 1 g	a=2 b=-
+c1a r1a c2b	g 1 g	a=- b=2
+c1a r1a r1a	g 1 0	a=- b=-
+c1a r1a r2a	g 1 0	a=- b=-
+c1a r1a r1*	g 1 0	a=- b=-
+c1a r1a r2*	g 1 0	a=- b=-
+c1a r2a c1a	g 0 e	a=1 b=-
+c1a r2a c1b	g 0 g	a=1 b=1
+c1a r2a c2a	g 0 r1	a=1 b=-
+c1a r2a c2b	g 0 g	a=1 b=2
+c1a r2a r1a	g 0 1	a=- b=-
+c1a r2a r2a	g 0 0	a=1 b=-
+c1a r2a r1*	g 0 1	a=- b=-
+c1a r2a r2*	g 0 0	a=1 b=-
+c1a r1* c1a	g 1 g	a=1 b=-
+c1a r1* c1b	g 1 g	a=- b=1
+c1a r1* c2a	g 1 g	a=2 b=-
+c1a r1* c2b	g 1 g	a=- b=2
+c1a r1* r1a	g 1 0	a=- b=-
+c1a r1* r2a	g 1 0	a=- b=-
+c1a r1* r1*	g 1 0	a=- b=-
+c1a r1* r2*	g 1 0	a=- b=-
+c1a r2* c1a	g 0 e	a=1 b=-
+c1a r2* c1b	g 0 g	a=1 b=1
+c1a r2* c2a	g 0 r1	a=1 b=-
+c1a r2* c2b	g 0 g	a=1 b=2
+c1a r2* r1a	g 0 1	a=- b=-
+c1a r2* r2a	g 0 0	a=1 b=-
+c1a r2* r1*	g 0 1	a=- b=-
+c1a r2* r2*	g 0 0	a=1 b=-
+c1b c1a c1a	g g e	a=1 b=1
+c1b c1a c1b	g g e	a=1 b=1
+c1b c1a c2a	g g r1	a=1 b=1
+c1b c1a c2b	g g r1	a=1 b=1
+c1b c1a r1a	g g 1	a=- b=1
+c1b c1a r2a	g g 0	a=1 b=1
+c1b c1a r1*	g g 2	a=- b=-
+c1b c1a r2*	g g 0	a=1 b=1
+c1b c1b c1a	g e g	a=1 b=1
+c1b c1b c1b	g e e	a=- b=1
+c1b c1b c2a	g e g	a=2 b=1
+c1b c1b c2b	g e r1	a=- b=1
+c1b c1b r1a	g e 0	a=- b=1
+c1b c1b r2a	g e 0	a=- b=1
+c1b c1b r1*	g e 1	a=- b=-
+c1b c1b r2*	g e 0	a=- b=1
+c1b c2a c1a	g g r2	a=2 b=1
+c1b c2a c1b	g g e	a=2 b=1
+c1b c2a c2a	g g e	a=2 b=1
+c1b c2a c2b	g g r1	a=2 b=1
+c1b c2a r1a	g g 0	a=2 b=1
+c1b c2a r2a	g g 1	a=- b=1
+c1b c2a r1*	g g 1	a=2 b=-
+c1b c2a r2*	g g 1	a=- b=1
+c1b c2b c1a	g r1 g	a=1 b=1
+c1b c2b c1b	g r1 e	a=- b=1
+c1b c2b c2a	g r1 g	a=2 b=1
+c1b c2b c2b	g r1 r1	a=- b=1
+c1b c2b r1a	g r1 0	a=- b=1
+c1b c2b r2a	g r1 0	a=- b=1
+c1b c2b r1*	g r1 1	a=- b=-
+c1b c2b r2*	g r1 0	a=- b=1
+c1b r1a c1a	g 0 g	a=1 b=1
+c1b r1a c1b	g 0 e	a=- b=1
+c1b r1a c2a	g 0 g	a=2 b=1
+c1b r1a c2b	g 0 r1	a=- b=1
+c1b r1a r1a	g 0 0	a=- b=1
+c1b r1a r2a	g 0 0	a=- b=1
+c1b r1a r1*	g 0 1	a=- b=-
+c1b r1a r2*	g 0 0	a=- b=1
+c1b r2a c1a	g 0 g	a=1 b=1
+c1b r2a c1b	g 0 e	a=- b=1
+c1b r2a c2a	g 0 g	a=2 b=1
+c1b r2a c2b	g 0 r1	a=- b=1
+c1b r2a r1a	g 0 0	a=- b=1
+c1b r2a r2a	g 0 0	a=- b=1
+c1b r2a r1*	g 0 1	a=- b=-
+c1b r2a r2*	g 0 0	a=- b=1
+c1b r1* c1a	g 1 g	a=1 b=-
+c1b r1* c1b	g 1 g	a=- b=1
+c1b r1* c2a	g 1 g	a=2 b=-
+c1b r1* c2b	g 1 g	a=- b=2
+c1b r1* r1a	g 1 0	a=- b=-
+c1b r1* r2a	g 1 0	a=- b=-
+c1b r1* r1*	g 1 0	a=- b=-
+c1b r1* r2*	g 1 0	a=- b=-
+c1b r2* c1a	g 0 g	a=1 b=1
+c1b r2* c1b	g 0 e	a=- b=1
+c1b r2* c2a	g 0 g	a=2 b=1
+c1b r2* c2b	g 0 r1	a=- b=1
+c1b r2* r1a	g 0 0	a=- b=1
+c1b r2* r2a	g 0 0	a=- b=1
+c1b r2* r1*	g 0 1	a=- b=-
+c1b r2* r2*	g 0 0	a=- b=1
+c2a c1a c1a	g r2 r2	a=2 b=-
+c2a c1a c1b	g r2 g	a=2 b=1
+c2a c1a c2a	g r2 e	a=2 b=-
+c2a c1a c2b	g r2 g	a=2 b=2
+c2a c1a r1a	g r2 0	a=2 b=-
+c2a c1a r2a	g r2 1	a=- b=-
+c2a c1a r1*	g r2 0	a=2 b=-
+c2a c1a r2*	g r2 1	a=- b=-
+c2a c1b c1a	g g r2	a=2 b=1
+c2a c1b c1b	g g e	a=2 b=1
+c2a c1b c2a	g g e	a=2 b=1
+c2a c1b c2b	g g r1	a=2 b=1
+c2a c1b r1a	g g 0	a=2 b=1
+c2a c1b r2a	g g 1	a=- b=1
+c2a c1b r1*	g g 1	a=2 b=-
+c2a c1b r2*	g g 1	a=- b=1
+c2a c2a c1a	g e r2	a=2 b=-
+c2a c2a c1b	g e g	a=2 b=1
+c2a c2a c2a	g e e	a=2 b=-
+c2a c2a c2b	g e g	a=2 b=2
+c2a c2a r1a	g e 0	a=2 b=-
+c2a c2a r2a	g e 1	a=- b=-
+c2a c2a r1*	g e 0	a=2 b=-
+c2a c2a r2*	g e 1	a=- b=-
+c2a c2b c1a	g g r2	a=2 b=2
+c2a c2b c1b	g g r2	a=2 b=2
+c2a c2b c2a	g g e	a=2 b=2
+c2a c2b c2b	g g e	a=2 b=2
+c2a c2b r1a	g g 0	a=2 b=2
+c2a c2b r2a	g g 1	a=- b=2
+c2a c2b r1*	g g 0	a=2 b=2
+c2a c2b r2*	g g 2	a=- b=-
+c2a r1a c1a	g 0 r2	a=2 b=-
+c2a r1a c1b	g 0 g	a=2 b=1
+c2a r1a c2a	g 0 e	a=2 b=-
+c2a r1a c2b	g 0 g	a=2 b=2
+c2a r1a r1a	g 0 0	a=2 b=-
+c2a r1a r2a	g 0 1	a=- b=-
+c2a r1a r1*	g 0 0	a=2 b=-
+c2a r1a r2*	g 0 1	a=- b=-
+c2a r2a c1a	g 1 g	a=1 b=-
+c2a r2a c1b	g 1 g	a=- b=1
+c2a r2a c2a	g 1 g	a=2 b=-
+c2a r2a c2b	g 1 g	a=- b=2
+c2a r2a r1a	g 1 0	a=- b=-
+c2a r2a r2a	g 1 0	a=- b=-
+c2a r2a r1*	g 1 0	a=- b=-
+c2a r2a r2*	g 1 0	a=- b=-
+c2a r1* c1a	g 0 r2	a=2 b=-
+c2a r1* c1b	g 0 g	a=2 b=1
+c2a r1* c2a	g 0 e	a=2 b=-
+c2a r1* c2b	g 0 g	a=2 b=2
+c2a r1* r1a	g 0 0	a=2 b=-
+c2a r1* r2a	g 0 1	a=- b=-
+c2a r1* r1*	g 0 0	a=2 b=-
+c2a r1* r2*	g 0 1	a=- b=-
+c2a r2* c1a	g 1 g	a=1 b=-
+c2a r2* c1b	g 1 g	a=- b=1
+c2a r2* c2a	g 1 g	a=2 b=-
+c2a r2* c2b	g 1 g	a=- b=2
+c2a r2* r1a	g 1 0	a=- b=-
+c2a r2* r2a	g 1 0	a=- b=-
+c2a r2* r1*	g 1 0	a=- b=-
+c2a r2* r2*	g 1 0	a=- b=-
+c2b c1a c1a	g g e	a=1 b=2
+c2b c1a c1b	g g r2	a=1 b=2
+c2b c1a c2a	g g r1	a=1 b=2
+c2b c1a c2b	g g e	a=1 b=2
+c2b c1a r1a	g g 1	a=- b=2
+c2b c1a r2a	g g 0	a=1 b=2
+c2b c1a r1*	g g 1	a=- b=2
+c2b c1a r2*	g g 1	a=1 b=-
+c2b c1b c1a	g r2 g	a=1 b=2
+c2b c1b c1b	g r2 r2	a=- b=2
+c2b c1b c2a	g r2 g	a=2 b=2
+c2b c1b c2b	g r2 e	a=- b=2
+c2b c1b r1a	g r2 0	a=- b=2
+c2b c1b r2a	g r2 0	a=- b=2
+c2b c1b r1*	g r2 0	a=- b=2
+c2b c1b r2*	g r2 1	a=- b=-
+c2b c2a c1a	g g r2	a=2 b=2
+c2b c2a c1b	g g r2	a=2 b=2
+c2b c2a c2a	g g e	a=2 b=2
+c2b c2a c2b	g g e	a=2 b=2
+c2b c2a r1a	g g 0	a=2 b=2
+c2b c2a r2a	g g 1	a=- b=2
+c2b c2a r1*	g g 0	a=2 b=2
+c2b c2a r2*	g g 2	a=- b=-
+c2b c2b c1a	g e g	a=1 b=2
+c2b c2b c1b	g e r2	a=- b=2
+c2b c2b c2a	g e g	a=2 b=2
+c2b c2b c2b	g e e	a=- b=2
+c2b c2b r1a	g e 0	a=- b=2
+c2b c2b r2a	g e 0	a=- b=2
+c2b c2b r1*	g e 0	a=- b=2
+c2b c2b r2*	g e 1	a=- b=-
+c2b r1a c1a	g 0 g	a=1 b=2
+c2b r1a c1b	g 0 r2	a=- b=2
+c2b r1a c2a	g 0 g	a=2 b=2
+c2b r1a c2b	g 0 e	a=- b=2
+c2b r1a r1a	g 0 0	a=- b=2
+c2b r1a r2a	g 0 0	a=- b=2
+c2b r1a r1*	g 0 0	a=- b=2
+c2b r1a r2*	g 0 1	a=- b=-
+c2b r2a c1a	g 0 g	a=1 b=2
+c2b r2a c1b	g 0 r2	a=- b=2
+c2b r2a c2a	g 0 g	a=2 b=2
+c2b r2a c2b	g 0 e	a=- b=2
+c2b r2a r1a	g 0 0	a=- b=2
+c2b r2a r2a	g 0 0	a=- b=2
+c2b r2a r1*	g 0 0	a=- b=2
+c2b r2a r2*	g 0 1	a=- b=-
+c2b r1* c1a	g 0 g	a=1 b=2
+c2b r1* c1b	g 0 r2	a=- b=2
+c2b r1* c2a	g 0 g	a=2 b=2
+c2b r1* c2b	g 0 e	a=- b=2
+c2b r1* r1a	g 0 0	a=- b=2
+c2b r1* r2a	g 0 0	a=- b=2
+c2b r1* r1*	g 0 0	a=- b=2
+c2b r1* r2*	g 0 1	a=- b=-
+c2b r2* c1a	g 1 g	a=1 b=-
+c2b r2* c1b	g 1 g	a=- b=1
+c2b r2* c2a	g 1 g	a=2 b=-
+c2b r2* c2b	g 1 g	a=- b=2
+c2b r2* r1a	g 1 0	a=- b=-
+c2b r2* r2a	g 1 0	a=- b=-
+c2b r2* r1*	g 1 0	a=- b=-
+c2b r2* r2*	g 1 0	a=- b=-
+r1a c1a c1a	0 g e	a=1 b=-
+r1a c1a c1b	0 g g	a=1 b=1
+r1a c1a c2a	0 g r1	a=1 b=-
+r1a c1a c2b	0 g g	a=1 b=2
+r1a c1a r1a	0 g 1	a=- b=-
+r1a c1a r2a	0 g 0	a=1 b=-
+r1a c1a r1*	0 g 1	a=- b=-
+r1a c1a r2*	0 g 0	a=1 b=-
+r1a c1b c1a	0 g g	a=1 b=1
+r1a c1b c1b	0 g e	a=- b=1
+r1a c1b c2a	0 g g	a=2 b=1
+r1a c1b c2b	0 g r1	a=- b=1
+r1a c1b r1a	0 g 0	a=- b=1
+r1a c1b r2a	0 g 0	a=- b=1
+r1a c1b r1*	0 g 1	a=- b=-
+r1a c1b r2*	0 g 0	a=- b=1
+r1a c2a c1a	0 g r2	a=2 b=-
+r1a c2a c1b	0 g g	a=2 b=1
+r1a c2a c2a	0 g e	a=2 b=-
+r1a c2a c2b	0 g g	a=2 b=2
+r1a c2a r1a	0 g 0	a=2 b=-
+r1a c2a r2a	0 g 1	a=- b=-
+r1a c2a r1*	0 g 0	a=2 b=-
+r1a c2a r2*	0 g 1	a=- b=-
+r1a c2b c1a	0 g g	a=1 b=2
+r1a c2b c1b	0 g r2	a=- b=2
+r1a c2b c2a	0 g g	a=2 b=2
+r1a c2b c2b	0 g e	a=- b=2
+r1a c2b r1a	0 g 0	a=- b=2
+r1a c2b r2a	0 g 0	a=- b=2
+r1a c2b r1*	0 g 0	a=- b=2
+r1a c2b r2*	0 g 1	a=- b=-
+r1a r1a c1a	0 0 g	a=1 b=-
+r1a r1a c1b	0 0 g	a=- b=1
+r1a r1a c2a	0 0 g	a=2 b=-
+r1a r1a c2b	0 0 g	a=- b=2
+r1a r1a r1a	0 0 0	a=- b=-
+r1a r1a r2a	0 0 0	a=- b=-
+r1a r1a r1*	0 0 0	a=- b=-
+r1a r1a r2*	0 0 0	a=- b=-
+r1a r2a c1a	0 0 g	a=1 b=-
+r1a r2a c1b	0 0 g	a=- b=1
+r1a r2a c2a	0 0 g	a=2 b=-
+r1a r2a c2b	0 0 g	a=- b=2
+r1a r2a r1a	0 0 0	a=- b=-
+r1a r2a r2a	0 0 0	a=- b=-
+r1a r2a r1*	0 0 0	a=- b=-
+r1a r2a r2*	0 0 0	a=- b=-
+r1a r1* c1a	0 0 g	a=1 b=-
+r1a r1* c1b	0 0 g	a=- b=1
+r1a r1* c2a	0 0 g	a=2 b=-
+r1a r1* c2b	0 0 g	a=- b=2
+r1a r1* r1a	0 0 0	a=- b=-
+r1a r1* r2a	0 0 0	a=- b=-
+r1a r1* r1*	0 0 0	a=- b=-
+r1a r1* r2*	0 0 0	a=- b=-
+r1a r2* c1a	0 0 g	a=1 b=-
+r1a r2* c1b	0 0 g	a=- b=1
+r1a r2* c2a	0 0 g	a=2 b=-
+r1a r2* c2b	0 0 g	a=- b=2
+r1a r2* r1a	0 0 0	a=- b=-
+r1a r2* r2a	0 0 0	a=- b=-
+r1a r2* r1*	0 0 0	a=- b=-
+r1a r2* r2*	0 0 0	a=- b=-
+r2a c1a c1a	0 g e	a=1 b=-
+r2a c1a c1b	0 g g	a=1 b=1
+r2a c1a c2a	0 g r1	a=1 b=-
+r2a c1a c2b	0 g g	a=1 b=2
+r2a c1a r1a	0 g 1	a=- b=-
+r2a c1a r2a	0 g 0	a=1 b=-
+r2a c1a r1*	0 g 1	a=- b=-
+r2a c1a r2*	0 g 0	a=1 b=-
+r2a c1b c1a	0 g g	a=1 b=1
+r2a c1b c1b	0 g e	a=- b=1
+r2a c1b c2a	0 g g	a=2 b=1
+r2a c1b c2b	0 g r1	a=- b=1
+r2a c1b r1a	0 g 0	a=- b=1
+r2a c1b r2a	0 g 0	a=- b=1
+r2a c1b r1*	0 g 1	a=- b=-
+r2a c1b r2*	0 g 0	a=- b=1
+r2a c2a c1a	0 g r2	a=2 b=-
+r2a c2a c1b	0 g g	a=2 b=1
+r2a c2a c2a	0 g e	a=2 b=-
+r2a c2a c2b	0 g g	a=2 b=2
+r2a c2a r1a	0 g 0	a=2 b=-
+r2a c2a r2a	0 g 1	a=- b=-
+r2a c2a r1*	0 g 0	a=2 b=-
+r2a c2a r2*	0 g 1	a=- b=-
+r2a c2b c1a	0 g g	a=1 b=2
+r2a c2b c1b	0 g r2	a=- b=2
+r2a c2b c2a	0 g g	a=2 b=2
+r2a c2b c2b	0 g e	a=- b=2
+r2a c2b r1a	0 g 0	a=- b=2
+r2a c2b r2a	0 g 0	a=- b=2
+r2a c2b r1*	0 g 0	a=- b=2
+r2a c2b r2*	0 g 1	a=- b=-
+r2a r1a c1a	0 0 g	a=1 b=-
+r2a r1a c1b	0 0 g	a=- b=1
+r2a r1a c2a	0 0 g	a=2 b=-
+r2a r1a c2b	0 0 g	a=- b=2
+r2a r1a r1a	0 0 0	a=- b=-
+r2a r1a r2a	0 0 0	a=- b=-
+r2a r1a r1*	0 0 0	a=- b=-
+r2a r1a r2*	0 0 0	a=- b=-
+r2a r2a c1a	0 0 g	a=1 b=-
+r2a r2a c1b	0 0 g	a=- b=1
+r2a r2a c2a	0 0 g	a=2 b=-
+r2a r2a c2b	0 0 g	a=- b=2
+r2a r2a r1a	0 0 0	a=- b=-
+r2a r2a r2a	0 0 0	a=- b=-
+r2a r2a r1*	0 0 0	a=- b=-
+r2a r2a r2*	0 0 0	a=- b=-
+r2a r1* c1a	0 0 g	a=1 b=-
+r2a r1* c1b	0 0 g	a=- b=1
+r2a r1* c2a	0 0 g	a=2 b=-
+r2a r1* c2b	0 0 g	a=- b=2
+r2a r1* r1a	0 0 0	a=- b=-
+r2a r1* r2a	0 0 0	a=- b=-
+r2a r1* r1*	0 0 0	a=- b=-
+r2a r1* r2*	0 0 0	a=- b=-
+r2a r2* c1a	0 0 g	a=1 b=-
+r2a r2* c1b	0 0 g	a=- b=1
+r2a r2* c2a	0 0 g	a=2 b=-
+r2a r2* c2b	0 0 g	a=- b=2
+r2a r2* r1a	0 0 0	a=- b=-
+r2a r2* r2a	0 0 0	a=- b=-
+r2a r2* r1*	0 0 0	a=- b=-
+r2a r2* r2*	0 0 0	a=- b=-
+r1* c1a c1a	0 g e	a=1 b=-
+r1* c1a c1b	0 g g	a=1 b=1
+r1* c1a c2a	0 g r1	a=1 b=-
+r1* c1a c2b	0 g g	a=1 b=2
+r1* c1a r1a	0 g 1	a=- b=-
+r1* c1a r2a	0 g 0	a=1 b=-
+r1* c1a r1*	0 g 1	a=- b=-
+r1* c1a r2*	0 g 0	a=1 b=-
+r1* c1b c1a	0 g g	a=1 b=1
+r1* c1b c1b	0 g e	a=- b=1
+r1* c1b c2a	0 g g	a=2 b=1
+r1* c1b c2b	0 g r1	a=- b=1
+r1* c1b r1a	0 g 0	a=- b=1
+r1* c1b r2a	0 g 0	a=- b=1
+r1* c1b r1*	0 g 1	a=- b=-
+r1* c1b r2*	0 g 0	a=- b=1
+r1* c2a c1a	0 g r2	a=2 b=-
+r1* c2a c1b	0 g g	a=2 b=1
+r1* c2a c2a	0 g e	a=2 b=-
+r1* c2a c2b	0 g g	a=2 b=2
+r1* c2a r1a	0 g 0	a=2 b=-
+r1* c2a r2a	0 g 1	a=- b=-
+r1* c2a r1*	0 g 0	a=2 b=-
+r1* c2a r2*	0 g 1	a=- b=-
+r1* c2b c1a	0 g g	a=1 b=2
+r1* c2b c1b	0 g r2	a=- b=2
+r1* c2b c2a	0 g g	a=2 b=2
+r1* c2b c2b	0 g e	a=- b=2
+r1* c2b r1a	0 g 0	a=- b=2
+r1* c2b r2a	0 g 0	a=- b=2
+r1* c2b r1*	0 g 0	a=- b=2
+r1* c2b r2*	0 g 1	a=- b=-
+r1* r1a c1a	0 0 g	a=1 b=-
+r1* r1a c1b	0 0 g	a=- b=1
+r1* r1a c2a	0 0 g	a=2 b=-
+r1* r1a c2b	0 0 g	a=- b=2
+r1* r1a r1a	0 0 0	a=- b=-
+r1* r1a r2a	0 0 0	a=- b=-
+r1* r1a r1*	0 0 0	a=- b=-
+r1* r1a r2*	0 0 0	a=- b=-
+r1* r2a c1a	0 0 g	a=1 b=-
+r1* r2a c1b	0 0 g	a=- b=1
+r1* r2a c2a	0 0 g	a=2 b=-
+r1* r2a c2b	0 0 g	a=- b=2
+r1* r2a r1a	0 0 0	a=- b=-
+r1* r2a r2a	0 0 0	a=- b=-
+r1* r2a r1*	0 0 0	a=- b=-
+r1* r2a r2*	0 0 0	a=- b=-
+r1* r1* c1a	0 0 g	a=1 b=-
+r1* r1* c1b	0 0 g	a=- b=1
+r1* r1* c2a	0 0 g	a=2 b=-
+r1* r1* c2b	0 0 g	a=- b=2
+r1* r1* r1a	0 0 0	a=- b=-
+r1* r1* r2a	0 0 0	a=- b=-
+r1* r1* r1*	0 0 0	a=- b=-
+r1* r1* r2*	0 0 0	a=- b=-
+r1* r2* c1a	0 0 g	a=1 b=-
+r1* r2* c1b	0 0 g	a=- b=1
+r1* r2* c2a	0 0 g	a=2 b=-
+r1* r2* c2b	0 0 g	a=- b=2
+r1* r2* r1a	0 0 0	a=- b=-
+r1* r2* r2a	0 0 0	a=- b=-
+r1* r2* r1*	0 0 0	a=- b=-
+r1* r2* r2*	0 0 0	a=- b=-
+r2* c1a c1a	0 g e	a=1 b=-
+r2* c1a c1b	0 g g	a=1 b=1
+r2* c1a c2a	0 g r1	a=1 b=-
+r2* c1a c2b	0 g g	a=1 b=2
+r2* c1a r1a	0 g 1	a=- b=-
+r2* c1a r2a	0 g 0	a=1 b=-
+r2* c1a r1*	0 g 1	a=- b=-
+r2* c1a r2*	0 g 0	a=1 b=-
+r2* c1b c1a	0 g g	a=1 b=1
+r2* c1b c1b	0 g e	a=- b=1
+r2* c1b c2a	0 g g	a=2 b=1
+r2* c1b c2b	0 g r1	a=- b=1
+r2* c1b r1a	0 g 0	a=- b=1
+r2* c1b r2a	0 g 0	a=- b=1
+r2* c1b r1*	0 g 1	a=- b=-
+r2* c1b r2*	0 g 0	a=- b=1
+r2* c2a c1a	0 g r2	a=2 b=-
+r2* c2a c1b	0 g g	a=2 b=1
+r2* c2a c2a	0 g e	a=2 b=-
+r2* c2a c2b	0 g g	a=2 b=2
+r2* c2a r1a	0 g 0	a=2 b=-
+r2* c2a r2a	0 g 1	a=- b=-
+r2* c2a r1*	0 g 0	a=2 b=-
+r2* c2a r2*	0 g 1	a=- b=-
+r2* c2b c1a	0 g g	a=1 b=2
+r2* c2b c1b	0 g r2	a=- b=2
+r2* c2b c2a	0 g g	a=2 b=2
+r2* c2b c2b	0 g e	a=- b=2
+r2* c2b r1a	0 g 0	a=- b=2
+r2* c2b r2a	0 g 0	a=- b=2
+r2* c2b r1*	0 g 0	a=- b=2
+r2* c2b r2*	0 g 1	a=- b=-
+r2* r1a c1a	0 0 g	a=1 b=-
+r2* r1a c1b	0 0 g	a=- b=1
+r2* r1a c2a	0 0 g	a=2 b=-
+r2* r1a c2b	0 0 g	a=- b=2
+r2* r1a r1a	0 0 0	a=- b=-
+r2* r1a r2a	0 0 0	a=- b=-
+r2* r1a r1*	0 0 0	a=- b=-
+r2* r1a r2*	0 0 0	a=- b=-
+r2* r2a c1a	0 0 g	a=1 b=-
+r2* r2a c1b	0 0 g	a=- b=1
+r2* r2a c2a	0 0 g	a=2 b=-
+r2* r2a c2b	0 0 g	a=- b=2
+r2* r2a r1a	0 0 0	a=- b=-
+r2* r2a r2a	0 0 0	a=- b=-
+r2* r2a r1*	0 0 0	a=- b=-
+r2* r2a r2*	0 0 0	a=- b=-
+r2* r1* c1a	0 0 g	a=1 b=-
+r2* r1* c1b	0 0 g	a=- b=1
+r2* r1* c2a	0 0 g	a=2 b=-
+r2* r1* c2b	0 0 g	a=- b=2
+r2* r1* r1a	0 0 0	a=- b=-
+r2* r1* r2a	0 0 0	a=- b=-
+r2* r1* r1*	0 0 0	a=- b=-
+r2* r1* r2*	0 0 0	a=- b=-
+r2* r2* c1a	0 0 g	a=1 b=-
+r2* r2* c1b	0 0 g	a=- b=1
+r2* r2* c2a	0 0 g	a=2 b=-
+r2* r2* c2b	0 0 g	a=- b=2
+r2* r2* r1a	0 0 0	a=- b=-
+r2* r2* r2a	0 0 0	a=- b=-
+r2* r2* r1*	0 0 0	a=- b=-
+r2* r2* r2*	0 0 0	a=- b=-

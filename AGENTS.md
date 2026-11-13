@@ -16,6 +16,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Claim release fixtures: `lake exe claim-release-fixtures > fixtures/claim-release.tsv` in `proofs/`.
 - Re-check fixtures: `lake exe recheck-fixtures > fixtures/recheck.tsv` in `proofs/`.
 - Workspace deletion fixtures: `lake exe workspace-deletion-fixtures > fixtures/workspace-deletion.tsv` in `proofs/`.
+- Piece claims fixtures: `lake exe piece-claims-fixtures > fixtures/piece-claims.tsv` in `proofs/`.
 - Fixture tables, regenerated from `proofs/` after a model changes: `lake exe landing-fixtures > fixtures/landing.tsv` and `lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv`.
 - CI runs the Rust build, lint and tests on Windows, and the Rust build on Linux.
 
@@ -94,6 +95,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - `crates/rosen-server/src/landing/`: decides when the base moves; a bug lands unchecked code or applies a land twice (SPEC.md R8).
 - `crates/rosen-server/src/metadata.rs`: shared SQLite connection settings and schema initialization; a bad migration can corrupt authoritative metadata.
 - `crates/rosen-server/src/changes/schema.rs`: SQLite schema and migration for changes and snapshots; a bad migration corrupts or loses metadata.
+- `crates/rosen-server/src/channel/`: the AIRC channel's SQLite schema and piece-claim lock; a bug lets two agents own one piece or loses channel state (SPEC.md R13).
 - `crates/rosen-server/src/conflicts.rs`: SQLite schema and storage for stored conflicts; a bug lets a conflicted change land (SPEC.md R5).
 - `crates/rosen-client/src/workspace/lifecycle.rs`: guarded workspace deletion; an unsafe deletion loses local edits (SPEC.md R4).
 - `crates/rosen-client/src/workspace/delete.rs`: holds verified files and removes exact objects; a pathname race can lose another workspace's edits.
