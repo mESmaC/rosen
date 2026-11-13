@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS receipts (
 );
 ";
 
+pub(crate) fn ensure_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(SCHEMA)
+}
+
 /// Tier recorded for a ref's initial commit; never counts as prose-only.
 const INITIAL_TIER: &str = "initial";
 
@@ -108,7 +112,7 @@ pub struct Ledger {
 
 impl Ledger {
     pub fn open(path: &Path) -> LandResult<Ledger> {
-        Self::prepare(Connection::open(path)?)
+        Self::prepare(crate::metadata::open(path)?)
     }
 
     pub fn open_in_memory() -> LandResult<Ledger> {
@@ -118,10 +122,8 @@ impl Ledger {
     fn prepare(connection: Connection) -> LandResult<Ledger> {
         // WAL lets readers proceed during a land; FULL sync makes a committed
         // land survive power loss.
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        connection.execute_batch(SCHEMA)?;
+        crate::metadata::configure(&connection)?;
+        ensure_schema(&connection)?;
         // The land transaction reads the conflict gate, so its table must be
         // in this same database.
         conflicts::ensure_schema(&connection)?;
