@@ -44,6 +44,10 @@ pub(crate) fn ensure_change_schema(conn: &Connection) -> rusqlite::Result<()> {
              tree_id   TEXT NOT NULL,
              message   TEXT,
              PRIMARY KEY (change_id, seq)
-         ) WITHOUT ROWID;",
+         ) WITHOUT ROWID;
+         -- An unedited legacy child's initial head is its exact parent basis.
+         INSERT OR IGNORE INTO stack_bases (change_id, tree)
+         SELECT id, head FROM changes c WHERE parent_change IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM change_snapshots s WHERE s.change_id = c.id);",
     )
 }

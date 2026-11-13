@@ -20,7 +20,7 @@ pub(crate) fn track(conn: &Connection, id: ChangeId, tree: ObjectId) -> Result<(
 pub(crate) fn basis(
     conn: &Connection,
     id: ChangeId,
-    parent: ChangeId,
+    _parent: ChangeId,
 ) -> Result<ObjectId, ChangeError> {
     let tree: Option<String> = conn
         .query_row(
@@ -31,9 +31,18 @@ pub(crate) fn basis(
         .optional()?;
     match tree {
         Some(tree) => tree.parse().map_err(failure),
-        // Older databases did not retain a basis. Preserve their existing
-        // landing behavior; newly created stacks always have an exact basis.
-        None => Ok(changes::get(conn, parent)?.change.head),
+        // An edited legacy stack has no recoverable exact basis. Guessing the
+        // parent's current head can interpret intervening lands as deletions.
+        None => {
+            let child = changes::get(conn, id)?.change;
+            if child.snapshots.is_empty() {
+                Ok(child.head)
+            } else {
+                Err(ChangeError::Base(
+                    "cannot safely rebase a legacy stack without its recorded parent tree".into(),
+                ))
+            }
+        }
     }
 }
 
