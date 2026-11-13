@@ -76,3 +76,22 @@ pub struct ReviewThread {
     pub updated_at: i64,
     pub comments: Vec<ReviewComment>,
 }
+
+/// Approve the exact head the reviewer read; stale approvals are refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApproveRequest {
+    pub change: String,
+    pub reviewer: AgentId,
+    pub head: ObjectId,
+}
+
+/// An approval retains its original reviewed head after a server rebase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approval {
+    pub id: u64,
+    pub change: ChangeId,
+    pub reviewer: AgentId,
+    pub head: ObjectId,
+    pub created_at: i64,
+    pub valid: bool,
+}
