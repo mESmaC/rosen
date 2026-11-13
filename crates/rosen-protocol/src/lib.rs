@@ -22,8 +22,8 @@ pub use workspace::{WorkspaceBytes, WorkspaceWrite};
 
 pub use change::{ChangeFilter, ChangeRecord, NewChange};
 pub use claim::{
-    ClaimFilter, ClaimHolder, ClaimKind, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome,
-    ShareOutcome, WaitOutcome, WokenWait,
+    ClaimFilter, ClaimHolder, ClaimKind, ClaimOutcome, ClaimRequest, OverlapAnswer, OverlapQuery,
+    OverlapRecord, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome, WokenWait,
 };
 pub use config::{ConfigQuery, ConfigRecord};
 pub use history::{

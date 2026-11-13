@@ -3,8 +3,8 @@
 use crate::connection::{unexpected, Client};
 use crate::Error;
 use rosen_protocol::{
-    ClaimFilter, ClaimOutcome, ClaimRequest, Event, EventKind, PathClaim, ReleaseOutcome, Request,
-    Response, ShareOutcome, WaitOutcome,
+    ClaimFilter, ClaimOutcome, ClaimRequest, Event, EventKind, OverlapAnswer, OverlapQuery,
+    PathClaim, ReleaseOutcome, Request, Response, ShareOutcome, WaitOutcome,
 };
 use std::collections::BTreeSet;
 
@@ -72,6 +72,15 @@ impl Client {
     pub async fn claim_list(&self, filter: ClaimFilter) -> Result<Vec<PathClaim>, Error> {
         match self.request(Request::ClaimList(filter)).await? {
             Response::PathClaims(records) => Ok(records),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// The live changes that overlap a change's claims, shares and edits, or
+    /// a set of paths queried as a claim (R6). AIRC and Velocity call this.
+    pub async fn overlaps(&self, query: OverlapQuery) -> Result<OverlapAnswer, Error> {
+        match self.request(Request::Overlaps(query)).await? {
+            Response::Overlaps(answer) => Ok(answer),
             other => Err(unexpected(other)),
         }
     }

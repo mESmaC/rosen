@@ -175,8 +175,11 @@ pub enum Command {
     /// List changes that overlap a change or a set of paths.
     ///
     /// Two changes overlap when they claim the same path, or their edits in
-    /// one file touch or sit within 3 lines of each other.
-    Overlaps(ChangePaths),
+    /// one file touch or sit within 3 lines of each other. A claim or share
+    /// covers every line of its paths; a wait covers none. Generated files
+    /// and registration lists never count. Only open and ready changes are
+    /// listed. Paths given without `--change` are queried as a claim.
+    Overlaps(OverlapArgs),
     /// Comment on, list or resolve review threads, or approve a change.
     #[command(subcommand)]
     Review(ReviewCommand),
@@ -519,6 +522,21 @@ pub struct ClaimArgs {
     /// directory, a `**` segment any number of directories, and a trailing
     /// `/` everything under a directory.
     #[arg(required = true)]
+    pub paths: Vec<String>,
+}
+
+/// What `rosen overlaps` queries: a change, a set of paths, or a change
+/// narrowed to some paths.
+#[derive(Debug, Args)]
+pub struct OverlapArgs {
+    /// Change to query: its ID or a unique prefix. Defaults, when no paths
+    /// are given, to the workspace holding the current directory, then
+    /// $ROSEN_CHANGE.
+    #[arg(long)]
+    pub change: Option<String>,
+    /// Repository-relative paths or globs. Alone, they are queried as if a
+    /// change claimed them. With `--change`, only overlaps on these paths
+    /// are listed.
     pub paths: Vec<String>,
 }
 
