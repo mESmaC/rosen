@@ -193,13 +193,29 @@ impl Budget {
         let _lock = self.lock()?;
         let mut registry = self.read()?;
         // Record both names before renaming. A crash on either side of the
-        // rename therefore charges whichever name survives. Until the next
-        // scan the workspace stays charged under `from`, which the last scan
-        // measured, so this record reserves nothing itself.
+        // rename therefore charges whichever name survives.
         let (to_absolute, from_absolute) = (std::path::absolute(to)?, std::path::absolute(from)?);
-        push_reservation(&mut registry, to_absolute, from_absolute, 0, NO_SLOT);
+        // A scan running now may already have snapshotted `from` and will
+        // measure it empty after the rename. So the workspace's charge moves
+        // from the record that made it to this one, which keeps it until a
+        // scan measures the workspace as `to`.
+        let carried = match registry
+            .workspaces
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.destination == from_absolute)
+        {
+            Some(maker) => {
+                let carried = charge(maker, false);
+                maker.measured = Some(0);
+                maker.measured_in_flight = false;
+                carried
+            }
+            None => 0,
+        };
+        push_reservation(&mut registry, to_absolute, from_absolute, carried, NO_SLOT);
         self.save(&registry)?;
-        fs::rename(from, to)
+        rename_while_walked(from, to)
     }
 
     fn lock(&self) -> io::Result<File> {
@@ -345,6 +361,32 @@ impl Budget {
             .retain(|entry| kept.contains(&entry.sequence));
         self.save(&registry)?;
         Ok(targets)
+    }
+}
+
+/// The longest a take retries a rename that a scan's walk is blocking.
+const RENAME_RETRY: Duration = Duration::from_secs(2);
+
+/// On Windows, renaming a directory fails with PermissionDenied while any
+/// process holds a handle inside it. A scan walks workspaces with no
+/// registry lock, so it can hold one briefly during a take; each handle
+/// lives for one metadata or directory read, so a short retry gets past it.
+/// The walk never waits on the registry lock this caller holds, so the
+/// retry cannot deadlock.
+fn rename_while_walked(from: &Path, to: &Path) -> io::Result<()> {
+    let started = Instant::now();
+    let mut delay = Duration::from_millis(2);
+    loop {
+        match fs::rename(from, to) {
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && started.elapsed() < RENAME_RETRY =>
+            {
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_millis(100));
+            }
+            result => return result,
+        }
     }
 }
 
