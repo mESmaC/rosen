@@ -88,6 +88,7 @@ pub struct Landing {
     ledger: Ledger,
     deps: LandingDeps,
     config: LandingConfig,
+    recheck_store: Option<std::sync::Arc<dyn rosen_store::ObjectStore>>,
 }
 
 impl Landing {
@@ -96,7 +97,18 @@ impl Landing {
             ledger,
             deps,
             config,
+            recheck_store: None,
         }
+    }
+
+    /// Enables build-unit receipt reuse using immutable objects from the
+    /// authoritative store. Without it, only intervening prose is reusable.
+    pub fn with_recheck_store(
+        mut self,
+        store: std::sync::Arc<dyn rosen_store::ObjectStore>,
+    ) -> Self {
+        self.recheck_store = Some(store);
+        self
     }
 
     pub fn ledger(&self) -> &Ledger {
@@ -208,7 +220,7 @@ impl Landing {
             tier: facts.tier,
             receipt: ReceiptCheck::Missing,
             base_moved: false,
-            landed_since_all_prose: true,
+            landed_since_all_independent: true,
             // Filled in once the merge has run.
             merge_clean: true,
         };
@@ -233,13 +245,30 @@ impl Landing {
             ReceiptLookup::Valid { receipt, base_seq } => {
                 input.receipt = ReceiptCheck::Valid;
                 input.base_moved = receipt.base != *base;
-                input.landed_since_all_prose = self
-                    .ledger
-                    .landed_since_all_prose(&self.config.base_ref, base_seq)?;
+                input.landed_since_all_independent =
+                    self.independent_since(facts, base, base_seq)?;
                 Some(receipt)
             }
         };
         Ok(Gathered { input, receipt })
+    }
+
+    fn independent_since(
+        &self,
+        facts: &ChangeFacts,
+        base: &CommitId,
+        seq: i64,
+    ) -> LandResult<bool> {
+        let lands = self
+            .ledger
+            .lands_between(&self.config.base_ref, seq, base)?;
+        if lands.iter().all(|(_, tier)| *tier == Tier::ProseOnly) {
+            return Ok(true);
+        }
+        match &self.recheck_store {
+            Some(store) => super::reach_store::reusable(store.as_ref(), base, facts, &lands),
+            None => Ok(false),
+        }
     }
 
     fn commit_land(

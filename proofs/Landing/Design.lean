@@ -1,35 +1,27 @@
 /-!
 # Design proof: optimistic landing (SPEC.md R8)
-
 Models the land decision (`crates/rosen-server/src/landing/rules.rs`) and the
 compare-and-swap of the base ref (`ledger.rs`), and proves:
-
 * `correct`: a land moves the base exactly when SPEC.md R8 step 2 allows it,
   from the old base to the landed commit, and never twice for one change;
 * `cost_bound`: under the stated cost model, a land costs at most one attempt
   per competing land that beat it, plus one, and never more than the cap;
 * `optimal`: among sound re-check policies, ours asks for the fewest new
   receipts on every request history.
-
 `fixtureTable` is exported to `proofs/fixtures/landing.tsv`, which the Rust
 test `landing_fixtures` checks the implementation against.
 -/
-
 namespace Landing
-
 /-- `active` covers both `open` and `ready`: the decision treats them alike. -/
 inductive ChangeState where
   | active | landed | abandoned
   deriving DecidableEq, Repr
-
 inductive Tier where
   | prose | normal | sensitive
   deriving DecidableEq, Repr
-
 inductive ReceiptCheck where
   | missing | invalid | valid
   deriving DecidableEq, Repr
-
 structure Input where
   state : ChangeState
   parentLanded : Bool
@@ -38,20 +30,17 @@ structure Input where
   tier : Tier
   receipt : ReceiptCheck
   baseMoved : Bool
-  landedSinceAllProse : Bool
+  landedSinceAllIndependent : Bool
   mergeClean : Bool
   deriving DecidableEq, Repr
-
 inductive Refusal where
   | alreadyLanded | abandoned | parentUnlanded | conflicts | unapproved
   | noReceipt | receiptStale | mergeConflict | needsRecheck
   deriving DecidableEq, Repr
-
 inductive Verdict where
   | land
   | refuse (r : Refusal)
   deriving DecidableEq, Repr
-
 /-- Checks that do not depend on the merge result, in refusal order. -/
 def gate (i : Input) : Option Refusal :=
   match i.state with
@@ -66,15 +55,13 @@ def gate (i : Input) : Option Refusal :=
       | .missing => some .noReceipt
       | .invalid => some .receiptStale
       | .valid => none
-
 def decideLand (i : Input) : Verdict :=
   match gate i with
   | some r => .refuse r
   | none =>
     if !i.mergeClean then .refuse .mergeConflict
-    else if i.tier = .prose ∨ !i.baseMoved ∨ i.landedSinceAllProse then .land
+    else if i.tier = .prose ∨ !i.baseMoved ∨ i.landedSinceAllIndependent then .land
     else .refuse .needsRecheck
-
 /-- SPEC.md R8 step 2, with SPEC.md R7 approval and SPEC.md R8 step 3 stack
 order: the change is live, its parent has landed, it has no stored
 conflicts, its current head is approved, it merges cleanly onto the current
@@ -84,11 +71,9 @@ def Authorized (i : Input) : Prop :=
   i.state = .active ∧ i.parentLanded = true ∧ i.hasConflicts = false ∧
   i.approved = true ∧ i.mergeClean = true ∧
   (i.tier = .prose ∨
-    (i.receipt = .valid ∧ (i.baseMoved = false ∨ i.landedSinceAllProse = true)))
-
+    (i.receipt = .valid ∧ (i.baseMoved = false ∨ i.landedSinceAllIndependent = true)))
 instance : DecidablePred Authorized := fun i => by
   unfold Authorized; infer_instance
-
 /-- The metadata store as landing sees it: the base ref and the landed
 `(change, commit)` pairs, newest first. -/
 structure Ledger where
@@ -183,15 +168,15 @@ def oursRecheck (i : Input) : Bool :=
   decideLand i == .refuse .needsRecheck
 
 /-- The class of alternatives: policies that never let a receipt count across
-a non-prose land for a non-prose change that otherwise passes every check.
+a dependent land for a non-prose change that otherwise passes every check.
 Reusing it there can land code no check built (the struct literal case in R8). -/
 def SoundPolicy (policy : Input → Bool) : Prop :=
   ∀ i, gate i = none → i.mergeClean = true → i.tier ≠ .prose →
-    i.baseMoved = true → i.landedSinceAllProse = false → policy i = true
+    i.baseMoved = true → i.landedSinceAllIndependent = false → policy i = true
 
 private theorem oursRecheck_unsafe (i : Input) (h : oursRecheck i = true) :
     gate i = none ∧ i.mergeClean = true ∧ i.tier ≠ .prose ∧
-      i.baseMoved = true ∧ i.landedSinceAllProse = false := by
+      i.baseMoved = true ∧ i.landedSinceAllIndependent = false := by
   obtain ⟨s, p, c, a, t, r, b, q, m⟩ := i
   revert h
   cases s <;> cases p <;> cases c <;> cases a <;> cases t <;> cases r <;>
@@ -251,7 +236,7 @@ def Verdict.code : Verdict → String
   | .refuse .mergeConflict => "merge_conflict"
   | .refuse .needsRecheck => "needs_recheck"
 
-/-- Every input, except that `landedSinceAllProse` is pinned to true when the
+/-- Every input, except that `landedSinceAllIndependent` is pinned to true when the
 base has not moved: nothing landed since B, so the flag is vacuously true. -/
 def allInputs : List Input :=
   [ChangeState.active, .landed, .abandoned].flatMap fun s =>
@@ -266,11 +251,36 @@ def allInputs : List Input :=
 def fixtureRow (i : Input) : String :=
   "\t".intercalate [i.state.code, bit i.parentLanded, bit i.hasConflicts,
     bit i.approved, i.tier.code, i.receipt.code, bit i.baseMoved,
-    bit i.landedSinceAllProse, bit i.mergeClean, (decideLand i).code]
+    bit i.landedSinceAllIndependent, bit i.mergeClean, (decideLand i).code]
 
 def fixtureTable : String :=
   "state\tparent_landed\thas_conflicts\tapproved\ttier\treceipt\tbase_moved\t" ++
-    "landed_since_all_prose\tmerge_clean\tverdict\n" ++
+    "landed_since_all_independent\tmerge_clean\tverdict\n" ++
     String.join (allInputs.map (fixtureRow · ++ "\n"))
 
+
+#print axioms correct
+#print axioms cost_bound
+#print axioms optimal
+#print axioms gate
+#print axioms decideLand
+#print axioms Authorized
+#print axioms Ledger.hasLanded
+#print axioms cas
+#print axioms landStep
+#print axioms decideLand_eq_land
+#print axioms attempts
+#print axioms recheckCost
+#print axioms oursRecheck
+#print axioms SoundPolicy
+#print axioms oursRecheck_unsafe
+#print axioms countP_le_of_imp
+#print axioms bit
+#print axioms ChangeState.code
+#print axioms Tier.code
+#print axioms ReceiptCheck.code
+#print axioms Verdict.code
+#print axioms allInputs
+#print axioms fixtureRow
+#print axioms fixtureTable
 end Landing
