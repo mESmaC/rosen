@@ -2,6 +2,7 @@
 //! behind its partition proxy, and agent processes on every machine.
 
 use super::agent::Ack;
+use super::enroll;
 use super::setup::{self, Layout};
 use crate::execute::Faults;
 use crate::plan::{Cut, Machine, Target};
@@ -41,7 +42,6 @@ pub struct Harness {
 impl Harness {
     pub async fn start(spec: &Spec) -> anyhow::Result<Self> {
         let listen: SocketAddr = format!("127.0.0.1:{}", setup::free_port()?).parse()?;
-        let (fingerprint, credential) = setup::server_identity(&spec.layout.server_dir())?;
         let logs = spec.layout.root.join("logs");
         std::fs::create_dir_all(&logs)?;
         let mut server = Slot::new("server", server_recipe(spec, listen)).log_to(logs.join("server.log"));
@@ -52,17 +52,11 @@ impl Harness {
         for machine in 1..spec.machines {
             let proxy = PartitionProxy::start("127.0.0.1:0".parse()?, listen).await?;
             let dir = spec.layout.machine_dir(machine);
-            std::fs::create_dir_all(&dir)?;
-            let credential_file = dir.join("credential");
-            std::fs::write(&credential_file, &credential)?;
-            let upstream = Upstream {
-                address: proxy.address(),
-                fingerprint: fingerprint.clone(),
-                credential_file,
-            };
+            let server = rosen_protocol::Endpoint::new(spec.layout.endpoint(0));
             let name = format!("daemon-{machine}");
+            enroll::enroll(&server, proxy.address(), &dir, &format!("{}-m{machine}", spec.layout.tag)).await?;
             let log = logs.join(format!("{name}.log"));
-            let mut daemon = Slot::new(name, daemon_recipe(spec, machine, upstream)).log_to(log);
+            let mut daemon = Slot::new(name, daemon_recipe(spec, machine)).log_to(log);
             daemon.start()?;
             wait_ready(&spec.layout.endpoint(machine)).await?;
             proxies.push(proxy);
@@ -157,6 +151,14 @@ impl Harness {
         self.server.stop().await;
     }
 
+    /// Removes every machine credential the drill enrolled.
+    pub fn forget_machines(&self, layout: &Layout) -> Vec<String> {
+        (1..=self.daemons.len())
+            .filter_map(|machine| enroll::forget(&layout.machine_dir(machine)).err())
+            .map(|err| format!("{err:#}"))
+            .collect()
+    }
+
     pub fn counts(&self) -> serde_json::Value {
         let all = std::iter::once(&self.server)
             .chain(&self.daemons)
@@ -191,12 +193,6 @@ impl Faults for Harness {
     }
 }
 
-struct Upstream {
-    address: SocketAddr,
-    fingerprint: String,
-    credential_file: PathBuf,
-}
-
 fn server_recipe(spec: &Spec, listen: SocketAddr) -> crate::process::Recipe {
     let bin = spec.server_bin.clone();
     let dir = spec.layout.server_dir();
@@ -211,7 +207,9 @@ fn server_recipe(spec: &Spec, listen: SocketAddr) -> crate::process::Recipe {
     })
 }
 
-fn daemon_recipe(spec: &Spec, machine: Machine, upstream: Upstream) -> crate::process::Recipe {
+/// The daemon reads its server and credential from the `upstream.json`
+/// enrollment wrote, as a daemon a client starts with no flags does.
+fn daemon_recipe(spec: &Spec, machine: Machine) -> crate::process::Recipe {
     let bin = spec.server_bin.clone();
     let dir = spec.layout.machine_dir(machine);
     let endpoint = spec.layout.endpoint(machine);
@@ -220,11 +218,7 @@ fn daemon_recipe(spec: &Spec, machine: Machine, upstream: Upstream) -> crate::pr
         command
             .arg("--data-dir")
             .arg(&dir)
-            .args(["--endpoint", &endpoint])
-            .args(["--upstream", &upstream.address.to_string()])
-            .args(["--fingerprint", &upstream.fingerprint])
-            .arg("--credential-file")
-            .arg(&upstream.credential_file);
+            .args(["--endpoint", &endpoint]);
         command
     })
 }

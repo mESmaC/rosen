@@ -1,12 +1,11 @@
 //! Lays out the drill's machines on one disk and creates the project.
 
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
 use rosen_core::{Commit, FileMode, ObjectId, Signature, Tree, TreeEntry};
 use rosen_server::landing::Ledger;
-use rosen_server::network::identity::{self, Identity};
 use rosen_server::ServerConfig;
 use rosen_store::{LooseObjectStore, ObjectStore};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Where each simulated machine keeps its data, and the names of its
 /// daemon's local endpoint.
@@ -73,16 +72,6 @@ pub fn create_project(layout: &Layout, units: &[String]) -> anyhow::Result<Objec
         .init_base("main", &root)
         .map_err(|err| anyhow!("{err}"))?;
     Ok(root)
-}
-
-/// The server's fingerprint and machine credential, created now so cache
-/// daemons can be configured before the server first starts.
-pub fn server_identity(server_dir: &Path) -> anyhow::Result<(String, String)> {
-    let identity = Identity::load_or_create(server_dir).context("server identity")?;
-    Ok((
-        identity::hex(&identity.fingerprint()),
-        identity.credential().to_owned(),
-    ))
 }
 
 /// A free local port for the server's listener. It must stay the same

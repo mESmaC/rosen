@@ -904,6 +904,7 @@ dependencies = [
  "getrandom 0.3.4",
  "rosen-client",
  "rosen-core",
+ "rosen-platform",
  "rosen-protocol",
  "rosen-server",
  "rosen-store",

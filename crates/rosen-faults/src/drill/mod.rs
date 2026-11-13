@@ -9,6 +9,7 @@
 //! [`crate::execute::Faults`].
 
 pub mod agent;
+mod enroll;
 mod harness;
 mod setup;
 mod verify;
@@ -92,6 +93,9 @@ pub async fn run(args: DrillArgs) -> anyhow::Result<bool> {
     let elapsed = start.elapsed();
     let crashed = harness.crashed();
     harness.stop().await;
+    for problem in harness.forget_machines(&spec.layout) {
+        eprintln!("drill: could not remove a machine credential: {problem}");
+    }
     let acks = harness.acks.lock().expect("acks lock").clone();
     let checks = verify::verify(&spec.layout.server_config(), &acks, args.failing_commit)?;
     let ok = settled.is_ok() && crashed.is_empty() && checks.iter().all(|check| check.ok);
