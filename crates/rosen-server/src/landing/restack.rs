@@ -6,7 +6,7 @@
 
 use super::{
     ChangeBook, ChangeId, ChangeState, CommitId, EventSink, LandError, LandResult, LandingEvent,
-    MergeOutcome, Merger, Routing,
+    MergeOutcome, Merger, Reparent, Routing,
 };
 
 /// How often one target is re-merged when snapshots keep moving its head
@@ -25,6 +25,8 @@ pub(crate) struct Restacker<'a> {
     pub book: &'a dyn ChangeBook,
     pub merger: &'a dyn Merger,
     pub events: &'a dyn EventSink,
+    /// This run replays a land whose earlier run may have announced it.
+    pub replay: bool,
 }
 
 impl Restacker<'_> {
@@ -33,7 +35,15 @@ impl Restacker<'_> {
         let targets = self.targets(landed)?;
         self.book.mark_landed(landed, commit)?;
         self.book.release_claims(landed)?;
-        self.events.emit(LandingEvent::Released { change: *landed });
+        let released = LandingEvent::Released {
+            change: *landed,
+            commit: *commit,
+        };
+        if self.replay {
+            self.events.emit_once(released);
+        } else {
+            self.events.emit(released);
+        }
         let mut report = RestackReport::default();
         for target in targets {
             self.rebase_one(&target, commit, &mut report)?;
@@ -73,8 +83,8 @@ impl Restacker<'_> {
     }
 
     /// One rebase of `change` onto `onto`. Returns false when a snapshot
-    /// moved its head before conflicts were stored: nothing from the stale
-    /// head is attached, and the caller merges again.
+    /// moved its head before the rebase or its conflicts were stored:
+    /// nothing from the stale head is kept, and the caller merges again.
     fn try_rebase(
         &self,
         change: &ChangeId,
@@ -89,7 +99,12 @@ impl Restacker<'_> {
         }
         match self.merger.merge(&facts.merge_base, onto, &facts.head)? {
             MergeOutcome::Clean(tree) => {
-                self.book.reparent(change, onto, Some(&tree))?;
+                match self.book.reparent(change, onto, &facts.head, Some(&tree))? {
+                    Reparent::Moved => {}
+                    // A replay or a later land's run already moved it.
+                    Reparent::AlreadyPast => return Ok(true),
+                    Reparent::HeadMoved => return Ok(false),
+                }
                 self.events.emit(LandingEvent::Rebased {
                     change: *change,
                     onto: *onto,
@@ -99,7 +114,13 @@ impl Restacker<'_> {
             MergeOutcome::Conflicted(paths) => {
                 // Conflicts are stored on the change, never raised as errors
                 // (D2): the change moves anyway and its owner resolves them.
-                self.book.reparent(change, onto, None)?;
+                // Conflicts against a base older than the change's own are
+                // stale, so a change past `onto` stores none.
+                match self.book.reparent(change, onto, &facts.head, None)? {
+                    Reparent::Moved => {}
+                    Reparent::AlreadyPast => return Ok(true),
+                    Reparent::HeadMoved => return Ok(false),
+                }
                 let routing = self.book.record_conflicts_at(
                     change,
                     &facts.merge_base,

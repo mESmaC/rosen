@@ -204,6 +204,64 @@ pub fn rebase(
     Ok(record)
 }
 
+/// What a post-land rebase onto `onto` would do, per [`behind_after_land`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterLand {
+    /// The change is behind `onto`, at the head the merge read.
+    Rebased,
+    /// The change already sits on the landed commit or a later base.
+    AlreadyPast,
+    /// A snapshot moved the head after the merge read it.
+    HeadMoved,
+}
+
+/// Whether a change whose merge onto `onto` conflicted still needs its
+/// conflicts stored: only while it is behind `onto` and at the head the merge
+/// read. Lands finish their post-land work in any order and recovery replays
+/// a land after later lands finished theirs, so conflicts against a base
+/// older than the change's own would be stale.
+pub fn behind_after_land(
+    conn: &mut Connection,
+    id: ChangeId,
+    onto: ObjectId,
+    read_head: ObjectId,
+) -> Result<AfterLand, ChangeError> {
+    let current = load(conn, id)?.change;
+    Ok(if !behind_base(conn, current.parent, onto)? {
+        AfterLand::AlreadyPast
+    } else if current.head != read_head {
+        AfterLand::HeadMoved
+    } else {
+        AfterLand::Rebased
+    })
+}
+
+/// True when `parent` is earlier in the base history than `onto`. A stacked
+/// change is always behind: the land of its parent is what moves it.
+fn behind_base(
+    conn: &Connection,
+    parent: ChangeParent,
+    onto: ObjectId,
+) -> Result<bool, ChangeError> {
+    let ChangeParent::Base(current) = parent else {
+        return Ok(true);
+    };
+    let position = |commit: ObjectId| {
+        conn.query_row(
+            "SELECT seq FROM base_history WHERE commit_id = ?1",
+            params![commit.to_hex()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+    };
+    // A parent the base history never held cannot be ordered; moving it onto
+    // a commit the base did hold is how it gets back on the base.
+    Ok(match (position(current)?, position(onto)?) {
+        (Some(at), Some(target)) => at < target,
+        _ => current != onto,
+    })
+}
+
 /// Walks down from `below` to the base; meeting `id` on the way means stacking
 /// `id` on `below` would close a loop. The visited set makes the walk end even
 /// if a damaged store already holds a loop.
