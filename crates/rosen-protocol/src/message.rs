@@ -122,6 +122,11 @@ pub enum Request {
     BisectSubmit(crate::BisectResult),
     /// Offers the newest untested landed commit to an external checker (R12).
     PostLandNext,
+    /// Starts bisection from the stored green boundary after a batch failure.
+    PostLandFailed {
+        job: crate::PostLandJob,
+        output: String,
+    },
     /// Marks the tested landed prefix green after the full check set passed.
     PostLandPassed(crate::post_land::PostLandJob),
     /// Liveness check.

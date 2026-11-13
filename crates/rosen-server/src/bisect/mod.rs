@@ -1,4 +1,5 @@
 //! Restart-safe post-land bisection. Checks execute outside Rosen (D9, R12).
+pub mod failure;
 mod model;
 mod storage;
 
