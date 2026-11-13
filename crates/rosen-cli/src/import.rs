@@ -5,8 +5,7 @@ use serde_json::json;
 
 use crate::server::Succeeded;
 
-/// Schema tag for `--json` output (SPEC.md R10).
-const IMPORT_SCHEMA: &str = "rosen.import/v1";
+use crate::output::IMPORT_SCHEMA;
 
 /// Starts the server if needed, imports `repo` and prints the new base.
 pub async fn import(
