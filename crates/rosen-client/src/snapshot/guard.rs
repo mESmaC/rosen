@@ -26,7 +26,7 @@ impl Snapshotter {
             files: self.index.files.clone(),
             gitlinks: self.index.gitlinks.clone(),
         };
-        let candidates = relevant_files(&self.root, &self.index)?;
+        let candidates = relevant_files(&self.root, &self.index, &self.marker.ignore)?;
         scanned
             .files
             .retain(|path, _| !self.sparse.includes(path.as_bytes()) || candidates.contains(path));
@@ -61,8 +61,13 @@ fn file_identity(
     index.files.get(path).map(|entry| (entry.mode, entry.blob))
 }
 
-fn relevant_files(root: &Path, index: &Index) -> Result<BTreeSet<String>, SnapshotError> {
-    let mut ignore = IgnoreRules::new(root.to_path_buf());
+fn relevant_files(
+    root: &Path,
+    index: &Index,
+    project_ignore: &[String],
+) -> Result<BTreeSet<String>, SnapshotError> {
+    // Ignored output never blocks deletion (SPEC R2, R4).
+    let mut ignore = IgnoreRules::new(root.to_path_buf(), project_ignore);
     let mut files = BTreeSet::new();
     let mut pending = vec![String::new()];
     while let Some(dir) = pending.pop() {
@@ -158,7 +163,7 @@ impl Snapshotter {
             .iter()
             .map(|(path, entry)| (path.clone(), entry.blob))
             .collect();
-        let mut ignore = IgnoreRules::new(self.root.clone());
+        let mut ignore = IgnoreRules::new(self.root.clone(), &self.marker.ignore);
         crate::workspace::delete::remove_verified(&self.root, &expected, |rel, is_dir| {
             always_ignored(rel)
                 || (!self.index.tracks(rel)
