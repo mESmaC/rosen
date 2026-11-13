@@ -9,7 +9,8 @@
 
 use crate::change::{ChangeFilter, ChangeRecord, NewChange};
 use crate::claim::{
-    ClaimFilter, ClaimOutcome, ClaimRequest, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome,
+    ClaimFilter, ClaimOutcome, ClaimRequest, OverlapAnswer, OverlapQuery, PathClaim,
+    ReleaseOutcome, ShareOutcome, WaitOutcome,
 };
 use crate::config::{ConfigQuery, ConfigRecord};
 use crate::history::{
@@ -146,6 +147,8 @@ pub enum Request {
     EditRegions {
         change: String,
     },
+    /// Lists the live changes that overlap a change or a set of paths (R6).
+    Overlaps(OverlapQuery),
     /// Stores the subscriber's event cursor: it has handled every event up
     /// to `seq`. A later subscribe with no cursor resumes after it, even
     /// across a server restart (R9). The cursor never moves backwards.
@@ -253,6 +256,7 @@ pub enum Response {
     Released(ReleaseOutcome),
     PathClaims(Vec<PathClaim>),
     EditRegions(crate::edits::EditRegions),
+    Overlaps(OverlapAnswer),
     ObjectsStored(ObjectsStored),
     Snapshot(SnapshotOutcome),
     EventsAcked(EventCursor),
