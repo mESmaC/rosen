@@ -15,7 +15,7 @@ use super::rules::{self, LandInput, ReceiptCheck, Refusal, Verdict};
 use super::{
     CasResult, ChangeBook, ChangeFacts, ChangeId, ChangeParent, CommitId, CommitWriter, EventSink,
     LandError, LandRecord, LandResult, LandedCommit, LandingEvent, Ledger, MergeOutcome, Merger,
-    Receipt, RestackReport, Tier, TreeId,
+    Receipt, RestackReport, Routing, Tier, TreeId,
 };
 
 #[derive(Clone, Debug)]
@@ -75,7 +75,8 @@ pub struct MergePreview {
 
 enum Attempt {
     Done(LandOutcome),
-    BaseMoved,
+    /// The base or the change moved after this attempt read it; decide again.
+    Retry,
 }
 
 /// Decision inputs read for one attempt, with the receipt they rely on.
@@ -185,7 +186,7 @@ impl Landing {
         // A receipt on a base newer than the one read means the base moved
         // mid-attempt; retrying reads that base instead of failing the land.
         let Some(mut gathered) = self.gather(&facts, &base)? else {
-            return Ok(Attempt::BaseMoved);
+            return Ok(Attempt::Retry);
         };
         if !rules::needs_merge(&gathered.input) {
             return Ok(Attempt::Done(refused(rules::decide(&gathered.input))));
@@ -200,13 +201,18 @@ impl Landing {
                 self.commit_land(&facts, base, tree, gathered.receipt, attempt)
             }
             (Verdict::Refuse(Refusal::MergeConflict), MergeOutcome::Conflicted(paths)) => {
-                self.deps.book.record_conflicts_at(
+                let routing = self.deps.book.record_conflicts_at(
                     change,
                     &facts.merge_base,
                     &base,
                     &facts.head,
                     &paths,
                 )?;
+                if routing == Routing::ChangeMoved {
+                    // A snapshot raced the merge: its conflicts belong to an
+                    // older head. The retry reads the new head and state.
+                    return Ok(Attempt::Retry);
+                }
                 self.deps.events.emit(LandingEvent::Conflict {
                     change: *change,
                     paths,
@@ -316,7 +322,7 @@ impl Landing {
             // A moved change is decided afresh, like a moved base: the retry
             // reads its new head and state, and refuses if the receipt or
             // approval no longer covers them.
-            CasResult::BaseMoved { .. } | CasResult::ChangeMoved => Ok(Attempt::BaseMoved),
+            CasResult::BaseMoved { .. } | CasResult::ChangeMoved => Ok(Attempt::Retry),
             CasResult::OpenConflicts => Ok(Attempt::Done(LandOutcome::Refused(Refusal::Conflicts))),
             CasResult::AlreadyLanded { commit } => {
                 Ok(Attempt::Done(LandOutcome::AlreadyLanded { commit }))

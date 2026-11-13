@@ -1,7 +1,7 @@
 //! Risk: concurrent lands applying a change twice, forking the base, or
 //! reusing a receipt across a non-prose land (SPEC R8 "Accept when").
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,6 +14,10 @@ struct World {
     parents: Mutex<HashMap<CommitId, CommitId>>,
     events: Mutex<Vec<LandingEvent>>,
     next: AtomicU64,
+    /// Heads whose merge onto any base conflicts.
+    conflicting: Mutex<HashSet<CommitId>>,
+    /// Changes that get one snapshot between their merge and conflict routing.
+    racing: Mutex<HashSet<ChangeId>>,
 }
 
 struct Shared(Arc<World>);
@@ -37,6 +41,25 @@ impl ChangeBook for Shared {
     fn record_conflicts(&self, _: &ChangeId, _: &[String]) -> LandResult<()> {
         Ok(())
     }
+    fn record_conflicts_at(
+        &self,
+        id: &ChangeId,
+        _: &CommitId,
+        _: &CommitId,
+        head: &CommitId,
+        _: &[String],
+    ) -> LandResult<Routing> {
+        let mut changes = self.0.changes.lock().unwrap();
+        let facts = changes.get_mut(id).unwrap();
+        if self.0.racing.lock().unwrap().remove(id) {
+            facts.head = oid(HEAD, facts.head.as_bytes()[1] + 100);
+        }
+        Ok(if facts.head == *head {
+            Routing::Stored
+        } else {
+            Routing::ChangeMoved
+        })
+    }
     fn reparent(&self, id: &ChangeId, onto: &CommitId, _: Option<&TreeId>) -> LandResult<()> {
         let mut changes = self.0.changes.lock().unwrap();
         changes.get_mut(id).unwrap().parent = ChangeParent::Base(*onto);
@@ -49,6 +72,9 @@ impl ChangeBook for Shared {
 
 impl Merger for Shared {
     fn merge(&self, _: &CommitId, onto: &CommitId, head: &CommitId) -> LandResult<MergeOutcome> {
+        if self.0.conflicting.lock().unwrap().contains(head) {
+            return Ok(MergeOutcome::Conflicted(vec!["shared.txt".into()]));
+        }
         Ok(MergeOutcome::Clean(oid(
             TREE,
             onto.as_bytes()[1] ^ head.as_bytes()[1],
@@ -251,4 +277,34 @@ fn receipt_on_a_base_newer_than_the_attempt_retries() {
         }
         helper.join().unwrap();
     }
+}
+
+#[test]
+fn snapshot_racing_conflict_routing_is_decided_on_its_new_head() {
+    // Risk (SPEC R8 step 2): conflicts merged from an older head attached to
+    // a newer one, or one racing snapshot aborting the post-land rebase.
+    let (landed, stacked, other) = (1, 2, 3);
+    let (world, landing) = setup(vec![
+        change(landed, Tier::ProseOnly, ChangeParent::Base(root())),
+        change(stacked, Tier::ProseOnly, ChangeParent::Change(cid(landed))),
+        change(other, Tier::ProseOnly, ChangeParent::Base(root())),
+    ]);
+    for n in [stacked, other] {
+        world.conflicting.lock().unwrap().insert(oid(HEAD, n));
+        world.racing.lock().unwrap().insert(cid(n));
+    }
+    let LandOutcome::Landed { restack, .. } = landing.land(&cid(landed)).unwrap() else {
+        panic!("the bottom change lands");
+    };
+    // The stacked change's new head merges cleanly, so it is rebased.
+    assert_eq!(restack.unwrap().rebased, vec![cid(stacked)]);
+    let base = landing.ledger().base("main").unwrap();
+    // The new head voids the approval, which the retried attempt reports.
+    let unapproved = LandOutcome::Refused(Refusal::Unapproved);
+    assert_eq!(landing.land(&cid(other)).unwrap(), unapproved);
+    assert_eq!(landing.ledger().base("main").unwrap(), base);
+    let events = world.events.lock().unwrap();
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, LandingEvent::Conflict { .. })));
 }
