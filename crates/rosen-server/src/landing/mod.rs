@@ -176,6 +176,11 @@ pub type LandResult<T> = Result<T, LandError>;
 /// The change model, as landing sees it.
 pub trait ChangeBook: Send + Sync {
     fn facts(&self, id: &ChangeId) -> LandResult<Option<ChangeFacts>>;
+    /// Classify the immutable diff using this attempt's base configuration.
+    /// Adapters without a project store retain their supplied tier.
+    fn tier_at(&self, facts: &ChangeFacts, _base: &CommitId) -> LandResult<Tier> {
+        Ok(facts.tier)
+    }
     /// Changes whose parent is `id`, bottom of each stack first.
     fn stacked_on(&self, id: &ChangeId) -> LandResult<Vec<ChangeId>>;
     /// Unlanded changes that overlap `id` (SPEC §2 "Overlap").

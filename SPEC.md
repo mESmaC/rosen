@@ -218,6 +218,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 Landing is the core algorithm. No global queue or lock exists, and unrelated changes never wait on each other.
 
 1. A checker gets the server-computed merge result of a change onto base commit B, runs the project's **pre-land check set** (build and lint, D20), and submits a **receipt** for `(head, B, pre-land check set)`. A prose-only change (R7 tier) needs no receipt.
+   - Each landing attempt reads the check-set name and computes the review tier from the configuration at that attempt's base, including retries after a lost compare-and-swap. Prose-only changes still need approval and a clean merge.
 2. `rosen land <change>` asks the server to land it. In one transaction the server checks:
    - the change has no conflicts, an approval for its current head, and a valid receipt;
    - **base unchanged** (the base still equals the receipt's B): it writes the single landed commit and compare-and-swaps the base ref from B to it;
