@@ -60,10 +60,16 @@ impl ChangeBook for Shared {
             Routing::ChangeMoved
         })
     }
-    fn reparent(&self, id: &ChangeId, onto: &CommitId, _: Option<&TreeId>) -> LandResult<()> {
+    fn reparent(
+        &self,
+        id: &ChangeId,
+        onto: &CommitId,
+        _: &CommitId,
+        _: Option<&TreeId>,
+    ) -> LandResult<Reparent> {
         let mut changes = self.0.changes.lock().unwrap();
         changes.get_mut(id).unwrap().parent = ChangeParent::Base(*onto);
-        Ok(())
+        Ok(Reparent::Moved)
     }
     fn release_claims(&self, _: &ChangeId) -> LandResult<()> {
         Ok(())

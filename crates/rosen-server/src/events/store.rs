@@ -35,6 +35,21 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// True when the log holds this exact event: kind, change and detail.
+pub fn holds(
+    conn: &Connection,
+    kind: EventKind,
+    change: &str,
+    detail: &serde_json::Value,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events
+         WHERE kind = ?1 AND change_id = ?2 AND detail = ?3)",
+        params![kind_text(kind), change, detail.to_string()],
+        |row| row.get(0),
+    )
+}
+
 /// The newest stored sequence number, 0 when the log is empty.
 pub fn last_seq(conn: &Connection) -> rusqlite::Result<u64> {
     let max: Option<i64> = conn.query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))?;

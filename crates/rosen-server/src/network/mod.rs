@@ -81,6 +81,15 @@ impl UpstreamConfig {
 /// task, and its TLS handshake runs there, so a slow peer never holds up
 /// the accept loop.
 pub async fn serve(listener: TcpListener, acceptor: TlsAcceptor, state: Arc<ServerState>) {
+    let _advertisement = state.network_status().and_then(|(address, fingerprint)| {
+        match rosen_client::discovery::advertise(address, &fingerprint) {
+            Ok(advertisement) => Some(advertisement),
+            Err(err) => {
+                eprintln!("rosen-server: DNS-SD announcement failed: {err}");
+                None
+            }
+        }
+    });
     loop {
         let accepted = tokio::select! {
             accepted = listener.accept() => accepted,

@@ -1,6 +1,7 @@
 //! Transactional enrollment authority (SPEC R14).
 pub mod credentials;
 pub mod keys;
+pub mod manage;
 use crate::ServerState;
 use rosen_protocol::{CreateJoinKey, ErrorBody, ErrorCode, Outcome, Response};
 use rusqlite::Connection;

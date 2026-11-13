@@ -22,6 +22,7 @@ mod pending;
 mod store;
 
 pub use audience::Concern;
+pub use channel::ChannelLine;
 pub use landing_sink::LandingEvents;
 pub use store::Page;
 
@@ -196,6 +197,23 @@ impl EventLog {
             }
         }
         Some(concern)
+    }
+
+    /// True when this exact event is stored or queued to be.
+    /// An unreadable log answers false, so the caller publishes again: a
+    /// repeat is allowed (delivery is at least once), a lost event is not.
+    pub fn holds(&self, kind: EventKind, change: &str, detail: &serde_json::Value) -> bool {
+        let inner = &self.inner;
+        inner.with_slot(|slot| {
+            let queued = slot.queue.iter().any(|pending| {
+                pending.kind == kind
+                    && pending.change.as_deref() == Some(change)
+                    && pending.detail == *detail
+            });
+            queued
+                || matches!(inner.connection(&mut slot.conn, false),
+                    Ok(Some(conn)) if store::holds(conn, kind, change, detail).unwrap_or(false))
+        })
     }
 
     /// Every event after `cursor`, oldest first.

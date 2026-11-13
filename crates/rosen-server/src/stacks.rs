@@ -245,13 +245,24 @@ fn stack_selection_matches_proved_fixture() {
     }
 }
 
+/// What [`land_rebase`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LandRebase {
+    Moved,
+    /// Closed, already on `onto` or a later base, or stacked on an unlanded
+    /// parent: nothing moved, so nothing is announced.
+    Skipped,
+    /// The live head conflicts with `onto`; nothing moved.
+    Conflicted,
+}
+
 /// Re-read the live child while holding the writer lock. The landing engine's
 /// preview may predate an author snapshot, so its tree cannot be installed.
 pub(crate) fn land_rebase(
     state: &ServerState,
     id: ChangeId,
     onto: ObjectId,
-) -> Result<(), ChangeError> {
+) -> Result<LandRebase, ChangeError> {
     use rosen_core::ChangeParent;
     use rosen_store::ObjectStore;
     let ctx = history::open(state).map_err(failure)?;
@@ -265,21 +276,22 @@ pub(crate) fn land_rebase(
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = changes::get(&tx, id)?.change;
         if current.state.is_closed() {
-            return Ok(());
+            return Ok(LandRebase::Skipped);
         }
         let base = match current.parent {
             ChangeParent::Base(commit) => {
                 // Recovery can replay an older land after a later rebase.
                 // Moving back would discard the intervening base additions.
-                if commit != onto && descends_from(&ctx.store, commit, onto)? {
-                    return Ok(());
+                // Already on `onto`: a replay of this land moved it.
+                if commit == onto || descends_from(&ctx.store, commit, onto)? {
+                    return Ok(LandRebase::Skipped);
                 }
                 ctx.store.read_commit(&commit).map_err(failure)?.tree
             }
             ChangeParent::Change(parent) => {
                 // Overlap alone cannot detach a child from its unlanded parent.
                 if changes::get(&tx, parent)?.change.state != rosen_core::ChangeState::Landed {
-                    return Ok(());
+                    return Ok(LandRebase::Skipped);
                 }
                 basis(&tx, id, parent)?
             }
@@ -294,16 +306,16 @@ pub(crate) fn land_rebase(
             }
         })
         .map_err(failure)?;
-        let tree = merged
-            .tree
-            .ok_or_else(|| ChangeError::Base("rebase inputs moved; recovery retries".into()))?;
+        let Some(tree) = merged.tree else {
+            return Ok(LandRebase::Conflicted);
+        };
         changes::update_in(&tx, id, |c| c.rebase(ChangeParent::Base(onto), tree))?;
         tx.execute(
             "DELETE FROM stack_bases WHERE change_id = ?1",
             [id.to_string()],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(LandRebase::Moved)
     })
 }
 

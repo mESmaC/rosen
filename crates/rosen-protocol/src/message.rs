@@ -8,6 +8,7 @@
 //! Responses may arrive out of order, and event frames are interleaved with them.
 
 use crate::change::{ChangeFilter, ChangeRecord, NewChange};
+use crate::channel::{ChannelAnswer, ChannelRequest};
 use crate::claim::{
     ClaimFilter, ClaimOutcome, ClaimRequest, OverlapAnswer, OverlapQuery, PathClaim,
     ReleaseOutcome, ShareOutcome, WaitOutcome,
@@ -114,6 +115,11 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
+    MachineList,
+    MachineApprove { machine: String },
+    MachineRevoke { machine: String },
+    JoinKeyList,
+    JoinKeyRevoke { key: String },
     JoinKeyCreate(crate::CreateJoinKey),
     MachineEnroll {
         key: String,
@@ -260,12 +266,19 @@ pub enum Request {
     /// later one, was prose-only (R7), so a workspace prepared at the first
     /// needs no new prepare at the second (R3).
     LandedProse(crate::LandedProseQuery),
+    /// An AIRC channel operation (R13). Answered only by the server, never
+    /// from a machine's local copy.
+    Channel(ChannelRequest),
 }
 
 /// Successful results, one per [`Request`] variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
+    Machines(Vec<crate::machine::MachineRecord>),
+    Machine(crate::machine::MachineRecord),
+    JoinKeys(Vec<crate::machine::JoinKeyRecord>),
+    JoinKey(crate::machine::JoinKeyRecord),
     JoinKeyCreated {
         key: String,
     },
@@ -311,6 +324,7 @@ pub enum Response {
     MergeResult(MergeResultAnswer),
     /// Boxed: a configuration is far larger than every other answer.
     Config(Box<ConfigRecord>),
+    Channel(ChannelAnswer),
 }
 
 /// The answer to [`Request::AckEvents`]: the cursor now stored, which is

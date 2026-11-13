@@ -6,6 +6,7 @@
 //! links server code and the server never links client code.
 
 pub mod change;
+pub mod channel;
 pub mod claim;
 pub mod config;
 pub mod edits;
@@ -26,6 +27,7 @@ pub mod workspace;
 pub use workspace::{WorkspaceBytes, WorkspaceWrite};
 
 pub use change::{ChangeFilter, ChangeRecord, NewChange};
+pub use channel::{ChannelAnswer, ChannelRequest};
 pub use claim::{
     ClaimFilter, ClaimHolder, ClaimKind, ClaimOutcome, ClaimRequest, OverlapAnswer, OverlapQuery,
     OverlapRecord, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome, WokenWait,

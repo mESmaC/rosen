@@ -1,0 +1,9 @@
+a_pending	crash	target_after_recovery	retry	c_in_history	pending_after	target_after
+0	0	b	landed	1	0	c
+0	1	c	already_landed	1	0	c
+0	2	c	already_landed	1	0	c
+0	3	c	already_landed	1	0	c
+1	0	b	landed	1	0	c
+1	1	c	already_landed	1	0	c
+1	2	c	already_landed	1	0	c
+1	3	c	already_landed	1	0	c

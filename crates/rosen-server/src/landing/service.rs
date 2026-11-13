@@ -8,6 +8,7 @@
 //! never wait in a queue.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
+use std::time::Duration;
 
 use rosen_core::{AgentId, Change, ChangeParent, ChangeState, SnapshotKind};
 use rosen_protocol::{
@@ -20,7 +21,7 @@ use super::review_gate::StoredReviews;
 use super::{
     ChangeBook, ChangeFacts, ChangeId, CommitId, CommitWriter, EventSink, LandError, LandOutcome,
     LandResult, LandedCommit, Landing, LandingConfig, LandingDeps, LandingEvent, Ledger,
-    MergeOutcome, Merger, Refusal, Tier, TreeId,
+    MergeOutcome, Merger, RecoveryReport, Refusal, Reparent, Tier, TreeId,
 };
 use crate::changes::{self, ChangeError};
 use crate::events::LandingEvents;
@@ -43,7 +44,15 @@ pub struct LandingService {
     /// renames the pre-land check set, which receipts are matched by.
     engine: Mutex<Option<Arc<Landing>>>,
     gate: RwLock<Arc<dyn ReviewGate>>,
+    /// Wakes [`keep_recovering`] when a land's post-land work fails. A
+    /// failure while a pass runs leaves a permit, so it is never missed.
+    retry: tokio::sync::Notify,
 }
+
+/// First wait before retrying post-land work that failed, doubled up to
+/// [`RETRY_CAP`] while it keeps failing.
+const RETRY_START: Duration = Duration::from_millis(250);
+const RETRY_CAP: Duration = Duration::from_secs(30);
 
 /// Answers `land` on the blocking pool: merging and SQLite I/O must not
 /// stall the async workers that carry every other connection.
@@ -68,12 +77,54 @@ pub async fn landed_prose(state: &Arc<ServerState>, query: LandedProseQuery) -> 
     }
 }
 
+/// Finishes post-land work a crash cut short, then waits for a land whose
+/// post-land work fails and retries it with backoff until it succeeds. The
+/// land itself is already on the base; only its release, rebases and events
+/// are outstanding.
+pub async fn keep_recovering(state: Arc<ServerState>) {
+    let mut delay = RETRY_START;
+    loop {
+        let pass = Arc::clone(&state);
+        let report = tokio::task::spawn_blocking(move || {
+            let report = pass.landing.recover(&pass);
+            // Children of replayed lands follow them (R8 step 4, D19).
+            crate::stacks::refresh(&pass);
+            report
+        })
+        .await;
+        let complete = match report {
+            Ok(Ok(report)) => {
+                for (change, why) in &report.failed {
+                    eprintln!("rosen-server: post-land recovery for {change} failed: {why}");
+                }
+                report.is_complete()
+            }
+            Ok(Err(body)) => {
+                eprintln!("rosen-server: landing recovery failed: {}", body.message);
+                false
+            }
+            Err(join) => {
+                eprintln!("rosen-server: landing recovery stopped: {join}");
+                false
+            }
+        };
+        if complete {
+            delay = RETRY_START;
+            state.landing.retry.notified().await;
+        } else {
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(RETRY_CAP);
+        }
+    }
+}
+
 impl LandingService {
     pub fn new(state: Weak<ServerState>) -> Self {
         Self {
             gate: RwLock::new(Arc::new(StoredReviews(state.clone()))),
             state,
             engine: Mutex::new(None),
+            retry: tokio::sync::Notify::new(),
         }
     }
 
@@ -115,6 +166,7 @@ impl LandingService {
                 // The land stands either way; recovery replays the rebase.
                 if let Err(why) = restack {
                     eprintln!("rosen-server: post-land work for {id} failed: {why}");
+                    self.retry.notify_one();
                 }
                 LandStatus::Landed { commit, attempts }
             }
@@ -157,11 +209,11 @@ impl LandingService {
         Ok(lands.iter().all(|(_, tier)| *tier == Tier::ProseOnly))
     }
 
-    /// Replays post-land work a crash interrupted (R8 step 4). Does nothing
-    /// before the project has a base.
-    pub fn recover(&self, state: &ServerState) -> Result<usize, ErrorBody> {
+    /// Replays post-land work a crash or a failed step interrupted (R8 step
+    /// 4). Does nothing before the project has a base.
+    pub fn recover(&self, state: &ServerState) -> Result<RecoveryReport, ErrorBody> {
         if state.project_config.at_base().map_err(internal)?.is_none() {
-            return Ok(0);
+            return Ok(RecoveryReport::default());
         }
         self.engine(state)?.recover().map_err(land_body)
     }
@@ -202,8 +254,11 @@ impl LandingService {
         };
         let store = LooseObjectStore::open(state.config.objects_dir())
             .map_err(|err| internal(err.to_string()))?;
-        let engine =
-            Arc::new(Landing::new(ledger, deps, config).with_recheck_store(Arc::new(store)));
+        let mut engine = Landing::new(ledger, deps, config).with_recheck_store(Arc::new(store));
+        if let Some(old) = slot.as_ref() {
+            engine = engine.taking_over(old);
+        }
+        let engine = Arc::new(engine);
         *slot = Some(Arc::clone(&engine));
         Ok(engine)
     }
@@ -217,7 +272,7 @@ fn refusal_status(
     base: &CommitId,
     refusal: Refusal,
 ) -> Result<LandStatus, ErrorBody> {
-    let set = &engine.config().pre_land_check_set;
+    let set = engine.check_set_at(base).map_err(land_body)?;
     let head = change.head;
     let submit = format!(
         "a checker runs the `{set}` check set on the merge result and submits \
@@ -281,6 +336,14 @@ impl Adapters {
 }
 
 impl ChangeBook for Adapters {
+    fn tier_at(&self, facts: &ChangeFacts, base: &CommitId) -> LandResult<Tier> {
+        let state = self.state()?;
+        let store = LooseObjectStore::open(state.config.objects_dir())
+            .map_err(|error| LandError::Backend(error.to_string()))?;
+        crate::reviews::tiers::compute(&store, base, &facts.merge_base, &facts.head)
+            .map_err(LandError::Backend)
+    }
+
     fn facts(&self, id: &ChangeId) -> LandResult<Option<ChangeFacts>> {
         let state = self.state()?;
         let change = match state.changes.with_conn(|c| changes::get(c, *id)) {
@@ -359,13 +422,37 @@ impl ChangeBook for Adapters {
         super::conflict_routes::record(&*self.state()?, *id, *merge_base, *onto, *head, paths)
     }
 
-    fn reparent(&self, id: &ChangeId, onto: &CommitId, merged: Option<&TreeId>) -> LandResult<()> {
-        // A conflicted change stays on its old parent, so its head never
-        // holds a half-merged tree; it merges again when it lands.
+    fn reparent(
+        &self,
+        id: &ChangeId,
+        onto: &CommitId,
+        head: &CommitId,
+        merged: Option<&TreeId>,
+    ) -> LandResult<Reparent> {
+        let state = self.state()?;
+        // A conflicted change stays on its old parent (`merged` is `None`),
+        // so its head never holds a half-merged tree; it merges again when
+        // it lands. Only ask whether a move would be forward.
         let Some(_) = merged else {
-            return Ok(());
+            let behind =
+                self.with_changes(|conn| changes::behind_after_land(conn, *id, *onto, *head))?;
+            return Ok(match behind {
+                changes::AfterLand::Rebased => Reparent::Moved,
+                changes::AfterLand::AlreadyPast => Reparent::AlreadyPast,
+                changes::AfterLand::HeadMoved => Reparent::HeadMoved,
+            });
         };
-        crate::stacks::land_rebase(&*self.state()?, *id, *onto).map_err(backend)
+        // The stack-aware rebase merges again under the writer lock from the
+        // live head, so a snapshot stored since the restacker's merge is kept.
+        Ok(
+            match crate::stacks::land_rebase(&state, *id, *onto).map_err(backend)? {
+                crate::stacks::LandRebase::Moved => Reparent::Moved,
+                crate::stacks::LandRebase::Skipped => Reparent::AlreadyPast,
+                // The live head conflicts where the restacker's read did not:
+                // merge again from it, so its conflicts are routed.
+                crate::stacks::LandRebase::Conflicted => Reparent::HeadMoved,
+            },
+        )
     }
 
     fn release_claims(&self, id: &ChangeId) -> LandResult<()> {
@@ -407,6 +494,12 @@ impl EventSink for Adapters {
         // A stopping server has no subscribers left to tell.
         if let Ok(state) = self.state() {
             LandingEvents(state).emit(event);
+        }
+    }
+
+    fn emit_once(&self, event: LandingEvent) {
+        if let Ok(state) = self.state() {
+            LandingEvents(state).emit_once(event);
         }
     }
 }

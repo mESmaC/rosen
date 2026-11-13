@@ -1,6 +1,6 @@
 //! Event-driven refill; one worker per daemon serializes refresh work and
 //! runs at most one prepare at a time (SPEC R3).
-use super::pool::{refresh, Prep, Slot, WarmPool};
+use super::pool::{refresh, seed_slot, Prep, Slot, WarmPool};
 use super::{prepare, template, Method, Options};
 use crate::{Client, Error};
 use rosen_core::ObjectId;
@@ -386,6 +386,11 @@ async fn make_slot(
     let cloning = options.source.is_some();
     let report = client.materialise_tree(base.tree, &path, options).await?;
     drop(template);
+    let store = client.local_store().await?;
+    let (seed_path, tree) = (path.clone(), base.tree);
+    tokio::task::spawn_blocking(move || seed_slot(&store, &seed_path, tree))
+        .await
+        .map_err(|error| Error::Unexpected(error.to_string()))?;
     if cloning && report.method != Method::BlockClone {
         stop_template(pool, report.fallback.as_deref()).await?;
     }
