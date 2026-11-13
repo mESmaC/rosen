@@ -16,6 +16,7 @@ rosen-protocol = { path = "crates/rosen-protocol" }
 rosen-server = { path = "crates/rosen-server" }
 rosen-client = { path = "crates/rosen-client" }
 rosen-platform = { path = "crates/rosen-platform" }
+rosen-faults = { path = "crates/rosen-faults" }
 anyhow = "1"
 atomicwrites = "0.4"
 base64 = "0.22"
