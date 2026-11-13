@@ -227,10 +227,12 @@ async fn conflicted_land_routes_regions_and_files_to_its_owner() {
     let (temp, state, root) = setup();
     let (a, b) = (new_change(&state).await, new_change(&state).await);
     let ha = write(&state, &a, "shared.txt", b"first\n").await;
-    let hb = write(&state, &b, "shared.txt", b"second\n").await;
     receipt(&state, &a, ha, root).await;
-    receipt(&state, &b, hb, root).await;
     let tip = land(&state, &a).await.base;
+    // Edit after A lands: B had no overlap to rebase then, so its own land
+    // still exercises R8 step 2 conflict routing against a moved base.
+    let hb = write(&state, &b, "shared.txt", b"second\n").await;
+    receipt(&state, &b, hb, root).await;
     let answer = land(&state, &b).await;
     assert_eq!(answer.base, tip);
     assert_eq!(refused(&answer), Some("merge_conflict"));
