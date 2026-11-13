@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use rosen_core::ObjectId;
-use rosen_protocol::{ChangeRecord, EnsureObjects, Request, Response};
+use rosen_protocol::{
+    ChangeRecord, EnsureObjects, LandedProseQuery, PooledWorkspace, Request, Response,
+};
 use rosen_store::LooseObjectStore;
 
 use super::{
@@ -49,14 +51,19 @@ impl Client {
             None
         };
         let report = match pooled {
-            Some(files) => Report {
-                method: super::Method::WarmPool,
-                files,
+            Some(taken) => Report {
+                method: if taken.from_template {
+                    super::Method::BlockClone
+                } else {
+                    super::Method::WarmPool
+                },
+                files: taken.files,
                 cloned: 0,
                 copied: 0,
                 written: 0,
                 bytes_written: 0,
                 fallback: None,
+                prepared: taken.prepared,
             },
             None => {
                 self.materialise_tree(change.change.head, dest, options)
@@ -110,10 +117,26 @@ impl Client {
         }
     }
 
-    async fn take_workspace(&self, tree: ObjectId, dest: &Path) -> Result<Option<u64>, Error> {
+    /// Takes a ready workspace holding `tree`, prepared ones first, or a
+    /// clone of the daemon's template. `None` when the daemon has neither.
+    async fn take_workspace(
+        &self,
+        tree: ObjectId,
+        dest: &Path,
+    ) -> Result<Option<PooledWorkspace>, Error> {
         let dest = std::path::absolute(dest)?.to_string_lossy().into_owned();
         match self.request(Request::PoolTake { tree, dest }).await? {
-            Response::PoolTaken(files) => Ok(files),
+            Response::PoolTaken(taken) => Ok(taken),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Whether every land after base commit `since` through `through` was
+    /// prose-only, so a workspace prepared at `since` is still prepared.
+    pub async fn landed_prose(&self, since: ObjectId, through: ObjectId) -> Result<bool, Error> {
+        let query = LandedProseQuery { since, through };
+        match self.request(Request::LandedProse(query)).await? {
+            Response::LandedProse(prose) => Ok(prose),
             other => Err(unexpected(other)),
         }
     }

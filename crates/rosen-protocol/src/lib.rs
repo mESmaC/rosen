@@ -14,6 +14,7 @@ pub mod history;
 pub mod land;
 pub mod message;
 pub mod objects;
+pub mod pool;
 pub mod post_land;
 pub mod receipt;
 pub mod review;
@@ -38,6 +39,7 @@ pub use land::{LandAnswer, LandStatus};
 pub use post_land::{PostLandJob, PostLandWork};
 pub use message::*;
 pub use objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal, WireKind, WireObject};
+pub use pool::{LandedProseQuery, PooledWorkspace};
 pub use receipt::{ReceiptRecord, SubmitReceipt};
 pub use review::{
     Approval, ApproveRequest, CommentRequest, CommentTarget, ResolveRequest, ReviewComment,

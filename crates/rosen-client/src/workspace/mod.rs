@@ -28,7 +28,9 @@ pub mod limits;
 mod parallel;
 pub mod pool;
 mod pool_worker;
+mod prepare;
 mod sparse;
+mod template;
 mod write;
 
 use std::collections::HashMap;
@@ -98,6 +100,9 @@ pub struct Report {
     pub bytes_written: u64,
     /// Why a source workspace was given but not cloned from, if it was not.
     pub fallback: Option<String>,
+    /// The project's prepare commands have run in it at its tree (R3), so
+    /// an agent's first build compiles only what it changes.
+    pub prepared: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -209,6 +214,7 @@ fn from_store(
         written: target.files.len() as u64,
         bytes_written: bytes,
         fallback: None,
+        prepared: false,
     })
 }
 
@@ -247,6 +253,7 @@ fn from_source(
         written: changed.len() as u64,
         bytes_written: bytes,
         fallback: None,
+        prepared: false,
     })
 }
 

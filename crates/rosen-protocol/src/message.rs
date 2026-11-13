@@ -244,6 +244,10 @@ pub enum Request {
         tree: rosen_core::ObjectId,
         dest: String,
     },
+    /// Whether every land after one base commit, up to and including a
+    /// later one, was prose-only (R7), so a workspace prepared at the first
+    /// needs no new prepare at the second (R3).
+    LandedProse(crate::LandedProseQuery),
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -253,8 +257,11 @@ pub enum Response {
     PostLand(crate::post_land::PostLandWork),
     Pong,
     PoolSized,
-    /// Number of tracked files, or None when no matching slot is ready.
-    PoolTaken(Option<u64>),
+    /// The handed-over workspace, or None when the pool had none to give.
+    PoolTaken(Option<crate::PooledWorkspace>),
+    /// The answer to `landed_prose`: false when either commit is not in the
+    /// base's landed history.
+    LandedProse(bool),
     Status(ServerStatus),
     ShuttingDown,
     /// The answer to `change_new`, `change_show` and `change_abandon`.

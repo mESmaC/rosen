@@ -1,10 +1,21 @@
-//! Event-driven refill; one worker per daemon serializes refresh work.
-use super::pool::{refresh, Slot, WarmPool};
-use super::Options;
+//! Event-driven refill; one worker per daemon serializes refresh work and
+//! runs at most one prepare at a time (SPEC R3).
+use super::pool::{refresh, Prep, Slot, WarmPool};
+use super::{prepare, template, Method, Options};
 use crate::{Client, Error};
+use rosen_core::ObjectId;
 use rosen_protocol::{Endpoint, LogRequest};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// The base tip a refill pass brought the pool to.
+struct Base {
+    commit: ObjectId,
+    tree: ObjectId,
+    /// The prepare commands in the base's configuration.
+    commands: Vec<String>,
+}
 
 pub(super) async fn run(pool: Arc<WarmPool>, endpoint: Endpoint) {
     // Only unused ready directories live here. Taken workspaces are moved
@@ -16,6 +27,11 @@ pub(super) async fn run(pool: Arc<WarmPool>, endpoint: Endpoint) {
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    let root = pool.state.lock().await.root.clone();
+    let block_clones = tokio::task::spawn_blocking(move || template::block_clones(&root))
+        .await
+        .unwrap_or(false);
+    pool.state.lock().await.block_clones = block_clones;
     loop {
         if let Err(error) = connected(&pool, &endpoint).await {
             eprintln!("rosen warm pool: {error}");
@@ -31,15 +47,26 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
     let mut events = client.subscribe(None).await?;
     loop {
         let retry_cleanup = cleanup(&client).await?;
-        if let Err(error) = refill(pool, &client).await {
-            if matches!(error, Error::Disconnected | Error::NotRunning(_)) {
-                return Err(error);
+        let base = match refill(pool, &client).await {
+            Ok(base) => base,
+            Err(error) if matches!(error, Error::Disconnected | Error::NotRunning(_)) => {
+                return Err(error)
             }
-            eprintln!("rosen warm pool refill: {error}");
-            // Retry transient store/index contention even if no later land
-            // arrives to wake the worker. Successful reads are event-driven.
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
+            Err(error) => {
+                eprintln!("rosen warm pool refill: {error}");
+                // Retry transient store/index contention even if no later
+                // land arrives to wake the worker. Successful reads are
+                // event-driven.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        // One prepare per pass, then refill again, so a land that arrived
+        // during a long prepare is followed before the next one starts.
+        if let Some(base) = &base {
+            if prepare_next(pool, base).await {
+                continue;
+            }
         }
         tokio::select! {
             event = events.recv() => { event.ok_or(Error::Disconnected)?; }
@@ -49,7 +76,32 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
     }
 }
 
-async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<(), Error> {
+async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<Option<Base>, Error> {
+    if !shrink(pool, client).await? {
+        return Ok(None);
+    }
+    let Some(base) = read_base(client).await? else {
+        return Ok(None);
+    };
+    let store = client.local_store().await?;
+    let mut prose = ProseSince::new(client, base.commit);
+    let block_clones = pool.state.lock().await.block_clones;
+    if block_clones {
+        sync_template(pool, client, &store, &base, &mut prose).await?;
+    }
+    let mut state = pool.state.lock().await;
+    refresh_ready(&store, &mut state.ready, &base, &mut prose).await?;
+    drop(state);
+    if block_clones {
+        drop_unprepared(pool, &base).await?;
+    }
+    fill(pool, client, &base).await?;
+    Ok(Some(base))
+}
+
+/// Removes ready slots over the target size. Answers false when the pool is
+/// off, after removing the template too, so a disabled pool holds no disk.
+async fn shrink(pool: &WarmPool, client: &Client) -> Result<bool, Error> {
     // Read on every pass: a land can change the configured size.
     let configured = client.base_config().await?.warm_pool.size as usize;
     let mut state = pool.state.lock().await;
@@ -58,59 +110,128 @@ async fn refill(pool: &Arc<WarmPool>, client: &Client) -> Result<(), Error> {
         let slot = state.ready.pop().expect("excess slot");
         std::fs::remove_dir_all(slot.path)?;
     }
-    if state.size == 0 {
-        return Ok(());
+    if state.size > 0 {
+        return Ok(true);
     }
     drop(state);
+    if let Some(slot) = pool.template.write().await.take() {
+        std::fs::remove_dir_all(slot.path)?;
+    }
+    Ok(false)
+}
+
+async fn read_base(client: &Client) -> Result<Option<Base>, Error> {
     let log = client
         .log(LogRequest {
             limit: Some(1),
             ..LogRequest::default()
         })
         .await?;
-    let Some(base) = log.entries.first() else {
-        return Ok(());
+    let Some(entry) = log.entries.first() else {
+        return Ok(None);
     };
-    client.ensure_local(base.tree).await?;
-    let store = client.local_store().await?;
-    let mut state = pool.state.lock().await;
-    refresh_ready(&store, &mut state.ready, base.tree).await?;
-    // Bound one refill pass so a busy launch cannot starve landed events.
-    let missing = state.size.saturating_sub(state.ready.len());
-    for _ in 0..missing {
-        if state.ready.len() >= state.size {
-            break;
+    client.ensure_local(entry.tree).await?;
+    let config = client.project_config(Some(entry.commit)).await?;
+    Ok(Some(Base {
+        commit: entry.commit,
+        tree: entry.tree,
+        commands: config.config.prepare.commands,
+    }))
+}
+
+/// Answers, once per earlier base commit, whether only prose landed from it
+/// to the base tip: then a workspace prepared there is still prepared.
+struct ProseSince<'a> {
+    client: &'a Client,
+    tip: ObjectId,
+    known: HashMap<ObjectId, bool>,
+}
+
+impl<'a> ProseSince<'a> {
+    fn new(client: &'a Client, tip: ObjectId) -> Self {
+        Self {
+            client,
+            tip,
+            known: HashMap::new(),
         }
-        state.next += 1;
-        let path = state
-            .root
-            .join(format!("{}-{}", std::process::id(), state.next));
-        if path.exists() {
-            continue;
-        }
-        // Existing ready slots remain available while a replacement copies.
-        drop(state);
-        let report = client
-            .materialise_tree(base.tree, &path, Options::default())
-            .await?;
-        state = pool.state.lock().await;
-        state.ready.push(Slot {
-            path,
-            tree: base.tree,
-            files: report.files,
-        });
     }
+
+    async fn only_prose(&mut self, since: ObjectId) -> Result<bool, Error> {
+        if since == self.tip {
+            return Ok(true);
+        }
+        if let Some(&known) = self.known.get(&since) {
+            return Ok(known);
+        }
+        let prose = self.client.landed_prose(since, self.tip).await?;
+        self.known.insert(since, prose);
+        Ok(prose)
+    }
+
+    /// The state a workspace prepared as `prep` at `commit` has at the tip.
+    /// A failed prepare is retried now that the base has moved.
+    async fn carried(&mut self, prep: Prep, commit: ObjectId) -> Result<Prep, Error> {
+        if commit == self.tip {
+            return Ok(prep);
+        }
+        if prep == Prep::Done && self.only_prose(commit).await? {
+            return Ok(Prep::Done);
+        }
+        Ok(Prep::Needed)
+    }
+}
+
+/// Brings the template to the base tip, making it on first use. The write
+/// lock keeps takes from cloning it while its files change.
+async fn sync_template(
+    pool: &WarmPool,
+    client: &Client,
+    store: &rosen_store::LooseObjectStore,
+    base: &Base,
+    prose: &mut ProseSince<'_>,
+) -> Result<(), Error> {
+    let mut template = pool.template.write().await;
+    if let Some(slot) = template.as_ref() {
+        if slot.commit == base.commit {
+            return Ok(());
+        }
+        let prep = prose.carried(slot.prep, slot.commit).await?;
+        template::refresh_in_place(store, &mut template, base.tree).await?;
+        if let Some(slot) = template.as_mut() {
+            slot.commit = base.commit;
+            slot.prep = prep;
+            return Ok(());
+        }
+    }
+    let path = template::path(&pool.state.lock().await.root);
+    if path.exists() {
+        // Left by a failed refresh or make; never handed to an agent.
+        std::fs::remove_dir_all(&path)?;
+    }
+    let report = client
+        .materialise_tree(base.tree, &path, Options::default())
+        .await?;
+    *template = Some(Slot {
+        path,
+        tree: base.tree,
+        commit: base.commit,
+        files: report.files,
+        prep: Prep::Needed,
+    });
     Ok(())
 }
 
 async fn refresh_ready(
     store: &rosen_store::LooseObjectStore,
     ready: &mut Vec<Slot>,
-    tree: rosen_core::ObjectId,
+    base: &Base,
+    prose: &mut ProseSince<'_>,
 ) -> Result<(), Error> {
     let mut retained = Vec::new();
-    for mut slot in ready.drain(..) {
-        let store = store.clone();
+    for mut slot in std::mem::take(ready) {
+        slot.prep = prose.carried(slot.prep, slot.commit).await?;
+        slot.commit = base.commit;
+        let (store, tree) = (store.clone(), base.tree);
         let updated = tokio::task::spawn_blocking(move || {
             if slot.tree == tree || refresh(&store, &mut slot, tree).is_ok() {
                 Some(slot)
@@ -128,6 +249,161 @@ async fn refresh_ready(
     }
     *ready = retained;
     Ok(())
+}
+
+/// Once the template is prepared at the tip, swaps every unprepared ready
+/// slot for a fresh clone of it, which `fill` makes next. Until then the
+/// unprepared slots stay, so a take still gets a workspace at once.
+async fn drop_unprepared(pool: &WarmPool, base: &Base) -> Result<(), Error> {
+    let template = pool.template.read().await;
+    if !matches!(template::source(&template, base.tree), Some((_, true))) {
+        return Ok(());
+    }
+    drop(template);
+    let mut state = pool.state.lock().await;
+    let (keep, stale): (Vec<Slot>, Vec<Slot>) = std::mem::take(&mut state.ready)
+        .into_iter()
+        .partition(|slot| slot.prep == Prep::Done);
+    state.ready = keep;
+    drop(state);
+    for slot in stale {
+        std::fs::remove_dir_all(&slot.path)?;
+    }
+    Ok(())
+}
+
+async fn fill(pool: &Arc<WarmPool>, client: &Client, base: &Base) -> Result<(), Error> {
+    let mut state = pool.state.lock().await;
+    // Bound one refill pass so a busy launch cannot starve landed events.
+    let missing = state.size.saturating_sub(state.ready.len());
+    for _ in 0..missing {
+        if state.ready.len() >= state.size {
+            break;
+        }
+        state.next += 1;
+        let path = state
+            .root
+            .join(format!("{}-{}", std::process::id(), state.next));
+        if path.exists() {
+            continue;
+        }
+        // Existing ready slots remain available while a replacement copies.
+        drop(state);
+        let slot = make_slot(pool, client, base, path).await?;
+        state = pool.state.lock().await;
+        state.ready.push(slot);
+    }
+    Ok(())
+}
+
+/// Makes one ready slot: a block clone of the template when there is one,
+/// otherwise a plain copy that is prepared on its own later.
+async fn make_slot(
+    pool: &WarmPool,
+    client: &Client,
+    base: &Base,
+    path: std::path::PathBuf,
+) -> Result<Slot, Error> {
+    // Held through a clone so the worker's own template writes wait.
+    let mut template = Some(pool.template.read().await);
+    let source = template
+        .as_deref()
+        .and_then(|t| template::source(t, base.tree));
+    if source.is_none() {
+        template = None;
+    }
+    let prepared = source.as_ref().is_some_and(|(_, prepared)| *prepared);
+    let options = Options {
+        source: source.map(|(source, _)| source),
+        ..Options::default()
+    };
+    let cloning = options.source.is_some();
+    let report = client.materialise_tree(base.tree, &path, options).await?;
+    drop(template);
+    if cloning && report.method != Method::BlockClone {
+        stop_template(pool, report.fallback.as_deref()).await?;
+    }
+    let prep = if prepared && report.method == Method::BlockClone {
+        Prep::Done
+    } else {
+        Prep::Needed
+    };
+    Ok(Slot {
+        path,
+        tree: base.tree,
+        commit: base.commit,
+        files: report.files,
+        prep,
+    })
+}
+
+/// The volume refused a template clone after all: stop keeping a template
+/// and prepare each ready workspace on its own.
+async fn stop_template(pool: &WarmPool, why: Option<&str>) -> Result<(), Error> {
+    eprintln!(
+        "rosen warm pool: template clone fell back to a copy ({}); preparing each workspace instead",
+        why.unwrap_or("unknown reason")
+    );
+    pool.state.lock().await.block_clones = false;
+    if let Some(slot) = pool.template.write().await.take() {
+        std::fs::remove_dir_all(slot.path)?;
+    }
+    Ok(())
+}
+
+/// Runs the prepare commands in one workspace that needs them: the template
+/// when there is one, otherwise a ready slot. Answers whether it ran.
+async fn prepare_next(pool: &WarmPool, base: &Base) -> bool {
+    if pool.state.lock().await.block_clones {
+        return prepare_template(pool, base).await;
+    }
+    let path = {
+        let mut state = pool.state.lock().await;
+        let next = state
+            .ready
+            .iter_mut()
+            .find(|slot| slot.prep == Prep::Needed && slot.commit == base.commit);
+        let Some(slot) = next else {
+            return false;
+        };
+        // Running keeps takes away while the commands write into it.
+        slot.prep = Prep::Running;
+        slot.path.clone()
+    };
+    let prep = run_prepare(&path, &base.commands).await;
+    let mut state = pool.state.lock().await;
+    if let Some(slot) = state.ready.iter_mut().find(|slot| slot.path == path) {
+        slot.prep = prep;
+    }
+    true
+}
+
+async fn prepare_template(pool: &WarmPool, base: &Base) -> bool {
+    let path = {
+        let mut template = pool.template.write().await;
+        match template.as_mut() {
+            Some(slot) if slot.prep == Prep::Needed && slot.commit == base.commit => {
+                slot.prep = Prep::Running;
+                slot.path.clone()
+            }
+            _ => return false,
+        }
+    };
+    let prep = run_prepare(&path, &base.commands).await;
+    if let Some(slot) = pool.template.write().await.as_mut() {
+        slot.prep = prep;
+    }
+    true
+}
+
+async fn run_prepare(path: &std::path::Path, commands: &[String]) -> Prep {
+    match prepare::run(path, commands).await {
+        Ok(()) => Prep::Done,
+        Err(why) => {
+            eprintln!("rosen warm pool: {why}");
+            Prep::Failed
+        }
+    }
 }
 
 async fn reset_ready_root(pool: &WarmPool) -> Result<(), Error> {
