@@ -383,3 +383,23 @@ pub fn rebase_checked(
     tx.commit()?;
     Ok(record)
 }
+
+/// Preserve a pending rebase while appending the author's original snapshot.
+/// Both updates are one transaction; a concurrent rebase forces a retry.
+pub fn record_snapshot_merged(
+    conn: &mut Connection,
+    expected: &Change,
+    snapshot: Snapshot,
+    head: ObjectId,
+) -> Result<ChangeRecord, ChangeError> {
+    update(conn, expected.id, |current| {
+        if current != expected {
+            return Err(rosen_core::Error::InvalidPath(
+                "snapshot inputs moved; retry".into(),
+            ));
+        }
+        current.record_snapshot(snapshot)?;
+        current.head = head;
+        Ok(())
+    })
+}

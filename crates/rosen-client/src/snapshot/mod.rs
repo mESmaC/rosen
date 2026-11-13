@@ -453,6 +453,7 @@ async fn send(
         .snapshot(SnapshotRequest {
             change: snapshotter.change().to_string(),
             tree: prepared.root,
+            from: Some(snapshotter.marker.tree),
             message,
         })
         .await?;

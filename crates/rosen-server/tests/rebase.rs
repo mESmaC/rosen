@@ -90,7 +90,8 @@ async fn server_rebase_preserves_history_and_requires_explicit_clean_apply() {
         WorkspaceMarker::read(&root).unwrap().tree,
         before.change.head
     );
-    check_apply(&client, &root, &owner, rebased.change.head).await;
+    let head = snapshot_during_pending_rebase(&client, &root, &id).await;
+    check_apply(&client, &root, &owner, head).await;
     // An obsolete merge result cannot overwrite a newer head.
     assert!(state
         .changes
@@ -112,11 +113,11 @@ async fn check_apply(client: &Client, root: &std::path::Path, owner: &AgentId, t
     std::fs::write(root.join("a"), b"unstored\n").unwrap();
     assert!(client.apply_rebase(root, owner).await.is_err());
     assert_eq!(std::fs::read(root.join("a")).unwrap(), b"unstored\n");
-    std::fs::write(root.join("a"), b"authored\n").unwrap();
+    std::fs::write(root.join("a"), b"step two\n").unwrap();
     std::fs::create_dir(root.join("build")).unwrap();
     std::fs::write(root.join("build/output"), b"keep").unwrap();
     assert_eq!(client.apply_rebase(root, owner).await.unwrap(), tree);
-    assert_eq!(std::fs::read(root.join("a")).unwrap(), b"authored\n");
+    assert_eq!(std::fs::read(root.join("a")).unwrap(), b"step two\n");
     assert_eq!(std::fs::read(root.join("b")).unwrap(), b"b\n");
     assert_eq!(std::fs::read(root.join("build/output")).unwrap(), b"keep");
     assert_eq!(WorkspaceMarker::read(root).unwrap().tree, tree);
@@ -148,4 +149,20 @@ async fn start(
     let server = tokio::spawn(rosen_server::listener::serve(listener, Arc::clone(&state)));
     let client = Client::connect(&endpoint).await.unwrap();
     (state, store, client, server, original, base)
+}
+
+// Regression from PR duty: the watcher may snapshot while the agent finishes
+// its step on the old local tree. The pending base additions must survive.
+async fn snapshot_during_pending_rebase(
+    client: &Client,
+    root: &std::path::Path,
+    id: &str,
+) -> ObjectId {
+    std::fs::write(root.join("a"), b"step two\n").unwrap();
+    client.snapshot_workspace(root, None).await.unwrap();
+    assert!(!root.join("b").exists());
+    let change = client.change_show(id).await.unwrap();
+    let result = client.workspace_read(id, "b").await.unwrap();
+    assert!(matches!(result, rosen_protocol::ReadAnswer::File { .. }));
+    change.change.head
 }
