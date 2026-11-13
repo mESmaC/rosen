@@ -3,10 +3,10 @@
 //! applied twice. Runs the real server path: registry, merge, store, ledger.
 
 use rosen_core::history::LandedTrailers;
-use rosen_core::{AgentId, Commit, ObjectId, Signature, Tree};
+use rosen_core::{AgentId, Commit, ObjectId, ReceiptTrailer, Signature, Tree};
 use rosen_protocol::{
-    ApproveRequest, LandAnswer, LandStatus, NewChange, Outcome, Request, Response, SubmitReceipt, WorkspaceBytes,
-    WorkspaceWrite,
+    ApproveRequest, LandAnswer, LandStatus, LogRequest, NewChange, Outcome, Request, Response,
+    SubmitReceipt, WorkspaceBytes, WorkspaceWrite,
 };
 use rosen_server::landing::{CasResult, LandRecord, Ledger, Tier};
 use rosen_server::{rpc::dispatch, ServerConfig, ServerState};
@@ -210,8 +210,23 @@ async fn base_moves_only_with_a_receipt_for_the_exact_head_and_a_trusted_base() 
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let landed = store.read_commit(&commit).unwrap();
     assert_eq!((landed.parents, landed.tree), (vec![root], head_a));
-    let trailers = LandedTrailers::parse(&landed.message);
-    assert_eq!(trailers.map(|t| t.change.to_string()), Some(a.clone()));
+    // D15: the landed commit names its change, the receipt that counted and
+    // its approver, and the log reads them back from the commit.
+    let trailers = LandedTrailers::parse(&landed.message).unwrap();
+    let checker = AgentId::new("checker").unwrap();
+    let expected = ReceiptTrailer::new("pre-land", head_a, root, checker).unwrap();
+    assert_eq!(trailers.change.to_string(), a);
+    assert_eq!(trailers.receipt.as_ref(), Some(&expected));
+    let Response::Log(log) = call(&state, Request::Log(LogRequest::default())).await else {
+        panic!("log answers with a log");
+    };
+    let entry = &log.entries[0];
+    assert_eq!(
+        (entry.commit, entry.change),
+        (commit, Some(trailers.change))
+    );
+    assert_eq!(entry.receipt.as_ref(), Some(&expected));
+    assert_eq!(entry.approvers, [AgentId::new("reviewer").unwrap()]);
     let again = land(&state, &a).await;
     assert_eq!(again.outcome, LandStatus::AlreadyLanded { commit });
 
@@ -289,16 +304,28 @@ async fn conflicted_land_routes_regions_and_files_to_its_owner() {
 async fn a_land_needs_an_approval_that_still_holds_for_the_current_head() {
     let (_temp, state, root) = setup();
     let a = new_change(&state).await;
-    let first = write(&state, &a, "a.txt", b"one
-").await;
+    let first = write(
+        &state, &a, "a.txt", b"one
+",
+    )
+    .await;
     receipt(&state, &a, first, root).await;
     assert_eq!(refused(&land_as_is(&state, &a).await), Some("unapproved"));
 
     approve(&state, &a, first).await;
-    write(&state, &a, "a.txt", b"two
-").await;
-    assert_eq!(write(&state, &a, "a.txt", b"one
-").await, first);
+    write(
+        &state, &a, "a.txt", b"two
+",
+    )
+    .await;
+    assert_eq!(
+        write(
+            &state, &a, "a.txt", b"one
+"
+        )
+        .await,
+        first
+    );
     assert_eq!(refused(&land_as_is(&state, &a).await), Some("unapproved"));
     // A land that read the approval before the author's snapshots loses its
     // swap, though the head it decided on is the head again.
