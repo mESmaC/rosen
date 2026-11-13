@@ -80,6 +80,16 @@ impl Drop for ConnectionGuard {
 /// when another daemon owns the endpoint. The server need not be reachable
 /// at start: each client connection reaches it when it first needs to.
 pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Result<()> {
+    let renewal_dir = config.data_dir.clone();
+    let renewal = tokio::spawn(async move {
+        loop {
+            if let Err(err) = rosen_client::enrollment::renew(&renewal_dir).await {
+                eprintln!("rosen-server: credential renewal failed: {err}");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
+    let _renewal = RenewalTask(renewal);
     let mut listener = Listener::bind(&config.endpoint)?;
     let store = LooseObjectStore::open(config.objects_dir())
         .map_err(|err| io::Error::other(err.to_string()))?;
@@ -115,4 +125,11 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Ok(())
+}
+
+struct RenewalTask(tokio::task::JoinHandle<()>);
+impl Drop for RenewalTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
