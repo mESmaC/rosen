@@ -245,8 +245,8 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum MachineCommand {
-    /// Join this machine to a project with a join key. Non-interactive, so
-    /// it runs from an install script or a machine image.
+    /// Join with a key, or request pending admission with --address and
+    /// --fingerprint. Non-interactive, for install scripts or machine images.
     ///
     /// The daemon connects to the server the key names (or finds it by
     /// DNS-SD on the local network) and checks the server's certificate

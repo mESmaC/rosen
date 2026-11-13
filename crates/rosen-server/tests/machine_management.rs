@@ -100,6 +100,7 @@ async fn approve_pending(state: &Arc<ServerState>, anonymous: &mut BoxStream) ->
         request(anonymous, Request::MachineList).await,
         Outcome::Error(_)
     ));
+    assert!(!machines::authenticate(&state.config.data_dir, &credential.secret).unwrap());
     let approved = rpc::dispatch(
         state,
         Request::MachineApprove {
@@ -122,9 +123,22 @@ async fn revoke(state: &Arc<ServerState>, enrolled: &mut BoxStream, id: &str) {
         rpc::dispatch(state, Request::MachineRevoke { machine: id.into() }).await,
         Outcome::Ok(Response::Machine(_))
     ));
+    write_frame(
+        enrolled,
+        &ClientFrame::Request {
+            id: 2,
+            request: Request::Ping,
+        },
+    )
+    .await
+    .unwrap();
+    // Refusal may close the authenticated session before dispatching the frame.
     assert!(matches!(
-        request(enrolled, Request::Ping).await,
-        Outcome::Error(_)
+        read_frame::<_, ServerFrame>(enrolled).await.unwrap(),
+        None | Some(ServerFrame::Response {
+            outcome: Outcome::Error(_),
+            ..
+        })
     ));
     assert!(matches!(
         rpc::dispatch(state, Request::MachineApprove { machine: id.into() }).await,
