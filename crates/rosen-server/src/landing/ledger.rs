@@ -100,6 +100,10 @@ pub enum ReceiptLookup {
         receipt: Receipt,
         base_seq: i64,
     },
+    /// The newest receipt is bound to a base the ref reached after the
+    /// attempt read it: the base moved during the attempt, so the attempt
+    /// must be retried on the new base rather than decided on the old one.
+    Ahead,
 }
 
 pub struct Ledger {
@@ -293,12 +297,15 @@ impl Ledger {
 
     /// Finds the receipt for `head` and `check_set` whose base is newest in
     /// the ref's history, which leaves the fewest lands to re-check.
+    /// `attempt_base` is the base the land attempt read; a receipt bound to a
+    /// later base is reported as [`ReceiptLookup::Ahead`].
     pub fn best_receipt(
         &self,
         ref_name: &str,
         change: &ChangeId,
         head: &CommitId,
         check_set: &str,
+        attempt_base: &CommitId,
     ) -> LandResult<ReceiptLookup> {
         let connection = self.lock()?;
         let valid = connection
@@ -318,6 +325,9 @@ impl Ledger {
             )
             .optional()?;
         if let Some((base, submitter, base_seq)) = valid {
+            if base_seq > history_seq(&connection, ref_name, attempt_base)? {
+                return Ok(ReceiptLookup::Ahead);
+            }
             let receipt = Receipt {
                 change: *change,
                 head: *head,
@@ -519,6 +529,19 @@ fn change_unmoved(tx: &Connection, record: &LandRecord) -> LandResult<bool> {
     Ok(row.is_some_and(|(state, head)| {
         matches!(state.as_str(), "open" | "ready") && head == record.head.to_hex()
     }))
+}
+
+/// Position of `commit` in the ref's history. The commit must be one the
+/// ref has held: every base a land attempt reads was recorded there first.
+fn history_seq(connection: &Connection, ref_name: &str, commit: &CommitId) -> LandResult<i64> {
+    connection
+        .query_row(
+            "SELECT seq FROM base_history WHERE ref_name = ?1 AND commit_id = ?2",
+            params![ref_name, commit.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| LandError::Store(format!("{commit} is not in the history of {ref_name}")))
 }
 
 /// Reads a commit ID the ledger stored as hex.
