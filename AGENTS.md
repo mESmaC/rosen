@@ -25,7 +25,8 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Targeted rebase fixtures: `lake exe targeted-rebase-fixtures > fixtures/targeted-rebase.tsv` in `proofs/`.
 - Stacked changes fixtures: `lake exe stacked-changes-fixtures > fixtures/stacked-changes.tsv` in `proofs/`.
 - Fixture tables, regenerated from `proofs/` after a model changes: `lake exe landing-fixtures > fixtures/landing.tsv` and `lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv`.
-- §5 stress run on one machine: `cargo build --release -p rosen-server -p rosen-stress`, then `target/release/rosen-stress local --dir <new dir>` for three simulated machines; add `--faults --fault-seed <n>` for the kill and partition run. Across machines: `rosen-stress seed`, `rosen import` on the server, `rosen-stress agents` on each machine with `rosen-stress checker` on one, then `rosen-stress verify <reports…>`; `rosen-stress --help` has the flags.
+- Stress suite (the merge gate for sensitive PRs): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed 1` and `target/debug/rosen-faults drill --seed 2`, as described under Fault drill below. Each run takes about a minute. This is the project's stress command.
+- §5 benchmark, not the stress suite and never a merge gate: run it only when the user asks. It takes an hour or more and fails the latency targets until the server performance issues are fixed. On one machine: `cargo build --release -p rosen-server -p rosen-stress`, then `target/release/rosen-stress local --dir <new dir>` for three simulated machines; add `--faults --fault-seed <n>` for the kill and partition run. Across machines: `rosen-stress seed`, `rosen import` on the server, `rosen-stress agents` on each machine with `rosen-stress checker` on one, then `rosen-stress verify <reports…>`; `rosen-stress --help` has the flags.
 - Fault drill (SPEC.md §5): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed <n>`. It injects a failing commit and checks R12 bisects and reverts it unless given `--no-failing-commit`, prints a JSON report, exits non-zero when a guarantee breaks, and replays exactly from its seed.
 - CI runs the Rust build, lint and tests on Windows, and the Rust build on Linux.
 
@@ -98,7 +99,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
   - `proofs/lakefile.toml`: the `lean_lib` and `lean_exe` entries.
 
 ## Sensitive paths
-- PR duty gives a PR that touches a path listed here the sensitive review: full review, the full stress suite before merge, and a confidence proof at the strongest level its language allows.
+- PR duty gives a PR that touches a path listed here the sensitive review: full review, then the stress suite (the two fault drill seeds under Commands) and `cargo test --workspace` on the merge result before merge. Never run the §5 benchmark for a review. A proof-list feature the PR changes needs its confidence proof at reference level: a fixture table exported from the Lean model and a Rust test that checks the implementation against it. Code level (a translation) is required only when an issue asks for one.
 - List one path, folder or glob per bullet, as inline code, followed by why it is sensitive. Add migrations, worktree deletion and auth code as they are established.
 - `.github/workflows/`: CI config.
 - `crates/rosen-server/src/landing/`: decides when the base moves; a bug lands unchecked code or applies a land twice (SPEC.md R8).
