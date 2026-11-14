@@ -104,7 +104,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 ## Sensitive paths
 - PR duty gives a PR that touches a path listed here the sensitive review: full review, then the stress suite (the two fault drill seeds under Commands) and `cargo test --workspace` on the merge result before merge. Never run the §5 benchmark for a review. A proof-list feature the PR changes needs its confidence proof at reference level: a fixture table exported from the Lean model and a Rust test that checks the implementation against it. Code level (a translation) is required only when an issue asks for one.
 - List one path, folder or glob per bullet, as inline code, followed by why it is sensitive. Add migrations, worktree deletion and auth code as they are established.
-- `rosen.toml`: Rosen's own project configuration; it names the checks a land needs, the sensitive paths below and the mirror remote. Keep its `sensitive`, `generated` and `registration_lists` the same as the lists in this file.
+- `rosen.toml`: Rosen's own project configuration; it names the checks a land needs, the sensitive paths below and the mirror remote. Keep its `sensitive` list the same as the list in this file. Its `registration_lists` also holds `Cargo.lock` and the fixture tables, for the reason it gives.
 - `.github/workflows/`: CI config.
 - `crates/rosen-server/src/landing/`: decides when the base moves; a bug lands unchecked code or applies a land twice (SPEC.md R8).
 - `crates/rosen-server/src/metadata.rs`: shared SQLite connection settings and schema initialization; a bad migration can corrupt authoritative metadata.
