@@ -7,7 +7,9 @@ use super::SnapshotError;
 use crate::connection::unexpected;
 use crate::{Client, Error};
 use rosen_core::{FileMode, ObjectId};
-use rosen_protocol::{ObjectUpload, Request, Response, UploadKind, UploadObject};
+use rosen_protocol::{
+    BlobChunk, ObjectUpload, Request, Response, UploadKind, UploadObject, OBJECT_CHUNK_BYTES,
+};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -15,10 +17,9 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 /// Raw bytes per `put_objects` frame. Base64 grows them by a third, which
-/// keeps a full batch well inside the protocol's 64 MiB frame limit.
-const BATCH_BYTES: usize = 16 * 1024 * 1024;
-/// The largest file a snapshot can carry in one frame.
-pub const MAX_FILE_BYTES: u64 = 40 * 1024 * 1024;
+/// keeps a full batch well inside the protocol's 64 MiB frame limit. A blob
+/// larger than this goes in slices of the same size instead.
+const BATCH_BYTES: usize = OBJECT_CHUNK_BYTES;
 /// A timestamp this close to the read is not trusted to detect later writes:
 /// a second write in the same clock tick would leave it unchanged.
 const RACY_WINDOW: Duration = Duration::from_secs(2);
@@ -79,9 +80,6 @@ fn read_file(
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         other => other.map_err(|err| SnapshotError::io(&path, err))?,
     };
-    if meta.len() > MAX_FILE_BYTES {
-        return Err(SnapshotError::TooLarge(rel.to_owned(), meta.len()));
-    }
     let read = if meta.file_type().is_symlink() {
         fs::read_link(&path).map(|target| target.to_string_lossy().replace('\\', "/").into_bytes())
     } else {
@@ -135,19 +133,27 @@ pub struct Sent {
 }
 
 /// Sends blobs, then trees children first, so the server never sees a tree
-/// before what it names.
+/// before what it names. Blobs too large for a frame go first, in slices.
 pub async fn send_objects(
     client: &Client,
     blobs: &[ChangedBlob],
     trees: &[(ObjectId, Vec<u8>)],
 ) -> Result<Sent, Error> {
-    let objects = blobs
+    let (large, small): (Vec<&ChangedBlob>, Vec<&ChangedBlob>) = blobs
         .iter()
+        .partition(|blob| blob.data.len() > BATCH_BYTES);
+    let mut sent = Sent::default();
+    for blob in large {
+        put_large(client, &blob.data).await?;
+        sent.blobs += 1;
+        sent.bytes += blob.data.len() as u64;
+    }
+    let objects = small
+        .into_iter()
         .map(|blob| (UploadKind::Blob, &blob.data))
         .chain(trees.iter().map(|(_, body)| (UploadKind::Tree, body)));
     let mut batch = ObjectUpload::default();
     let mut batch_bytes = 0;
-    let mut sent = Sent::default();
     for (kind, data) in objects {
         if batch_bytes + data.len() > BATCH_BYTES && !batch.objects.is_empty() {
             put(client, std::mem::take(&mut batch)).await?;
@@ -168,6 +174,42 @@ pub async fn send_objects(
         put(client, batch).await?;
     }
     Ok(sent)
+}
+
+/// Uploads one blob in frame-sized slices. A fresh upload name per call keeps
+/// two uploads of the same blob from writing into each other's staging.
+async fn put_large(client: &Client, data: &[u8]) -> Result<(), Error> {
+    let id = ObjectId::hash_object("blob", data);
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let upload = format!("{}-{:x}-{nanos:x}", &id.to_hex()[..16], std::process::id());
+    let mut offset = 0;
+    loop {
+        let end = (offset + BATCH_BYTES).min(data.len());
+        let chunk = BlobChunk {
+            upload: upload.clone(),
+            id,
+            total: data.len() as u64,
+            offset: offset as u64,
+            data: data[offset..end].to_vec(),
+        };
+        let stored = match client.request(Request::PutBlobChunk(chunk)).await? {
+            Response::BlobChunkStored(stored) => stored,
+            other => return Err(unexpected(other)),
+        };
+        // The server may already hold the blob, and then says so early.
+        if stored.stored {
+            return Ok(());
+        }
+        if end == data.len() {
+            return Err(Error::Unexpected(format!(
+                "the server did not store blob {id} after its last slice"
+            )));
+        }
+        offset = end;
+    }
 }
 
 async fn put(client: &Client, batch: ObjectUpload) -> Result<(), Error> {

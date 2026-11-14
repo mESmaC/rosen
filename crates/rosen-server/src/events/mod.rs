@@ -259,7 +259,25 @@ impl EventLog {
         Ok(stored.unwrap_or(0))
     }
 
-    /// The newest stored sequence number, 0 when the log is empty.
+    /// True when an event of `kind` is stored after `cursor`. Reads SQLite:
+    /// call it on the blocking pool.
+    pub fn holds_kind_after(&self, cursor: u64, kind: EventKind) -> Result<bool, EventError> {
+        let found = self.with_db(false, |conn| {
+            Ok(store::holds_kind_after(conn, cursor, kind)?)
+        })?;
+        Ok(found.unwrap_or(false))
+    }
+
+    /// The newest sequence number announced so far, without touching the
+    /// database or the log's lock, so async code can read it. It equals
+    /// [`EventLog::last_seq`] once the log has been opened; the server opens
+    /// it at startup.
+    pub fn announced_seq(&self) -> u64 {
+        *self.inner.latest.borrow()
+    }
+
+    /// The newest stored sequence number, 0 when the log is empty. Opens
+    /// the database: call it on the blocking pool.
     pub fn last_seq(&self) -> u64 {
         // Opening reads the stored sequence, so a restarted server reports
         // the log's real tip rather than 0.
