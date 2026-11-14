@@ -284,8 +284,14 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     let state = ServerState::new(config.clone());
     // Opening the log announces its stored tip, so status and the mirror
     // read a restarted server's real tip without touching SQLite themselves.
+    // Events a stopped server staged with their cause but never stored are
+    // delivered before any client can publish newer ones (R9, #118).
     let opening = Arc::clone(&state);
-    let _ = tokio::task::spawn_blocking(move || opening.events.last_seq()).await;
+    let _ = tokio::task::spawn_blocking(move || {
+        opening.events.last_seq();
+        opening.events.deliver_staged();
+    })
+    .await;
     let pool_worker = state.pool.start(config.endpoint.clone());
     // Finishes post-land work (claim release, rebases) a crash cut short,
     // off the accept path so clients can connect meanwhile, then keeps

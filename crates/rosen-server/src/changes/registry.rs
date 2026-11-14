@@ -1,4 +1,5 @@
 use super::error::ChangeError;
+use crate::events::Staged;
 use rosen_core::{AgentId, Change, ChangeId, ChangeParent, ObjectId, Snapshot, SnapshotKind};
 use rosen_protocol::{ChangeFilter, ChangeRecord};
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
@@ -171,6 +172,18 @@ pub(super) fn abandon_releasing(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let record = update_in(&tx, id, Change::abandon)?;
     let released = crate::claims::store::release_in(&tx, id, None)?;
+    // Closing removed the claims; the former paths keep their overlapping
+    // holders in the `updated` event's audience.
+    let concern = crate::events::Concern {
+        paths: released.released.iter().map(|r| r.path.clone()).collect(),
+        ..Default::default()
+    };
+    let detail = serde_json::json!({ "state": record.change.state });
+    let event = Staged {
+        concern,
+        ..Staged::about(rosen_protocol::EventKind::Updated, id, detail)
+    };
+    stage_all(&tx, &[event])?;
     tx.commit()?;
     Ok((record, released))
 }
@@ -451,7 +464,7 @@ pub fn rebase_checked(
     onto: ObjectId,
     tree: ObjectId,
 ) -> Result<ChangeRecord, ChangeError> {
-    rebase_checked_storing(conn, expected, onto, tree, Vec::new())
+    rebase_checked_storing(conn, expected, onto, tree, Vec::new(), &[])
 }
 
 /// [`rebase_checked`] for a rebase whose merge conflicted (R5): `tree` holds
@@ -464,6 +477,7 @@ pub fn rebase_checked_storing(
     onto: ObjectId,
     tree: ObjectId,
     conflicts: Vec<(String, Vec<rosen_core::Conflict>)>,
+    events: &[Staged],
 ) -> Result<ChangeRecord, ChangeError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let current = load(&tx, expected.id)?;
@@ -477,6 +491,7 @@ pub fn rebase_checked_storing(
     let record = update_in(&tx, expected.id, |c| {
         c.rebase(ChangeParent::Base(onto), tree)
     })?;
+    stage_all(&tx, events)?;
     tx.commit()?;
     Ok(record)
 }
@@ -517,6 +532,7 @@ pub fn record_snapshot_merged(
     snapshot: Snapshot,
     head: ObjectId,
     conflicts: Vec<(String, Vec<rosen_core::Conflict>)>,
+    events: &[Staged],
 ) -> Result<ChangeRecord, ChangeError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let record = update_in(&tx, expected.id, |current| {
@@ -530,6 +546,16 @@ pub fn record_snapshot_merged(
         Ok(())
     })?;
     store_open_conflicts(&tx, expected.id, conflicts)?;
+    stage_all(&tx, events)?;
     tx.commit()?;
     Ok(record)
+}
+
+/// Stages the events a write reports in its own transaction, so a stop
+/// after the commit cannot lose them (R9).
+fn stage_all(tx: &rusqlite::Transaction<'_>, events: &[Staged]) -> Result<(), ChangeError> {
+    for event in events {
+        crate::events::stage(tx, event)?;
+    }
+    Ok(())
 }

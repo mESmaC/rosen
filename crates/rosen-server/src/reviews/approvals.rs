@@ -2,9 +2,11 @@
 //! the snapshot transaction; rebases preserve both validity and review history.
 use super::ReviewError;
 use crate::changes;
+use crate::events::Staged;
 use rosen_core::{ChangeId, ObjectId};
-use rosen_protocol::{Approval, ApproveRequest};
+use rosen_protocol::{Approval, ApproveRequest, EventKind};
 use rusqlite::{params, Connection, TransactionBehavior};
+use serde_json::json;
 
 pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -45,6 +47,10 @@ pub fn approve(conn: &mut Connection, req: &ApproveRequest) -> Result<Approval, 
         created_at: now,
         valid: true,
     };
+    // Staged with the approval, so a stop after the commit cannot lose it (R9).
+    let detail = json!({"action": "approve", "head": approval.head, "by": approval.reviewer});
+    let event = Staged::about(EventKind::Review, id, detail);
+    crate::events::stage(&tx, &event)?;
     tx.commit()?;
     Ok(approval)
 }

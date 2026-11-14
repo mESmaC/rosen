@@ -27,6 +27,8 @@ pub(super) struct Pending {
     pub detail: serde_json::Value,
     /// `None` broadcasts the event.
     pub audience: Option<BTreeSet<String>>,
+    /// The outbox row a staged event is moved from, if it was staged.
+    pub outbox: Option<i64>,
 }
 
 /// Stores queued events oldest first, stopping at the first failure so none
@@ -45,12 +47,16 @@ pub(super) fn flush(
             next.change.as_deref(),
             &next.detail,
             next.audience.as_ref(),
+            next.outbox,
         )?;
         queue.pop_front();
-        // Announce while the log's lock is held, so subscribers see
-        // sequence numbers in order.
-        inner.latest.send_replace(seq);
-        last = seq;
+        // `None`: a racing delivery already stored this staged event.
+        if let Some(seq) = seq {
+            // Announce while the log's lock is held, so subscribers see
+            // sequence numbers in order.
+            inner.latest.send_replace(seq);
+            last = seq;
+        }
     }
     Ok(last)
 }

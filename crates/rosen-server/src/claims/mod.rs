@@ -21,14 +21,12 @@ pub fn live_records(
 }
 
 use crate::changes::ChangeError;
-use crate::events::Concern;
 use crate::ServerState;
 use rosen_core::ChangeId;
 use rosen_protocol::{
-    ClaimOutcome, ClaimRequest, ErrorBody, ErrorCode, EventKind, Outcome, ReleaseOutcome, Response,
+    ClaimOutcome, ClaimRequest, ErrorBody, ErrorCode, Outcome, ReleaseOutcome, Response,
     WaitOutcome,
 };
-use serde_json::json;
 use std::sync::Arc;
 
 /// One claim operation, as received from a client.
@@ -51,18 +49,9 @@ pub async fn handle(state: &Arc<ServerState>, call: ClaimCall) -> Outcome {
 pub async fn abandon(state: &Arc<ServerState>, change: String) -> Outcome {
     let state = Arc::clone(state);
     let work = move || {
-        let (record, released) = state.changes.abandon_releasing(&change)?;
-        // Closure already removed the claims; preserve the former paths so
-        // their overlapping holders still hear about the update.
-        let detail = json!({ "state": record.change.state });
-        let id = Some(record.change.id.to_string());
-        let concern = Concern {
-            paths: released.released.iter().map(|r| r.path.clone()).collect(),
-            ..Concern::default()
-        };
-        state
-            .events
-            .publish_to(EventKind::Updated, id, detail, &concern);
+        // The abandon staged its `updated` event in its own transaction.
+        let (record, _) = state.changes.abandon_releasing(&change)?;
+        state.events.deliver_staged();
         recover(&state)?;
         Ok(Response::Change(record))
     };
@@ -85,11 +74,9 @@ fn run(state: &ServerState, call: ClaimCall) -> Result<Response, ChangeError> {
     Ok(match call {
         ClaimCall::Claim(req) => {
             let outcome = changes.with_conn(|c| store::claim(c, &req.change, &req.paths))?;
-            if let ClaimOutcome::Granted { change, paths } = &outcome {
-                let detail = json!({ "paths": paths });
-                state
-                    .events
-                    .publish(EventKind::Claim, Some(change.to_string()), detail);
+            // A grant staged its `claim` event in the claim's transaction.
+            if matches!(outcome, ClaimOutcome::Granted { .. }) {
+                state.events.deliver_staged();
             }
             Response::Claimed(outcome)
         }

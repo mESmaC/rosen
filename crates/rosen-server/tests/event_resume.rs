@@ -5,7 +5,7 @@
 
 use rosen_core::AgentId;
 use rosen_protocol::EventKind;
-use rosen_server::events::EventLog;
+use rosen_server::events::{stage, EventLog, Staged};
 use serde_json::json;
 
 #[test]
@@ -56,4 +56,33 @@ fn an_event_whose_write_fails_is_stored_later_in_order() {
     assert_eq!(log.publish(EventKind::Mirror, None, json!(3)), 3);
     let details: Vec<_> = log.after(0).into_iter().map(|e| e.detail).collect();
     assert_eq!(details, [json!(1), json!(2), json!(3)]);
+}
+
+/// SPEC R9: "Delivery is at least once." Risk: a producer commits its cause
+/// on the registry's connection and the event on the log's, so a server that
+/// stops between the two loses the event for good (#118). An event staged in
+/// the cause's transaction must reach the log after a restart, exactly once
+/// however many deliveries run.
+#[test]
+fn an_event_staged_with_its_cause_survives_a_stop_before_delivery() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("metadata.sqlite");
+    let producer = rosen_server::metadata::open(&db).unwrap();
+    let tx = producer.unchecked_transaction().unwrap();
+    let event = Staged {
+        kind: EventKind::Mirror,
+        change: None,
+        detail: json!("staged"),
+        concern: Default::default(),
+    };
+    stage(&tx, &event).unwrap();
+    tx.commit().unwrap();
+    // The server stops here, before delivering what it staged.
+    drop(producer);
+
+    let restarted = EventLog::open(&db);
+    restarted.deliver_staged();
+    restarted.deliver_staged();
+    let details: Vec<_> = restarted.after(0).into_iter().map(|e| e.detail).collect();
+    assert_eq!(details, [json!("staged")]);
 }
