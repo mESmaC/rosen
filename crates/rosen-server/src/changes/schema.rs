@@ -49,5 +49,23 @@ pub(crate) fn ensure_change_schema(conn: &Connection) -> rusqlite::Result<()> {
          INSERT OR IGNORE INTO stack_bases (change_id, tree)
          SELECT id, head FROM changes c WHERE parent_change IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM change_snapshots s WHERE s.change_id = c.id);",
-    )
+    )?;
+    // The owner's machine (R14). Rows from before it was recorded keep ''
+    // and show the bare nick: their machine is unknown, never guessed.
+    add_text_column(conn, "changes", "owner_machine")
+}
+
+/// Adds a `TEXT NOT NULL DEFAULT ''` column unless `table` has it already.
+pub(crate) fn add_text_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+    let present: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
+        [table, column],
+        |row| row.get(0),
+    )?;
+    if !present {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+        ))?;
+    }
+    Ok(())
 }

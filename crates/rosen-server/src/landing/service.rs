@@ -464,7 +464,7 @@ impl ChangeBook for Adapters {
         let (approved_head, approvers) = approval.map_or((None, Vec::new()), |(h, a)| (Some(h), a));
         Ok(Some(ChangeFacts {
             id: *id,
-            owner: change.owner.clone(),
+            owner: change.qualified_owner(),
             description: description(&change),
             state: change.state,
             parent: change.parent,

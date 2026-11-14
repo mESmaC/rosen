@@ -591,7 +591,9 @@ fn landed_commit(
     Ok(LandedCommit {
         base,
         tree,
-        author: Signature::new(owner, format!("{owner}@rosen"), now),
+        // `<nick>@<machine>` already reads as an address (R14); a change from
+        // before machines were recorded keeps the bare nick at `rosen`.
+        author: Signature::new(owner, author_email(owner), now),
         committer: Signature::new("rosen-server", "rosen-server@rosen", now),
         description: facts.description.clone(),
         trailers: LandedTrailers {
@@ -600,6 +602,14 @@ fn landed_commit(
             approvers: facts.approvers.clone(),
         },
     })
+}
+
+fn author_email(owner: &str) -> String {
+    if owner.contains('@') {
+        owner.to_owned()
+    } else {
+        format!("{owner}@rosen")
+    }
 }
 
 /// The `Rosen-Receipt` trailer, naming the submitter as nick plus the
