@@ -183,12 +183,31 @@ fn remove_entry(path: &Path, meta: &fs::Metadata) -> Result<(), MaterialiseError
 /// whether it was cloned. Never hardlinks.
 fn clone_or_copy(source: &Path, dest: &Path, path: &[u8]) -> Result<bool, MaterialiseError> {
     let (from, to) = (disk_path(source, path), disk_path(dest, path));
-    if reflink_copy::reflink(&from, &to).is_ok() {
-        return Ok(true);
+    let cloned = reflink_copy::reflink(&from, &to).is_ok();
+    if !cloned {
+        // A failed clone removes its own partial file, so the copy starts clean.
+        fs::copy(&from, &to).map_err(|error| MaterialiseError::io(&from, error))?;
     }
-    // A failed clone removes its own partial file, so the copy starts clean.
-    fs::copy(&from, &to).map_err(|error| MaterialiseError::io(&from, error))?;
-    Ok(false)
+    keep_modified_time(&from, &to);
+    Ok(cloned)
+}
+
+/// Gives the clone its source's modified time. A clone is a new file, so it
+/// is stamped with the moment it was made, and the files of one workspace
+/// are cloned in parallel, in no order. Build tools read those times: cargo
+/// rebuilds a crate when a dependency's output is newer than its own, so a
+/// clone of a prepared workspace rebuilt nearly every crate on its first
+/// build. With the times kept, the clone is as fresh as its source.
+///
+/// Best effort: a time that cannot be set costs a rebuild, never a wrong
+/// file, so a read-only file is left as it is.
+fn keep_modified_time(from: &Path, to: &Path) {
+    let Ok(modified) = fs::metadata(from).and_then(|meta| meta.modified()) else {
+        return;
+    };
+    if let Ok(file) = fs::File::options().write(true).open(to) {
+        let _ = file.set_modified(modified);
+    }
 }
 
 /// Clones the probe file and checks that its bytes hash to its blob ID.
@@ -199,6 +218,7 @@ fn probe_clone(source: &Path, dest: &Path, entry: &FileEntry) -> Result<(), Mate
     if ObjectId::hash_object("blob", &data) != entry.blob {
         return Err(MaterialiseError::CloneMismatch(to));
     }
+    keep_modified_time(&from, &to);
     Ok(())
 }
 
