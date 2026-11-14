@@ -29,9 +29,13 @@ pub struct ChannelMembership {
 
 /// What `airc_claim` got: the piece, and the files as path claims (R6) on
 /// the agent's change. Files are claimed only once the piece is granted, so
-/// a refused piece never leaves paths claimed behind it.
+/// a refused piece never leaves paths claimed behind it; and refused files
+/// release a piece this call newly claimed, so they never leave the piece
+/// held behind them.
 #[derive(Debug, Clone)]
 pub struct WorkClaim {
+    /// `Granted` with `extended: false` and refused `files` means the piece
+    /// was granted and released again: the member does not hold it.
     pub piece: PieceOutcome,
     /// `None` when the piece was refused or no files were named.
     pub files: Option<ClaimOutcome>,
@@ -135,13 +139,29 @@ impl ChannelMembership {
         files: &[String],
     ) -> Result<WorkClaim, Error> {
         let piece = self.claim_piece(piece, task, branch).await?;
-        let files = match piece {
-            PieceOutcome::Granted { .. } if !files.is_empty() => {
-                Some(self.session.claim(change, files).await?)
+        let new_claim = match &piece {
+            PieceOutcome::Granted { claim, extended } if !files.is_empty() => {
+                (!extended).then(|| claim.piece.clone())
             }
-            _ => None,
+            _ => return Ok(WorkClaim { piece, files: None }),
         };
-        Ok(WorkClaim { piece, files })
+        let files = self.session.claim(change, files).await;
+        // A caller reads a refusal as "pick other work" (AGENTS.md), so a
+        // piece claimed only for these files must not stay locked behind
+        // them (issue #188). A piece the member already held stays held.
+        let granted = matches!(files, Ok(ClaimOutcome::Granted { .. }));
+        if let Some(new_piece) = new_claim.filter(|_| !granted) {
+            let released = self.release_piece(Some(&new_piece)).await;
+            // The claim's own error, returned below, explains more than a
+            // release failing after it.
+            if files.is_ok() {
+                released?;
+            }
+        }
+        Ok(WorkClaim {
+            piece,
+            files: Some(files?),
+        })
     }
 
     /// Releases one of this member's pieces, or all of them with `None`.
