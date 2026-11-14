@@ -1,9 +1,10 @@
-# Cargo checks from SPEC.md §5 "Done means (v1)":
+# Checks from SPEC.md §5 "Done means (v1)":
 #   cargo build --workspace
 #   cargo clippy --workspace --all-targets -- -D warnings
 #   cargo test --workspace
-# Windows 11 is the shipped platform (D11), so it runs all three.
-# Linux is best-effort and only has to compile.
+#   lake build (in proofs/), plus the AGENTS.md axiom audit
+# Windows 11 is the shipped platform (D11), so it runs all three cargo checks.
+# Linux is best-effort and only has to compile; it also runs the Lean job.
 name: CI
 
 on:
@@ -100,3 +101,43 @@ jobs:
 
       - name: cargo build
         run: cargo build --workspace
+
+  # SPEC.md §5 also requires `lake build` in proofs/, and AGENTS.md "Proofs"
+  # allows only propext, Classical.choice and Quot.sound as axioms. The proofs
+  # are platform-independent, so they run once, on the faster Linux runner.
+  lean:
+    name: Lean (lake build, axiom audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: proofs
+    steps:
+      - uses: actions/checkout@v4
+
+      # elan reads proofs/lean-toolchain, so the pinned Lean is the one installed.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('proofs/lean-toolchain') }}
+
+      - name: Install elan
+        run: |
+          if [ ! -x "$HOME/.elan/bin/elan" ]; then
+            curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | sh -s -- -y --default-toolchain none
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      # Lake rebuilds whatever its traces show changed, so a stale cache is safe.
+      - uses: actions/cache@v4
+        with:
+          path: proofs/.lake
+          key: lake-${{ runner.os }}-${{ hashFiles('proofs/lean-toolchain', 'proofs/lakefile.toml', 'proofs/lake-manifest.json') }}-${{ hashFiles('proofs/**/*.lean') }}
+          restore-keys: |
+            lake-${{ runner.os }}-${{ hashFiles('proofs/lean-toolchain', 'proofs/lakefile.toml', 'proofs/lake-manifest.json') }}-
+
+      - name: lake build
+        run: lake build
+
+      - name: Axiom audit
+        run: bash ../.github/scripts/audit-axioms.sh
