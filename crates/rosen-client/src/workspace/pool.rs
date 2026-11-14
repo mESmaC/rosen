@@ -328,12 +328,28 @@ pub(super) fn refresh(
 /// update); left there, the edit would reach the agent that takes the slot
 /// and show up in its change as if it wrote it (issue #168). Build output,
 /// which is untracked, is kept.
+///
+/// A link or file left where a tracked directory was is refused with
+/// [`MaterialiseError::TrackedDirNotDir`] before anything is written, as
+/// `refresh` does (#312): writing through it would change files outside
+/// the slot. A tracked directory the prepare removed is made again (#322).
 pub(super) fn restore_tracked(
     store: &LooseObjectStore,
     root: &Path,
     tree: ObjectId,
 ) -> Result<Vec<String>, MaterialiseError> {
     let layout = Layout::of_tree(store, tree, &super::Sparse::all())?;
+    super::clone::check_tracked_dirs(root, &layout)?;
+    // Parents come first, so each directory's parent already exists.
+    for dir in &layout.dirs {
+        let path = super::layout::disk_path(root, dir);
+        match std::fs::create_dir(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+                return Err(MaterialiseError::io(&path, error));
+            }
+            _ => {}
+        }
+    }
     let changed = std::sync::Mutex::new(Vec::new());
     super::parallel::for_each::<_, MaterialiseError, _>(&layout.files, |entry| {
         if !matches_tree(root, entry) {
