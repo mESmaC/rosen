@@ -56,3 +56,18 @@ jobs:
 
       - name: Axiom audit
         run: lake env lean --run ../.github/scripts/audit_axioms.lean
+
+      # The Rust tests check the code against each fixture table; this checks
+      # each table against its model, byte for byte, so a model changed
+      # without regenerating its table cannot pass (issue #180).
+      - name: Fixture tables match their models
+        run: |
+          status=0
+          for exe in $(sed -n 's/^name = "\(.*-fixtures\)"$/\1/p' lakefile.toml); do
+            table="fixtures/${exe%-fixtures}.tsv"
+            if ! lake exe "$exe" | cmp -s - "$table"; then
+              echo "::error file=proofs/$table::$table is not what 'lake exe $exe' prints; regenerate it"
+              status=1
+            fi
+          done
+          exit $status
