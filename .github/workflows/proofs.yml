@@ -36,18 +36,29 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The toolchain is about 1 GB; reuse it until lean-toolchain changes.
+      # The toolchain is about 1 GB; reuse it until lean-toolchain or the
+      # pinned elan below changes.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.elan
-          key: elan-${{ runner.os }}-${{ hashFiles('proofs/lean-toolchain') }}
+          key: elan-v4.2.4-${{ runner.os }}-${{ hashFiles('proofs/lean-toolchain') }}
 
       # elan reads proofs/lean-toolchain and installs that exact Lean on first use.
+      # elan itself is a pinned release checked against its hash: elan-init.sh
+      # from master would run whatever lands there, and the script downloads
+      # the latest elan even when pinned itself (issue #221). To update, change
+      # the version here and in the cache key, and the hash of the new archive.
       - name: Install elan
+        env:
+          ELAN_VERSION: v4.2.4
+          ELAN_SHA256: 42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
         run: |
           if [ ! -x "$HOME/.elan/bin/elan" ]; then
-            curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
-              | sh -s -- -y --default-toolchain none --no-modify-path
+            archive="$RUNNER_TEMP/elan.tar.gz"
+            curl -sSfL "https://github.com/leanprover/elan/releases/download/$ELAN_VERSION/elan-x86_64-unknown-linux-gnu.tar.gz" -o "$archive"
+            echo "$ELAN_SHA256  $archive" | sha256sum -c -
+            tar -xzf "$archive" -C "$RUNNER_TEMP"
+            "$RUNNER_TEMP/elan-init" -y --default-toolchain none --no-modify-path
           fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
