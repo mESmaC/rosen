@@ -15,7 +15,7 @@ use rosen_protocol::{
 };
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -41,6 +41,11 @@ const EVENT_PAGE: u64 = 256;
 
 /// Pause before retrying a failed event-log read.
 const READ_RETRY: Duration = Duration::from_secs(1);
+
+/// How long a network subscriber's last credential check holds. Revocation
+/// refuses a peer's next request (R14), but a peer that only listens sends
+/// none, so its stream checks again before sending, at most this often.
+const CREDENTIAL_RECHECK: Duration = Duration::from_secs(1);
 
 type Outbox = mpsc::Sender<ServerFrame>;
 
@@ -311,7 +316,15 @@ impl Session {
         }
         let state = Arc::clone(&self.state);
         let outbox = self.outbox.clone();
-        let stream = forward_events(state, outbox, after, subscriber);
+        // Only a network peer can be revoked; `handle_frame` admitted it.
+        let admitted = match (self.access, &self.credential) {
+            (Access::Network, Some(credential)) => Admitted::Checked {
+                credential: credential.clone(),
+                at: Instant::now(),
+            },
+            _ => Admitted::Always,
+        };
+        let stream = forward_events(state, outbox, after, subscriber, admitted);
         self.subscription = Some(tokio::spawn(stream));
     }
 
@@ -335,13 +348,45 @@ fn machine_local(request: &Request) -> bool {
     )
 }
 
+/// Whether a subscriber may still receive events.
+enum Admitted {
+    /// A local client, which has no credential to revoke.
+    Always,
+    /// A network peer, whose credential last passed at `at`.
+    Checked { credential: String, at: Instant },
+}
+
+impl Admitted {
+    /// Checks the credential again once [`CREDENTIAL_RECHECK`] has passed.
+    /// A refused one ends the stream: without that, a peer subscribed
+    /// before its machine was revoked kept receiving every event for as
+    /// long as it sent nothing (#154).
+    async fn still(&mut self, state: &Arc<ServerState>) -> bool {
+        let Admitted::Checked { credential, at } = self else {
+            return true;
+        };
+        if at.elapsed() < CREDENTIAL_RECHECK {
+            return true;
+        }
+        // SQLite I/O, so off the async workers like the log reads below.
+        let (state, given) = (Arc::clone(state), credential.clone());
+        let passed = tokio::task::spawn_blocking(move || state.credential_matches(&given))
+            .await
+            .unwrap_or(false);
+        *at = Instant::now();
+        passed
+    }
+}
+
 /// Sends every event after the starting cursor that the subscriber should
-/// see, then each new one as it is published.
+/// see, then each new one as it is published, until a network peer's
+/// credential is refused.
 async fn forward_events(
     state: Arc<ServerState>,
     outbox: Outbox,
     after: Option<u64>,
     subscriber: Option<AgentId>,
+    mut admitted: Admitted,
 ) {
     let mut published = state.events.watch();
     let mut cursor = starting_cursor(&state, after, subscriber.clone()).await;
@@ -350,6 +395,9 @@ async fn forward_events(
         // published between the read and the wait still wakes this loop.
         published.borrow_and_update();
         let page = read_page(&state, cursor, subscriber.clone()).await;
+        if !page.events.is_empty() && !admitted.still(&state).await {
+            return;
+        }
         for event in page.events {
             if outbox.send(ServerFrame::Event(event)).await.is_err() {
                 return;
