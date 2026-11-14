@@ -353,7 +353,14 @@ fn scp_remote(remote: &str) -> Result<(), String> {
             "is not a network remote: use a {MIRROR_SCHEMES:?} URL or `user@host:path`; only `rosen import --mirror` can name a local path"
         ))
     };
-    let Some((authority, path)) = remote.split_once(':') else {
+    // A bracketed IPv6 host (`git@[2001:db8::1]:repo`) has colons of its
+    // own, so the separator is the one after `]`. `host_name` then checks
+    // the brackets enclose only an address.
+    let split = match remote.find("]:") {
+        Some(end) => Some((&remote[..=end], &remote[end + 2..])),
+        None => remote.split_once(':'),
+    };
+    let Some((authority, path)) = split else {
         return not_network();
     };
     // A separator before the colon makes git read a local path; `x::` is a
@@ -375,8 +382,11 @@ fn scp_remote(remote: &str) -> Result<(), String> {
 }
 
 /// A user name git passes to ssh; one starting with `-` would be an option.
+/// No `:` either: git reads `<scheme>::` at the start of a remote as a
+/// helper before it looks for a user, as in `ext::x@[::1]:repo`.
 fn user_name(user: &str) -> Result<(), String> {
-    if user.is_empty() || user.starts_with('-') || user.contains(['@', '/', '\\']) {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '~');
+    if user.is_empty() || user.starts_with('-') || !user.chars().all(allowed) {
         return Err(format!("has an invalid user name {user:?}"));
     }
     Ok(())
@@ -449,6 +459,7 @@ mod tests {
             "git://example.com/repo.git",
             "git@github.com:you/repo.git",
             "ssh://[::1]/repo.git",
+            "git@[2001:db8::1]:team/repo.git",
         ] {
             assert!(parsed(good).is_ok(), "refused {good}");
         }
@@ -461,6 +472,7 @@ mod tests {
             "ext::sh -c calc",
             "fd::3",
             "custom::anything",
+            "ext::calc@[::1]:repo.git",
             "http://example.com/repo.git",
             "https://ghp_token@github.com/you/repo.git",
             "ssh://user:secret@example.com/repo.git",
