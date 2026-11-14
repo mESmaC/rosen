@@ -203,10 +203,14 @@ theorem correct (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : Li
   split
   · split <;> simp_all
   · rfl
-/-- **cost_bound** (SPEC.md R8 step 3). Cost model: `loop`'s merges, each writing
-a fixed set of rows (change and `stack_bases`, or conflicts, plus one
-`stack_delivery` row), and selection queries; merge CPU and objects excluded.
-A pass merges at most once per child and runs one query more than it merges. -/
+/-- **cost_bound** (SPEC.md R8 step 3). Cost model: `loop`'s merges (one
+transaction each) and selection queries; merge CPU, objects and SQL row counts
+excluded. A clean merge writes a fixed set of rows (the change, `stack_bases`
+and one `stack_delivery` row). A conflicted merge writes one `stack_delivery`
+row plus one `conflicts` row per stored conflict that changed, so its row count
+grows with the conflicted paths and is not bounded here; `conflicts::save`
+keeps it minimal (`proofs/ConflictRouting`). A pass merges at most once per
+child and runs one query more than it merges. -/
 -- SPEC.md §R8
 theorem cost_bound (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : List Node)
     (n : Nat) (hn : cs.length < n) :
@@ -253,7 +257,10 @@ private theorem run_targets (t : Store) : ∀ (ks : List Nat) (s : Store) (k : N
 writes that each set one change's record (in any order, batched or not)
 and turn the stack's records into the propagated stack. Our writes are in
 the class and number exactly our merges; no write sequence in the class is
-shorter, because every merged child's record differs and needs a write. -/
+shorter, because every merged child's record differs and needs a write.
+A write here is one abstract `Node` record (head, basis, conflicted), not a
+SQL row: the bound counts merged children, not the `conflicts` rows a
+conflicted child stores, whose minimum `proofs/ConflictRouting` proves. -/
 -- SPEC.md §R8
 theorem optimal (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : List Node) :
     runWrites (toStore cs) (oursWrites merge q cs) = toStore (pass merge q cs) ∧
