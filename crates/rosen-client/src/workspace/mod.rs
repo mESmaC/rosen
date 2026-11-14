@@ -30,6 +30,7 @@ pub mod pool;
 mod pool_worker;
 mod prepare;
 mod sparse;
+mod staging_sweep;
 mod template;
 mod write;
 
@@ -303,7 +304,8 @@ fn bring_to_tree<'a>(
 }
 
 /// A hidden directory beside the destination that a workspace is built in.
-/// It is removed on drop unless published.
+/// It is removed on drop unless published; one a crash left behind is
+/// removed by [`staging_sweep`].
 struct Staging {
     parent: PathBuf,
     path: PathBuf,
@@ -327,10 +329,15 @@ impl Staging {
             .map(Path::to_path_buf)
             .unwrap_or_default();
         fs::create_dir_all(&parent).map_err(|error| MaterialiseError::io(&parent, error))?;
+        staging_sweep::sweep_abandoned(&parent);
         for attempt in 0u32.. {
             let mut hidden = std::ffi::OsString::from(".");
             hidden.push(name);
-            hidden.push(format!(".rosen-partial-{}-{attempt}", std::process::id()));
+            hidden.push(format!(
+                "{}{}-{attempt}",
+                staging_sweep::STAGING_TAG,
+                std::process::id()
+            ));
             let path = parent.join(hidden);
             match fs::create_dir(&path) {
                 Ok(()) => {
@@ -340,7 +347,8 @@ impl Staging {
                         published: false,
                     })
                 }
-                // A crashed run can leave its staging directory behind.
+                // A crashed run of an earlier process with this id can
+                // leave its staging directory behind until a sweep.
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(MaterialiseError::io(&path, error)),
             }

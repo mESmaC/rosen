@@ -1,4 +1,5 @@
-//! Starts a detached background process that inherits no handles.
+//! Starts a detached background process that inherits no handles, and tells
+//! whether a process id may still name a running process.
 //!
 //! `std::process::Command` always calls `CreateProcessW` with handle
 //! inheritance on, so a child inherits every inheritable handle in the parent,
@@ -11,11 +12,13 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::{io, ptr};
-use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{
+    ERROR_INVALID_PARAMETER, STILL_ACTIVE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, GetExitCodeProcess, WaitForSingleObject, CREATE_BREAKAWAY_FROM_JOB,
-    CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
-    STARTUPINFOW,
+    CreateProcessW, GetExitCodeProcess, OpenProcess, WaitForSingleObject,
+    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW,
 };
 
 /// A process started by [`spawn_detached`]; dropping it closes the handle
@@ -42,6 +45,30 @@ impl DetachedProcess {
         }
         Ok(Some(code))
     }
+}
+
+/// False only when no running process has id `pid`. Every doubt answers
+/// true: a process this user may not open, or one that exited with the
+/// code that also means "still active", counts as running.
+pub fn may_be_running(pid: u32) -> bool {
+    // SAFETY: OpenProcess takes plain values and returns a new handle or null.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if raw.is_null() {
+        // Windows reports an id that names no process as an invalid parameter.
+        let error = io::Error::last_os_error();
+        return error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32);
+    }
+    // SAFETY: a non-null OpenProcess result is a fresh handle this function
+    // owns and nothing else closes.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut code = 0u32;
+    // SAFETY: the handle is live and `code` is a valid out pointer. A process
+    // object outlives its process while handles to it remain, so the exit
+    // code, not the open, tells whether it still runs.
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
+        return true;
+    }
+    code == STILL_ACTIVE as u32
 }
 
 /// Starts `program` with `args`, detached from the caller's console and
