@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -463,10 +463,19 @@ impl Budget {
         let mut registry = self.read()?;
         let measured_ms = now_ms();
         for entry in &mut registry.workspaces {
-            if let Some(&(bytes, in_flight)) = measured.get(&entry.sequence) {
-                entry.measured = Some(bytes);
-                entry.measured_in_flight = in_flight;
+            let Some(walk) = measured.get(&entry.sequence) else {
+                continue;
+            };
+            entry.measured_in_flight = walk.in_flight;
+            if walk.complete {
+                entry.measured = Some(walk.bytes);
                 entry.measured_ms = measured_ms;
+            } else {
+                // What was read is a floor: the charge may grow to it but
+                // never drops on a walk that missed files, and the record
+                // keeps its age so it is walked first next scan (#277).
+                let before = entry.measured.unwrap_or(entry.bytes);
+                entry.measured = Some(before.max(walk.bytes));
             }
         }
         registry.last_scan = Some(ScanTime {
@@ -635,39 +644,89 @@ fn scan_due(registry: &Registry) -> bool {
         .is_none_or(|age| age >= RESCAN_AFTER_MS.max(scan.took_ms))
 }
 
+/// One target's walk.
+struct Measured {
+    bytes: u64,
+    in_flight: bool,
+    /// False when some entry could not be read, so `bytes` misses it.
+    complete: bool,
+}
+
 /// Walks targets in order, in parallel since each walk waits mostly on the
 /// file system, starting none after the scan's slice; returns the walked.
-/// A walk that fails leaves its target unwalked, like one past the slice:
-/// it keeps the charge it had and is walked first next scan. On Windows a
-/// workspace deleted while a virus scanner or indexer still holds its
-/// directory lingers, pending deletion, and listing it is access denied
+/// An entry a walk cannot read is skipped and the rest still counted. On
+/// Windows a workspace deleted while a virus scanner or indexer still holds
+/// its directory lingers, pending deletion, and listing it is access denied
 /// (#102). Failing the scan for that would fail every admission on the
-/// machine, though the walk succeeds or finds it gone moments later.
-fn measure(targets: &[ScanTarget], started: Instant) -> io::Result<HashMap<u64, (u64, bool)>> {
-    let walked: Vec<OnceLock<u64>> = targets.iter().map(|_| OnceLock::new()).collect();
+/// machine, though the walk succeeds or finds it gone moments later. A
+/// failure that persists is reported (see [`WalkReport`]).
+fn measure(targets: &[ScanTarget], started: Instant) -> io::Result<HashMap<u64, Measured>> {
+    let walked: Vec<OnceLock<(u64, bool)>> = targets.iter().map(|_| OnceLock::new()).collect();
     let indexed: Vec<usize> = (0..targets.len()).collect();
     super::parallel::for_each(&indexed, |&index| {
         if index > 0 && started.elapsed() >= SCAN_SLICE {
             return Ok(());
         }
-        let mut bytes = 0u64;
+        let (mut bytes, mut complete) = (0u64, true);
         for path in &targets[index].paths {
-            let Ok(size) = disk_bytes(path) else {
-                return Ok(());
-            };
-            bytes = bytes.saturating_add(size);
+            let walk = walk_bytes(path);
+            WalkReport::note(path, walk.unread.as_ref());
+            complete &= walk.unread.is_none();
+            bytes = bytes.saturating_add(walk.bytes);
         }
-        let _ = walked[index].set(bytes);
+        let _ = walked[index].set((bytes, complete));
         Ok::<(), io::Error>(())
     })?;
     Ok(targets
         .iter()
         .zip(walked)
-        .filter_map(|(target, bytes)| {
-            let bytes = bytes.into_inner()?;
-            Some((target.sequence, (bytes, target.in_flight)))
+        .filter_map(|(target, walk)| {
+            let (bytes, complete) = walk.into_inner()?;
+            let in_flight = target.in_flight;
+            let measured = Measured {
+                bytes,
+                in_flight,
+                complete,
+            };
+            Some((target.sequence, measured))
         })
         .collect())
+}
+
+/// Says on stderr which workspace the disk budget cannot measure, once its
+/// walks have failed for [`REPORT_AFTER`] and then every [`REPORT_EVERY`].
+/// Without it a budget that under-counts a grown workspace looks right. A
+/// failure that clears sooner, like #102's, stays quiet.
+struct WalkReport;
+
+/// Workspaces whose last walk failed: since when, and when last reported.
+type FailingWalks = HashMap<PathBuf, (Instant, Option<Instant>)>;
+static FAILING_WALKS: Mutex<Option<FailingWalks>> = Mutex::new(None);
+
+impl WalkReport {
+    fn note(root: &Path, unread: Option<&(PathBuf, io::Error)>) {
+        let mut failing = FAILING_WALKS.lock().unwrap_or_else(PoisonError::into_inner);
+        let failing = failing.get_or_insert_with(HashMap::new);
+        let Some((path, error)) = unread else {
+            failing.remove(root);
+            return;
+        };
+        let (since, reported) = failing
+            .entry(root.to_path_buf())
+            .or_insert((Instant::now(), None));
+        let due = since.elapsed() >= REPORT_AFTER
+            && reported.is_none_or(|at| at.elapsed() >= REPORT_EVERY);
+        if due {
+            eprintln!(
+                "rosen: the disk budget cannot measure all of workspace {} (failing {} s): \
+                 {}: {error}; it stays charged at least what it measured before",
+                root.display(),
+                since.elapsed().as_secs(),
+                path.display()
+            );
+            *reported = Some(Instant::now());
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -705,26 +764,44 @@ fn try_lock(file: &File) -> io::Result<bool> {
 /// Runs with no lock held, so a directory removed or renamed mid-walk,
 /// such as a staging directory being published, counts as empty.
 pub(super) fn disk_bytes(root: &Path) -> io::Result<u64> {
-    let mut bytes = 0u64;
+    let walk = walk_bytes(root);
+    match walk.unread {
+        Some((_, error)) => Err(error),
+        None => Ok(walk.bytes),
+    }
+}
+
+/// A walk's bytes, and the first entry it could not read, if any.
+struct Walk {
+    bytes: u64,
+    unread: Option<(PathBuf, io::Error)>,
+}
+
+/// Counts every entry it can read, skipping one it cannot, so one
+/// unreadable file does not hide what the rest of the workspace holds.
+fn walk_bytes(root: &Path) -> Walk {
+    let mut walk = Walk {
+        bytes: 0,
+        unread: None,
+    };
     let mut pending = vec![root.to_path_buf()];
     while let Some(path) = pending.pop() {
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        if metadata.is_dir() && !metadata.is_symlink() {
-            let entries = match fs::read_dir(&path) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            for entry in entries {
-                pending.push(entry?.path());
+        let listed = fs::symlink_metadata(&path).and_then(|metadata| {
+            if metadata.is_dir() && !metadata.is_symlink() {
+                for entry in fs::read_dir(&path)? {
+                    pending.push(entry?.path());
+                }
+            } else {
+                walk.bytes = walk.bytes.saturating_add(metadata.len());
             }
-        } else {
-            bytes = bytes.saturating_add(metadata.len());
+            Ok(())
+        });
+        match listed {
+            Err(error) if error.kind() != io::ErrorKind::NotFound && walk.unread.is_none() => {
+                walk.unread = Some((path, error));
+            }
+            _ => {}
         }
     }
-    Ok(bytes)
+    walk
 }
