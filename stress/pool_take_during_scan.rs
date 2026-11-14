@@ -18,14 +18,7 @@ fn fill(dir: &Path, files: usize) {
 fn pool_take_during_unlocked_scan() {
     let root = tempfile::tempdir().unwrap();
     let limits = root.path().join("limits");
-    let budget = Budget::open(
-        &limits,
-        Settings {
-            materialisations: 4,
-            disk_bytes: 1 << 40,
-        },
-    )
-    .unwrap();
+    let budget = Budget::open(&limits, Settings { materialisations: 4, disk_bytes: 1 << 40 }).unwrap();
     let (a, b) = (root.path().join("ws-a"), root.path().join("ws-b"));
     drop(budget.acquire(&a, &root.path().join("stage-a"), 1).unwrap());
     fill(&a, 6000);
@@ -38,11 +31,7 @@ fn pool_take_during_unlocked_scan() {
             while !stop.load(Ordering::Relaxed) {
                 n += 1;
                 let probe = root.join(format!("probe-{n}"));
-                drop(
-                    budget
-                        .acquire(&probe, &root.join(format!("pstage-{n}")), 0)
-                        .unwrap(),
-                );
+                drop(budget.acquire(&probe, &root.join(format!("pstage-{n}")), 0).unwrap());
                 std::thread::sleep(Duration::from_millis(20));
             }
         })
