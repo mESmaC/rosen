@@ -1,0 +1,97 @@
+# Rosen's own project configuration (SPEC.md §2 "Project configuration").
+# The server reads this file from the base, never from a change, so an edit
+# takes effect only once it lands. Unknown keys are refused.
+# `rosen config show` prints the configuration in force.
+
+# Untracked paths snapshots skip (R2), in .gitignore syntax. They rank below
+# the .gitignore files, which already cover build output. These keep
+# credentials a tool or a person leaves in a workspace out of every snapshot,
+# and so out of the public mirror.
+ignore = [
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.pfx",
+    "*.p12",
+    "*.key",
+]
+
+# Regenerated after a merge, never merged by hand (R5; AGENTS.md "Shared
+# files"). When both sides change one, the merge result holds the base's copy
+# and the change's owner regenerates it. The pre-land build runs `--locked`,
+# so a lockfile left stale by that never lands.
+generated = [
+    "Cargo.lock",
+    "proofs/lake-manifest.json",
+    "proofs/fixtures/*.tsv",
+]
+
+# Both sides' additions are kept (R5; AGENTS.md "Shared files").
+registration_lists = [
+    "Cargo.toml",
+    "crates/rosen-protocol/src/message.rs",
+    "crates/rosen-server/src/rpc.rs",
+    "crates/rosen-cli/src/commands.rs",
+    "proofs/lakefile.toml",
+]
+
+# Changes to these take the sensitive review tier (R7). Each one's reason is
+# under "Sensitive paths" in AGENTS.md; keep the two lists the same.
+sensitive = [
+    "rosen.toml",
+    ".github/workflows/",
+    "crates/rosen-server/src/landing/",
+    "crates/rosen-server/src/metadata.rs",
+    "crates/rosen-server/src/changes/schema.rs",
+    "crates/rosen-server/src/channel/",
+    "crates/rosen-server/src/conflicts.rs",
+    "crates/rosen-server/src/machines/",
+    "crates/rosen-server/src/network/",
+    "crates/rosen-client/src/workspace/lifecycle.rs",
+    "crates/rosen-client/src/workspace/delete.rs",
+    "crates/rosen-client/src/workspace/pool_worker.rs",
+    "crates/rosen-client/src/enrollment.rs",
+    "crates/rosen-platform/",
+    "crates/rosen-store/",
+    "crates/rosen-protocol/src/transport_windows.rs",
+    "crates/rosen-merge/",
+]
+
+# Build units are left to discovery: each package of the Cargo workspace is a
+# unit, read from the manifests at the base, so a new crate or dependency
+# needs no edit here.
+
+# Build and lint on the exact merge result, before a land (R8). Each command
+# is one line that runs the same from cmd, PowerShell and sh.
+[checks.pre_land]
+commands = [
+    "cargo build --workspace --locked",
+    "cargo clippy --workspace --all-targets --locked -- -D warnings",
+]
+
+# The full tests, on landed commits in batches (R12). A commit that fails
+# them twice while its parent passes is reverted.
+[checks.post_land]
+commands = [
+    "cargo test --workspace --locked",
+]
+
+# Ready workspaces each machine's daemon keeps at the base tip (R3). On a
+# ReFS volume each is a block clone of one prepared template, so the size
+# costs almost no disk.
+[warm_pool]
+size = 8
+
+# Run in the template, or in each ready workspace where there is no ReFS, so
+# an agent's first build compiles only what it changed (R3). No `--locked`:
+# a lockfile the base left stale must not leave every workspace unprepared.
+[prepare]
+commands = [
+    "cargo build --workspace",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+]
+
+# The base is pushed here after each land (R1). The server's git credential
+# helper holds the credentials.
+[mirror]
+remote = "https://github.com/mESmaC/rosen.git"
