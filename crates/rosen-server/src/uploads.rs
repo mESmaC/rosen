@@ -2,9 +2,10 @@
 //! frame arrives as `PutBlobChunk` slices.
 //!
 //! Each upload is staged in its own file under the data directory until its
-//! last byte arrives. Only then is it hashed and stored, so the object store
-//! never holds a partial blob, and a blob whose bytes do not hash to the
-//! claimed ID is refused. A client that disappears mid-upload leaves its
+//! last byte arrives. Only then is it hashed and stored, streamed from the
+//! staging file so the server never holds the whole blob in memory. The
+//! object store never holds a partial blob, and a blob whose bytes do not
+//! hash to the claimed ID is refused. A client that disappears mid-upload leaves its
 //! staging file behind; the next upload to start sweeps out stale ones.
 
 use std::fs::{self, File, OpenOptions};
@@ -44,7 +45,7 @@ pub async fn put_chunk(state: &Arc<ServerState>, chunk: BlobChunk) -> Outcome {
 /// Appends one slice to its upload, and stores the blob once it is whole.
 pub fn store_chunk(
     staging: &Path,
-    store: &dyn ObjectStore,
+    store: &LooseObjectStore,
     chunk: &BlobChunk,
 ) -> Result<BlobChunkStored, ErrorBody> {
     let path = staging_path(staging, &chunk.upload)?;
@@ -69,7 +70,7 @@ pub fn store_chunk(
             stored: false,
         });
     }
-    let stored = finish(store, &path, chunk.id);
+    let stored = finish(store, &path, chunk.id, chunk.total);
     let _ = fs::remove_file(&path);
     stored.map(|()| BlobChunkStored {
         received,
@@ -107,13 +108,20 @@ fn append(staging: &Path, path: &Path, chunk: &BlobChunk) -> Result<(), ErrorBod
 }
 
 /// Stores the staged bytes if they are the blob the client named.
-fn finish(store: &dyn ObjectStore, path: &Path, id: ObjectId) -> Result<(), ErrorBody> {
-    let data = fs::read(path).map_err(internal)?;
-    if ObjectId::hash_object("blob", &data) != id {
+fn finish(
+    store: &LooseObjectStore,
+    path: &Path,
+    id: ObjectId,
+    total: u64,
+) -> Result<(), ErrorBody> {
+    let mut staged = File::open(path).map_err(internal)?;
+    let stored = store
+        .put_raw_from(ObjectKind::Blob, id, total, &mut staged)
+        .map_err(internal)?;
+    if !stored {
         let why = format!("the uploaded bytes do not hash to blob {id}; upload it again");
         return Err(ErrorBody::new(ErrorCode::InvalidArgument, why));
     }
-    store.put_raw(ObjectKind::Blob, &data).map_err(internal)?;
     Ok(())
 }
 

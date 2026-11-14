@@ -18,6 +18,10 @@ use rosen_core::{ObjectId, ObjectKind};
 
 use crate::backend::{ObjectStore, RawObject, StoreError};
 
+mod stream;
+
+pub use stream::{PendingObject, ReadWithin};
+
 /// Distinguishes temporary files written concurrently by threads of one
 /// process; the process ID in the name separates processes.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -128,18 +132,32 @@ impl LooseObjectStore {
     /// Checks the file already stored for `id`. A put must verify it rather
     /// than trust its existence: a truncated or damaged file would otherwise
     /// make the put report success while every read fails as corrupt.
+    /// The check streams, so a large object is never held whole.
     fn existing_state(&self, id: &ObjectId, path: &Path) -> Result<Existing, StoreError> {
-        match fs::read(path) {
-            Ok(compressed) => match decode_loose(id, &compressed) {
-                Ok(_) => Ok(Existing::Valid),
-                Err(StoreError::Corrupt { .. }) => Ok(Existing::Damaged),
-                Err(error) => Err(error),
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Existing::Absent),
-            // A directory or other non-file squatting on the object path is
-            // not something a put can repair by replacing; report it.
-            Err(error) => Err(error.into()),
+        let Some(file) = self.open_object(path)? else {
+            return Ok(Existing::Absent);
+        };
+        match stream::copy_body(id, file, &mut io::sink()) {
+            Ok(_) => Ok(Existing::Valid),
+            Err(StoreError::Corrupt { .. }) => Ok(Existing::Damaged),
+            Err(error) => Err(error),
         }
+    }
+
+    /// Opens an object file, or `None` when there is none. A directory or
+    /// other non-file squatting on the object path is not something a put
+    /// can repair by replacing, so it is reported.
+    fn open_object(&self, path: &Path) -> Result<Option<File>, StoreError> {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !file.metadata()?.is_file() {
+            let why = format!("{} is not a file", path.display());
+            return Err(io::Error::other(why).into());
+        }
+        Ok(Some(file))
     }
 }
 
@@ -249,7 +267,7 @@ impl ObjectStore for LooseObjectStore {
             Err(error) => return Err(error.into()),
         };
         let compressed = file.metadata()?.len();
-        let len = read_header_len(id, ZlibDecoder::new(file))?;
+        let (_, len) = read_header(id, &mut ZlibDecoder::new(file))?;
         // Callers reserve disk for this length before any validating read,
         // so a corrupt header claiming more than the file could inflate to
         // must fail here rather than wait forever for room.
@@ -270,7 +288,8 @@ const MAX_DEFLATE_RATIO: u64 = 1032;
 /// The longest header is a kind name, a space and a 20-digit u64 length.
 const MAX_HEADER: usize = 32;
 
-fn read_header_len(id: &ObjectId, mut inflated: impl Read) -> Result<u64, StoreError> {
+/// Reads the `<kind> <len>\0` header from the start of an inflated object.
+fn read_header(id: &ObjectId, inflated: &mut impl Read) -> Result<(ObjectKind, u64), StoreError> {
     let corrupt = |reason: String| StoreError::Corrupt { id: *id, reason };
     let mut header = Vec::with_capacity(MAX_HEADER);
     let mut byte = [0u8; 1];
@@ -290,8 +309,9 @@ fn read_header_len(id: &ObjectId, mut inflated: impl Read) -> Result<u64, StoreE
     let (kind, len) = header
         .split_once(' ')
         .ok_or_else(|| corrupt("bad header".into()))?;
-    ObjectKind::parse(kind.as_bytes()).map_err(|error| corrupt(error.to_string()))?;
-    len.parse().map_err(|_| corrupt("bad length".into()))
+    let kind = ObjectKind::parse(kind.as_bytes()).map_err(|error| corrupt(error.to_string()))?;
+    let len = len.parse().map_err(|_| corrupt("bad length".into()))?;
+    Ok((kind, len))
 }
 
 #[cfg(test)]
