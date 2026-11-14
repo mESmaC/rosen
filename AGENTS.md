@@ -3,10 +3,16 @@
 Read this file in full before you start any task. Every rule here is mandatory.
 SPEC.md defines what to build. The project Task List defines what is left.
 
+## Where you work
+- Your thread works in a Rosen workspace by default. Velocity's first message says so and names your change. Landing your work below gives that flow.
+- A project can choose git instead, and Velocity falls back to a git worktree when Rosen can't make a workspace. Your folder is then a git checkout on a `vel/<task-name>` branch, and you follow the git flow under Landing your work.
+- To tell them apart: a Rosen workspace has a `.rosen` folder at its root and no `.git`.
+
 ## Commands
 - Read the project's build, run and lint commands from its manifests and SPEC.md before running them. Record those commands here when they are established.
+- Run every build, test and lint through `rosen run -- <command>`, for example `rosen run -- cargo build -p rosen-core`. Heavy commands on one machine take turns in its run queue (SPEC.md R3), so yours gets the cores while it runs, and the checks a land waits on go first. This applies in a git worktree too, whenever `rosen` is on `PATH`. A command already inside a turn runs at once, so `rosen run` never waits on itself.
 - For a project with a pinned Lean project, run `lake build` in `proofs/` before pushing proof changes.
-- Run the project's local checks on the merge result before marking a PR ready. Lint reports zero warnings.
+- Before you name your work (or mark a PR ready), run the checks your change can affect and see them pass. Lint reports zero warnings. Velocity then runs `rosen.toml`'s pre-land checks on the exact merge result before every land, and its post-land checks (`cargo test --workspace`) on what landed.
 - Build and check only what your change can affect. A change to docs or SPEC.md needs no build. A change to one part, such as the UI or one package, needs that part's checks, not the whole project's. Never run a build or check again when nothing it covers changed since it last passed.
 - Rust build: `cargo build --workspace`. For one crate, use `cargo build -p <crate>`.
 - Rust lint, zero warnings: `cargo clippy --workspace --all-targets -- -D warnings`. For one crate, use `-p <crate>` in place of `--workspace`.
@@ -78,10 +84,12 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Comment code whose purpose is not clear; explain why. Never add a new Markdown file unless the piece asks for one.
 
 ## Coordination (AIRC)
-- Before editing, claim your task, branch and every file you expect to touch in AIRC.
+- Before editing, claim your task in AIRC, and every file you expect to touch with `rosen claim <paths>`. The first claim wins; a refusal names the holder.
 - If your claim is refused, pick different unclaimed work.
-- Before editing a file another agent claimed, record a share or a wait in AIRC.
-- If your work depends on another PR, record a wait; continue and rebase when it merges.
+- Before editing a file another change claimed, record it with `rosen share <paths>`, or `rosen wait <paths>` when you need its change landed first.
+- If your work depends on another change, record a wait; continue, and take the rebase Rosen makes when it lands.
+- Claims are released when your change lands or is abandoned. `rosen release <paths>` gives one up sooner.
+- In a git worktree, claim your branch and files in AIRC instead.
 - Message another agent only when a claim, overlap or dependency needs words. Never repeat events Velocity posts.
 - Answer AIRC questions addressed to you. Reply to requests with done or declined and a reason. Never reply to inform messages.
 - Log discoveries other agents need in the Discoveries ledger.
@@ -90,6 +98,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Identify generated files and registration lists for this project here as they are established.
 - Regenerate generated files after a merge. Never merge them by hand.
 - Keep both additions to shared registration lists, inside each module's group.
+- In Rosen, `rosen.toml` lists these. Rosen merges a registration list by keeping both sides' additions, and gives a generated file the base's copy. When Rosen rebases your change onto a base that changed a generated file, regenerate it in your workspace before you name the work again.
 - Generated files:
   - `Cargo.lock`: regenerate with cargo.
   - `proofs/lake-manifest.json`: regenerate with lake.
@@ -102,7 +111,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
   - `proofs/lakefile.toml`: the `lean_lib` and `lean_exe` entries.
 
 ## Sensitive paths
-- PR duty gives a PR that touches a path listed here the sensitive review: full review, then the stress suite (the two fault drill seeds under Commands) and `cargo test --workspace` on the merge result before merge. Never run the §5 benchmark for a review. A proof-list feature the PR changes needs its confidence proof at reference level: a fixture table exported from the Lean model and a Rust test that checks the implementation against it. Code level (a translation) is required only when an issue asks for one.
+- PR duty gives a change or PR that touches a path listed here the sensitive review: full review, then the stress suite (the two fault drill seeds under Commands) and `cargo test --workspace` on the merge result before merge. Never run the §5 benchmark for a review. A proof-list feature the PR changes needs its confidence proof at reference level: a fixture table exported from the Lean model and a Rust test that checks the implementation against it. Code level (a translation) is required only when an issue asks for one.
 - List one path, folder or glob per bullet, as inline code, followed by why it is sensitive. Add migrations, worktree deletion and auth code as they are established.
 - `rosen.toml`: Rosen's own project configuration; it names the checks a land needs, the sensitive paths below and the mirror remote. Keep its `sensitive` list the same as the list in this file. Its `registration_lists` also holds `Cargo.lock` and the fixture tables, for the reason it gives.
 - `.github/workflows/`: CI config.
@@ -123,10 +132,21 @@ SPEC.md defines what to build. The project Task List defines what is left.
 
 - `crates/rosen-client/src/workspace/pool_worker.rs`: removes unused ready directories on restart and pool shrink; a wrong root could delete a taken workspace (SPEC.md R3).
 
-## Pull requests
-- One piece, one branch, one PR. Name the branch `vel/<task-name>`.
-- Use your thread's own worktree. Velocity creates and removes it. Never run `git worktree add`, `git worktree remove` or `git worktree prune` yourself.
-- Describe what changed, why, the theorems proved and the Task List item or issue it completes.
+## Landing your work
+One piece, one change (or one PR). Describe what changed, why, the theorems proved and the Task List item or issue it completes.
+
+### In a Rosen workspace
+- The folder is not a git checkout. Never run `git` or `gh` in it, and skip every branch, commit, push and pull request step.
+- Every file you write is stored on the Rosen server within 2 seconds. There is nothing to push. `rosen status` shows what is stored, and whether the server has rebased your change; `rosen diff` shows your change.
+- When the work is done and its checks pass, name it: `rosen commit -m "<what changed, and the item or issue it completes>"`. That is your request for review. End your turn.
+- PR duty reviews your change's merge result onto the base. Velocity runs the pre-land checks on that exact tree and lands it. Never run `rosen review approve`, `rosen receipt submit` or `rosen land` on your own change.
+- When PR duty requests changes, or the pre-land checks fail, Velocity sends you the reason. Fix it, then name the work again with `rosen commit -m`.
+- When your change conflicts with the base: run `rosen rebase`, combine both sides between the conflict markers, run `rosen resolve <file>` for each file, then `rosen commit -m` again.
+- After a land, the post-land checks run the full tests. If your change broke them, Rosen reverts it and Velocity reopens your workspace with the failing output. Your work is kept: fix it and name it again.
+- Velocity creates and deletes your workspace. Never delete it, and never move files out of it to keep them.
+
+### In a git worktree (the fallback)
+- Name the branch `vel/<task-name>`. Use your thread's own worktree. Velocity creates and removes it. Never run `git worktree add`, `git worktree remove` or `git worktree prune` yourself.
 - Opening the PR does not finish the task. Monitor it until it is merged.
 - Fix failing checks on your change and push.
 - Address every PR duty comment: fix and push, or reply with the reason. Resolve each thread and re-request review after fixes.
@@ -142,12 +162,12 @@ SPEC.md defines what to build. The project Task List defines what is left.
 
 ## Done means
 - The piece meets SPEC.md and has been run successfully.
-- The required local checks pass on the merge result and the required proofs check.
-- The PR is merged and Velocity has removed its worktree.
+- The required checks pass on the merge result and the required proofs check.
+- The change has landed and its post-land checks passed (or the PR is merged), and Velocity has removed its workspace or worktree.
 
 ## Never
 - Never wait for a plan or tool approval. Run with full permissions and the provider's full toolset.
 - Never start build work before the project spec is locked.
-- Never push directly to the project's base branch.
+- Never push directly to the project's base branch, and never land your own change.
 - Never commit secrets, tokens or `.env` files.
 - Never skip, delete or weaken a scout's failing script to make checks pass.
