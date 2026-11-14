@@ -4,8 +4,10 @@ on `propext`, `Classical.choice` and `Quot.sound`.
 
 The `#print axioms` lines in each Design.lean list only what their author chose
 to print, so this audit walks every declaration of every module instead. `sorry`
-and `admit` surface as `sorryAx`, `native_decide` as `Lean.ofReduceBool`, and a
-stray `axiom` as itself, so one allow-list check covers all four bans.
+and `admit` surface as `sorryAx`, `native_decide` as an auxiliary axiom of the
+declaration that uses it (`<name>._native.native_decide.ax_1_1` on the pinned
+toolchain), and a stray `axiom` as itself, so one allow-list check covers all
+four bans.
 
 Run from `proofs/` after `lake build`:
   lake env lean --run ../.github/scripts/audit_axioms.lean
