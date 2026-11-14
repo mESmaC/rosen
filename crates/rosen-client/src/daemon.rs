@@ -56,27 +56,42 @@ type Daemon = std::process::Child;
 fn spawn_daemon(endpoint: &Endpoint) -> Result<Daemon, Error> {
     use rosen_platform::process::spawn_detached;
     use std::ffi::OsStr;
-    let binary = resolve_on_path(server_binary());
+    let binary = resolve_binary(server_binary())?;
     let args = [OsStr::new("--endpoint"), OsStr::new(endpoint.as_str())];
     spawn_detached(&binary, &args, true)
         .or_else(|_| spawn_detached(&binary, &args, false))
         .map_err(|err| Error::Start(format!("could not run {}: {err}", binary.display())))
 }
 
-/// A bare program name, as `server_binary` falls back to, found on the PATH the
-/// way `std::process::Command` finds it; CreateProcessW would also search the
-/// current directory.
+/// The file to launch, found the way `std::process::Command` finds it: a bare
+/// name, as `server_binary` falls back to, only on the PATH, and `.exe` added to
+/// a name without an extension. CreateProcessW runs exactly the path it is
+/// given, so a bare name left unresolved would run from the current directory,
+/// where an untrusted checkout could plant one.
 #[cfg(windows)]
-fn resolve_on_path(binary: PathBuf) -> PathBuf {
+fn resolve_binary(binary: PathBuf) -> Result<PathBuf, Error> {
     if binary.components().count() != 1 {
-        return binary;
+        return Ok(with_exe_suffix(binary));
     }
     std::env::var_os("PATH")
         .iter()
         .flat_map(std::env::split_paths)
-        .map(|dir| dir.join(&binary))
+        .map(|dir| with_exe_suffix(dir.join(&binary)))
         .find(|candidate| candidate.is_file())
-        .unwrap_or(binary)
+        .ok_or_else(|| Error::Start(format!("could not find {} on PATH", binary.display())))
+}
+
+#[cfg(windows)]
+fn with_exe_suffix(path: PathBuf) -> PathBuf {
+    if path.extension().is_some() {
+        return path;
+    }
+    let exe = path.with_extension("exe");
+    if exe.is_file() {
+        exe
+    } else {
+        path
+    }
 }
 
 #[cfg(not(windows))]
