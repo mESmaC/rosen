@@ -477,7 +477,7 @@ impl Client {
         // The last stored tree may have been uploaded from another machine's
         // workspace or rebased on the server, so make it local first (D8).
         if let Ok(marker) = WorkspaceMarker::read(root) {
-            self.ensure_local(marker.tree).await?;
+            self.ensure_sparse_local(marker.tree, marker.sparse).await?;
         }
         let store = self.local_store().await?;
         let root = root.to_path_buf();

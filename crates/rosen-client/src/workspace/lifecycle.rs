@@ -91,7 +91,8 @@ impl Client {
         staged: bool,
     ) -> Result<Snapshotter, Error> {
         let marker = WorkspaceMarker::read(root)?;
-        self.ensure_local(marker.tree).await?;
+        self.ensure_sparse_local(marker.tree, marker.sparse.clone())
+            .await?;
         let store = self.local_store().await?;
         let mut scan = Snapshotter::open(&store, root)?;
         scan.hold_for_deletion()?;

@@ -1,13 +1,18 @@
 //! Filling a cache daemon's store from the server (SPEC D8, §3 "Object
 //! store").
 //!
-//! The cache keeps one invariant, the same one the server's store keeps: a
-//! tree or commit in the store has everything it reaches in the store too.
-//! So a fill stops at any object already held, and writes the trees and
+//! The cache keeps the server's invariant, a tree or commit in the store has
+//! everything it reaches in the store too, with one exception: a sparse
+//! workspace (R3) needs every tree but only the blobs under its chosen paths,
+//! so a sparse fill stores trees that lack blobs and records each in
+//! [`PartialObjects`] before writing it. Every stored tree still has all its
+//! subtrees stored. So a fill stops at any object held and not recorded,
+//! walks a recorded one from the local store, and writes the trees and
 //! commits it fetched only after every fetched object they name. A fill cut
-//! short leaves only blobs and complete trees behind, never a tree with a
-//! hole, and the next fill finishes the job.
+//! short leaves only blobs, complete trees and recorded trees behind, never
+//! a tree missing a subtree, and the next fill finishes the job.
 
+use super::partial::PartialObjects;
 use super::session::LinkSlot;
 use super::upstream::UpstreamLink;
 use rosen_core::{FileMode, Object, ObjectId, ObjectKind};
@@ -16,33 +21,39 @@ use rosen_protocol::{
 };
 use rosen_store::{LooseObjectStore, ObjectStore, StoreError};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// IDs per fetch request. Small enough that the request frame stays small;
 /// the server also defers objects past its byte budget.
 const IDS_PER_FETCH: usize = 1024;
 
 /// Makes everything reachable from `root` readable from `store`, fetching
-/// what is missing from the server. Returns how many objects were fetched.
-/// The server is only contacted when something is missing.
+/// what is missing from the server, or with `sparse` paths only every tree
+/// and the blobs at or under those paths. Returns how many objects were
+/// fetched. The server is only contacted when something is missing.
 pub async fn ensure(
     store: &LooseObjectStore,
+    partial: &Arc<PartialObjects>,
     links: &LinkSlot,
     root: ObjectId,
+    sparse: &[String],
 ) -> Result<u64, ErrorBody> {
-    let mut walk = Walk::default();
-    walk.want(vec![root]);
-    let (mut wanted, mut walk) = blocking(store, |store, walk| walk.drop_held(store), walk).await?;
-    if wanted.is_empty() {
-        return Ok(0);
-    }
-    let link = links.get().await?;
-    while !wanted.is_empty() {
-        let batch = fetch_all(&link, &wanted).await?;
-        (wanted, walk) =
-            blocking(store, move |store, walk| walk.absorb(store, batch), walk).await?;
+    let mut walk = Walk::new(Selection::new(sparse), Arc::clone(partial));
+    let need = walk.selection.need_at(b"");
+    walk.want(root, need);
+    let (mut wanted, mut walk) = blocking(store, |store, walk| walk.resolve(store), walk).await?;
+    if !wanted.is_empty() {
+        let link = links.get().await?;
+        while !wanted.is_empty() {
+            let batch = fetch_all(&link, &wanted).await?;
+            (wanted, walk) =
+                blocking(store, move |store, walk| walk.absorb(store, batch), walk).await?;
+        }
     }
     let fetched = walk.fetched;
-    blocking(store, |store, walk| walk.write_deferred(store), walk).await?;
+    // Runs even when nothing was fetched: a recorded tree walked locally may
+    // have become complete, and its record is then dropped.
+    blocking(store, |store, walk| walk.finish(store), walk).await?;
     Ok(fetched)
 }
 
@@ -80,40 +91,155 @@ pub async fn get_objects(
     Ok(local)
 }
 
+/// The paths a sparse workspace holds, as the client's `Sparse` chooses
+/// them: a chosen path holds itself and everything under it.
+struct Selection {
+    /// `/`-separated paths, or empty for the whole tree.
+    paths: Vec<Vec<u8>>,
+}
+
+impl Selection {
+    fn new(sparse: &[String]) -> Self {
+        let paths: Vec<Vec<u8>> = sparse
+            .iter()
+            .map(|path| {
+                let parts: Vec<&str> = path
+                    .split('/')
+                    .filter(|part| !part.is_empty() && *part != ".")
+                    .collect();
+                parts.join("/").into_bytes()
+            })
+            .collect();
+        // A path naming the root chooses the whole tree.
+        if paths.iter().any(Vec::is_empty) {
+            return Self { paths: Vec::new() };
+        }
+        Self { paths }
+    }
+
+    fn includes(&self, path: &[u8]) -> bool {
+        self.paths.is_empty() || self.paths.iter().any(|chosen| is_within(path, chosen))
+    }
+
+    /// What the workspace needs of the tree at `path`.
+    fn need_at(&self, path: &[u8]) -> Need {
+        if self.includes(path) {
+            Need::Full
+        } else if path.is_empty() || self.paths.iter().any(|chosen| is_within(chosen, path)) {
+            Need::Toward(path.to_vec())
+        } else {
+            Need::TreesOnly
+        }
+    }
+}
+
+/// Whether `path` is `ancestor` or lies under it.
+fn is_within(path: &[u8], ancestor: &[u8]) -> bool {
+    path.strip_prefix(ancestor)
+        .is_some_and(|rest| rest.is_empty() || rest[0] == b'/')
+}
+
+/// What a fill needs of one object. Every tree is always needed, because a
+/// sparse workspace's snapshots and tree cache read the whole tree (R2).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Need {
+    /// The object and everything it reaches.
+    Full,
+    /// The tree at this path, on the way to a chosen path: every subtree,
+    /// and the blobs the selection includes.
+    Toward(Vec<u8>),
+    /// A tree with no chosen path at or under it: every subtree, no blobs.
+    TreesOnly,
+}
+
+/// A tree or commit this fill read, from the server or the local store.
+struct Node {
+    kind: ObjectKind,
+    data: Vec<u8>,
+    /// Fetched, so written at the end; otherwise a recorded partial object
+    /// already in the store.
+    fetched: bool,
+    /// For a commit, its tree, named by the empty string.
+    links: Vec<Link>,
+}
+
+struct Link {
+    name: Vec<u8>,
+    id: ObjectId,
+    is_tree: bool,
+}
+
 /// The state of one fill between fetch rounds.
-#[derive(Default)]
 struct Walk {
-    /// Every ID this fill has asked for, so a shared subtree is fetched once.
-    seen: HashSet<ObjectId>,
-    /// IDs to fetch next.
-    next: Vec<ObjectId>,
-    /// Trees and commits fetched, written once the fetch is complete.
-    deferred: Vec<Deferred>,
+    selection: Selection,
+    partial: Arc<PartialObjects>,
+    /// Every visit this fill has queued, so a shared subtree is visited once
+    /// for each need.
+    seen: HashSet<(ObjectId, Need)>,
+    /// Visits to resolve next.
+    next: Vec<(ObjectId, Need)>,
+    /// Objects asked of the server, with the needs to apply on arrival.
+    fetching: HashMap<ObjectId, Vec<Need>>,
+    nodes: HashMap<ObjectId, Node>,
+    /// Objects known stored with their whole closure: blobs fetched or found,
+    /// and trees found stored and not recorded as partial.
+    complete: HashSet<ObjectId>,
     fetched: u64,
 }
 
 impl Walk {
-    fn want(&mut self, ids: Vec<ObjectId>) {
-        for id in ids {
-            if self.seen.insert(id) {
-                self.next.push(id);
-            }
+    fn new(selection: Selection, partial: Arc<PartialObjects>) -> Self {
+        Self {
+            selection,
+            partial,
+            seen: HashSet::new(),
+            next: Vec::new(),
+            fetching: HashMap::new(),
+            nodes: HashMap::new(),
+            complete: HashSet::new(),
+            fetched: 0,
         }
     }
 
-    /// Keeps only the wanted IDs the store lacks, and returns them.
-    fn drop_held(&mut self, store: &LooseObjectStore) -> Result<Vec<ObjectId>, StoreError> {
-        let mut missing = Vec::new();
-        for id in std::mem::take(&mut self.next) {
-            if !store.contains(&id)? {
-                missing.push(id);
-            }
+    fn want(&mut self, id: ObjectId, need: Need) {
+        // A full visit covers every other.
+        if self.seen.contains(&(id, Need::Full)) {
+            return;
         }
-        Ok(missing)
+        if self.seen.insert((id, need.clone())) {
+            self.next.push((id, need));
+        }
     }
 
-    /// Stores fetched blobs at once, defers trees and commits, and returns
-    /// the children still missing.
+    /// Resolves queued visits against the store, walking recorded partial
+    /// objects locally, and returns the IDs to fetch.
+    fn resolve(&mut self, store: &LooseObjectStore) -> Result<Vec<ObjectId>, StoreError> {
+        while let Some((id, need)) = self.next.pop() {
+            if self.nodes.contains_key(&id) {
+                self.expand(id, &need);
+            } else if self.complete.contains(&id) {
+                continue;
+            } else if let Some(needs) = self.fetching.get_mut(&id) {
+                needs.push(need);
+            } else if !store.contains(&id)? {
+                self.fetching.insert(id, vec![need]);
+            } else if !self.partial.contains(&id) {
+                // Asked after the store: a record is made before its object
+                // is written, so a stored object's record is already visible.
+                self.complete.insert(id);
+            } else if need != Need::TreesOnly {
+                // A partial tree holds all its subtrees, so only a visit that
+                // wants blobs reads it.
+                let raw = store.get_raw(&id)?.ok_or(StoreError::NotFound(id))?;
+                self.add_node(id, raw.kind, raw.data, false)?;
+                self.expand(id, &need);
+            }
+        }
+        Ok(self.fetching.keys().copied().collect())
+    }
+
+    /// Stores fetched blobs at once, keeps trees and commits to write at the
+    /// end, and returns what is still to fetch.
     fn absorb(
         &mut self,
         store: &LooseObjectStore,
@@ -122,83 +248,169 @@ impl Walk {
         for object in objects {
             self.fetched += 1;
             let kind = ObjectKind::from(object.kind);
+            let id = ObjectId::hash_object(kind.as_str(), &object.data);
+            let needs = self.fetching.remove(&id).unwrap_or_default();
             if kind == ObjectKind::Blob {
                 store.put_raw(kind, &object.data)?;
+                self.complete.insert(id);
                 continue;
             }
-            let children = match Object::decode_body(kind, &object.data) {
-                Ok(Object::Tree(tree)) => tree
-                    .entries()
-                    .iter()
-                    // Gitlinks name commits in other repositories; no store holds them.
-                    .filter(|entry| entry.mode != FileMode::Submodule)
-                    .map(|entry| entry.id)
-                    .collect(),
-                Ok(Object::Commit(commit)) => vec![commit.tree],
-                Ok(Object::Blob(_)) => Vec::new(),
-                Err(err) => {
-                    let id = ObjectId::hash_object(kind.as_str(), &object.data);
-                    return Err(StoreError::Malformed(id, err));
-                }
-            };
-            self.want(children.clone());
-            self.deferred.push(Deferred {
-                id: ObjectId::hash_object(kind.as_str(), &object.data),
-                kind,
-                data: object.data,
-                children,
-            });
+            self.add_node(id, kind, object.data, true)?;
+            for need in needs {
+                self.expand(id, &need);
+            }
         }
-        self.drop_held(store)
+        self.resolve(store)
     }
 
-    /// Writes deferred trees and commits in post-order: each only after
-    /// every deferred object it names. Reverse fetch order is not enough,
-    /// because a subtree shared by a parent and its sibling is fetched in the
-    /// parent's round but named by the sibling too. Objects are content
-    /// addressed, so the graph has no cycles.
-    fn write_deferred(&mut self, store: &LooseObjectStore) -> Result<(), StoreError> {
-        let deferred = &self.deferred;
-        let index: HashMap<ObjectId, usize> = deferred
+    fn add_node(
+        &mut self,
+        id: ObjectId,
+        kind: ObjectKind,
+        data: Vec<u8>,
+        fetched: bool,
+    ) -> Result<(), StoreError> {
+        let links = match Object::decode_body(kind, &data) {
+            Ok(Object::Tree(tree)) => tree
+                .entries()
+                .iter()
+                // Gitlinks name commits in other repositories; no store holds them.
+                .filter(|entry| entry.mode != FileMode::Submodule)
+                .map(|entry| Link {
+                    name: entry.name.clone(),
+                    id: entry.id,
+                    is_tree: entry.mode.is_tree(),
+                })
+                .collect(),
+            Ok(Object::Commit(commit)) => vec![Link {
+                name: Vec::new(),
+                id: commit.tree,
+                is_tree: true,
+            }],
+            Ok(Object::Blob(_)) => Vec::new(),
+            Err(err) => return Err(StoreError::Malformed(id, err)),
+        };
+        let node = Node {
+            kind,
+            data,
+            fetched,
+            links,
+        };
+        self.nodes.insert(id, node);
+        Ok(())
+    }
+
+    /// Queues what `need` wants of the node's children.
+    fn expand(&mut self, id: ObjectId, need: &Need) {
+        let node = &self.nodes[&id];
+        let is_commit = node.kind == ObjectKind::Commit;
+        let wanted: Vec<(ObjectId, Need)> = node
+            .links
             .iter()
-            .enumerate()
-            .map(|(at, object)| (object.id, at))
+            .filter_map(|link| {
+                let child = match need {
+                    Need::Full => Need::Full,
+                    Need::TreesOnly if link.is_tree => Need::TreesOnly,
+                    Need::TreesOnly => return None,
+                    Need::Toward(dir) => {
+                        // A commit's tree stands at the commit's own path.
+                        let path = if is_commit {
+                            dir.clone()
+                        } else {
+                            join(dir, &link.name)
+                        };
+                        if link.is_tree {
+                            self.selection.need_at(&path)
+                        } else if self.selection.includes(&path) {
+                            Need::Full
+                        } else {
+                            return None;
+                        }
+                    }
+                };
+                Some((link.id, child))
+            })
             .collect();
-        let mut written = vec![false; deferred.len()];
-        for start in 0..deferred.len() {
-            // Each frame is an object and how many of its children are done.
+        for (child, need) in wanted {
+            self.want(child, need);
+        }
+    }
+
+    /// Writes fetched trees and commits, each after every node it names.
+    /// Those whose closures are incomplete are recorded first; recorded
+    /// nodes now complete have their records dropped last, once everything
+    /// they reach is written.
+    fn finish(&mut self, store: &LooseObjectStore) -> Result<(), StoreError> {
+        let order = self.post_order();
+        let mut incomplete = Vec::new();
+        for id in &order {
+            let node = &self.nodes[id];
+            if node
+                .links
+                .iter()
+                .all(|link| self.complete.contains(&link.id))
+            {
+                self.complete.insert(*id);
+            } else if node.fetched {
+                incomplete.push(*id);
+            }
+        }
+        self.partial.mark(&incomplete)?;
+        for id in &order {
+            let node = &self.nodes[id];
+            if node.fetched {
+                store.put_raw(node.kind, &node.data)?;
+            }
+        }
+        let completed: Vec<ObjectId> = order
+            .into_iter()
+            .filter(|id| self.complete.contains(id))
+            .collect();
+        self.partial.clear(&completed)?;
+        Ok(())
+    }
+
+    /// Every node, each after every node it names. Fetch order is not
+    /// enough, because a subtree shared by a parent and its sibling is
+    /// fetched in the parent's round but named by the sibling too. Objects
+    /// are content addressed, so the graph has no cycles.
+    fn post_order(&self) -> Vec<ObjectId> {
+        let mut order = Vec::with_capacity(self.nodes.len());
+        let mut placed: HashSet<ObjectId> = HashSet::with_capacity(self.nodes.len());
+        for &start in self.nodes.keys() {
+            // Each frame is a node and how many of its links are done.
             let mut stack = vec![(start, 0usize)];
             while let Some(frame) = stack.last_mut() {
-                let (at, next_child) = *frame;
-                if written[at] {
+                let (id, next_link) = *frame;
+                if placed.contains(&id) {
                     stack.pop();
                     continue;
                 }
-                if let Some(child) = deferred[at].children.get(next_child) {
+                if let Some(link) = self.nodes[&id].links.get(next_link) {
                     frame.1 += 1;
-                    if let Some(&child_at) = index.get(child) {
-                        if !written[child_at] {
-                            stack.push((child_at, 0));
-                        }
+                    if self.nodes.contains_key(&link.id) && !placed.contains(&link.id) {
+                        stack.push((link.id, 0));
                     }
                     continue;
                 }
-                store.put_raw(deferred[at].kind, &deferred[at].data)?;
-                written[at] = true;
+                placed.insert(id);
+                order.push(id);
                 stack.pop();
             }
         }
-        Ok(())
+        order
     }
 }
 
-/// A fetched tree or commit waiting for its children to be written.
-struct Deferred {
-    id: ObjectId,
-    kind: ObjectKind,
-    data: Vec<u8>,
-    /// Objects it names that the store lacked when it was fetched.
-    children: Vec<ObjectId>,
+fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    if dir.is_empty() {
+        return name.to_vec();
+    }
+    let mut path = Vec::with_capacity(dir.len() + 1 + name.len());
+    path.extend_from_slice(dir);
+    path.push(b'/');
+    path.extend_from_slice(name);
+    path
 }
 
 /// Fetches every object in `ids`, asking again for any the server deferred.

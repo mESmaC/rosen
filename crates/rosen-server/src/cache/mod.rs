@@ -9,6 +9,7 @@
 //! The cache holds no metadata store.
 
 mod fill;
+mod partial;
 mod session;
 mod upstream;
 
@@ -30,6 +31,8 @@ pub struct CacheState {
     /// The machine's object store, at the path `status` reports, so clients
     /// materialise workspaces from it directly (R3).
     pub store: LooseObjectStore,
+    /// Trees in `store` that a sparse fill left without all their blobs.
+    pub partial: Arc<partial::PartialObjects>,
     started: Instant,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
@@ -93,11 +96,13 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
     let mut listener = Listener::bind(&config.endpoint)?;
     let store = LooseObjectStore::open(config.objects_dir())
         .map_err(|err| io::Error::other(err.to_string()))?;
+    let partial = Arc::new(partial::PartialObjects::open(&config.data_dir)?);
     let state = Arc::new(CacheState {
         config: config.clone(),
         pool: rosen_client::workspace::pool::WarmPool::new(&config.data_dir),
         upstream,
         store,
+        partial,
         started: Instant::now(),
         open_connections: AtomicU64::new(0),
         shutdown: watch::Sender::new(false),

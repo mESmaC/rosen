@@ -7,6 +7,7 @@
 //! would. Requests this build does not know are forwarded too.
 
 use super::fill;
+use super::partial::CompleteView;
 use super::upstream::{self, error_response, Relay, UpstreamLink};
 use super::CacheState;
 use crate::connection::handshake;
@@ -190,9 +191,15 @@ impl Session {
                     .map(Response::Objects)
             }),
             Request::EnsureObjects(ensure) => self.spawn(id, move |state, links| async move {
-                fill::ensure(&state.store, &links, ensure.root)
-                    .await
-                    .map(|fetched| Response::ObjectsLocal(rosen_protocol::ObjectsLocal { fetched }))
+                fill::ensure(
+                    &state.store,
+                    &state.partial,
+                    &links,
+                    ensure.root,
+                    &ensure.sparse,
+                )
+                .await
+                .map(|fetched| Response::ObjectsLocal(rosen_protocol::ObjectsLocal { fetched }))
             }),
             Request::PutObjects(upload) => {
                 self.keep_uploaded(upload);
@@ -224,8 +231,13 @@ impl Session {
     /// them without a round trip. The server still checks and stores them;
     /// the same completeness rule keeps an incomplete tree out of the cache.
     fn keep_uploaded(&self, upload: ObjectUpload) {
-        let store = self.state.store.clone();
+        let state = Arc::clone(&self.state);
         tokio::task::spawn_blocking(move || {
+            // A tree naming a partial one is not complete either.
+            let store = CompleteView {
+                store: &state.store,
+                partial: &state.partial,
+            };
             let _ = crate::snapshots::store_objects(&store, &upload);
         });
     }
