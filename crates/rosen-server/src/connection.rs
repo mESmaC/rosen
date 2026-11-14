@@ -17,7 +17,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{ReadHalf, WriteHalf};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 /// A client that connects but never says hello is dropped after this long, so
@@ -93,6 +93,7 @@ pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, acces
         outbox,
         in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         subscription: None,
+        refused: Arc::new(Notify::new()),
         machine_agent: None,
     };
     session.read_frames(&mut reader).await;
@@ -159,6 +160,9 @@ struct Session {
     in_flight: Arc<Semaphore>,
     credential: Option<String>,
     subscription: Option<JoinHandle<()>>,
+    /// Signalled by the event stream when it finds the peer's credential
+    /// refused, so the whole connection closes rather than going silent.
+    refused: Arc<Notify>,
 }
 
 impl Session {
@@ -170,12 +174,14 @@ impl Session {
             let permit = tokio::select! {
                 permit = slot => permit,
                 _ = self.state.shutdown_requested() => return,
+                _ = self.refused.notified() => return,
             };
             // The session never closes its semaphore, so this cannot fail.
             let Ok(permit) = permit else { return };
             let read = tokio::select! {
                 read = read_frame_body(reader) => read,
                 _ = self.state.shutdown_requested() => return,
+                _ = self.refused.notified() => return,
             };
             let body = match read {
                 Ok(Some(body)) => body,
@@ -321,6 +327,7 @@ impl Session {
             (Access::Network, Some(credential)) => Admitted::Checked {
                 credential: credential.clone(),
                 at: Instant::now(),
+                refused: Arc::clone(&self.refused),
             },
             _ => Admitted::Always,
         };
@@ -352,17 +359,30 @@ fn machine_local(request: &Request) -> bool {
 enum Admitted {
     /// A local client, which has no credential to revoke.
     Always,
-    /// A network peer, whose credential last passed at `at`.
-    Checked { credential: String, at: Instant },
+    /// A network peer, whose credential last passed at `at`. `refused`
+    /// closes its connection.
+    Checked {
+        credential: String,
+        at: Instant,
+        refused: Arc<Notify>,
+    },
 }
 
 impl Admitted {
     /// Checks the credential again once [`CREDENTIAL_RECHECK`] has passed.
     /// A refused one ends the stream: without that, a peer subscribed
     /// before its machine was revoked kept receiving every event for as
-    /// long as it sent nothing (#154).
+    /// long as it sent nothing (#154). It also closes the connection, so the
+    /// peer sees its link drop: a cache whose credential was rotated
+    /// reconnects with the new one, and a revoked machine is refused at the
+    /// handshake, instead of either waiting on a silent stream.
     async fn still(&mut self, state: &Arc<ServerState>) -> bool {
-        let Admitted::Checked { credential, at } = self else {
+        let Admitted::Checked {
+            credential,
+            at,
+            refused,
+        } = self
+        else {
             return true;
         };
         if at.elapsed() < CREDENTIAL_RECHECK {
@@ -374,6 +394,9 @@ impl Admitted {
             .await
             .unwrap_or(false);
         *at = Instant::now();
+        if !passed {
+            refused.notify_one();
+        }
         passed
     }
 }
