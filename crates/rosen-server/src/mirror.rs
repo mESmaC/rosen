@@ -12,7 +12,8 @@
 //! names one, and otherwise the one `rosen import --mirror` stored.
 //!
 //! The task also syncs once at startup, so a land whose push a crash
-//! interrupted reaches the mirror when the server comes back.
+//! interrupted reaches the mirror when the server comes back, and after an
+//! import, which sets the base without a land.
 
 mod push;
 mod state;
@@ -169,8 +170,8 @@ fn adopt_configured_remote(
     mirror.set_remote(remote).map_err(|e| store(e.to_string()))
 }
 
-/// Waits until a land is published after `seen`. Returns false when the
-/// server is shutting down instead.
+/// Waits until a land is published after `seen`, or an import wakes the
+/// mirror. Returns false when the server is shutting down instead.
 async fn wait_for_land(state: &ServerState, wake: &mut watch::Receiver<u64>, seen: u64) -> bool {
     let mut seen = seen;
     loop {
@@ -187,6 +188,7 @@ async fn wait_for_land(state: &ServerState, wake: &mut watch::Receiver<u64>, see
                     return false;
                 }
             }
+            () = state.mirror_wake.notified() => return true,
             () = state.shutdown_requested() => return false,
         }
     }
