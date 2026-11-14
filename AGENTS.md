@@ -12,6 +12,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Rust lint, zero warnings: `cargo clippy --workspace --all-targets -- -D warnings`. For one crate, use `-p <crate>` in place of `--workspace`.
 - Rust tests: `cargo test --workspace`. For one crate, use `cargo test -p <crate>`.
 - Proofs: `lake build` in `proofs/`.
+- Axiom audit: `lake env lean --run ../.github/scripts/audit_axioms.lean` in `proofs/`, after `lake build`. It fails when a declaration uses an axiom other than `propext`, `Classical.choice` and `Quot.sound`.
 - Atomic transaction fixtures: `lake exe atomic-transactions-fixtures > fixtures/atomic-transactions.tsv` in `proofs/`.
 - Claim release fixtures: `lake exe claim-release-fixtures > fixtures/claim-release.tsv` in `proofs/`.
 - Bisection fixtures: `lake exe bisection-fixtures > fixtures/bisection.tsv` in `proofs/`.
@@ -29,7 +30,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Stress suite (the merge gate for sensitive PRs): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed 1` and `target/debug/rosen-faults drill --seed 2`, as described under Fault drill below. Each run takes about a minute. This is the project's stress command.
 - §5 benchmark, not the stress suite and never a merge gate: run it only when the user asks. It takes an hour or more and fails the latency targets until the server performance issues are fixed. On one machine: `cargo build --release -p rosen-server -p rosen-stress`, then `target/release/rosen-stress local --dir <new dir>` for three simulated machines; add `--faults --fault-seed <n>` for the kill and partition run. Across machines: `rosen-stress seed`, `rosen import` on the server, `rosen-stress agents` on each machine with `rosen-stress checker` on one, then `rosen-stress verify <reports…>`; `rosen-stress --help` has the flags.
 - Fault drill (SPEC.md §5): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed <n>`. It injects a failing commit and checks R12 bisects and reverts it unless given `--no-failing-commit`, prints a JSON report, exits non-zero when a guarantee breaks, and replays exactly from its seed.
-- CI runs the Rust build, lint and tests on Windows, and the Rust build on Linux.
+- CI runs the Rust build, lint and tests on Windows, and the Rust build on Linux. The Proofs workflow runs `lake build --wfail` and the axiom audit on Linux when `proofs/`, the audit script or the workflow changes.
 
 ## Code
 - Keep functions under 60 lines. Split anything longer.
