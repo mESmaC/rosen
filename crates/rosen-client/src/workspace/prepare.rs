@@ -1,8 +1,12 @@
 //! Running the project's prepare commands in a ready workspace (SPEC R3).
 //!
 //! The pool worker is the only caller, and it prepares one workspace at a
-//! time, so a machine never runs two prepares at once. Each command runs at
-//! below-normal priority, so agents' own builds go first.
+//! time. A machine runs one daemon per project, so each prepare also takes a
+//! turn in the machine's run queue, in its last class: two projects' prepares
+//! never run at once, and none starts while a landing check, an agent's
+//! build or the tests after a land are running or waiting. Each command runs
+//! at below-normal priority, so a more important run that starts beside a
+//! prepare gets the cores.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -11,9 +15,15 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use crate::run_queue::{self, RunClass, RunQueue, Turn};
+
 /// A prepare that has not finished in this long is treated as failed, so a
 /// hung command cannot stop the pool worker from following the base.
 const COMMAND_LIMIT: Duration = Duration::from_secs(60 * 60);
+
+/// How often a prepare waiting for its turn looks at the queue again. A
+/// prepare is in no hurry, and each look reads the queue's folder.
+const WAIT_POLL: Duration = Duration::from_millis(500);
 
 /// How much of a failed command's output is kept for the daemon's log.
 const OUTPUT_TAIL: usize = 4096;
@@ -21,12 +31,38 @@ const OUTPUT_TAIL: usize = 4096;
 /// Runs every command in order from `root`, stopping at the first failure.
 /// The error names the command and ends with the tail of its output.
 pub(super) async fn run(root: &Path, commands: &[String]) -> Result<(), String> {
+    let _turn = match commands.is_empty() {
+        true => None,
+        false => turn(root).await,
+    };
     for command in commands {
         run_one(root, command)
             .await
             .map_err(|why| format!("prepare command `{command}` in {}: {why}", root.display()))?;
     }
     Ok(())
+}
+
+/// This prepare's turn in the machine's run queue. `None` when the queue is
+/// off for this process or can't be used: it only schedules, so a prepare
+/// then runs without waiting.
+async fn turn(root: &Path) -> Option<Turn> {
+    if !run_queue::prepares_queue() {
+        return None;
+    }
+    let note = format!("prepare {}", root.display());
+    let waiter = RunQueue::machine()
+        .ok()?
+        .wait(RunClass::Prepare, &note)
+        .ok()?;
+    loop {
+        match waiter.try_start() {
+            Ok(Some(turn)) => return Some(turn),
+            // Dropping this future leaves the line: the waiter goes with it.
+            Ok(None) => tokio::time::sleep(WAIT_POLL).await,
+            Err(_) => return None,
+        }
+    }
 }
 
 async fn run_one(root: &Path, command: &str) -> Result<(), String> {
