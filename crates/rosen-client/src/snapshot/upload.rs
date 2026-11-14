@@ -10,7 +10,7 @@ use rosen_core::{FileMode, ObjectHasher, ObjectId};
 use rosen_protocol::{
     BlobChunk, ObjectUpload, Request, Response, UploadKind, UploadObject, OBJECT_CHUNK_BYTES,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -21,8 +21,8 @@ use std::time::SystemTime;
 /// larger than this goes in slices of the same size instead.
 pub(super) const BATCH_BYTES: usize = OBJECT_CHUNK_BYTES;
 
-/// How many times a large file whose length changes while it is hashed is
-/// hashed again before the snapshot gives up on it for now.
+/// How many times a large file that changes while it is hashed is hashed
+/// again before the snapshot counts it as busy and leaves it for later.
 const LARGE_HASH_TRIES: usize = 3;
 /// Bytes read at a time while hashing a large file.
 const HASH_PIECE: usize = 1 << 20;
@@ -65,21 +65,34 @@ impl ChangedBlob {
 pub struct ReadOutcome {
     /// The blobs the server may lack.
     pub changed: Vec<ChangedBlob>,
-    /// Files another process holds open, left at their indexed entry.
+    /// Files another process holds open or keeps writing, left at the
+    /// entry last captured for them.
     pub unreadable: BTreeSet<String>,
+    /// The entries this read replaced, for paths whose entry was captured
+    /// (on the server or in the journal): what a skipped file falls back to
+    /// should this snapshot fail.
+    pub previous: Vec<(String, Option<Entry>)>,
 }
+
+/// Paths whose last read was never captured, with the entry each had
+/// before it, which was. A file skipped later as held or busy falls back
+/// to that entry, since its indexed blob may be on neither the server nor
+/// the journal.
+pub type Fallback = HashMap<String, Option<Entry>>;
 
 /// Reads each candidate into the index. The blobs returned are those the
 /// server may lack: those whose content changed, and those of `unconfirmed`
 /// paths, whose last upload failed. Every file is read before the index
 /// changes, so a failed read leaves the index as it was and nothing is
 /// half-recorded. With `defer_unreadable`, a file another process holds open
-/// is skipped instead of failing the snapshot (issue #59).
+/// is skipped instead of failing the snapshot (issue #59), and so is a
+/// large file that keeps changing while it is read (#342).
 pub fn read_candidates(
     root: &Path,
     index: &mut Index,
     candidates: &BTreeSet<String>,
     unconfirmed: &BTreeSet<String>,
+    fallback: &Fallback,
     defer_unreadable: bool,
 ) -> Result<ReadOutcome, SnapshotError> {
     let paths: BTreeSet<&String> = candidates.iter().chain(unconfirmed).collect();
@@ -89,16 +102,27 @@ pub fn read_candidates(
         match read_file(root, path, index.files.get(path)) {
             Ok(file) => read.push((path, file)),
             // An unconfirmed path's indexed blob may be missing on the
-            // server, so the tree cannot fall back to it.
+            // server, so the tree falls back to the one last captured, and
+            // without that the snapshot cannot go on without the file.
             Err(SnapshotError::Io { source, .. })
-                if defer_unreadable && is_held(&source) && !unconfirmed.contains(path) =>
+                if defer_unreadable
+                    && is_held(&source)
+                    && (!unconfirmed.contains(path) || fallback.contains_key(path)) =>
             {
                 unreadable.insert(path.clone());
             }
             Err(err) => return Err(err),
         }
     }
+    for path in &unreadable {
+        match fallback.get(path) {
+            Some(Some(entry)) => _ = index.files.insert(path.clone(), entry.clone()),
+            Some(None) => _ = index.files.remove(path),
+            None => {}
+        }
+    }
     let mut changed = Vec::new();
+    let mut previous = Vec::new();
     for (path, file) in read {
         let Some((entry, blob)) = file else {
             // Deleted since the scan saw it.
@@ -112,11 +136,15 @@ pub fn read_candidates(
         if !same || unconfirmed.contains(path) {
             changed.push(blob);
         }
-        index.files.insert(path.clone(), entry);
+        let replaced = index.files.insert(path.clone(), entry);
+        if !same && !unconfirmed.contains(path) {
+            previous.push((path.clone(), replaced));
+        }
     }
     Ok(ReadOutcome {
         changed,
         unreadable,
+        previous,
     })
 }
 
@@ -124,11 +152,13 @@ pub fn read_candidates(
 /// executable or an exclusively opened database refuses with a sharing or
 /// lock violation, and a file being deleted refuses access. Such a file can
 /// be read later, so the snapshot keeps its last stored content until then,
-/// as git keeps the indexed blob of a path it cannot read.
+/// as git keeps the indexed blob of a path it cannot read. A large file
+/// that never holds still while it is hashed is busy and waits the same way.
 fn is_held(err: &io::Error) -> bool {
     const ERROR_SHARING_VIOLATION: i32 = 32;
     const ERROR_LOCK_VIOLATION: i32 = 33;
     err.kind() == io::ErrorKind::PermissionDenied
+        || err.kind() == io::ErrorKind::ResourceBusy
         || (cfg!(windows)
             && matches!(
                 err.raw_os_error(),
@@ -177,14 +207,17 @@ fn held(data: Vec<u8>) -> ReadBlob {
     (ObjectId::hash_object("blob", &data), data, None)
 }
 
-/// Hashes a file too large for one frame as it streams past. The git
-/// header names the length first, so a file whose length changes while it
-/// is read, as a write races the snapshot, is read again.
+/// Hashes a file too large for one frame as it streams past. A write that
+/// races the hash shows in the file's length or time, so the file is read
+/// again, and one that is still changing after a few tries is busy: its
+/// bytes would fail the hash check when sent. A write after the hash still
+/// fails one snapshot; the next finds the file busy.
 fn hash_large(path: &Path) -> io::Result<ReadBlob> {
     let mut piece = vec![0u8; HASH_PIECE];
     for _ in 0..LARGE_HASH_TRIES {
         let mut file = File::open(path)?;
-        let len = file.metadata()?.len();
+        let before = file.metadata()?;
+        let len = before.len();
         let mut hasher = ObjectHasher::new("blob", len);
         loop {
             match file.read(&mut piece) {
@@ -194,13 +227,18 @@ fn hash_large(path: &Path) -> io::Result<ReadBlob> {
                 Err(err) => return Err(err),
             }
         }
-        if let Some(id) = hasher.finish() {
-            let source = path.to_owned();
-            return Ok((id, Vec::new(), Some(LargeBlob { id, len, source })));
+        let after = file.metadata()?;
+        let still = after.len() == len && after.modified().ok() == before.modified().ok();
+        match hasher.finish() {
+            Some(id) if still => {
+                let source = path.to_owned();
+                return Ok((id, Vec::new(), Some(LargeBlob { id, len, source })));
+            }
+            _ => continue,
         }
     }
     let why = format!("{} kept changing while it was read", path.display());
-    Err(io::Error::other(why))
+    Err(io::Error::new(io::ErrorKind::ResourceBusy, why))
 }
 
 /// Windows has no executable bit, and R3 writes symlinks there as plain
