@@ -46,6 +46,35 @@ pub struct ObjectsStored {
     pub ids: Vec<ObjectId>,
 }
 
+/// Parameters of [`crate::Request::PutBlobChunk`]: one slice of a blob too
+/// large for a single frame. Chunks of one upload arrive in order, each at
+/// the offset the previous one ended; the first is at offset 0 and restarts
+/// the upload. The server stores the blob when the last byte arrives, and
+/// only if its bytes hash to `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobChunk {
+    /// Names this upload, so two clients sending the same blob never write
+    /// into each other's staging. Letters, digits and `-`, at most 64.
+    pub upload: String,
+    /// The blob the finished upload must hash to.
+    pub id: ObjectId,
+    /// The blob's whole length in bytes.
+    pub total: u64,
+    pub offset: u64,
+    #[serde(with = "base64_bytes")]
+    pub data: Vec<u8>,
+}
+
+/// The answer to [`crate::Request::PutBlobChunk`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobChunkStored {
+    /// Bytes of the upload the server holds so far.
+    pub received: u64,
+    /// True once the blob is in the store, which may be before the last
+    /// chunk when the server already held it; the client then stops.
+    pub stored: bool,
+}
+
 /// Parameters of [`crate::Request::Snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotRequest {
