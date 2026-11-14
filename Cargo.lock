@@ -991,6 +991,7 @@ name = "rosen-protocol"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "libc",
  "rosen-core",
  "serde",
  "serde_json",
@@ -1008,6 +1009,7 @@ dependencies = [
  "clap",
  "getrandom 0.3.4",
  "rcgen",
+ "ring",
  "rosen-client",
  "rosen-core",
  "rosen-merge",

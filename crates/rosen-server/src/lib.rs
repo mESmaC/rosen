@@ -66,6 +66,9 @@ pub struct ServerState {
     /// Shared by workspace reads, lists, diffs and writes across all transports.
     pub workspace_io: Arc<tokio::sync::Semaphore>,
     pub project_config: project_config::ConfigService,
+    /// Wakes the mirror task when the base appears without a land, as an
+    /// import does (SPEC R1). A wake during a push is kept for the next wait.
+    pub mirror_wake: tokio::sync::Notify,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
 }
@@ -94,6 +97,7 @@ impl ServerState {
             config,
             started: Instant::now(),
             network: OnceLock::new(),
+            mirror_wake: tokio::sync::Notify::new(),
             open_connections: AtomicU64::new(0),
             shutdown: watch::Sender::new(false),
         });
