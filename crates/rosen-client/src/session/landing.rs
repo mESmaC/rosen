@@ -73,6 +73,29 @@ impl Session {
         change: &str,
         dir: &Path,
     ) -> Result<MergeCheckout, Error> {
+        self.check_out(change, dir, false).await
+    }
+
+    /// Like [`Session::check_out_merge_result`], for a checker with no build
+    /// tree of its own to reuse: the directory comes from the warm pool when
+    /// it can, with the build output the pool prepared, so the checker's
+    /// first build compiles only what the change and the lands since the
+    /// pool's base touched. It takes one ready workspace from the pool,
+    /// which the daemon replaces.
+    pub async fn check_out_prepared_merge_result(
+        &self,
+        change: &str,
+        dir: &Path,
+    ) -> Result<MergeCheckout, Error> {
+        self.check_out(change, dir, true).await
+    }
+
+    async fn check_out(
+        &self,
+        change: &str,
+        dir: &Path,
+        prepared: bool,
+    ) -> Result<MergeCheckout, Error> {
         let merge = self.client.merge_result(change).await?;
         let Some(tree) = merge.tree else {
             return Ok(MergeCheckout {
@@ -81,10 +104,13 @@ impl Session {
                 report: None,
             });
         };
-        let report = self
-            .client
-            .materialise_tree(tree, dir, Options::default())
-            .await?;
+        let report = if prepared {
+            self.client.materialise_build_tree(tree, dir).await?
+        } else {
+            self.client
+                .materialise_tree(tree, dir, Options::default())
+                .await?
+        };
         Ok(MergeCheckout {
             merge,
             dir: Some(dir.to_path_buf()),

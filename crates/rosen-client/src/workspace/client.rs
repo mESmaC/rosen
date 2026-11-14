@@ -67,21 +67,7 @@ impl Client {
         // A ready workspace's stats were recorded before the take.
         let seed_stats = pooled.is_err();
         let report = match pooled {
-            Ok(taken) => Report {
-                method: if taken.from_template {
-                    super::Method::BlockClone
-                } else {
-                    super::Method::WarmPool
-                },
-                files: taken.files,
-                cloned: 0,
-                copied: 0,
-                written: 0,
-                bytes_written: 0,
-                fallback: None,
-                pool_missed: None,
-                prepared: taken.prepared,
-            },
+            Ok(taken) => pooled_report(&taken),
             Err(missed) => Report {
                 pool_missed: missed,
                 ..self
@@ -110,6 +96,31 @@ impl Client {
         .map_err(|error| Error::Unexpected(format!("tree cache seeding stopped: {error}")))??;
         self.register_workspace(change.change.id, dest).await?;
         Ok(report)
+    }
+
+    /// Materialises `tree` into the new directory `dest` for a checker to
+    /// build in: a ready workspace from the warm pool when one can be had,
+    /// brought to the tree, so the build output the pool prepared comes with
+    /// it and the first build compiles only what differs from the base. With
+    /// no pool, or none that can serve `dest`, the tree's files are written
+    /// as [`Client::materialise_tree`] writes them. Either way the directory
+    /// is a plain build tree: it is no workspace and nothing in it is
+    /// snapshotted.
+    pub async fn materialise_build_tree(
+        &self,
+        tree: ObjectId,
+        dest: &Path,
+    ) -> Result<Report, Error> {
+        self.ensure_local(tree).await?;
+        match self.take_workspace(tree, dest).await? {
+            Ok(taken) => Ok(pooled_report(&taken)),
+            Err(missed) => Ok(Report {
+                pool_missed: missed,
+                ..self
+                    .materialise_tree(tree, dest, Options::default())
+                    .await?
+            }),
+        }
     }
 
     /// Materialises any tree in the local store into the new directory
@@ -157,6 +168,25 @@ impl Client {
         .await
         .map_err(|error| Error::Unexpected(format!("load limits stopped: {error}")))?
         .map_err(|error| Error::Workspace(super::MaterialiseError::io(&path, error)))
+    }
+}
+
+/// The report of a workspace the daemon served from its pool or template.
+fn pooled_report(taken: &PooledWorkspace) -> Report {
+    Report {
+        method: if taken.from_template {
+            super::Method::BlockClone
+        } else {
+            super::Method::WarmPool
+        },
+        files: taken.files,
+        cloned: 0,
+        copied: 0,
+        written: 0,
+        bytes_written: 0,
+        fallback: None,
+        pool_missed: None,
+        prepared: taken.prepared,
     }
 }
 
