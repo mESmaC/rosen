@@ -1766,6 +1766,41 @@
         "land"
       ]
     },
+    "rosen.rebase/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.rebase/v1"
+        },
+        "rebase": {
+          "type": "object",
+          "properties": {
+            "change": {
+              "$ref": "#/$defs/ChangeRecord"
+            },
+            "workspace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "change",
+            "workspace"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "rebase"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "rebase"
+      ]
+    },
     "rosen.resolve/v1": {
       "type": "object",
       "properties": {

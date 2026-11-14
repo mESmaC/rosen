@@ -11,7 +11,7 @@
 //! of the server. Landing reaches them only through the traits below, so each
 //! can be wired in without touching the landing algorithm.
 
-mod conflict_routes;
+pub(crate) mod conflict_routes;
 mod engine;
 mod ledger;
 pub(crate) use ledger::ensure_schema;

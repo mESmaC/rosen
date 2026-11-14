@@ -388,7 +388,9 @@ fn refusal_status(
         }
         Refusal::Conflicts => {
             paths = super::conflict_routes::paths(state, change.id).map_err(land_body)?;
-            "the change has stored conflicts; resolve them with `rosen resolve`".into()
+            "the change has stored conflicts; run `rosen rebase` in its workspace to get \
+             conflict markers on the current base, combine both sides, then run `rosen resolve`"
+                .into()
         }
         Refusal::Unapproved => format!(
             "no approval for the current head {head}; a reviewer reads that head and runs \

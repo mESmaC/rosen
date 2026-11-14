@@ -21,6 +21,7 @@ pub const IMPORT_SCHEMA: &str = "rosen.import/v1";
 pub const LAND_SCHEMA: &str = "rosen.land/v1";
 pub const LOG_SCHEMA: &str = "rosen.log/v2";
 pub const OVERLAPS_SCHEMA: &str = "rosen.overlaps/v1";
+pub const REBASE_SCHEMA: &str = "rosen.rebase/v1";
 pub const RECEIPT_SCHEMA: &str = "rosen.receipt/v1";
 pub const RELEASE_SCHEMA: &str = "rosen.release/v1";
 pub const RESOLVE_SCHEMA: &str = "rosen.resolve/v1";
