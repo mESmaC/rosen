@@ -75,7 +75,7 @@ pub async fn watch(
         .map_err(watch_error)?;
     tokio::pin!(stop);
     let mut pending = Pending::new(Dirty::Full, Instant::now());
-    let mut failures = 0;
+    let mut backoff = Backoff::default();
     loop {
         let wake = pending.as_ref().map(Pending::due);
         tokio::select! {
@@ -85,32 +85,36 @@ pub async fn watch(
                 note(&mut snapshotter, &mut pending, event);
             }
             () = sleep_or_never(wake) => {
-                let dirty = pending.take().expect("a wake time means a pending snapshot").dirty;
-                let (back, result) = link.snapshot(snapshotter, dirty.clone()).await;
+                let due = pending.take().expect("a wake time means a pending snapshot");
+                let (back, result, attempt) = link.attempt(snapshotter, due, &backoff).await;
                 snapshotter = back;
-                // A captured snapshot is on the server or in the journal, so
-                // only the files it skipped need another read.
-                let left = if snapshotter.captured {
-                    Dirty::Paths(snapshotter.unreadable.clone())
-                } else {
-                    dirty
-                };
-                pending = after_attempt(result, left, &mut failures, &mut report)?;
+                pending = after_attempt(result, attempt, &mut backoff, &mut report)?;
             }
         }
     }
 }
 
+/// What one attempt left behind.
+struct Attempt {
+    /// The paths still to snapshot.
+    left: Dirty,
+    /// The attempt was captured but skipped files another process holds.
+    held: bool,
+    /// The attempt only wrote the journal, without trying the server.
+    journal_only: bool,
+}
+
 /// Reports one attempt and returns what is left to snapshot.
 fn after_attempt(
     result: Result<SnapshotReport, Error>,
-    left: Dirty,
-    failures: &mut u32,
+    attempt: Attempt,
+    backoff: &mut Backoff,
     report: &mut impl FnMut(WatchEvent),
 ) -> Result<Option<Pending>, Error> {
+    let left = attempt.left;
     match result {
         Ok(mut done) => {
-            *failures = 0;
+            *backoff = Backoff::default();
             for earlier in std::mem::take(&mut done.replayed) {
                 report(WatchEvent::Snapshot(earlier));
             }
@@ -125,12 +129,44 @@ fn after_attempt(
         // The change is closed or gone: no retry can store it.
         Err(err) if is_final(&err) => Err(err),
         Err(err) => {
-            *failures += 1;
+            // A journal-only re-read did not try the server, so it is no
+            // new failure and does not push the server's retry back.
+            if !attempt.journal_only {
+                backoff.failed();
+            }
             report(WatchEvent::Failed(err));
+            if attempt.held {
+                return Ok(Pending::reread(left, RETRY));
+            }
             // A captured attempt leaves no paths, and its retry only
             // replays the journal.
-            Ok(Pending::retry(left, backoff(*failures)))
+            Ok(Pending::retry(left, backoff.remaining()))
         }
+    }
+}
+
+/// Failed attempts in a row, and when the server may be tried again.
+#[derive(Default)]
+struct Backoff {
+    failures: u32,
+    next_try: Option<Instant>,
+}
+
+impl Backoff {
+    fn failed(&mut self) {
+        self.failures += 1;
+        self.next_try = Some(Instant::now() + backoff(self.failures));
+    }
+
+    /// Whether the server's retry is not due yet.
+    fn waiting(&self) -> bool {
+        self.next_try.is_some_and(|at| Instant::now() < at)
+    }
+
+    fn remaining(&self) -> Duration {
+        self.next_try.map_or(Duration::ZERO, |at| {
+            at.saturating_duration_since(Instant::now())
+        })
     }
 }
 
@@ -148,11 +184,44 @@ struct Link {
 }
 
 impl Link {
+    /// Takes the due snapshot and says what it left. A held file is read
+    /// again each second (R2), but the server is tried again only on the
+    /// backoff: until then, the re-read goes to the journal alone (#263).
+    async fn attempt(
+        &mut self,
+        snapshotter: Snapshotter,
+        due: Pending,
+        backoff: &Backoff,
+    ) -> (Snapshotter, Result<SnapshotReport, Error>, Attempt) {
+        let journal_only = due.reread_only && backoff.waiting();
+        let (snapshotter, result) = self
+            .snapshot(snapshotter, due.dirty.clone(), journal_only)
+            .await;
+        // A captured snapshot is on the server or in the journal, so only
+        // the files it skipped need another read.
+        let left = if snapshotter.captured {
+            Dirty::Paths(snapshotter.unreadable.clone())
+        } else {
+            due.dirty
+        };
+        let held = snapshotter.captured && !snapshotter.unreadable.is_empty();
+        let attempt = Attempt {
+            left,
+            held,
+            journal_only,
+        };
+        (snapshotter, result, attempt)
+    }
+
     async fn snapshot(
         &mut self,
         snapshotter: Snapshotter,
         dirty: Dirty,
+        journal_only: bool,
     ) -> (Snapshotter, Result<SnapshotReport, Error>) {
+        if journal_only {
+            return journal_snapshot(snapshotter, dirty).await;
+        }
         let client = match self.client.take() {
             Some(client) => client,
             None => match Client::connect(&self.endpoint).await {
@@ -180,6 +249,8 @@ struct Pending {
     last: Instant,
     /// Set after a failure: no snapshot before this time.
     not_before: Option<Instant>,
+    /// Only held files are due: no write came since they were skipped.
+    reread_only: bool,
 }
 
 impl Pending {
@@ -189,6 +260,7 @@ impl Pending {
             first: now,
             last: now,
             not_before: None,
+            reread_only: false,
         })
     }
 
@@ -201,6 +273,15 @@ impl Pending {
             first: now,
             last: now,
             not_before: Some(now + wait),
+            reread_only: false,
+        })
+    }
+
+    /// Held files to read again after `wait`.
+    fn reread(dirty: Dirty, wait: Duration) -> Option<Self> {
+        Self::retry(dirty, wait).map(|pending| Self {
+            reread_only: true,
+            ..pending
         })
     }
 
@@ -214,6 +295,7 @@ impl Pending {
         // A new write is captured on the usual schedule, durably in the
         // journal if the server is still away, whatever the retry pause.
         self.not_before = None;
+        self.reread_only = false;
         match (&mut self.dirty, more) {
             (Dirty::Full, _) => {}
             (dirty, Dirty::Full) => *dirty = Dirty::Full,
