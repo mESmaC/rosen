@@ -20,18 +20,7 @@ pub(super) fn load_or_capture(state: &ServerState, landed: ChangeId) -> LandResu
     if let Some(targets) = cached {
         return Ok(targets);
     }
-    // Overlap rebases only bring conflicts forward; each target still rebases
-    // when it lands. Claim release and marking the change landed wait on this
-    // capture, and a failure that persists (such as an unreadable project
-    // config at base) would fail every replay, so it saves an empty selection.
-    let targets =
-        overlaps::find(state, &Subject::Change(landed.to_string())).unwrap_or_else(|err| {
-            eprintln!(
-                "rosen-server: no overlap rebases after landing {landed}: \
-                 selecting overlaps failed: {err}"
-            );
-            Vec::new()
-        });
+    let targets = select(state, landed)?;
     state
         .changes
         .with_conn(|conn| {
@@ -65,6 +54,30 @@ pub(super) fn load_or_capture(state: &ServerState, landed: ChangeId) -> LandResu
             Ok(saved)
         })
         .map_err(backend)
+}
+
+/// The changes the landed change overlaps, for the selection to save.
+fn select(state: &ServerState, landed: ChangeId) -> LandResult<Vec<overlaps::Overlap>> {
+    // Overlap rebases only bring conflicts forward; each target still rebases
+    // when it lands. Claim release and marking the change landed wait on this
+    // capture, and a failure that persists (such as an unreadable project
+    // config at base) would fail every replay, so it saves an empty selection.
+    // A busy database or an I/O error may pass, and saving it would drop the
+    // overlapping changes' rebases for good, so it fails this run instead and
+    // the replay selects again while the claims are still held (issue #284).
+    match overlaps::find(state, &Subject::Change(landed.to_string())) {
+        Ok(targets) => Ok(targets),
+        Err(err) if err.may_pass() => Err(LandError::Backend(format!(
+            "selecting overlaps after landing {landed}: {err}"
+        ))),
+        Err(err) => {
+            eprintln!(
+                "rosen-server: no overlap rebases after landing {landed}: \
+                 selecting overlaps failed: {err}"
+            );
+            Ok(Vec::new())
+        }
+    }
 }
 
 fn ensure_schema(conn: &Connection) -> Result<(), ChangeError> {
