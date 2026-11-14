@@ -50,7 +50,8 @@ async fn offline_versions_survive_restart_and_replay_in_order() {
     // A new write after restart must follow both durable intermediate versions.
     std::fs::write(workspace.join("main.rs"), b"third edit").unwrap();
     let (state, result) = take_snapshot(&client, state, Dirty::Full, None).await;
-    result.unwrap();
+    // Each replayed record is reported, not only the last one sent.
+    assert_eq!(result.unwrap().replayed.len(), 2);
     drop(state);
     assert_eq!(pending_journal(&workspace).unwrap(), 0);
     verify_history(&client, &store, &change.change.id.to_string(), &workspace).await;
