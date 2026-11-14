@@ -438,7 +438,6 @@ impl Landing {
         attempts: u32,
     ) -> LandResult<Attempt> {
         let landed = landed_commit(facts, base, tree, receipt.as_ref())?;
-        let receipt = receipt.map(|signed| signed.receipt);
         // Written before the swap: if the swap loses, the object is an
         // unreferenced orphan, which is harmless because objects are immutable.
         let commit = self.deps.writer.write_landed(&landed)?;

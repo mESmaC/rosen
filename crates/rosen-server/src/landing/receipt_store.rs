@@ -217,12 +217,16 @@ impl Ledger {
     }
 }
 
-/// True when the stored row for `receipt`'s binding still verifies, read
-/// on the caller's connection so it can run inside the land transaction.
+/// True when the stored row for `signed`'s binding is still the one the
+/// land read, signed by the same machine, and still verifies. Read on the
+/// caller's connection so it can run inside the land transaction. A row a
+/// different machine's receipt replaced fails it, so the landed trailer
+/// never names a machine other than the one whose receipt counted.
 pub(super) fn stored_receipt_verifies(
     connection: &Connection,
-    receipt: &Receipt,
+    signed: &SignedReceipt,
 ) -> LandResult<bool> {
+    let receipt = &signed.receipt;
     let stored: Option<(String, String, String)> = connection
         .query_row(
             "SELECT submitter, machine, signature FROM receipts
@@ -239,7 +243,9 @@ pub(super) fn stored_receipt_verifies(
     let Some((submitter, machine, signature)) = stored else {
         return Ok(false);
     };
-    let unchanged = submitter == receipt.submitter.as_str();
+    let unchanged = submitter == receipt.submitter.as_str()
+        && machine == signed.machine
+        && signature == signed.signature;
     Ok(unchanged && verifies(connection, receipt, &machine, &signature)?)
 }
 
