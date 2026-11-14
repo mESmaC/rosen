@@ -7,6 +7,13 @@
 //! file named for its ID and kind. Every later slice seeks into that file.
 //! A copy unused for an hour is swept when the next one is made; a reader
 //! that loses its copy to the sweep only pays for one more inflate.
+//!
+//! Copies are renamed into place unsynced, which keeps making one cheap.
+//! After an OS crash a copy can hold zeros where its data never reached the
+//! disk, at the right length, and a reader's hash check would refuse it on
+//! every try. Only a crash of the whole machine loses unsynced data, and
+//! the server always starts again after one, so [`clear`] at start removes
+//! every copy that could be torn (issue #336).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom};
@@ -110,6 +117,17 @@ fn make_copy(store: &LooseObjectStore, dir: &Path, id: &ObjectId) -> Result<bool
         }
     }
     Ok(true)
+}
+
+/// Removes every copy and unfinished copy. Best effort: one that cannot be
+/// removed now is swept once it is an hour old.
+pub fn clear(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let _ = fs::remove_file(entry.path());
+    }
 }
 
 fn copy_path(dir: &Path, id: &ObjectId, kind: ObjectKind) -> PathBuf {
