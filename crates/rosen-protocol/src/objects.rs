@@ -65,6 +65,12 @@ pub struct EnsureObjects {
     /// A tree, commit or blob. For a commit, its tree is made local too, but
     /// not its parents.
     pub root: ObjectId,
+    /// A sparse workspace's chosen paths, `/`-separated from the root tree
+    /// (R3); empty for the whole tree. A cache then fetches every tree under
+    /// `root` but only the blobs at or under these paths. The server's store
+    /// is always complete, so the server ignores them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sparse: Vec<String>,
 }
 
 /// The answer to [`crate::Request::EnsureObjects`].

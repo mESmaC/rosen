@@ -29,7 +29,18 @@ impl Client {
     /// store. On the server's machine this only checks the root is there.
     /// Returns how many objects the daemon fetched.
     pub async fn ensure_local(&self, root: ObjectId) -> Result<u64, Error> {
-        let request = Request::EnsureObjects(EnsureObjects { root });
+        self.ensure_sparse_local(root, Vec::new()).await
+    }
+
+    /// Like [`Client::ensure_local`] for a sparse workspace holding `sparse`
+    /// (normalised, as [`super::Sparse::chosen`] gives them): every tree, but
+    /// only the blobs at or under those paths. Empty means the whole tree.
+    pub async fn ensure_sparse_local(
+        &self,
+        root: ObjectId,
+        sparse: Vec<String>,
+    ) -> Result<u64, Error> {
+        let request = Request::EnsureObjects(EnsureObjects { root, sparse });
         match self.request(request).await? {
             Response::ObjectsLocal(local) => Ok(local.fetched),
             other => Err(unexpected(other)),
@@ -102,8 +113,9 @@ impl Client {
         options: Options,
     ) -> Result<Report, Error> {
         // On a machine that is not the server, the daemon first fetches what
-        // its cache lacks (D8).
-        self.ensure_local(tree).await?;
+        // its cache lacks (D8): for a sparse workspace, only its blobs (R3).
+        self.ensure_sparse_local(tree, options.sparse.chosen())
+            .await?;
         let store = self.local_store().await?;
         let limits_root = PathBuf::from(self.status().await?.data_dir).join("workspace-limits");
         let dest = dest.to_path_buf();
