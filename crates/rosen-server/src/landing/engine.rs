@@ -186,12 +186,22 @@ impl Landing {
     pub fn submit_receipt(&self, signed: SignedReceipt) -> LandResult<SignedReceipt> {
         let receipt = &signed.receipt;
         let facts = self.facts(&receipt.change)?;
-        let required = self.check_set_at(&self.current_base()?)?;
+        let base_ref = &self.config.base_ref;
+        let known_base = self.ledger.base_seq(base_ref, &receipt.base)?.is_some();
+        // A receipt is bound to the check set named at its own base (R8 step
+        // 1), so a config land since then that renames the set does not make
+        // a faithful receipt for that base invalid. A base the ref never held
+        // is refused below; until then the current base words the refusal.
+        let named_at = if known_base {
+            receipt.base
+        } else {
+            self.current_base()?
+        };
+        let required = self.check_set_at(&named_at)?;
         receipt
             .check_binding(&facts.head, facts.state, &required)
             .map_err(|refusal| LandError::InvalidReceipt(refusal.to_string()))?;
-        let base_ref = &self.config.base_ref;
-        if self.ledger.base_seq(base_ref, &receipt.base)?.is_none() {
+        if !known_base {
             let refusal = ReceiptRefusal::UnknownBase {
                 base: receipt.base,
                 base_ref: base_ref.clone(),
@@ -267,7 +277,10 @@ impl Landing {
             return Ok(RestackReport::default());
         };
         // A finished run announced the land; announcing it here would repeat it.
-        match self.ledger.post_land_pending(&record.ref_name, &record.commit) {
+        match self
+            .ledger
+            .post_land_pending(&record.ref_name, &record.commit)
+        {
             Ok(true) => {}
             Ok(false) => return Ok(RestackReport::default()),
             Err(error) => return Err(error.to_string()),
@@ -465,9 +478,9 @@ impl Landing {
             // approval no longer covers them.
             // An untrusted receipt is decided afresh too: the retry finds it
             // invalid and refuses the land.
-            CasResult::BaseMoved { .. }
-            | CasResult::ChangeMoved
-            | CasResult::ReceiptUntrusted => Ok(Attempt::Retry),
+            CasResult::BaseMoved { .. } | CasResult::ChangeMoved | CasResult::ReceiptUntrusted => {
+                Ok(Attempt::Retry)
+            }
             CasResult::OpenConflicts => Ok(Attempt::Done(LandOutcome::Refused(Refusal::Conflicts))),
             CasResult::AlreadyLanded { commit } => {
                 Ok(Attempt::Done(LandOutcome::AlreadyLanded { commit }))

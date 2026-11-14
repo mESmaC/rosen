@@ -95,8 +95,25 @@ impl ReceiptService {
             submitter: request.submitter,
         };
         let signature = request.signature;
-        // The check set is the one the base's configuration names, so a
-        // change cannot rename the check set its own receipt must cover.
+        let (ledger, base_ref, current) = self.check(state, &receipt, change)?;
+        let signed = self.signed(state, &ledger, receipt, origin, signature)?;
+        let stored = ledger.put_receipt(&signed).map_err(land_body)?;
+        Ok(ReceiptRecord {
+            base_current: stored.receipt.base == current,
+            receipt: stored.receipt,
+            machine: stored.machine,
+            base_ref,
+        })
+    }
+
+    /// Checks the receipt's binding and base (R8 step 1). Returns the ledger,
+    /// the base ref and the current base commit.
+    fn check(
+        &self,
+        state: &ServerState,
+        receipt: &Receipt,
+        change: &rosen_core::Change,
+    ) -> Result<(Arc<Ledger>, String, rosen_core::ObjectId), ErrorBody> {
         let (base_ref, in_force) = state
             .project_config
             .at_base()
@@ -107,28 +124,34 @@ impl ReceiptService {
                     "the project has no base yet; import a repository with `rosen import`",
                 )
             })?;
-        let current = in_force.commit;
-        let required = &in_force.config.checks.pre_land.name;
-        receipt
-            .check_binding(&change.head, change.state, required)
-            .map_err(refusal_body)?;
         let ledger = self.ledger()?;
-        if ledger
+        let known_base = ledger
             .base_seq(&base_ref, &receipt.base)
             .map_err(land_body)?
-            .is_none()
-        {
+            .is_some();
+        // The check set is the one the receipt's base names, as a base's
+        // configuration, never the change's, so a change cannot rename the
+        // set its own receipt must cover. A config land since that base that
+        // renames the set does not make a faithful receipt for it invalid.
+        // A base the ref never held is refused below, so the current base
+        // words the refusal until then.
+        let required = if known_base {
+            let at_base = state
+                .project_config
+                .at_commit(&receipt.base)
+                .map_err(|err| ErrorBody::new(ErrorCode::Internal, err.to_string()))?;
+            at_base.config.checks.pre_land.name.clone()
+        } else {
+            in_force.config.checks.pre_land.name.clone()
+        };
+        receipt
+            .check_binding(&change.head, change.state, &required)
+            .map_err(refusal_body)?;
+        if !known_base {
             let base = receipt.base;
             return Err(refusal_body(ReceiptRefusal::UnknownBase { base, base_ref }));
         }
-        let signed = self.signed(state, &ledger, receipt, origin, signature)?;
-        let stored = ledger.put_receipt(&signed).map_err(land_body)?;
-        Ok(ReceiptRecord {
-            base_current: stored.receipt.base == current,
-            receipt: stored.receipt,
-            machine: stored.machine,
-            base_ref,
-        })
+        Ok((ledger, base_ref, in_force.commit))
     }
 
     /// Attaches the submitting machine's signature. A remote machine's must
