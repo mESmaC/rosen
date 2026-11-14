@@ -64,6 +64,31 @@ impl LooseObjectStore {
         }
         Ok(temp)
     }
+
+    /// Checks the file already stored for `id`. A put must verify it rather
+    /// than trust its existence: a truncated or damaged file would otherwise
+    /// make the put report success while every read fails as corrupt.
+    fn existing_state(&self, id: &ObjectId, path: &Path) -> Result<Existing, StoreError> {
+        match fs::read(path) {
+            Ok(compressed) => match decode_loose(id, &compressed) {
+                Ok(_) => Ok(Existing::Valid),
+                Err(StoreError::Corrupt { .. }) => Ok(Existing::Damaged),
+                Err(error) => Err(error),
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Existing::Absent),
+            // A directory or other non-file squatting on the object path is
+            // not something a put can repair by replacing; report it.
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+/// What a put finds at an object's path before writing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Existing {
+    Absent,
+    Valid,
+    Damaged,
 }
 
 /// Creates a fresh temporary file in `fan_out`. A crashed process can leave
@@ -127,22 +152,30 @@ impl ObjectStore for LooseObjectStore {
     fn put_raw(&self, kind: ObjectKind, data: &[u8]) -> Result<ObjectId, StoreError> {
         let id = ObjectId::hash_object(kind.as_str(), data);
         let path = self.object_path(&id);
-        // Objects are immutable and content-addressed: an existing file
-        // already holds exactly these bytes.
-        if path.is_file() {
+        let existing = self.existing_state(&id, &path)?;
+        if existing == Existing::Valid {
             return Ok(id);
         }
         let fan_out = path.parent().expect("object path has a fan-out directory");
         let temp = self.write_temp(fan_out, kind, data)?;
-        // move_atomic refuses to replace an existing file and makes the new
-        // directory entry durable (write-through on Windows, a directory fsync
-        // elsewhere). Without that, a crash just after a land could leave the
-        // base ref naming a commit whose file never reached the disk.
-        if let Err(error) = atomicwrites::move_atomic(&temp, &path) {
+        // Both moves make the new directory entry durable (write-through on
+        // Windows, a directory fsync elsewhere). Without that, a crash just
+        // after a land could leave the base ref naming a commit whose file
+        // never reached the disk.
+        let published = match existing {
+            // A damaged file (disk fault, or a foreign writer sharing
+            // `objects/`) would otherwise fail every later read forever;
+            // this put is the one chance to repair it.
+            Existing::Damaged => atomicwrites::replace_atomic(&temp, &path),
+            // move_atomic refuses to replace, so a concurrent writer's file
+            // is never swapped out under a reader.
+            _ => atomicwrites::move_atomic(&temp, &path),
+        };
+        if let Err(error) = published {
             let _ = fs::remove_file(&temp);
-            // A concurrent writer of the same object got there first; its
-            // file holds identical bytes.
-            if !path.is_file() {
+            // A concurrent writer of the same object got there first and
+            // its file holds identical bytes; anything else is a failure.
+            if self.existing_state(&id, &path)? != Existing::Valid {
                 return Err(error.into());
             }
         }
@@ -219,4 +252,30 @@ fn read_header_len(id: &ObjectId, mut inflated: impl Read) -> Result<u64, StoreE
         .ok_or_else(|| corrupt("bad header".into()))?;
     ObjectKind::parse(kind.as_bytes()).map_err(|error| corrupt(error.to_string()))?;
     len.parse().map_err(|_| corrupt("bad length".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Risk (SPEC D5, authoritative store): a put that trusts a damaged file
+    /// reports success while every read of that object fails for good, and
+    /// a crashed process's leftover temp name fails a later put.
+    #[test]
+    fn put_repairs_damaged_object_and_skips_stale_temp_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LooseObjectStore::open(dir.path()).unwrap();
+        let id = store.put_raw(ObjectKind::Blob, b"hello").unwrap();
+        let path = store.object_path(&id);
+        fs::write(&path, b"").unwrap();
+        assert!(store.get_raw(&id).is_err());
+        assert_eq!(store.put_raw(ObjectKind::Blob, b"hello").unwrap(), id);
+        assert_eq!(store.get_raw(&id).unwrap().unwrap().data, b"hello");
+
+        let next = TEMP_COUNTER.load(Ordering::Relaxed);
+        let stale = path.with_file_name(format!("tmp_obj_{}_{next}", std::process::id()));
+        fs::write(stale, b"left by a crash").unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(store.put_raw(ObjectKind::Blob, b"hello").unwrap(), id);
+    }
 }
