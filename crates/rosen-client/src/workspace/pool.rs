@@ -119,11 +119,17 @@ impl WarmPool {
             return Outcome::Ok(Response::PoolTaken(None));
         }
         let root = state.root.clone();
-        if let Some(index) = pick(&state.ready, tree) {
+        while let Some(index) = pick(&state.ready, tree) {
             // Removing the slot under the same lock as refresh makes
             // ownership exclusive even when two clients ask together.
             let slot = state.ready.remove(index);
-            let result = publish_slot(&slot, dest, &root).await;
+            let result = publish_slot(&slot, dest.clone(), &root).await;
+            if result.is_err() && vanished(&slot) {
+                // Removed behind the daemon's back: re-queuing it would fail
+                // every later take that draws it (#82). The worker refills.
+                self.wake.notify_one();
+                continue;
+            }
             let prepared = slot.prep == Prep::Done;
             let files = slot.files;
             if result.is_err() {
@@ -155,6 +161,10 @@ impl WarmPool {
             return Outcome::Ok(Response::PoolTaken(None));
         };
         let result = publish_slot(&slot, dest, root).await;
+        if result.is_err() && vanished(&slot) {
+            // Dropped, as in `take`; the client materialises without the pool.
+            return Outcome::Ok(Response::PoolTaken(None));
+        }
         let files = slot.files;
         if result.is_err() {
             // Its prepare ran at another tree; the worker refreshes it and
@@ -164,6 +174,13 @@ impl WarmPool {
         }
         taken(result, files, false)
     }
+}
+
+/// A slot whose directory is gone, as when an operator or antivirus removed
+/// it. Checked only after its rename failed, so a healthy take pays nothing.
+fn vanished(slot: &Slot) -> bool {
+    std::fs::symlink_metadata(&slot.path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 fn taken(result: std::io::Result<()>, files: u64, prepared: bool) -> Outcome {
