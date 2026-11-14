@@ -54,6 +54,47 @@ impl ObjectId {
     }
 }
 
+/// [`ObjectId::hash_object`] for a body fed in pieces, so a body too large
+/// to hold in memory can be hashed as it streams past. The header names the
+/// length up front, so the pieces must add up to exactly that length.
+#[derive(Clone)]
+pub struct ObjectHasher {
+    hasher: Sha1,
+    declared: u64,
+    fed: u64,
+}
+
+impl ObjectHasher {
+    pub fn new(kind: &str, len: u64) -> Self {
+        let mut hasher = Sha1::new();
+        hasher.update(kind.as_bytes());
+        hasher.update(b" ");
+        hasher.update(len.to_string().as_bytes());
+        hasher.update([0u8]);
+        Self {
+            hasher,
+            declared: len,
+            fed: 0,
+        }
+    }
+
+    pub fn update(&mut self, piece: &[u8]) {
+        self.hasher.update(piece);
+        self.fed = self.fed.saturating_add(piece.len() as u64);
+    }
+
+    /// Body bytes fed so far.
+    pub fn fed(&self) -> u64 {
+        self.fed
+    }
+
+    /// The ID, or `None` when the pieces did not add up to the declared
+    /// length: the header would then have named the wrong length.
+    pub fn finish(self) -> Option<ObjectId> {
+        (self.fed == self.declared).then(|| ObjectId(self.hasher.finalize().into()))
+    }
+}
+
 impl fmt::Display for ObjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_hex())

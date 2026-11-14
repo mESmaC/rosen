@@ -11,4 +11,4 @@ mod backend;
 mod loose;
 
 pub use backend::{MemoryObjectStore, ObjectStore, RawObject, StoreError};
-pub use loose::LooseObjectStore;
+pub use loose::{LooseObjectStore, PendingObject, ReadWithin};
