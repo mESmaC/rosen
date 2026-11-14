@@ -14,16 +14,20 @@
 //! bounded channel keeping up. Delivery is at least once: a subscriber's
 //! cursor moves only when it acknowledges what it has handled, and an event
 //! whose write fails is queued and retried in order rather than dropped.
+//! A producer that must not lose its event to a stop between its commit and
+//! the event's write stages it with the commit; see [`outbox`].
 
 pub mod audience;
 mod channel;
 mod landing_sink;
+mod outbox;
 mod pending;
 mod store;
 
 pub use audience::Concern;
 pub use channel::ChannelLine;
 pub use landing_sink::LandingEvents;
+pub use outbox::{ensure_schema as ensure_outbox_schema, stage, Staged};
 pub use store::Page;
 
 use crate::ServerState;
@@ -131,6 +135,43 @@ impl EventLog {
         detail: serde_json::Value,
         concern: &Concern,
     ) -> u64 {
+        self.enqueue_about(kind, change, detail, concern, None)
+    }
+
+    /// Moves every staged event into the log, oldest first (see [`outbox`]).
+    /// Call it after the transaction that staged them commits, with no
+    /// registry connection held: finding an event's audience reads it. A
+    /// write that fails stays queued and retried; a stop before then leaves
+    /// the event staged, and the next start delivers it.
+    pub fn deliver_staged(&self) {
+        let staged = match self.with_db(true, |conn| Ok(outbox::staged(conn)?)) {
+            Ok(staged) => staged.unwrap_or_default(),
+            Err(err) => {
+                eprintln!("rosen-server: staged events wait for the next delivery: {err}");
+                return;
+            }
+        };
+        for (id, event) in staged {
+            let Staged {
+                kind,
+                change,
+                detail,
+                concern,
+            } = event;
+            self.enqueue_about(kind, change, detail, &concern, Some(id));
+        }
+    }
+
+    /// Queues an event about `change` with its audience, moved from outbox
+    /// row `outbox` when it was staged.
+    fn enqueue_about(
+        &self,
+        kind: EventKind,
+        change: Option<String>,
+        detail: serde_json::Value,
+        concern: &Concern,
+        outbox: Option<i64>,
+    ) -> u64 {
         // Found before taking the log's lock: it reads the change registry
         // and trees, and must not hold up the log's readers meanwhile.
         let concern = change
@@ -140,7 +181,7 @@ impl EventLog {
             (Some(id), Some(concern), Some(conn)) => audience_or_everyone(conn, id, concern),
             _ => None,
         };
-        self.enqueue(kind, change.clone(), detail, audience)
+        self.enqueue(kind, change.clone(), detail, audience, outbox)
     }
 
     /// Both producers use this queue so a failed write cannot let a channel
@@ -151,6 +192,7 @@ impl EventLog {
         change: Option<String>,
         detail: serde_json::Value,
         audience: impl FnOnce(Option<&Connection>) -> Option<std::collections::BTreeSet<String>>,
+        outbox: Option<i64>,
     ) -> u64 {
         let inner = &self.inner;
         inner.with_slot(|slot| {
@@ -163,6 +205,7 @@ impl EventLog {
                 change,
                 detail,
                 audience,
+                outbox,
             });
             let stored = match opened {
                 Ok(Some(conn)) => pending::flush(inner, conn, &mut slot.queue),

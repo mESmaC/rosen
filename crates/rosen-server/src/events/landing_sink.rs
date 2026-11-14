@@ -13,6 +13,13 @@ pub struct LandingEvents(pub Arc<ServerState>);
 
 impl EventSink for LandingEvents {
     fn emit(&self, event: LandingEvent) {
+        // Conflict routing staged this event with the conflicts it stored
+        // (`conflict_routes::record`), so a stop after that commit cannot
+        // lose it (R9). Only its delivery is left.
+        if matches!(event, LandingEvent::Conflict { .. }) {
+            self.0.events.deliver_staged();
+            return;
+        }
         let (kind, change, detail) = parts(event);
         self.0
             .events

@@ -1,9 +1,11 @@
-//! R8: attach a failed merge to its change before publishing the conflict event.
+//! R8: attach a failed merge to its change, staging its conflict event with it.
 use super::{ChangeId, CommitId, LandError, LandResult, Routing};
+use crate::events::Staged;
 use crate::history::trees::{content, file_at};
 use crate::{changes, conflicts, ServerState};
 use rosen_core::{Conflict, ObjectId, ObjectKind};
 use rosen_merge::{merge_file, FileConflict, FileMerge, Hunk, MergePolicy};
+use rosen_protocol::EventKind;
 use rosen_store::{LooseObjectStore, ObjectStore};
 
 pub(super) fn record(
@@ -41,6 +43,10 @@ pub(super) fn record(
             }
             conflicts::save(&tx, &id.to_string(), &set)
                 .map_err(|e| changes::ChangeError::Corrupt(e.to_string()))?;
+            // The conflict event commits with the conflicts, so a stop before
+            // it is stored cannot lose it (R9); the sink delivers it.
+            let detail = serde_json::json!({ "paths": paths });
+            crate::events::stage(&tx, &Staged::about(EventKind::Conflict, id, detail))?;
             tx.commit()?;
             Ok(Routing::Stored)
         })

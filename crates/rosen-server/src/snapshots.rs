@@ -7,6 +7,7 @@
 //! only has to check that its root tree is present.
 
 use crate::changes::{self, ChangeError};
+use crate::events::Staged;
 use crate::ServerState;
 use rosen_core::{
     Change, ChangeId, ChangeParent, Commit, FileMode, ObjectId, ObjectKind, Signature, Snapshot,
@@ -63,10 +64,9 @@ pub async fn put_objects(state: &Arc<ServerState>, upload: ObjectUpload) -> Outc
 pub async fn snapshot(state: &Arc<ServerState>, request: SnapshotRequest) -> Outcome {
     on_blocking(state, move |state| {
         let store = LooseObjectStore::open(state.config.objects_dir())?;
-        let (outcome, conflicts) = record(state, &store, &request)?;
+        let outcome = record(state, &store, &request)?;
         if outcome.recorded {
-            publish(state, &outcome, request.message.is_some());
-            publish_conflicts(state, &outcome, conflicts);
+            delivered(state);
         }
         Ok(Response::Snapshot(outcome))
     })
@@ -144,7 +144,10 @@ fn store_blobs(store: &(dyn ObjectStore + Sync), blobs: &[&[u8]]) -> Result<(), 
     let writer = || {
         while let Some(data) = blobs.get(next.fetch_add(1, Ordering::Relaxed)) {
             if let Err(err) = store.put_raw(ObjectKind::Blob, data) {
-                failure.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(err);
+                failure
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get_or_insert(err);
                 // Skip the rest: the batch fails, and the client resends it.
                 next.store(blobs.len(), Ordering::Relaxed);
             }
@@ -190,25 +193,17 @@ fn record(
     state: &ServerState,
     store: &dyn ObjectStore,
     request: &SnapshotRequest,
-) -> Result<(SnapshotOutcome, Vec<String>), SnapshotError> {
+) -> Result<SnapshotOutcome, SnapshotError> {
     if request.tree != empty_tree() && !store.contains(&request.tree)? {
         return Err(SnapshotError::MissingTree(request.tree));
     }
     let ctx = crate::history::open(state).map_err(history_failure)?;
-    let mut outcome = None;
-    state.changes.with_conn(|conn| {
+    let outcome = state.changes.with_conn(|conn| {
         let current = changes::get(conn, changes::resolve(conn, &request.change)?)?;
         let head = merge_snapshot(&ctx, &current.change, request)?;
-        let paths = head
-            .conflicts
-            .iter()
-            .map(|(path, _)| path.clone())
-            .collect();
-        let recorded = record_at(conn, store, request, &current.change, head)?;
-        outcome = Some((recorded, paths));
-        Ok(())
+        record_at(conn, store, request, &current.change, head)
     })?;
-    Ok(outcome.expect("set by every successful path above"))
+    Ok(outcome)
 }
 
 /// Records while the caller holds the registry connection, allowing a tree
@@ -256,6 +251,7 @@ fn record_at(
             .clone()
             .map_or(SnapshotKind::Automatic, SnapshotKind::Named),
     };
+    let events = events(id, commit_id, request, &head.conflicts);
     Ok(SnapshotOutcome {
         change: changes::record_snapshot_merged(
             conn,
@@ -263,10 +259,33 @@ fn record_at(
             snapshot,
             head.tree,
             head.conflicts,
+            &events,
         )?,
         commit: Some(commit_id),
         recorded: true,
     })
+}
+
+/// The events a recorded snapshot reports, staged with it (R9): `snapshot`,
+/// and `conflict` naming the files a pending rebase left markers in.
+fn events(
+    change: ChangeId,
+    commit: ObjectId,
+    request: &SnapshotRequest,
+    conflicts: &Regions,
+) -> Vec<Staged> {
+    let detail = serde_json::json!({
+        "commit": commit,
+        "tree": request.tree,
+        "named": request.message.is_some(),
+    });
+    let mut events = vec![Staged::about(EventKind::Snapshot, change, detail)];
+    let paths: Vec<&String> = conflicts.iter().map(|(path, _)| path).collect();
+    if !paths.is_empty() {
+        let detail = serde_json::json!({ "paths": paths });
+        events.push(Staged::about(EventKind::Conflict, change, detail));
+    }
+    events
 }
 
 /// An automatic snapshot of the tree the change already holds stores
@@ -343,16 +362,10 @@ fn first_parent(conn: &Connection, parent: ChangeParent) -> Result<Option<Object
     }
 }
 
-pub(crate) fn publish(state: &ServerState, outcome: &SnapshotOutcome, named: bool) {
-    let change = &outcome.change.change;
-    let detail = serde_json::json!({
-        "commit": outcome.commit,
-        "tree": change.snapshots.last().map(|s| s.tree),
-        "named": named,
-    });
-    state
-        .events
-        .publish(EventKind::Snapshot, Some(change.id.to_string()), detail);
+/// Stores the events a recorded snapshot staged, then refreshes the stacks
+/// its new head may move. Call after the snapshot's transaction commits.
+pub(crate) fn delivered(state: &ServerState) {
+    state.events.deliver_staged();
     crate::stacks::refresh(state);
 }
 
@@ -411,10 +424,12 @@ fn merge_snapshot(
             .map_err(|err| ChangeError::Io(std::io::Error::other(err.to_string())))?;
     let Some(tree) = merged.tree else {
         let paths = merged.conflicts.join(", ");
-        return Err(ChangeError::Refused(rosen_core::Error::InvalidPath(format!(
-            "{paths}: the snapshot and the pending rebase need a file and a directory \
+        return Err(ChangeError::Refused(rosen_core::Error::InvalidPath(
+            format!(
+                "{paths}: the snapshot and the pending rebase need a file and a directory \
              at one path; local edits kept"
-        ))));
+            ),
+        )));
     };
     let conflicts = merged
         .conflicts
@@ -429,19 +444,6 @@ fn merge_snapshot(
         })
         .collect::<Result<Regions, _>>()?;
     Ok(MergedHead { tree, conflicts })
-}
-
-/// A snapshot whose edits conflicted with a pending rebase names the files
-/// now holding markers, as a conflicting rebase does.
-fn publish_conflicts(state: &ServerState, outcome: &SnapshotOutcome, paths: Vec<String>) {
-    if paths.is_empty() {
-        return;
-    }
-    state.events.publish(
-        EventKind::Conflict,
-        Some(outcome.change.change.id.to_string()),
-        serde_json::json!({ "paths": paths }),
-    );
 }
 
 fn history_failure(err: crate::history::HistoryError) -> SnapshotError {

@@ -69,17 +69,27 @@ pub fn holds_kind_after(conn: &Connection, cursor: u64, kind: EventKind) -> rusq
 
 /// Appends one event in a single transaction with its audience. `None` as
 /// the audience broadcasts it. Returns the new sequence number.
+///
+/// A staged event names its outbox row, which the same transaction deletes.
+/// Returns `None`, appending nothing, when that row is already gone: another
+/// delivery stored the event first.
 pub fn append(
     conn: &mut Connection,
     kind: EventKind,
     change: Option<&str>,
     detail: &serde_json::Value,
     audience: Option<&BTreeSet<String>>,
-) -> rusqlite::Result<u64> {
+    outbox: Option<i64>,
+) -> rusqlite::Result<Option<u64>> {
     let tx = conn.transaction()?;
+    if let Some(id) = outbox {
+        if !super::outbox::take(&tx, id)? {
+            return Ok(None);
+        }
+    }
     let seq = append_in(&tx, kind, change, detail, audience)?;
     tx.commit()?;
-    Ok(seq)
+    Ok(Some(seq))
 }
 
 /// Appends inside the caller's transaction, allowing channel state and its
@@ -211,7 +221,7 @@ fn read_event(row: &Row) -> rusqlite::Result<(u64, Option<Event>)> {
     Ok((seq, Some(event)))
 }
 
-fn kind_text(kind: EventKind) -> String {
+pub(super) fn kind_text(kind: EventKind) -> String {
     match serde_json::to_value(kind) {
         Ok(serde_json::Value::String(text)) => text,
         _ => format!("{kind:?}").to_lowercase(),

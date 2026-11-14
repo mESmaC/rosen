@@ -56,6 +56,10 @@ pub fn claim(
             params![id.to_string(), pattern.as_str()],
         )?;
     }
+    // Staged with the grant, so a stop after the commit cannot lose it (R9).
+    let detail = serde_json::json!({ "paths": texts(&patterns) });
+    let event = crate::events::Staged::about(rosen_protocol::EventKind::Claim, id, detail);
+    crate::events::stage(&tx, &event)?;
     tx.commit()?;
     Ok(ClaimOutcome::Granted {
         change: id,
