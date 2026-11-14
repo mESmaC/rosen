@@ -48,9 +48,9 @@ impl Client {
         for entry in entries {
             let path = entry?.path();
             if path.extension().is_some_and(|ext| ext == "json") {
-                records.push(
-                    serde_json::from_slice(&std::fs::read(path)?).map_err(std::io::Error::other)?,
-                );
+                if let Some(bytes) = read_listed(&path).await? {
+                    records.push(serde_json::from_slice(&bytes).map_err(std::io::Error::other)?);
+                }
             }
         }
         Ok(records)
@@ -127,6 +127,34 @@ impl Client {
 
     async fn workspace_registry(&self) -> Result<PathBuf, Error> {
         Ok(PathBuf::from(self.status().await?.data_dir).join("workspaces"))
+    }
+}
+
+/// Tries of a record read that Windows denies while the file is being
+/// deleted or replaced, and the pause between them.
+const DENIED_TRIES: u32 = 20;
+const DENIED_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Reads a record the listing found, or `None` when another process
+/// unregistered it after the directory was read: a cleanup pass or another
+/// client's abandon must not fail this one's listing (issue #170). Windows
+/// denies access to a file for the moment it is deleted or replaced, so a
+/// denial is retried briefly; one that persists is a real permission error.
+async fn read_listed(path: &Path) -> Result<Option<Vec<u8>>, Error> {
+    let mut tries = 0;
+    loop {
+        match std::fs::read(path) {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                tries += 1;
+                if tries >= DENIED_TRIES {
+                    return Err(err.into());
+                }
+                tokio::time::sleep(DENIED_PAUSE).await;
+            }
+            Err(err) => return Err(err.into()),
+        }
     }
 }
 
