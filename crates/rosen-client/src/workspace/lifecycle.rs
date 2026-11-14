@@ -98,23 +98,12 @@ impl Client {
         self.ensure_sparse_local(marker.tree, marker.sparse.clone())
             .await?;
         let store = self.local_store().await?;
-        let mut scan = Snapshotter::open(&store, root)?;
-        scan.hold_for_deletion()?;
-        let journal = crate::snapshot::pending_journal(root)?;
-        if !deletion_permitted(0, journal, 0) {
-            return Err(kept(format!(
-                "unuploaded files: {}",
-                scan.unuploaded_paths()?.join(", ")
-            )));
-        }
-        let paths = if staged {
-            scan.unstored_paths_on_disk()?
-        } else {
-            scan.unstored_paths()?
-        };
-        if !deletion_permitted(0, 0, paths.len()) {
-            return Err(kept(format!("unstored files: {}", paths.join(", "))));
-        }
+        let path = root.to_path_buf();
+        // Opening waits for any snapshot writer, such as another process's
+        // upload, so it must not hold a runtime worker meanwhile (#93).
+        let scan = tokio::task::spawn_blocking(move || hold_if_durable(&store, &path, staged))
+            .await
+            .map_err(|err| Error::Unexpected(format!("workspace check stopped: {err}")))??;
         // The marker is only a hint: verify that this tree really belongs
         // to a snapshot stored by this server before authorising removal.
         let change = self.change_show(&marker.change.to_string()).await?;
@@ -227,6 +216,33 @@ fn reject_symlink(root: &Path) -> Result<(), Error> {
         return Err(kept("root is a symlink"));
     }
     Ok(())
+}
+
+/// Opens the workspace, holds it for deletion and checks that every file is
+/// stored on the server. Blocking.
+fn hold_if_durable(
+    store: &dyn rosen_store::ObjectStore,
+    root: &Path,
+    staged: bool,
+) -> Result<Snapshotter, Error> {
+    let mut scan = Snapshotter::open(store, root)?;
+    scan.hold_for_deletion()?;
+    let journal = crate::snapshot::pending_journal(root)?;
+    if !deletion_permitted(0, journal, 0) {
+        return Err(kept(format!(
+            "unuploaded files: {}",
+            scan.unuploaded_paths()?.join(", ")
+        )));
+    }
+    let paths = if staged {
+        scan.unstored_paths_on_disk()?
+    } else {
+        scan.unstored_paths()?
+    };
+    if !deletion_permitted(0, 0, paths.len()) {
+        return Err(kept(format!("unstored files: {}", paths.join(", "))));
+    }
+    Ok(scan)
 }
 
 fn kept(reason: impl std::fmt::Display) -> Error {

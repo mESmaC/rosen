@@ -51,7 +51,13 @@ pub async fn watch(
     let client = Client::connect(endpoint).await.ok();
     let mut snapshotter = match &client {
         Some(client) => client.open_snapshotter(root).await?,
-        None => Snapshotter::open_offline(root)?,
+        // Opening waits for another writer's upload; keep it off the runtime.
+        None => {
+            let root = root.to_path_buf();
+            tokio::task::spawn_blocking(move || Snapshotter::open_offline(&root))
+                .await
+                .map_err(|err| Error::Unexpected(format!("workspace open stopped: {err}")))??
+        }
     };
     snapshotter.defer_unreadable();
     let mut link = Link {
