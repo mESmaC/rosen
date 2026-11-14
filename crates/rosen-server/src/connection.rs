@@ -13,6 +13,7 @@ use rosen_protocol::{
     negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Outcome, Request,
     RequestEnvelope, ServerFrame, SUPPORTED_VERSIONS,
 };
+use std::future::Future;
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -69,11 +70,17 @@ pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, acces
     let _open = state.track_connection();
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut presented = None;
-    let admit = |credential: Option<&str>| match access {
-        Access::Local => true,
-        Access::Network => {
-            presented = credential.map(str::to_owned);
-            credential.is_none() || credential.is_some_and(|given| state.credential_matches(given))
+    let admit = |credential: Option<String>| {
+        if access == Access::Network {
+            presented = credential.clone();
+        }
+        let state = Arc::clone(&state);
+        async move {
+            match (access, credential) {
+                (Access::Network, Some(given)) => state.credential_matches(&given).await,
+                // A local client, or a network peer that may only enroll.
+                _ => true,
+            }
         }
     };
     match handshake(&mut reader, &mut writer, admit).await {
@@ -106,28 +113,34 @@ pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, acces
 /// Reads the client's hello and answers it. `admit` decides whether the
 /// hello's credential lets the peer in. Returns false when the client was
 /// refused or left before saying hello.
-pub(crate) async fn handshake(
+pub(crate) async fn handshake<Admit: Future<Output = bool>>(
     reader: &mut ReadHalf<BoxStream>,
     writer: &mut WriteHalf<BoxStream>,
-    admit: impl FnOnce(Option<&str>) -> bool,
+    admit: impl FnOnce(Option<String>) -> Admit,
 ) -> io::Result<bool> {
     let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame::<_, ClientFrame>(reader))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no hello within the timeout"))??;
     let reply = match hello {
         None => return Ok(false),
-        Some(ClientFrame::Hello { credential, .. }) if !admit(credential.as_deref()) => {
-            reject("the machine credential is missing or not accepted".to_owned())
+        Some(ClientFrame::Hello {
+            credential,
+            versions,
+            ..
+        }) => {
+            if !admit(credential).await {
+                reject("the machine credential is missing or not accepted".to_owned())
+            } else if let Some(version) = negotiate_version(&versions) {
+                ServerFrame::Welcome {
+                    version,
+                    server: SERVER_NAME.to_owned(),
+                }
+            } else {
+                reject(format!(
+                    "no common protocol version; client offered {versions:?}"
+                ))
+            }
         }
-        Some(ClientFrame::Hello { versions, .. }) => match negotiate_version(&versions) {
-            Some(version) => ServerFrame::Welcome {
-                version,
-                server: SERVER_NAME.to_owned(),
-            },
-            None => reject(format!(
-                "no common protocol version; client offered {versions:?}"
-            )),
-        },
         Some(_) => reject("the first frame must be hello".to_owned()),
     };
     let accepted = matches!(reply, ServerFrame::Welcome { .. });
@@ -201,13 +214,13 @@ impl Session {
     /// other frame releases it. Returns false when the client broke the
     /// protocol and the connection should close.
     async fn handle_frame(&mut self, body: &[u8], permit: OwnedSemaphorePermit) -> bool {
-        if self.access == Access::Network
-            && self
-                .credential
-                .as_deref()
-                .is_some_and(|c| !self.state.credential_matches(c))
-        {
-            return false;
+        // SPEC R14: every network request rechecks the machine's status, so a
+        // revoked machine's next frame is refused. `dispatch` and `subscribe`
+        // rely on this check rather than reading SQLite again.
+        if let (Access::Network, Some(credential)) = (self.access, &self.credential) {
+            if !self.state.credential_matches(credential).await {
+                return false;
+            }
         }
         match decode_body::<ClientFrame>(body) {
             // Only the server's own machine may stop it or use its warm pool
@@ -231,12 +244,7 @@ impl Session {
                 true
             }
             Ok(ClientFrame::Subscribe { after, subscriber }) => {
-                if self.access == Access::Network
-                    && !self
-                        .credential
-                        .as_deref()
-                        .is_some_and(|c| self.state.credential_matches(c))
-                {
+                if self.access == Access::Network && self.credential.is_none() {
                     return false;
                 }
                 self.subscribe(after, subscriber);
@@ -258,9 +266,8 @@ impl Session {
                     Request::MachineEnroll { .. }
                     | Request::MachineRotate { .. }
                     | Request::MachinePending { .. } => true,
-                    _ => credential
-                        .as_deref()
-                        .is_some_and(|c| state.credential_matches(c)),
+                    // `handle_frame` checked it while reading this frame.
+                    _ => credential.is_some(),
                 };
             let outcome = if allowed {
                 // A network peer is never the server's own machine, even
@@ -388,11 +395,7 @@ impl Admitted {
         if at.elapsed() < CREDENTIAL_RECHECK {
             return true;
         }
-        // SQLite I/O, so off the async workers like the log reads below.
-        let (state, given) = (Arc::clone(state), credential.clone());
-        let passed = tokio::task::spawn_blocking(move || state.credential_matches(&given))
-            .await
-            .unwrap_or(false);
+        let passed = state.credential_matches(credential).await;
         *at = Instant::now();
         if !passed {
             refused.notify_one();

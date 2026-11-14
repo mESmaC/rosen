@@ -32,7 +32,7 @@ pub async fn serve(stream: BoxStream, state: Arc<CacheState>) {
     let _open = state.track_connection();
     let (mut reader, mut writer) = tokio::io::split(stream);
     // The local transport is already limited to the OS user.
-    match handshake(&mut reader, &mut writer, |_| true).await {
+    match handshake(&mut reader, &mut writer, |_| async { true }).await {
         Ok(true) => {}
         Ok(false) => return,
         Err(err) => {
