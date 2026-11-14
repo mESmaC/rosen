@@ -17,7 +17,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{ReadHalf, WriteHalf};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 /// A client that connects but never says hello is dropped after this long, so
@@ -27,6 +27,13 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Frames queued for the writer. Bounded so a client that stops reading slows
 /// its own requests and events instead of growing server memory.
 const OUTBOX_CAPACITY: usize = 256;
+
+/// Requests one connection may have running at once. The outbox alone does
+/// not bound memory: a request whose answer cannot be queued still holds its
+/// task. With this cap the reader stops taking frames once every slot is
+/// busy, so a client that never reads its answers is pushed back through the
+/// transport instead of making the server spawn a task per unread request.
+const MAX_IN_FLIGHT: usize = 256;
 
 /// Events read from the log per query, so a subscriber far behind catches
 /// up in bounded steps instead of loading its whole backlog at once.
@@ -79,6 +86,7 @@ pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, acces
         access,
         credential: presented,
         outbox,
+        in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         subscription: None,
         machine_agent: None,
     };
@@ -142,6 +150,8 @@ struct Session {
     state: Arc<ServerState>,
     access: Access,
     outbox: Outbox,
+    /// One permit per running request; see [`MAX_IN_FLIGHT`].
+    in_flight: Arc<Semaphore>,
     credential: Option<String>,
     subscription: Option<JoinHandle<()>>,
 }
@@ -149,6 +159,15 @@ struct Session {
 impl Session {
     async fn read_frames(&mut self, reader: &mut ReadHalf<BoxStream>) {
         loop {
+            // Take a request slot before reading, so a client with every slot
+            // busy is not read from at all until one of its requests ends.
+            let slot = Arc::clone(&self.in_flight).acquire_owned();
+            let permit = tokio::select! {
+                permit = slot => permit,
+                _ = self.state.shutdown_requested() => return,
+            };
+            // The session never closes its semaphore, so this cannot fail.
+            let Ok(permit) = permit else { return };
             let read = tokio::select! {
                 read = read_frame_body(reader) => read,
                 _ = self.state.shutdown_requested() => return,
@@ -161,15 +180,16 @@ impl Session {
                     return;
                 }
             };
-            if !self.handle_frame(&body).await {
+            if !self.handle_frame(&body, permit).await {
                 return;
             }
         }
     }
 
-    /// Acts on one frame. Returns false when the client broke the protocol and
-    /// the connection should close.
-    async fn handle_frame(&mut self, body: &[u8]) -> bool {
+    /// Acts on one frame. A request keeps `permit` until it is answered; any
+    /// other frame releases it. Returns false when the client broke the
+    /// protocol and the connection should close.
+    async fn handle_frame(&mut self, body: &[u8], permit: OwnedSemaphorePermit) -> bool {
         if self.access == Access::Network
             && self
                 .credential
@@ -196,7 +216,7 @@ impl Session {
                 self.outbox.send(response).await.is_ok()
             }
             Ok(ClientFrame::Request { id, request }) => {
-                self.dispatch(id, request);
+                self.dispatch(id, request, permit);
                 true
             }
             Ok(ClientFrame::Subscribe { after, subscriber }) => {
@@ -216,7 +236,7 @@ impl Session {
         }
     }
 
-    fn dispatch(&self, id: u64, request: Request) {
+    fn dispatch(&self, id: u64, request: Request, permit: OwnedSemaphorePermit) {
         let state = Arc::clone(&self.state);
         let outbox = self.outbox.clone();
         let credential = self.credential.clone();
@@ -247,6 +267,9 @@ impl Session {
                 ))
             };
             let _ = outbox.send(ServerFrame::Response { id, outcome }).await;
+            // Freed only once the answer is queued, so a request blocked on a
+            // full outbox still counts against the connection.
+            drop(permit);
         });
     }
 
