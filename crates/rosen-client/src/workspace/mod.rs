@@ -121,6 +121,8 @@ pub enum MaterialiseError {
     UnsupportedName(String),
     #[error("block clone of {0} does not hold the source's bytes")]
     CloneMismatch(PathBuf),
+    #[error("the source workspace holds a link or file at tracked directory {0}")]
+    TrackedDirNotDir(PathBuf),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error("{}: {source}", path.display())]
@@ -305,6 +307,7 @@ fn from_source(
 ) -> Result<Report, MaterialiseError> {
     let cloned =
         clone::clone_workspace(&source.dir, root, sparse, clone::pick_probe(&before.files))?;
+    clone::check_tracked_dirs(root, before)?;
     clone::clear_for_tree(root, before, target)?;
     let changed = bring_to_tree(root, before, target)?;
     let bytes = write_all(store, root, &changed)?;
