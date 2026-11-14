@@ -123,10 +123,16 @@ fn get(conn: &Connection, id: &str) -> Result<MachineRecord, ErrorBody> {
     .ok_or_else(|| ErrorBody::new(ErrorCode::NotFound, format!("no machine {id:?}")))
 }
 
+/// Activates a pending machine. Its credential lasts 30 days from approval,
+/// not from the request (R14): a machine approved days after it asked would
+/// otherwise get a shortened credential, or an already expired one that
+/// neither authenticates nor rotates. The machine's daemon still holds the
+/// request-time expiry, so it simply rotates early.
 pub fn approve(conn: &Connection, id: &str) -> Result<MachineRecord, ErrorBody> {
+    let expires_at = super::now() + super::credentials::LIFETIME;
     conn.execute(
-        "UPDATE machines SET status='active' WHERE id=?1 AND status='pending'",
-        [id],
+        "UPDATE machines SET status='active', expires_at=?2 WHERE id=?1 AND status='pending'",
+        rusqlite::params![id, expires_at],
     )
     .map_err(database)?;
     let record = get(conn, id)?;
