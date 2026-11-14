@@ -18,7 +18,8 @@ use rosen_protocol::{
 };
 use rosen_store::{LooseObjectStore, ObjectStore, StoreError};
 use rusqlite::Connection;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, thiserror::Error)]
@@ -85,17 +86,29 @@ async fn on_blocking(
     }
 }
 
-/// Stores the batch in order. A tree whose entries are not all stored is
-/// refused, and so is everything after it, so the store never holds an
-/// incomplete tree.
+/// Stores the batch's blobs, then its trees in order. A tree whose entries
+/// are not all stored is refused, and so is every tree after it, so the
+/// store never holds an incomplete tree.
+///
+/// Blobs name nothing, so they are stored first and in parallel: each loose
+/// object is synced on its own, and on NTFS one sync at a time made a burst
+/// of a few hundred files take seconds (#58). Trees are few, and each may
+/// name an earlier one, so they stay in order.
 pub fn store_objects(
-    store: &dyn ObjectStore,
+    store: &(dyn ObjectStore + Sync),
     upload: &ObjectUpload,
 ) -> Result<Vec<ObjectId>, SnapshotError> {
+    let blobs: Vec<&[u8]> = upload
+        .objects
+        .iter()
+        .filter(|object| object.kind == UploadKind::Blob)
+        .map(|object| object.data.as_slice())
+        .collect();
+    store_blobs(store, &blobs)?;
     let mut ids = Vec::with_capacity(upload.objects.len());
     for object in &upload.objects {
         let id = match object.kind {
-            UploadKind::Blob => store.put_raw(ObjectKind::Blob, &object.data)?,
+            UploadKind::Blob => ObjectId::hash_object("blob", &object.data),
             UploadKind::Tree => {
                 let id = ObjectId::hash_object("tree", &object.data);
                 let tree = match rosen_core::Object::decode_body(ObjectKind::Tree, &object.data) {
@@ -110,6 +123,42 @@ pub fn store_objects(
         ids.push(id);
     }
     Ok(ids)
+}
+
+/// More writers than this only queue behind the file system.
+const MAX_BLOB_WRITERS: usize = 16;
+
+/// Stores `blobs` on up to [`MAX_BLOB_WRITERS`] threads, returning the first
+/// failure. Every blob that succeeded is durable either way.
+fn store_blobs(store: &(dyn ObjectStore + Sync), blobs: &[&[u8]]) -> Result<(), SnapshotError> {
+    let writers = blobs.len().min(MAX_BLOB_WRITERS);
+    if writers <= 1 {
+        for data in blobs {
+            store.put_raw(ObjectKind::Blob, data)?;
+        }
+        return Ok(());
+    }
+    let next = AtomicUsize::new(0);
+    let failure = Mutex::new(None);
+    let writer = || {
+        while let Some(data) = blobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+            if let Err(err) = store.put_raw(ObjectKind::Blob, data) {
+                failure.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(err);
+                // Skip the rest: the batch fails, and the client resends it.
+                next.store(blobs.len(), Ordering::Relaxed);
+            }
+        }
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..writers {
+            scope.spawn(writer);
+        }
+        writer();
+    });
+    match failure.into_inner().unwrap_or_else(|p| p.into_inner()) {
+        Some(err) => Err(err.into()),
+        None => Ok(()),
+    }
 }
 
 /// Every entry but a gitlink must be stored. Gitlinks name commits in other
