@@ -95,6 +95,34 @@ fn target(db: &Connection, x: &str) -> String {
     ["a", "b", "c"][seq.parse::<usize>().unwrap() - 2].into()
 }
 
+/// Crash 0 dies inside `c`'s land transaction. Crash 1 dies right after it
+/// commits, at the first post-land write: the overlap selection, keyed by
+/// the landed commit, as a target row or as the marker of an empty one.
+fn inject_crash(db: &Connection, crash: u32, c: &str) {
+    let abort = "BEGIN SELECT RAISE(ABORT, 'crash'); END";
+    let landed = format!("(SELECT commit_id FROM base_history WHERE change_id = '{c}')");
+    let triggers = match crash {
+        0 => vec![("crash", "base_history", format!("NEW.change_id = '{c}'"))],
+        1 => vec![
+            (
+                "crash",
+                "landing_overlap_targets",
+                format!("NEW.landed = {landed}"),
+            ),
+            (
+                "crash_marker",
+                "landing_overlap_batches",
+                format!("NEW.landed = {landed}"),
+            ),
+        ],
+        _ => vec![],
+    };
+    for (name, table, when) in triggers {
+        let sql = format!("CREATE TRIGGER {name} BEFORE INSERT ON {table} WHEN {when} {abort}");
+        db.execute_batch(&sql).unwrap();
+    }
+}
+
 fn root(state: &State) {
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let (tree, author) = (
@@ -147,14 +175,7 @@ async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
         db.execute_batch(&unfinish(&a)).unwrap();
     }
     ready(&first, &db, c.clone()).await;
-    // Crash 0 dies inside the land transaction; crash 1 right after it commits.
-    let tables = [
-        "base_history WHEN NEW.change_id",
-        "landing_overlap_batches WHEN NEW.landed",
-    ];
-    if let Some(on) = tables.get(crash as usize) {
-        db.execute_batch(&format!("CREATE TRIGGER crash BEFORE INSERT ON {on} = '{c}' BEGIN SELECT RAISE(ABORT, 'crash'); END")).unwrap();
-    }
+    inject_crash(&db, crash, &c);
     let outcome = dispatch(&first, Land { change: c.clone() }).await;
     first.landing.settle();
     assert_eq!(
@@ -162,7 +183,16 @@ async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
         crash == 0,
         "{outcome:?}"
     );
-    db.execute_batch("DROP TRIGGER IF EXISTS crash").unwrap();
+    // Crash 1 must really cut the post-land run short, or its rows pass as
+    // if nothing crashed (issue #196).
+    let unfinished = format!("change_id = '{c}' AND post_land_done = 0");
+    let unfinished = read(
+        &db,
+        &format!("SELECT COUNT(*) FROM base_history WHERE {unfinished}"),
+    );
+    assert_eq!(unfinished, if crash == 1 { "1" } else { "0" });
+    db.execute_batch("DROP TRIGGER IF EXISTS crash; DROP TRIGGER IF EXISTS crash_marker")
+        .unwrap();
     if crash == 2 {
         db.execute_batch(&unfinish(&c)).unwrap();
     }
