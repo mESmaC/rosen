@@ -56,6 +56,17 @@ pub fn last_seq(conn: &Connection) -> rusqlite::Result<u64> {
     Ok(max.map_or(0, to_seq))
 }
 
+/// True when an event of `kind` is stored after `cursor`. Stops at the first
+/// match, so an idle reader costs one short range scan, not a full page.
+pub fn holds_kind_after(conn: &Connection, cursor: u64, kind: EventKind) -> rusqlite::Result<bool> {
+    let from = i64::try_from(cursor).unwrap_or(i64::MAX);
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE seq > ?1 AND kind = ?2)",
+        params![from, kind_text(kind)],
+        |row| row.get(0),
+    )
+}
+
 /// Appends one event in a single transaction with its audience. `None` as
 /// the audience broadcasts it. Returns the new sequence number.
 pub fn append(

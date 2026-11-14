@@ -71,7 +71,7 @@ pub async fn run(state: Arc<ServerState>) {
     loop {
         // Lands after this point wake the next sync, even if they arrive
         // while this one is pushing.
-        let seen = state.events.last_seq();
+        let seen = state.events.announced_seq();
         let keep_going = match sync_once(&state.config).await {
             Ok(synced) => {
                 if failures > 0 {
@@ -172,15 +172,21 @@ fn adopt_configured_remote(
 
 /// Waits until a land is published after `seen`, or an import wakes the
 /// mirror. Returns false when the server is shutting down instead.
-async fn wait_for_land(state: &ServerState, wake: &mut watch::Receiver<u64>, seen: u64) -> bool {
+async fn wait_for_land(
+    state: &Arc<ServerState>,
+    wake: &mut watch::Receiver<u64>,
+    seen: u64,
+) -> bool {
     let mut seen = seen;
     loop {
-        let fresh = state.events.after(seen);
-        if fresh.iter().any(|event| event.kind == EventKind::Landed) {
-            return true;
-        }
-        if let Some(last) = fresh.last() {
-            seen = last.seq;
+        // Marked before the read: an event announced after this wakes the
+        // next pass, and every event up to `tip` is visible to the read.
+        let tip = *wake.borrow_and_update();
+        match landed_after(state, seen).await {
+            Ok(true) => return true,
+            Ok(false) => seen = seen.max(tip),
+            // Keeps `seen`, so the next wake reads these events again.
+            Err(err) => eprintln!("rosen-server: mirror could not read events: {err}"),
         }
         tokio::select! {
             changed = wake.changed() => {
@@ -192,6 +198,16 @@ async fn wait_for_land(state: &ServerState, wake: &mut watch::Receiver<u64>, see
             () = state.shutdown_requested() => return false,
         }
     }
+}
+
+/// True when a land is stored after `seen`, read on the blocking pool so a
+/// publisher holding the log's lock cannot park an async worker.
+async fn landed_after(state: &Arc<ServerState>, seen: u64) -> Result<bool, String> {
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || state.events.holds_kind_after(seen, EventKind::Landed))
+        .await
+        .map_err(|join| join.to_string())?
+        .map_err(|err| err.to_string())
 }
 
 async fn sleep_unless_shutdown(state: &ServerState, delay: Duration) -> bool {

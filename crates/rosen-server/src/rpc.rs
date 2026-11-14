@@ -193,7 +193,7 @@ fn status(state: &ServerState) -> ServerStatus {
         data_dir: state.config.data_dir.display().to_string(),
         uptime_ms: u64::try_from(state.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         open_connections: state.open_connections(),
-        last_event: state.events.last_seq(),
+        last_event: state.events.announced_seq(),
         listen: network.as_ref().map(|(address, _)| address.to_string()),
         fingerprint: network.map(|(_, fingerprint)| fingerprint),
         upstream: None,
