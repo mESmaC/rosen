@@ -30,6 +30,16 @@ impl Snapshotter {
             .collect())
     }
 
+    /// Names files added, changed or removed on disk since the newest
+    /// captured snapshot: the stored one, or the last offline journal record
+    /// when records wait. With [`Snapshotter::unuploaded_paths`] it names
+    /// everything the server does not hold yet (`rosen status`, R10). Like
+    /// [`Snapshotter::unstored_paths`] it rereads every file and changes
+    /// nothing; call it on a freshly opened snapshotter.
+    pub fn uncaptured_paths(&mut self) -> Result<Vec<String>, SnapshotError> {
+        Ok(self.scan_differences()?.into_keys().collect())
+    }
+
     /// Each differing path, and whether a file exists on disk at it.
     fn differences(&mut self) -> Result<BTreeMap<String, bool>, SnapshotError> {
         if self.index.build_trees()?.root != self.marker.tree {
@@ -38,6 +48,12 @@ impl Snapshotter {
                 "reopen the stored snapshot before deletion",
             ));
         }
+        self.scan_differences()
+    }
+
+    /// Each path where the disk differs from the index, and whether a file
+    /// exists on disk at it. The index is left as it was.
+    fn scan_differences(&mut self) -> Result<BTreeMap<String, bool>, SnapshotError> {
         let mut scanned = Index {
             files: self.index.files.clone(),
             gitlinks: self.index.gitlinks.clone(),
