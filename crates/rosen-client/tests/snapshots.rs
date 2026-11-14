@@ -45,17 +45,27 @@ async fn a_write_is_stored_within_two_seconds_and_ignored_files_never_are() {
         .unwrap();
     let mut events = client.subscribe(None).await.unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let (snapshotted, mut snapshots) = tokio::sync::mpsc::unbounded_channel();
     let watcher = tokio::spawn({
         let (endpoint, workspace) = (endpoint.clone(), workspace.clone());
         async move {
             let stopped = async {
                 let _ = stopped.await;
             };
-            let failed = |event| assert!(!matches!(event, WatchEvent::Failed(_)), "{event:?}");
-            watch(&endpoint, &workspace, stopped, failed).await
+            let report = |event| {
+                assert!(!matches!(event, WatchEvent::Failed(_)), "{event:?}");
+                let _ = snapshotted.send(());
+            };
+            watch(&endpoint, &workspace, stopped, report).await
         }
     });
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The 2 s bound runs from a write to a running watcher. Its start-up
+    // scan is not part of it, and on a loaded machine (issue #330) it can
+    // take longer than any fixed pause, so wait for its first snapshot.
+    tokio::time::timeout(Duration::from_secs(60), snapshots.recv())
+        .await
+        .expect("the watcher's first snapshot within 60 s")
+        .unwrap();
 
     std::fs::create_dir(workspace.join("build")).unwrap();
     std::fs::write(workspace.join("build/out.bin"), b"build output").unwrap();
