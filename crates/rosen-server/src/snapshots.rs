@@ -63,9 +63,10 @@ pub async fn put_objects(state: &Arc<ServerState>, upload: ObjectUpload) -> Outc
 pub async fn snapshot(state: &Arc<ServerState>, request: SnapshotRequest) -> Outcome {
     on_blocking(state, move |state| {
         let store = LooseObjectStore::open(state.config.objects_dir())?;
-        let outcome = record(state, &store, &request)?;
+        let (outcome, conflicts) = record(state, &store, &request)?;
         if outcome.recorded {
             publish(state, &outcome, request.message.is_some());
+            publish_conflicts(state, &outcome, conflicts);
         }
         Ok(Response::Snapshot(outcome))
     })
@@ -183,12 +184,13 @@ fn ensure_complete(
 
 /// Writes the snapshot commit and appends it to the change, holding the
 /// registry's connection throughout, so two snapshots of one change can never
-/// both pick the same parent commit.
+/// both pick the same parent commit. Also returns the paths whose conflicts
+/// the snapshot stored.
 fn record(
     state: &ServerState,
     store: &dyn ObjectStore,
     request: &SnapshotRequest,
-) -> Result<SnapshotOutcome, SnapshotError> {
+) -> Result<(SnapshotOutcome, Vec<String>), SnapshotError> {
     if request.tree != empty_tree() && !store.contains(&request.tree)? {
         return Err(SnapshotError::MissingTree(request.tree));
     }
@@ -197,7 +199,13 @@ fn record(
     state.changes.with_conn(|conn| {
         let current = changes::get(conn, changes::resolve(conn, &request.change)?)?;
         let head = merge_snapshot(&ctx, &current.change, request)?;
-        outcome = Some(record_at(conn, store, request, &current.change, head)?);
+        let paths = head
+            .conflicts
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect();
+        let recorded = record_at(conn, store, request, &current.change, head)?;
+        outcome = Some((recorded, paths));
         Ok(())
     })?;
     Ok(outcome.expect("set by every successful path above"))
@@ -212,7 +220,13 @@ pub(crate) fn record_on(
 ) -> Result<SnapshotOutcome, ChangeError> {
     let id = changes::resolve(conn, &request.change)?;
     let current = changes::get(conn, id)?;
-    record_at(conn, store, request, &current.change, request.tree)
+    record_at(
+        conn,
+        store,
+        request,
+        &current.change,
+        MergedHead::clean(request.tree),
+    )
 }
 
 fn record_at(
@@ -220,11 +234,11 @@ fn record_at(
     store: &dyn ObjectStore,
     request: &SnapshotRequest,
     expected: &Change,
-    head: ObjectId,
+    head: MergedHead,
 ) -> Result<SnapshotOutcome, ChangeError> {
     let id = expected.id;
     let current = changes::get(conn, id)?;
-    if request.message.is_none() && holds_tree(&current.change, request.tree) {
+    if request.message.is_none() && holds_tree(&current.change, request) {
         let commit = current.change.snapshots.last().map(|s| s.commit);
         return Ok(SnapshotOutcome {
             change: current,
@@ -243,7 +257,13 @@ fn record_at(
             .map_or(SnapshotKind::Automatic, SnapshotKind::Named),
     };
     Ok(SnapshotOutcome {
-        change: changes::record_snapshot_merged(conn, expected, snapshot, head)?,
+        change: changes::record_snapshot_merged(
+            conn,
+            expected,
+            snapshot,
+            head.tree,
+            head.conflicts,
+        )?,
         commit: Some(commit_id),
         recorded: true,
     })
@@ -251,9 +271,21 @@ fn record_at(
 
 /// An automatic snapshot of the tree the change already holds stores
 /// nothing: the watcher may resend after a lost answer, or after a write
-/// that put a file back as it was.
-fn holds_tree(change: &Change, tree: ObjectId) -> bool {
-    change.head == tree
+/// that put a file back as it was. Before the owner applies a server
+/// rebase, the head is the merge of the latest snapshot, so a resend of
+/// that snapshot's tree from the old basis is held too.
+fn holds_tree(change: &Change, request: &SnapshotRequest) -> bool {
+    change.head == request.tree || resends_latest(change, request)
+}
+
+/// The workspace has not applied the head yet and names the latest
+/// snapshot's tree, whose edits the head already holds.
+fn resends_latest(change: &Change, request: &SnapshotRequest) -> bool {
+    request.from.is_some_and(|from| from != change.head)
+        && change
+            .snapshots
+            .last()
+            .is_some_and(|s| s.tree == request.tree)
 }
 
 fn snapshot_commit(
@@ -332,30 +364,84 @@ fn store_failure(err: StoreError) -> ChangeError {
     ChangeError::Io(std::io::Error::other(err.to_string()))
 }
 
+type Regions = Vec<(String, Vec<rosen_core::Conflict>)>;
+
+/// The head a snapshot gives its change, and the conflicts stored with it.
+struct MergedHead {
+    tree: ObjectId,
+    conflicts: Regions,
+}
+
+impl MergedHead {
+    fn clean(tree: ObjectId) -> Self {
+        MergedHead {
+            tree,
+            conflicts: Vec::new(),
+        }
+    }
+}
+
 // Local snapshot commits retain exactly the author's tree. Only the change's
 // live head incorporates the server rebase, until its owner applies it.
+//
+// Edits that conflict with the rebase are stored, not refused (D2, R5):
+// refusing left the workspace stuck, because applying the rebase needs
+// every local edit stored first (#105). The head takes diff3 markers with
+// the snapshot's side as `ours`, as a conflicting rebase writes them, and
+// the conflicts are stored open, so the owner applies the head, keeps both
+// sides and runs `rosen resolve`.
 fn merge_snapshot(
     ctx: &crate::history::Ctx,
     current: &Change,
     request: &SnapshotRequest,
-) -> Result<ObjectId, ChangeError> {
+) -> Result<MergedHead, ChangeError> {
     let from = request.from.ok_or_else(|| {
         ChangeError::Base("snapshot must name its workspace basis; update the client".into())
     })?;
     if from == current.head {
-        return Ok(request.tree);
+        return Ok(MergedHead::clean(request.tree));
     }
+    // Merged again, a resend would mark its own edits as a conflict.
+    if resends_latest(current, request) {
+        return Ok(MergedHead::clean(current.head));
+    }
+    let sides = [from, current.head, request.tree];
     let merged =
-        crate::history::merge::merge_trees(ctx, [from, current.head, request.tree], &|_| {
-            rosen_merge::MergePolicy::Text
+        crate::history::merge::merge_trees_marked(ctx, sides, &|_| rosen_merge::MergePolicy::Text)
+            .map_err(|err| ChangeError::Io(std::io::Error::other(err.to_string())))?;
+    let Some(tree) = merged.tree else {
+        let paths = merged.conflicts.join(", ");
+        return Err(ChangeError::Refused(rosen_core::Error::InvalidPath(format!(
+            "{paths}: the snapshot and the pending rebase need a file and a directory \
+             at one path; local edits kept"
+        ))));
+    };
+    let conflicts = merged
+        .conflicts
+        .iter()
+        .map(|path| {
+            crate::landing::conflict_routes::regions(
+                &ctx.store,
+                [from, request.tree, current.head],
+                path,
+            )
+            .map_err(|err| ChangeError::Io(std::io::Error::other(err.to_string())))
         })
-        .map_err(|err| ChangeError::Io(std::io::Error::other(err.to_string())))?;
-    merged.tree.ok_or_else(|| {
-        ChangeError::Base(format!(
-            "snapshot conflicts with pending rebase in {}; local edits kept",
-            merged.conflicts.join(", ")
-        ))
-    })
+        .collect::<Result<Regions, _>>()?;
+    Ok(MergedHead { tree, conflicts })
+}
+
+/// A snapshot whose edits conflicted with a pending rebase names the files
+/// now holding markers, as a conflicting rebase does.
+fn publish_conflicts(state: &ServerState, outcome: &SnapshotOutcome, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    state.events.publish(
+        EventKind::Conflict,
+        Some(outcome.change.change.id.to_string()),
+        serde_json::json!({ "paths": paths }),
+    );
 }
 
 fn history_failure(err: crate::history::HistoryError) -> SnapshotError {
