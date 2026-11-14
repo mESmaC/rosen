@@ -978,6 +978,9 @@
         "submitter": {
           "$ref": "#/$defs/AgentId"
         },
+        "machine": {
+          "type": "string"
+        },
         "base_ref": {
           "type": "string"
         },
@@ -991,6 +994,7 @@
         "base",
         "check_set",
         "submitter",
+        "machine",
         "base_ref",
         "base_current"
       ],
