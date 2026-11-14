@@ -995,6 +995,7 @@ dependencies = [
  "base64",
  "libc",
  "rosen-core",
+ "rosen-platform",
  "serde",
  "serde_json",
  "tokio",

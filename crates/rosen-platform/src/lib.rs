@@ -84,6 +84,10 @@ pub mod credentials;
 #[allow(unsafe_code)]
 pub mod process;
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub mod security;
+
 pub mod owner_only;
 
 /// False only when no running process has id `pid`; any doubt answers true,
