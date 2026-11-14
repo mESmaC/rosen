@@ -289,6 +289,9 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
         return cache::serve(config, upstream).await;
     }
     let listener = rosen_protocol::Listener::bind(&config.endpoint)?;
+    // Only once the endpoint is this server's: a daemon that loses a start
+    // race must not remove the copies the winner is serving.
+    object_slices::clear(&config.slices_dir());
     // Created with the project's first server start (R14), so the
     // fingerprint daemons pin never changes.
     let identity = Identity::load_or_create(&config.data_dir)?;
