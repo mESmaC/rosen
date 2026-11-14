@@ -106,6 +106,13 @@ impl AgentId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// This nick on `machine`, as `<nick>@<machine>`: how a receipt's
+    /// submitter is recorded once the server knows its machine (R14).
+    /// Machine ids hold no `@`, so the last `@` always splits the two.
+    pub fn on_machine(&self, machine: &str) -> Result<Self> {
+        AgentId::new(format!("{}@{machine}", self.0))
+    }
 }
 
 impl fmt::Display for AgentId {
