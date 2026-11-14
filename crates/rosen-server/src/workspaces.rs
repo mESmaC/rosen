@@ -38,6 +38,16 @@ fn edit(
 ) -> Result<rosen_protocol::SnapshotOutcome, ChangeError> {
     let parts = validate_path(&req.path)?;
     let store = LooseObjectStore::open(state.config.objects_dir()).map_err(store_error)?;
+    // The blob is the one large object, and hashing, compressing and syncing
+    // it is the slow part. Store it before taking the registry lock, which
+    // every change operation on the server waits on (#78). Objects are
+    // immutable, so a blob stored for an edit that is then refused is harmless.
+    let blob = req
+        .data
+        .as_ref()
+        .map(|bytes| store.put_blob(&bytes.0))
+        .transpose()
+        .map_err(store_error)?;
     // Keep the connection through read, tree edit and snapshot: concurrent edits
     // must each start from the head left by the preceding edit.
     let answer = state.changes.with_conn(|conn| {
@@ -46,12 +56,7 @@ fn edit(
         if current.change.state.is_closed() {
             return Err(ChangeError::Refused(rosen_core::Error::ChangeClosed(id)));
         }
-        let tree = rewrite(
-            &store,
-            current.change.head,
-            &parts,
-            req.data.as_ref().map(|d| d.0.as_slice()),
-        )?;
+        let tree = rewrite(&store, current.change.head, &parts, blob)?;
         snapshots::record_on(
             conn,
             &store,
@@ -90,7 +95,7 @@ fn rewrite(
     store: &dyn ObjectStore,
     root: ObjectId,
     parts: &[&str],
-    data: Option<&[u8]>,
+    blob: Option<ObjectId>,
 ) -> Result<ObjectId, ChangeError> {
     let empty = ObjectId::hash_object("tree", b"");
     let tree = if root == empty {
@@ -101,15 +106,15 @@ fn rewrite(
     let name = parts[0].as_bytes();
     let old = tree.get(name);
     let replacement = if parts.len() == 1 {
-        file_entry(store, old, name, data)?
+        file_entry(old, name, blob)?
     } else {
         if old.is_some_and(|e| !e.mode.is_tree()) {
             return Err(invalid("parent is not a directory"));
         }
-        if old.is_none() && data.is_none() {
+        if old.is_none() && blob.is_none() {
             return Ok(root);
         }
-        let child = rewrite(store, old.map_or(empty, |e| e.id), &parts[1..], data)?;
+        let child = rewrite(store, old.map_or(empty, |e| e.id), &parts[1..], blob)?;
         (child != empty).then(|| TreeEntry {
             mode: FileMode::Directory,
             name: name.to_vec(),
@@ -136,21 +141,19 @@ fn store_error(err: rosen_store::StoreError) -> ChangeError {
     ChangeError::Io(std::io::Error::other(err.to_string()))
 }
 
+/// The entry for a written file (`blob` already stored), or `None` for a
+/// delete.
 fn file_entry(
-    store: &dyn ObjectStore,
     old: Option<&TreeEntry>,
     name: &[u8],
-    data: Option<&[u8]>,
+    blob: Option<ObjectId>,
 ) -> Result<Option<TreeEntry>, ChangeError> {
     if old.is_some_and(|e| e.mode.is_tree() || e.mode == FileMode::Submodule) {
         return Err(invalid("path is not a file"));
     }
-    data.map(|bytes| {
-        Ok(TreeEntry {
-            mode: old.map_or(FileMode::Regular, |e| e.mode),
-            name: name.to_vec(),
-            id: store.put_blob(bytes).map_err(store_error)?,
-        })
-    })
-    .transpose()
+    Ok(blob.map(|id| TreeEntry {
+        mode: old.map_or(FileMode::Regular, |e| e.mode),
+        name: name.to_vec(),
+        id,
+    }))
 }
