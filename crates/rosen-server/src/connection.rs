@@ -232,7 +232,14 @@ impl Session {
                         .is_some_and(|c| state.credential_matches(c)),
                 };
             let outcome = if allowed {
-                rpc::dispatch(&state, request).await
+                // A network peer is never the server's own machine, even
+                // without a credential: then its machine is unknown.
+                let origin = if network {
+                    crate::receipts::Origin::Machine(credential.unwrap_or_default())
+                } else {
+                    crate::receipts::Origin::Local
+                };
+                rpc::dispatch_from(&state, request, origin).await
             } else {
                 Outcome::Error(ErrorBody::new(
                     ErrorCode::Refused,

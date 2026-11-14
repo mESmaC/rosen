@@ -12,10 +12,11 @@ use super::upstream::{self, error_response, Relay, UpstreamLink};
 use super::CacheState;
 use crate::connection::handshake;
 use crate::network::UpstreamConfig;
+use rosen_core::{ChangeId, Receipt};
 use rosen_protocol::frame::{decode_body, read_frame_body};
 use rosen_protocol::{
     BoxStream, ClientFrame, ErrorBody, ErrorCode, ObjectUpload, Outcome, Request, Response,
-    ServerFrame,
+    ServerFrame, SubmitReceipt,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -205,7 +206,65 @@ impl Session {
                 self.keep_uploaded(upload);
                 self.forward_body(id, &body).await;
             }
+            Request::ReceiptSubmit(submit) => self.forward_signed(id, submit).await,
             _ => self.forward_body(id, &body).await,
+        }
+    }
+
+    /// Signs a receipt with this machine's key and forwards it (SPEC.md §2,
+    /// R14). Done in the read loop, so the receipt keeps its place among the
+    /// client's frames; a receipt is rare enough that the wait is cheap.
+    async fn forward_signed(&self, id: u64, mut submit: SubmitReceipt) {
+        if let Err(error) = self.sign_receipt(&mut submit).await {
+            let _ = self.outbox.send(error_response(id, error)).await;
+            return;
+        }
+        let request = Request::ReceiptSubmit(submit);
+        let frame = ClientFrame::Request { id, request };
+        match serde_json::to_value(&frame) {
+            Ok(frame) => self.forward(id, frame).await,
+            Err(err) => {
+                let error = ErrorBody::new(ErrorCode::Internal, err.to_string());
+                let _ = self.outbox.send(error_response(id, error)).await;
+            }
+        }
+    }
+
+    /// The signature covers the full change ID, so a prefix the client gave
+    /// is resolved on the server first.
+    async fn sign_receipt(&self, submit: &mut SubmitReceipt) -> Result<(), ErrorBody> {
+        let change = match submit.change.parse::<ChangeId>() {
+            Ok(change) => change,
+            Err(_) => self.resolve_change(&submit.change).await?,
+        };
+        let receipt = Receipt {
+            change,
+            head: submit.head,
+            base: submit.base,
+            check_set: submit.check_set.clone(),
+            submitter: submit.submitter.clone(),
+        };
+        let key = self.state.signing_key().map_err(|err| {
+            let why = format!("could not load this machine's receipt signing key: {err}");
+            ErrorBody::new(ErrorCode::Internal, why)
+        })?;
+        submit.change = change.to_string();
+        submit.signature = Some(key.sign(&receipt.signing_payload()));
+        Ok(())
+    }
+
+    async fn resolve_change(&self, change: &str) -> Result<ChangeId, ErrorBody> {
+        let link = self.links.get().await?;
+        let show = Request::ChangeShow {
+            change: change.to_owned(),
+        };
+        match link.request(show).await {
+            Outcome::Ok(Response::Change(record)) => Ok(record.change.id),
+            Outcome::Ok(_) => Err(ErrorBody::new(
+                ErrorCode::Internal,
+                "the server answered a change lookup with something else",
+            )),
+            Outcome::Error(error) => Err(error),
         }
     }
 

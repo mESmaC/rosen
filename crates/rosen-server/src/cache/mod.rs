@@ -33,12 +33,27 @@ pub struct CacheState {
     pub store: LooseObjectStore,
     /// Trees in `store` that a sparse fill left without all their blobs.
     pub partial: Arc<partial::PartialObjects>,
+    /// The machine's receipt signing key, loaded on the first receipt.
+    signing_key: std::sync::Mutex<Option<Arc<crate::machines::signing::MachineKey>>>,
     started: Instant,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
 }
 
 impl CacheState {
+    /// The key this machine signs its receipts with (SPEC.md §2, R14).
+    fn signing_key(&self) -> io::Result<Arc<crate::machines::signing::MachineKey>> {
+        let mut slot = self
+            .signing_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(key) = slot.as_ref() {
+            return Ok(Arc::clone(key));
+        }
+        let key = crate::machines::signing::MachineKey::load_or_create(&self.config.data_dir)?;
+        Ok(Arc::clone(slot.insert(Arc::new(key))))
+    }
+
     fn status(&self) -> ServerStatus {
         ServerStatus {
             server: SERVER_NAME.to_owned(),
@@ -103,6 +118,7 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
         upstream,
         store,
         partial,
+        signing_key: std::sync::Mutex::new(None),
         started: Instant::now(),
         open_connections: AtomicU64::new(0),
         shutdown: watch::Sender::new(false),

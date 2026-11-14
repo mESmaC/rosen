@@ -221,6 +221,7 @@ async fn land_parent(state: &Arc<ServerState>, parent: &str) {
             base,
             check_set: "pre-land".into(),
             submitter: AgentId::new("checker").unwrap(),
+            signature: None,
         }),
     )
     .await;

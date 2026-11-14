@@ -82,6 +82,7 @@ async fn ready(state: &State, db: &Connection, change: String) {
         base,
         check_set,
         submitter,
+        signature: None,
     };
     ok(state, ReceiptSubmit(receipt)).await;
 }

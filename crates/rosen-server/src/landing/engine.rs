@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rosen_core::history::{LandedTrailers, ReceiptTrailer};
 use rosen_core::{ReceiptRefusal, Signature, PRE_LAND_CHECK_SET};
 
-use super::ledger::ReceiptLookup;
+use super::receipt_store::{ReceiptLookup, SignedReceipt};
 use super::restack::Restacker;
 use super::rules::{self, LandInput, ReceiptCheck, Refusal, Verdict};
 use super::{
@@ -174,10 +174,12 @@ impl Landing {
     }
 
     /// Stores a receipt after checking it is bound to the change's current
-    /// head, the configured check set, and a commit the base has held.
-    /// Returns the stored receipt, which keeps the first submitter when the
-    /// same receipt was already stored.
-    pub fn submit_receipt(&self, receipt: Receipt) -> LandResult<Receipt> {
+    /// head, the configured check set, and a commit the base has held, and
+    /// that its machine's key verifies its signature. Returns the stored
+    /// receipt, which keeps the first submitter when the same receipt was
+    /// already stored.
+    pub fn submit_receipt(&self, signed: SignedReceipt) -> LandResult<Receipt> {
+        let receipt = &signed.receipt;
         let facts = self.facts(&receipt.change)?;
         let required = self.check_set_at(&self.current_base()?)?;
         receipt
@@ -191,7 +193,7 @@ impl Landing {
             };
             return Err(LandError::InvalidReceipt(refusal.to_string()));
         }
-        self.ledger.put_receipt(&receipt)
+        self.ledger.put_receipt(&signed)
     }
 
     pub fn merge_preview(&self, change: &ChangeId) -> LandResult<MergePreview> {

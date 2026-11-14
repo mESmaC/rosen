@@ -22,6 +22,8 @@ base64.workspace = true
 getrandom.workspace = true
 clap.workspace = true
 rcgen.workspace = true
+# Ed25519 receipt signatures (SPEC.md §2, R8).
+ring.workspace = true
 rusqlite.workspace = true
 rustls.workspace = true
 serde_json.workspace = true
