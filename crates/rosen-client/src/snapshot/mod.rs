@@ -431,17 +431,51 @@ async fn store_or_queue(
         state.journal_record(last, prepared, message)?;
     }
     state.captured = true;
-    replay(client.ok_or(Error::Disconnected)?, state).await
+    let client = client.ok_or(Error::Disconnected)?;
+    if let Some(halt) = state.journal.halted()? {
+        if !change_open(client, state.change()).await? {
+            return Err(Error::JournalHalted {
+                record: halt.record,
+                refusal: halt.refusal,
+            });
+        }
+        // A post-land revert (R12) reopened the change: its records can
+        // be stored again.
+        state.journal.resume()?;
+    }
+    replay(client, state).await
+}
+
+/// Whether `change` takes snapshots. One small request, so a halted journal
+/// never uploads a record's blobs to a change that will refuse it.
+async fn change_open(client: &Client, change: ChangeId) -> Result<bool, Error> {
+    match client.change_show(&change.to_string()).await {
+        Ok(record) => Ok(!record.change.state.is_closed()),
+        Err(Error::Server(body)) if body.code == rosen_protocol::ErrorCode::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 /// Uploads every journal record in order, removing each once stored. The
-/// last record's report carries the earlier ones.
+/// last record's report carries the earlier ones. A record the server
+/// refuses for good halts the journal instead of failing every later
+/// snapshot on it again: it stays, with all after it (issue #91).
 async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotReport, Error> {
     let trees = journal::cache(&state.root)?;
     let mut reports = Vec::new();
     for id in state.journal.pending()? {
         let record = state.journal.load(id, &trees)?;
-        reports.push(send(client, state, &record.prepared, record.message).await?);
+        match send(client, state, &record.prepared, record.message).await {
+            Ok(report) => reports.push(report),
+            Err(Error::Server(refusal)) if !transient(refusal.code) => {
+                state.journal.halt(id, &refusal)?;
+                return Err(Error::JournalHalted {
+                    record: id,
+                    refusal,
+                });
+            }
+            Err(err) => return Err(err),
+        }
         state.journal.remove(id)?;
     }
     // Drops the blob store once the last record is gone.
@@ -465,15 +499,21 @@ async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotRepo
 /// later replay. A refusal is final: journaling it would stall every later
 /// snapshot behind a record the server never takes.
 fn worth_journaling(err: &Error) -> bool {
-    use rosen_protocol::ErrorCode;
     match err {
         Error::Disconnected | Error::NotRunning(_) | Error::Io(_) | Error::Start(_) => true,
-        Error::Server(body) => matches!(
-            body.code,
-            ErrorCode::Unavailable | ErrorCode::ShuttingDown | ErrorCode::Internal
-        ),
+        Error::Server(body) => transient(body.code),
         _ => false,
     }
+}
+
+/// Server errors a later attempt may not see again. Any other answer is the
+/// server's final word on the request.
+fn transient(code: rosen_protocol::ErrorCode) -> bool {
+    use rosen_protocol::ErrorCode;
+    matches!(
+        code,
+        ErrorCode::Unavailable | ErrorCode::ShuttingDown | ErrorCode::Internal
+    )
 }
 
 async fn send(
