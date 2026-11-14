@@ -28,9 +28,10 @@ pub enum ReceiptLookup {
     /// Receipts exist for the change, but none for its head and check set
     /// that a trusted machine's key verifies.
     Invalid,
-    /// `base_seq` is the receipt base's position in the base history.
+    /// `base_seq` is the receipt base's position in the base history. The
+    /// receipt carries its signing machine, which the landed commit records.
     Valid {
-        receipt: Receipt,
+        receipt: SignedReceipt,
         base_seq: i64,
     },
     /// The newest receipt is bound to a base the ref reached after the
@@ -112,7 +113,8 @@ impl Ledger {
     /// same `(change, head, base, check set)` again keeps the first
     /// submitter, unless that stored receipt no longer verifies: then the
     /// new one replaces it, so a revoked machine's receipt can be redone.
-    pub fn put_receipt(&self, signed: &SignedReceipt) -> LandResult<Receipt> {
+    /// The stored receipt comes back with the machine that signed it.
+    pub fn put_receipt(&self, signed: &SignedReceipt) -> LandResult<SignedReceipt> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !verifies(&tx, &signed.receipt, &signed.machine, &signed.signature)? {
@@ -142,7 +144,11 @@ impl Ledger {
                 ..receipt.clone()
             };
             if verifies(&tx, &first, &machine, &signature)? {
-                return Ok(first);
+                return Ok(SignedReceipt {
+                    receipt: first,
+                    machine,
+                    signature,
+                });
             }
         }
         tx.execute(
@@ -160,7 +166,7 @@ impl Ledger {
             ],
         )?;
         tx.commit()?;
-        Ok(receipt.clone())
+        Ok(signed.clone())
     }
 
     /// Finds the verified receipt for `head` and `check_set` whose base is
@@ -191,6 +197,11 @@ impl Ledger {
             if base_seq > history_seq(&connection, ref_name, attempt_base)? {
                 return Ok(ReceiptLookup::Ahead);
             }
+            let receipt = SignedReceipt {
+                receipt,
+                machine,
+                signature,
+            };
             return Ok(ReceiptLookup::Valid { receipt, base_seq });
         }
         let any: i64 = connection.query_row(
@@ -206,12 +217,16 @@ impl Ledger {
     }
 }
 
-/// True when the stored row for `receipt`'s binding still verifies, read
-/// on the caller's connection so it can run inside the land transaction.
+/// True when the stored row for `signed`'s binding is still the one the
+/// land read, signed by the same machine, and still verifies. Read on the
+/// caller's connection so it can run inside the land transaction. A row a
+/// different machine's receipt replaced fails it, so the landed trailer
+/// never names a machine other than the one whose receipt counted.
 pub(super) fn stored_receipt_verifies(
     connection: &Connection,
-    receipt: &Receipt,
+    signed: &SignedReceipt,
 ) -> LandResult<bool> {
+    let receipt = &signed.receipt;
     let stored: Option<(String, String, String)> = connection
         .query_row(
             "SELECT submitter, machine, signature FROM receipts
@@ -228,7 +243,9 @@ pub(super) fn stored_receipt_verifies(
     let Some((submitter, machine, signature)) = stored else {
         return Ok(false);
     };
-    let unchanged = submitter == receipt.submitter.as_str();
+    let unchanged = submitter == receipt.submitter.as_str()
+        && machine == signed.machine
+        && signature == signed.signature;
     Ok(unchanged && verifies(connection, receipt, &machine, &signature)?)
 }
 

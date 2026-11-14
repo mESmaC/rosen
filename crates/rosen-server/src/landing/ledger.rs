@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::conflicts::{self, ConflictStoreError};
 
-use super::{ChangeId, CommitId, LandError, LandResult, ObjectId, Receipt, Tier};
+use super::{ChangeId, CommitId, LandError, LandResult, ObjectId, SignedReceipt, Tier};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS base_refs (
@@ -266,7 +266,7 @@ impl Ledger {
         &self,
         expected: &CommitId,
         record: &LandRecord,
-        receipt: Option<&Receipt>,
+        receipt: Option<&SignedReceipt>,
     ) -> LandResult<CasResult> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;

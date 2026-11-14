@@ -54,8 +54,9 @@ fn object_id(flag: &str, hex: &str) -> Result<ObjectId, Error> {
     ObjectId::from_hex(hex).map_err(|err| Error::InvalidArgument(format!("{flag} {hex:?}: {err}")))
 }
 
-/// The submitter is the checker's identity. Velocity sets ROSEN_AGENT per
-/// agent; a human at a terminal falls back to their OS user name.
+/// The submitter is the checker's nick; the server adds its machine. Velocity
+/// sets ROSEN_AGENT per agent; a human at a terminal falls back to their OS
+/// user name.
 fn resolve_submitter(explicit: Option<&str>) -> Result<AgentId, Error> {
     let from_env = || {
         ["ROSEN_AGENT", "USERNAME", "USER"]
@@ -81,7 +82,7 @@ fn print_receipt(json: bool, record: &ReceiptRecord) {
     println!("check set: {}", receipt.check_set);
     println!("head:      {}", receipt.head);
     println!("base:      {} ({})", receipt.base, record.base_ref);
-    println!("submitter: {}", receipt.submitter);
+    println!("submitter: {}@{}", receipt.submitter, record.machine);
     if !record.base_current {
         println!(
             "note: {} has moved past this base; at land the server decides whether \

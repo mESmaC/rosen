@@ -13,8 +13,9 @@ pub struct SubmitReceipt {
     /// The base commit the head was merged onto for the checks.
     pub base: ObjectId,
     pub check_set: String,
-    /// The checker's identity, recorded on the receipt and in the landed
-    /// commit's `Rosen-Receipt` trailer.
+    /// The checker's nick, as Velocity fixed it at launch. The server adds
+    /// the machine from the connection's credential, never from the request
+    /// (R14), so the nick may not hold `@`.
     pub submitter: AgentId,
     /// The submitting machine's signature over the receipt. A client leaves
     /// it empty: its machine's daemon signs the receipt on the way to the
@@ -38,6 +39,11 @@ pub struct ReceiptRecord {
     /// one, so `submitter` names whoever submitted it first.
     #[serde(flatten)]
     pub receipt: Receipt,
+    /// The machine the receipt was submitted under, taken from its
+    /// connection's credential: an enrolled machine's id, or `server` for
+    /// the server's own machine. The landed commit's `Rosen-Receipt`
+    /// trailer names the submitter as `<submitter>@<machine>`.
+    pub machine: String,
     /// The base ref the receipt's base commit was held by, for example `main`.
     pub base_ref: String,
     /// The base ref still points at the receipt's base. When false, a land
