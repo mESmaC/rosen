@@ -77,6 +77,8 @@ fn a_block_clone_is_brought_to_the_new_tree_and_keeps_build_output() {
         ("edit.rs", b"new"),
         ("added.rs", b"added"),
         ("becomes_dir/inner.rs", b"inner"),
+        ("fresh", b"fresh"),
+        ("newdir/f.rs", b"f"),
     ];
     let after = put_tree(&store, after_files);
 
@@ -84,6 +86,12 @@ fn a_block_clone_is_brought_to_the_new_tree_and_keeps_build_output() {
     materialise(&store, before, &source, &Options::default()).unwrap();
     fs::create_dir(source.join("target")).unwrap();
     fs::write(source.join("target/out.bin"), b"build output").unwrap();
+    // Untracked output where the new tree tracks a path (issue #40): a file
+    // over a file, a directory over a file, a file over a directory.
+    fs::write(source.join("added.rs"), b"stale generated").unwrap();
+    fs::create_dir(source.join("fresh")).unwrap();
+    fs::write(source.join("fresh/x.o"), b"object").unwrap();
+    fs::write(source.join("newdir"), b"artefact").unwrap();
 
     let dest = dir.path().join("dest");
     let options = Options {
@@ -104,8 +112,8 @@ fn a_block_clone_is_brought_to_the_new_tree_and_keeps_build_output() {
         );
         return;
     }
-    // Five tracked files and the build output, all cloned, none copied.
-    assert_eq!((report.cloned, report.copied, report.written), (6, 0, 3));
+    // Five tracked files and four untracked, all cloned, none copied.
+    assert_eq!((report.cloned, report.copied, report.written), (9, 0, 5));
     assert_eq!(
         fs::read(dest.join("target/out.bin")).unwrap(),
         b"build output"
