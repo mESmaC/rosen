@@ -211,6 +211,7 @@ impl Budget {
         made_by: impl Fn(&Reservation, &Path) -> bool,
     ) -> io::Result<()> {
         let _lock = self.lock()?;
+        let before = self.read()?;
         let mut registry = self.read()?;
         // Record both names before renaming. A crash on either side of the
         // rename therefore charges whichever name survives.
@@ -235,7 +236,14 @@ impl Budget {
         };
         push_reservation(&mut registry, to_absolute, from_absolute, carried, NO_SLOT);
         self.save(&registry)?;
-        rename_while_walked(from, to)
+        // A failed rename moved nothing, but `made_by` may have matched a
+        // record through a stale alias of `from`, such as a staging path a
+        // concurrent sweep already moved away. Its charge must stay where its
+        // files are, so the registry goes back as it was; the lock is still
+        // held, so nothing else changed it meanwhile.
+        rename_while_walked(from, to).inspect_err(|_| {
+            let _ = self.save(&before);
+        })
     }
 
     fn lock(&self) -> io::Result<File> {
