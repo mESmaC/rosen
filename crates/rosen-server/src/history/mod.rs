@@ -137,7 +137,7 @@ fn run(state: &ServerState, call: HistoryCall) -> HistoryResult<Response> {
         HistoryCall::MergeBase { a, b } => Response::MergeBase(merge_base(&ctx, &a, &b)?),
         HistoryCall::ReadFile(req) => {
             let tree = Revision::resolve(&ctx, req.at.as_deref())?.tree(&ctx)?;
-            Response::File(trees::read(&ctx.store, tree, &req.path)?)
+            trees::read(&ctx.store, tree, &req.path)?
         }
         HistoryCall::MergeResult { change } => {
             Response::MergeResult(merge::merge_result(&ctx, &change)?)

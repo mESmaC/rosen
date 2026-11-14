@@ -224,6 +224,20 @@ pub enum ReadAnswer {
     },
 }
 
+/// The answer to [`crate::Request::ReadFile`] for a file too large for one
+/// frame (#243). Its bytes are read in slices with
+/// [`crate::Request::GetObjectChunk`]; the client's `read_file` does so and
+/// answers [`ReadAnswer::File`]. A separate answer, not a field of `File`,
+/// so a client that predates it fails to decode the answer instead of
+/// reading the file as empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LargeFile {
+    pub mode: String,
+    pub id: ObjectId,
+    /// The file's length in bytes.
+    pub len: u64,
+}
+
 /// The answer to [`crate::Request::MergeResult`]: a change merged onto the
 /// current base, as a checker builds it for a receipt (R8 step 1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

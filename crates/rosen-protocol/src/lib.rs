@@ -27,7 +27,7 @@ pub mod review;
 pub mod snapshot;
 pub mod transport;
 pub mod workspace;
-pub use workspace::{WorkspaceBytes, WorkspaceWrite};
+pub use workspace::{WorkspaceBlobWrite, WorkspaceBytes, WorkspaceWrite};
 
 pub use change::{ChangeFilter, ChangeRecord, NewChange};
 pub use channel::{ChannelAnswer, ChannelRequest};
@@ -40,7 +40,7 @@ pub use conflict::{ConflictsResolved, ResolveConflicts, ResolvedPath};
 pub use edits::{EditRegions, EditSpan, PathEdit, Regions};
 pub use history::{
     Blame, BlameRange, BlameRequest, Diff, DiffHunk, DiffLine, DiffRequest, DirEntry, FileDiff,
-    FileStatus, FileVersion, LineKind, Log, LogEntry, LogRequest, MergeBaseAnswer,
+    FileStatus, FileVersion, LargeFile, LineKind, Log, LogEntry, LogRequest, MergeBaseAnswer,
     MergeResultAnswer, ReadAnswer, ReadRequest,
 };
 pub use land::{LandAnswer, LandStatus};

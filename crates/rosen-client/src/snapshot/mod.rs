@@ -26,6 +26,7 @@ pub use marker::{WorkspaceMarker, STATE_DIR};
 pub use seed::seed_tree_cache;
 pub(crate) use stat_cache::seed as seed_stat_cache;
 pub use upload::Sent;
+pub(crate) use upload::put_held;
 pub use watch::{watch, WatchEvent};
 
 use crate::connection::unexpected;

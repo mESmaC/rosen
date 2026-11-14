@@ -195,6 +195,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
             crate::history::handle(state, HistoryCall::MergeResult { change }).await
         }
         Request::WorkspaceWrite(req) => crate::workspaces::write(state, req).await,
+        Request::WorkspaceWriteBlob(req) => crate::workspaces::write_blob(state, req).await,
         Request::ConfigShow(query) => crate::project_config::show(state, query).await,
         Request::Channel(call) => crate::channel::handle(state, call).await,
     }

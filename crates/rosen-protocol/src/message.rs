@@ -275,6 +275,9 @@ pub enum Request {
     ConfigShow(ConfigQuery),
     /// Edits a server-side file and returns its stored snapshot (R3).
     WorkspaceWrite(crate::WorkspaceWrite),
+    /// Writes a stored blob to a server-side file: a write too large for a
+    /// `WorkspaceWrite` frame, sent first with `PutBlobChunk` (R3).
+    WorkspaceWriteBlob(crate::WorkspaceBlobWrite),
     /// Machine-local warm pool size; zero disables it.
     PoolSize {
         size: usize,
@@ -350,6 +353,8 @@ pub enum Response {
     Diff(Diff),
     MergeBase(MergeBaseAnswer),
     File(ReadAnswer),
+    /// The answer to `ReadFile` for a file too large for one frame.
+    LargeFile(crate::LargeFile),
     MergeResult(MergeResultAnswer),
     /// Boxed: a configuration is far larger than every other answer.
     Config(Box<ConfigRecord>),
