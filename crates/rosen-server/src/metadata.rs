@@ -7,9 +7,15 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const SCHEMA_VERSION: i64 = 1;
+
+/// How long a connection waits for another's lock, including while another
+/// connection turns a new database into WAL mode.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// The pause between tries of a journal-mode change that found the file busy.
+const WAL_RETRY: Duration = Duration::from_millis(10);
 
 /// Databases this process has already brought to the current schema.
 /// Installing it takes the write lock and an fsync'd commit, so doing it on
@@ -49,11 +55,36 @@ fn installed(path: &Path, connection: &Connection) -> rusqlite::Result<bool> {
 
 /// Connection settings are local to each handle, even when WAL is persistent.
 pub fn configure(connection: &Connection) -> rusqlite::Result<()> {
-    connection.busy_timeout(Duration::from_secs(5))?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    use_wal(connection)?;
     // A committed ref or claim must survive a power failure, not just a crash.
     connection.pragma_update(None, "synchronous", "FULL")?;
     connection.pragma_update(None, "foreign_keys", "ON")
+}
+
+/// Puts the database in WAL mode. SQLite answers a journal-mode change it
+/// cannot make yet with SQLITE_BUSY at once, without the busy handler, so
+/// two connections opening a new database together, such as startup
+/// recovery and a first request, failed one of them (issue #157). Retries
+/// until the busy timeout. A database already in WAL mode needs no change,
+/// so only first opens ever wait here.
+fn use_wal(connection: &Connection) -> rusqlite::Result<()> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match connection.pragma_update(None, "journal_mode", "WAL") {
+            Err(err) if is_busy(&err) && Instant::now() < deadline => {
+                std::thread::sleep(WAL_RETRY);
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+fn is_busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 /// Adopts pre-versioned databases without changing or deleting their rows.
