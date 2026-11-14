@@ -24,16 +24,36 @@ pub fn write(path: &Path, bytes: &[u8], replace: Replace) -> io::Result<()> {
     let (temp_path, mut temp) = create_temp_beside(path)?;
     let written = temp.write_all(bytes).and_then(|()| temp.sync_all());
     drop(temp);
-    let placed = written.and_then(|()| match replace {
-        Replace::Allow => std::fs::rename(&temp_path, path),
-        // A hard link fails if the target exists, and shares the temp file's
-        // access list, so the target never exists with a wider one.
-        Replace::Refuse => std::fs::hard_link(&temp_path, path),
-    });
-    if placed.is_err() || replace == Replace::Refuse {
+    let placed = written.and_then(|()| place(&temp_path, path, replace));
+    // Gone after a move; a Unix hard link or a failed placement leaves it.
+    if temp_path.exists() {
         let _ = std::fs::remove_file(&temp_path);
     }
     placed
+}
+
+/// Moves the finished temp file to `path` and makes the new directory entry
+/// durable, so a power loss after success cannot lose a written identity.
+/// The placed file keeps the temp file's access list.
+#[cfg(unix)]
+fn place(temp: &Path, path: &Path, replace: Replace) -> io::Result<()> {
+    match replace {
+        Replace::Allow => std::fs::rename(temp, path)?,
+        // Unix has no portable no-replace rename; a hard link fails if the
+        // target exists.
+        Replace::Refuse => std::fs::hard_link(temp, path)?,
+    }
+    File::open(path.parent().unwrap_or(Path::new(".")))?.sync_all()
+}
+
+#[cfg(windows)]
+fn place(temp: &Path, path: &Path, replace: Replace) -> io::Result<()> {
+    windows::move_write_through(temp, path, replace == Replace::Allow)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn place(_temp: &Path, _path: &Path, _replace: Replace) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 /// Creates a new, uniquely named owner-only file in `path`'s directory, so the
@@ -99,8 +119,37 @@ mod windows {
         GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
         TOKEN_USER,
     };
-    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, MoveFileExW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, MOVEFILE_REPLACE_EXISTING,
+        MOVEFILE_WRITE_THROUGH,
+    };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    fn wide(path: &Path) -> io::Result<Vec<u16>> {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        if wide[..wide.len() - 1].contains(&0) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        Ok(wide)
+    }
+
+    /// Without `replace` the move fails with `AlreadyExists` when `to` exists,
+    /// atomically and with no hard-link support needed. Write-through returns
+    /// only once the new directory entry is on disk.
+    pub(super) fn move_write_through(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
+        let (from, to) = (wide(from)?, wide(to)?);
+        let flags = MOVEFILE_WRITE_THROUGH
+            | if replace {
+                MOVEFILE_REPLACE_EXISTING
+            } else {
+                0
+            };
+        // SAFETY: both paths are NUL-terminated and live for this synchronous call.
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), flags) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 
     pub(super) fn create_new(path: &Path) -> io::Result<File> {
         let descriptor = OwnerOnlyDescriptor::for_current_user()?;
@@ -109,10 +158,7 @@ mod windows {
             lpSecurityDescriptor: descriptor.0,
             bInheritHandle: 0,
         };
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        if wide[..wide.len() - 1].contains(&0) {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
+        let wide = wide(path)?;
         // SAFETY: `wide` is NUL-terminated and `attributes` points at a live
         // descriptor; both outlive this synchronous call. CREATE_NEW applies
         // the descriptor to the file it creates and fails if one exists.
