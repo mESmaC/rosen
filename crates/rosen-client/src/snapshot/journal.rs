@@ -6,7 +6,7 @@
 //! the files are, and reading the journal never parses file contents.
 use super::upload::ChangedBlob;
 use super::{Prepared, SnapshotError, STATE_DIR};
-use rosen_core::{ObjectId, ObjectKind};
+use rosen_core::{ChangeState, ObjectId, ObjectKind};
 use rosen_protocol::ErrorBody;
 use rosen_store::{LooseObjectStore, ObjectStore};
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,19 @@ const HALT: &str = "halt";
 pub(super) struct Halt {
     pub record: u64,
     pub refusal: ErrorBody,
+    /// The change as the server showed it just after the refusal. Replay
+    /// resumes only once the change differs (#273). Absent when it could
+    /// not be read, and from halts written before it was recorded: those
+    /// resume whenever the change is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<ChangeSeen>,
+}
+
+/// What a halted journal waits to see change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct ChangeSeen {
+    pub state: ChangeState,
+    pub head: ObjectId,
 }
 
 pub(super) struct Journal {
@@ -254,10 +267,11 @@ impl Journal {
 
     /// Stops replay after the server refused record `id` for good. The
     /// record stays, so the edit it holds survives for R4 to keep.
-    pub fn halt(&self, id: u64, refusal: &ErrorBody) -> io::Result<()> {
+    pub fn halt(&self, id: u64, refusal: &ErrorBody, seen: Option<ChangeSeen>) -> io::Result<()> {
         let halt = Halt {
             record: id,
             refusal: refusal.clone(),
+            seen,
         };
         let bytes = serde_json::to_vec(&halt).map_err(io::Error::other)?;
         let temp = self.dir.join("halt.tmp");
