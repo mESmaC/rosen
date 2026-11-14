@@ -49,14 +49,23 @@ pub(super) fn create_marked(dir: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => return Err(error),
     }
-    // The directory is new, so a marker already beside it was left by a
-    // builder with the same id that crashed after publishing; it now
-    // describes this directory, and truncating it takes it over.
-    if let Err(error) = fs::File::create(marker_of(dir)) {
-        let _ = fs::remove_dir(dir);
-        return Err(error);
+    // Created exclusively: a file already holding the marker's name, such
+    // as one a builder with the same id left by crashing after publishing,
+    // is never overwritten, and this name is given up for the next one.
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker_of(dir));
+    match created {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            let _ = fs::remove_dir(dir);
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                return Ok(false);
+            }
+            Err(error)
+        }
     }
-    Ok(true)
 }
 
 /// Called once `dir` is renamed into place: the published workspace must
@@ -104,7 +113,8 @@ pub(super) fn sweep_abandoned(parent: &Path) {
 }
 
 /// The staging directories in `parent` that carry a marker file and whose
-/// building process no longer runs. A marker whose directory is gone, left
+/// building process no longer runs. A marker is always empty, so a file with
+/// contents is never taken for one and never removed. A marker whose directory is gone, left
 /// by a crash just after publishing, is listed too, so it is cleared.
 fn find_abandoned(parent: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(parent) else {
@@ -114,6 +124,7 @@ fn find_abandoned(parent: &Path) -> Vec<PathBuf> {
     entries
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter(|entry| entry.metadata().is_ok_and(|meta| meta.len() == 0))
         .filter_map(|entry| {
             let marker = entry.path();
             // The staging name ends in `-<attempt>`, with no dot, so the
@@ -191,7 +202,15 @@ mod tests {
         fs::create_dir(staging(format!(".ws{STAGING_TAG}{dead}-4"))).unwrap();
         fs::create_dir(staging(format!(".ws{STAGING_TAG}{dead}-0x"))).unwrap();
         fs::write(marker_of(&staging(format!(".ws{STAGING_TAG}{dead}-0x"))), b"").unwrap();
+        let not_marker = staging(format!(".ws{STAGING_TAG}{dead}-5"));
+        fs::create_dir(&not_marker).unwrap();
+        fs::write(marker_of(&not_marker), b"user data").unwrap();
         assert_eq!(find_abandoned(root.path()), vec![dead_marked.clone()]);
+        // A file already holding a marker's name is kept and the name given up.
+        let taken = staging(format!(".ws{STAGING_TAG}{own}-6"));
+        fs::write(marker_of(&taken), b"user data").unwrap();
+        assert!(!create_marked(&taken).unwrap() && !taken.exists());
+        assert_eq!(fs::read(marker_of(&taken)).unwrap(), b"user data");
         remove_abandoned(&dead_marked);
         assert!(!dead_marked.exists() && !marker_of(&dead_marked).exists());
     }
