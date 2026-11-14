@@ -1,4 +1,5 @@
 //! R14 critical contract: pending and revoked peers must never perform project work.
+//! No peer may use the server's warm pool, whose takes create directories on its disk.
 use rosen_protocol::{
     frame::{read_frame, write_frame},
     *,
@@ -48,6 +49,12 @@ async fn pending_approval_and_revocation_apply_to_the_next_request() {
     assert!(matches!(
         request(&mut enrolled, Request::Ping).await,
         Outcome::Ok(Response::Pong)
+    ));
+    let tree = rosen_core::ObjectId::from_bytes([0; 20]);
+    let dest = dir.path().join("taken").display().to_string();
+    assert!(matches!(
+        request(&mut enrolled, Request::PoolTake { tree, dest }).await,
+        Outcome::Error(e) if e.code == ErrorCode::Refused
     ));
     check_presence(&state, &mut enrolled, &credential.machine_id).await;
     revoke(&state, &mut enrolled, &credential.machine_id).await;
