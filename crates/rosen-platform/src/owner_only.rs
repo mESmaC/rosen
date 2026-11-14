@@ -43,7 +43,7 @@ fn place(temp: &Path, path: &Path, replace: Replace) -> io::Result<()> {
         // target exists.
         Replace::Refuse => std::fs::hard_link(temp, path)?,
     }
-    File::open(path.parent().unwrap_or(Path::new(".")))?.sync_all()
+    File::open(parent_dir(path))?.sync_all()
 }
 
 #[cfg(windows)]
@@ -56,11 +56,20 @@ fn place(_temp: &Path, _path: &Path, _replace: Replace) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
+/// The directory holding `path`. A bare file name has an empty parent, which
+/// names no directory to open.
+fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
 /// Creates a new, uniquely named owner-only file in `path`'s directory, so the
 /// final rename stays on one volume.
 fn create_temp_beside(path: &Path) -> io::Result<(PathBuf, File)> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let dir = path.parent().unwrap_or(Path::new("."));
+    let dir = parent_dir(path);
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     loop {
         let temp = dir.join(format!(
