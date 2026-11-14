@@ -18,6 +18,7 @@ pub(crate) use ledger::ensure_schema;
 mod overlap_targets;
 pub mod reach;
 mod reach_store;
+mod receipt_store;
 mod restack;
 pub mod revert;
 mod revert_store;
@@ -32,6 +33,7 @@ pub use engine::{
     RecoveryReport,
 };
 pub use ledger::{CasResult, InitBase, LandRecord, Ledger};
+pub use receipt_store::{KeyBinding, ReceiptLookup, SignedReceipt};
 pub use restack::RestackReport;
 pub use review_gate::StoredReviews;
 pub use rules::{LandInput, ReceiptCheck, Refusal, Verdict};

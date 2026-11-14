@@ -44,6 +44,7 @@ pub async fn run(
         base,
         check_set,
         submitter,
+        signature: None,
     };
     print_receipt(json, &client.submit_receipt(request).await?);
     Ok(true)

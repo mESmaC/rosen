@@ -97,6 +97,7 @@ async fn approve_and_receipt(
         base,
         check_set: "pre-land".into(),
         submitter: AgentId::new("checker").unwrap(),
+        signature: None,
     };
     call(state, Request::ReceiptSubmit(receipt)).await;
     let approve = ApproveRequest {
