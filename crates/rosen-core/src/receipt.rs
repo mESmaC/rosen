@@ -120,4 +120,17 @@ impl Receipt {
         }
         Ok(())
     }
+
+    /// The exact bytes a machine signs for this receipt (SPEC.md §2). Every
+    /// field of the binding is in it, so a signature for one head, base,
+    /// check set or submitter never verifies for another. The fields cannot
+    /// hold a newline (ids are hex; the check set and submitter are refused
+    /// with whitespace), so the encoding is unambiguous.
+    pub fn signing_payload(&self) -> Vec<u8> {
+        format!(
+            "rosen-receipt-v1\n{}\n{}\n{}\n{}\n{}",
+            self.change, self.head, self.base, self.check_set, self.submitter
+        )
+        .into_bytes()
+    }
 }

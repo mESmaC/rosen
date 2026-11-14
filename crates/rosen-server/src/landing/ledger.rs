@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::conflicts::{self, ConflictStoreError};
 
-use super::{AgentId, ChangeId, CommitId, LandError, LandResult, ObjectId, Receipt, Tier};
+use super::{ChangeId, CommitId, LandError, LandResult, ObjectId, Receipt, Tier};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS base_refs (
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS receipts (
 
 pub(crate) fn ensure_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(SCHEMA)?;
+    super::receipt_store::ensure_schema(connection)?;
     super::revert_store::migrate_history(connection)
 }
 
@@ -78,6 +79,9 @@ pub enum CasResult {
     /// The change's head or state moved after the land read it, so the
     /// receipt and approval it decided on may no longer be for its head.
     ChangeMoved,
+    /// The receipt the land decided on no longer verifies, because its
+    /// machine was revoked or its row changed after the land read it.
+    ReceiptUntrusted,
 }
 
 /// What [`Ledger::init_base`] did.
@@ -89,22 +93,6 @@ pub enum InitBase {
         name: String,
         commit: CommitId,
     },
-}
-
-/// The best stored receipt for a change's current head and check set.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReceiptLookup {
-    Missing,
-    Invalid,
-    /// `base_seq` is the receipt base's position in the base history.
-    Valid {
-        receipt: Receipt,
-        base_seq: i64,
-    },
-    /// The newest receipt is bound to a base the ref reached after the
-    /// attempt read it: the base moved during the attempt, so the attempt
-    /// must be retried on the new base rather than decided on the old one.
-    Ahead,
 }
 
 pub struct Ledger {
@@ -133,7 +121,7 @@ impl Ledger {
         })
     }
 
-    fn lock(&self) -> LandResult<MutexGuard<'_, Connection>> {
+    pub(super) fn lock(&self) -> LandResult<MutexGuard<'_, Connection>> {
         self.connection
             .lock()
             .map_err(|_| LandError::Store("ledger mutex poisoned".into()))
@@ -261,95 +249,6 @@ impl Ledger {
         commit.map(parse_commit).transpose()
     }
 
-    /// Stores a receipt and returns the stored row. Submitting the same
-    /// `(change, head, base, check set)` again is a no-op that keeps the
-    /// first submitter: a stored receipt is never rewritten.
-    pub fn put_receipt(&self, receipt: &Receipt) -> LandResult<Receipt> {
-        let connection = self.lock()?;
-        let (change, head, base) = (
-            receipt.change.to_string(),
-            receipt.head.to_string(),
-            receipt.base.to_string(),
-        );
-        connection.execute(
-            "INSERT OR IGNORE INTO receipts (change_id, head, base, check_set, submitter)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                change,
-                head,
-                base,
-                receipt.check_set,
-                receipt.submitter.as_str()
-            ],
-        )?;
-        // Receipts are never deleted, so the row is there whether this call
-        // or an earlier one inserted it.
-        let submitter: String = connection.query_row(
-            "SELECT submitter FROM receipts
-             WHERE change_id = ?1 AND head = ?2 AND base = ?3 AND check_set = ?4",
-            params![change, head, base, receipt.check_set],
-            |row| row.get(0),
-        )?;
-        Ok(Receipt {
-            submitter: AgentId::new(submitter)?,
-            ..receipt.clone()
-        })
-    }
-
-    /// Finds the receipt for `head` and `check_set` whose base is newest in
-    /// the ref's history, which leaves the fewest lands to re-check.
-    /// `attempt_base` is the base the land attempt read; a receipt bound to a
-    /// later base is reported as [`ReceiptLookup::Ahead`].
-    pub fn best_receipt(
-        &self,
-        ref_name: &str,
-        change: &ChangeId,
-        head: &CommitId,
-        check_set: &str,
-        attempt_base: &CommitId,
-    ) -> LandResult<ReceiptLookup> {
-        let connection = self.lock()?;
-        let valid = connection
-            .query_row(
-                "SELECT r.base, r.submitter, h.seq FROM receipts r
-                 JOIN base_history h ON h.ref_name = ?1 AND h.commit_id = r.base
-                 WHERE r.change_id = ?2 AND r.head = ?3 AND r.check_set = ?4
-                 ORDER BY h.seq DESC LIMIT 1",
-                params![ref_name, change.to_string(), head.to_string(), check_set],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((base, submitter, base_seq)) = valid {
-            if base_seq > history_seq(&connection, ref_name, attempt_base)? {
-                return Ok(ReceiptLookup::Ahead);
-            }
-            let receipt = Receipt {
-                change: *change,
-                head: *head,
-                base: parse_commit(base)?,
-                check_set: check_set.to_owned(),
-                submitter: AgentId::new(submitter)?,
-            };
-            return Ok(ReceiptLookup::Valid { receipt, base_seq });
-        }
-        let any: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM receipts WHERE change_id = ?1",
-            params![change.to_string()],
-            |row| row.get(0),
-        )?;
-        Ok(if any == 0 {
-            ReceiptLookup::Missing
-        } else {
-            ReceiptLookup::Invalid
-        })
-    }
-
     /// Moves the base from `expected` to `record.commit` and records the land,
     /// atomically. Refuses if the base moved or the change already landed.
     pub fn compare_and_swap(
@@ -357,10 +256,27 @@ impl Ledger {
         expected: &CommitId,
         record: &LandRecord,
     ) -> LandResult<CasResult> {
+        self.compare_and_swap_with(expected, record, None)
+    }
+
+    /// [`Ledger::compare_and_swap`] for a land decided on `receipt`, which
+    /// must still verify inside the swap's transaction: a machine revoked
+    /// after the land read its receipt then stops the base from moving.
+    pub fn compare_and_swap_with(
+        &self,
+        expected: &CommitId,
+        record: &LandRecord,
+        receipt: Option<&Receipt>,
+    ) -> LandResult<CasResult> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(result) = check_attempt(&tx, expected, record)? {
             return Ok(result);
+        }
+        if let Some(receipt) = receipt {
+            if !super::receipt_store::stored_receipt_verifies(&tx, receipt)? {
+                return Ok(CasResult::ReceiptUntrusted);
+            }
         }
         // The predicate is also on the write itself, rather than relying on
         // the earlier read to be the compare half of compare-and-swap.
@@ -576,7 +492,11 @@ fn approval_holds(tx: &Connection, change: &ChangeId) -> LandResult<bool> {
 
 /// Position of `commit` in the ref's history. The commit must be one the
 /// ref has held: every base a land attempt reads was recorded there first.
-fn history_seq(connection: &Connection, ref_name: &str, commit: &CommitId) -> LandResult<i64> {
+pub(super) fn history_seq(
+    connection: &Connection,
+    ref_name: &str,
+    commit: &CommitId,
+) -> LandResult<i64> {
     connection
         .query_row(
             "SELECT seq FROM base_history WHERE ref_name = ?1 AND commit_id = ?2",
@@ -588,6 +508,6 @@ fn history_seq(connection: &Connection, ref_name: &str, commit: &CommitId) -> La
 }
 
 /// Reads a commit ID the ledger stored as hex.
-fn parse_commit(hex: String) -> LandResult<CommitId> {
+pub(super) fn parse_commit(hex: String) -> LandResult<CommitId> {
     Ok(ObjectId::from_hex(&hex)?)
 }
