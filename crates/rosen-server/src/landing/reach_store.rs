@@ -10,12 +10,52 @@ use std::collections::BTreeMap;
 
 type Files = BTreeMap<String, (rosen_core::FileMode, ObjectId)>;
 
+/// Why the check stopped before deciding.
+#[derive(Debug)]
+enum Stop {
+    /// Reading an object failed; the land reports it as an error.
+    Store(LandError),
+    /// The trees hold something no build graph can be read from: a manifest
+    /// that does not parse, two packages with one name, or a path that is
+    /// not UTF-8.
+    Unreadable(String),
+}
+
+impl From<LandError> for Stop {
+    fn from(error: LandError) -> Self {
+        Stop::Store(error)
+    }
+}
+
+type Checked<T> = Result<T, Stop>;
+
+/// Whether the change's receipt still counts after `lands` moved the base.
+/// A build graph that cannot be read cannot show independence, so it needs a
+/// new receipt (R8), which the agent can act on; an error would only tell
+/// it that the land failed.
 pub fn reusable(
     store: &dyn ObjectStore,
     base: &CommitId,
     facts: &ChangeFacts,
     lands: &[(CommitId, Tier)],
 ) -> LandResult<bool> {
+    match decide(store, base, facts, lands) {
+        Ok(reusable) => Ok(reusable),
+        Err(Stop::Unreadable(why)) => {
+            let change = facts.id;
+            eprintln!("rosen-server: {change} needs a new receipt: unreadable build graph at {base}: {why}");
+            Ok(false)
+        }
+        Err(Stop::Store(error)) => Err(error),
+    }
+}
+
+fn decide(
+    store: &dyn ObjectStore,
+    base: &CommitId,
+    facts: &ChangeFacts,
+    lands: &[(CommitId, Tier)],
+) -> Checked<bool> {
     let config = crate::project_config::resolve(store, base)
         .map_err(error)?
         .config;
@@ -48,20 +88,24 @@ fn error(e: impl std::fmt::Display) -> LandError {
     LandError::Backend(e.to_string())
 }
 
-fn files(store: &dyn ObjectStore, id: &ObjectId) -> LandResult<Files> {
+fn unreadable(e: impl std::fmt::Display) -> Stop {
+    Stop::Unreadable(e.to_string())
+}
+
+fn files(store: &dyn ObjectStore, id: &ObjectId) -> Checked<Files> {
     let tree = match store.read(id).map_err(error)? {
         Object::Commit(c) => c.tree,
         Object::Tree(_) => *id,
-        _ => return Err(error("build reach expects a commit or tree")),
+        _ => return Err(error("build reach expects a commit or tree").into()),
     };
     let mut out = Files::new();
     walk(store, tree, "", &mut out)?;
     Ok(out)
 }
 
-fn walk(store: &dyn ObjectStore, tree: ObjectId, prefix: &str, out: &mut Files) -> LandResult<()> {
+fn walk(store: &dyn ObjectStore, tree: ObjectId, prefix: &str, out: &mut Files) -> Checked<()> {
     for entry in store.read_tree(&tree).map_err(error)?.entries() {
-        let name = std::str::from_utf8(&entry.name).map_err(error)?;
+        let name = std::str::from_utf8(&entry.name).map_err(unreadable)?;
         let path = format!("{prefix}{name}");
         if entry.mode.is_tree() {
             walk(store, entry.id, &format!("{path}/"), out)?;
@@ -82,7 +126,7 @@ fn changed(old: &Files, new: &Files) -> Vec<String> {
         .collect()
 }
 
-fn graph(store: &dyn ObjectStore, files: &Files, config: &ProjectConfig) -> LandResult<BuildGraph> {
+fn graph(store: &dyn ObjectStore, files: &Files, config: &ProjectConfig) -> Checked<BuildGraph> {
     let units = if config.build_units.is_empty() {
         cargo_units(store, files)?
     } else {
@@ -94,12 +138,13 @@ fn graph(store: &dyn ObjectStore, files: &Files, config: &ProjectConfig) -> Land
     })
 }
 
-fn manifest(store: &dyn ObjectStore, id: &ObjectId) -> LandResult<toml::Value> {
+fn manifest(store: &dyn ObjectStore, id: &ObjectId) -> Checked<toml::Value> {
     let blob = store.read_blob(id).map_err(error)?;
-    toml::from_str(std::str::from_utf8(&blob.data).map_err(error)?).map_err(error)
+    let text = std::str::from_utf8(&blob.data).map_err(unreadable)?;
+    toml::from_str(text).map_err(unreadable)
 }
 
-fn cargo_units(store: &dyn ObjectStore, files: &Files) -> LandResult<BTreeMap<String, BuildUnit>> {
+fn cargo_units(store: &dyn ObjectStore, files: &Files) -> Checked<BTreeMap<String, BuildUnit>> {
     let Some((_, root)) = files.get("Cargo.toml") else {
         return Ok(BTreeMap::new());
     };
@@ -117,12 +162,13 @@ fn cargo_units(store: &dyn ObjectStore, files: &Files) -> LandResult<BTreeMap<St
             .get("package")
             .and_then(|p| p.get("name"))
             .and_then(|v| v.as_str())
+            .map(str::to_owned)
         {
             if packages
-                .insert(name.to_owned(), (path.clone(), value))
+                .insert(name.clone(), (path.clone(), value))
                 .is_some()
             {
-                return Err(error("duplicate Cargo package name in base"));
+                return Err(unreadable(format!("two Cargo packages are named {name:?}")));
             }
         }
     }
@@ -137,7 +183,7 @@ fn cargo_units(store: &dyn ObjectStore, files: &Files) -> LandResult<BTreeMap<St
         units.insert(
             name.clone(),
             BuildUnit {
-                paths: vec![PathPattern::new(&pattern)?],
+                paths: vec![PathPattern::new(&pattern).map_err(unreadable)?],
                 dependencies: deps,
             },
         );
@@ -266,6 +312,40 @@ mod tests {
             &[(changed_a, Tier::Normal), (reverted, Tier::Normal)]
         )
         .unwrap());
+    }
+
+    // Risk (R8, issue #107): a base whose build graph cannot be read failed
+    // every moved-base land with an internal error, not `needs_recheck`.
+    #[test]
+    fn unreadable_build_graph_needs_a_new_receipt() {
+        let store = MemoryObjectStore::new();
+        let manifest = TreeEntry {
+            name: b"Cargo.toml".to_vec(),
+            mode: FileMode::Regular,
+            id: store
+                .put_blob(
+                    b"[workspace
+",
+                )
+                .unwrap(),
+        };
+        let tree = store.put_tree(&Tree::new(vec![manifest]).unwrap()).unwrap();
+        let root = commit(&store, tree, vec![]);
+        let landed = commit(&store, tree, vec![root]);
+        let facts = ChangeFacts {
+            id: ChangeId::from_bytes([1; 16]),
+            owner: AgentId::new("test").unwrap(),
+            description: "a".into(),
+            state: ChangeState::Ready,
+            parent: ChangeParent::Base(root),
+            head: tree,
+            merge_base: root,
+            tier: Tier::Normal,
+            has_conflicts: false,
+            approved_head: None,
+            approvers: vec![],
+        };
+        assert!(!reusable(&store, &landed, &facts, &[(landed, Tier::Normal)]).unwrap());
     }
 
     // Risk: missing inherited or target-specific dependencies makes unrelated
