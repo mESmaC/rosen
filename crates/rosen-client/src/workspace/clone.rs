@@ -6,6 +6,7 @@
 //! file: a write to it copies the touched blocks and never reaches the
 //! source.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -14,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use reflink_copy::ReflinkSupport;
 use rosen_core::ObjectId;
 
-use super::layout::{disk_path, FileEntry, FileKind};
+use super::layout::{disk_path, FileEntry, FileKind, Layout};
 use super::{parallel, MaterialiseError, Sparse};
 
 /// What one clone pass did.
@@ -86,6 +87,70 @@ pub fn clone_workspace(
         cloned: cloned.into_inner() + u64::from(probe.is_some()),
         copied: copied.into_inner(),
     })
+}
+
+/// Clears whatever the clone in `root` holds where `after` puts a new
+/// directory or writes a changed file. The clone carries the source's
+/// untracked files too, and one can sit where the target tree tracks
+/// something: generated output a landed change started tracking, or a build
+/// artefact of the same name. Left there, the write would fail and the whole
+/// clone would fall back to a plain copy (issue #40).
+///
+/// Only call this on a fresh clone in a staging directory: it deletes
+/// untracked files, which in an agent's workspace would be its work. A link
+/// is removed, never followed, so nothing outside `root` is touched.
+pub fn clear_for_tree(
+    root: &Path,
+    before: &Layout,
+    after: &Layout,
+) -> Result<(), MaterialiseError> {
+    // Directories the source tracked are real directories Rosen made; only
+    // the new ones can be something else on disk. Parents come first, so a
+    // link removed here is never traversed below.
+    let tracked_dirs: HashSet<&[u8]> = before.dirs.iter().map(Vec::as_slice).collect();
+    for dir in after
+        .dirs
+        .iter()
+        .filter(|dir| !tracked_dirs.contains(dir.as_slice()))
+    {
+        let path = disk_path(root, dir);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if !meta.is_dir() => remove_entry(&path, &meta)?,
+            _ => {}
+        }
+    }
+    let old: HashMap<&[u8], &FileEntry> = before
+        .files
+        .iter()
+        .map(|entry| (entry.path.as_slice(), entry))
+        .collect();
+    for entry in &after.files {
+        if old.get(entry.path.as_slice()) == Some(&entry) {
+            continue;
+        }
+        let path = disk_path(root, &entry.path);
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            remove_entry(&path, &meta)?;
+        }
+    }
+    Ok(())
+}
+
+/// Removes one file, link or whole directory tree without following links.
+fn remove_entry(path: &Path, meta: &fs::Metadata) -> Result<(), MaterialiseError> {
+    let removed = if meta.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        // A Windows directory link or junction is removed as a directory.
+        fs::remove_file(path).or_else(|error| {
+            if meta.file_type().is_symlink() {
+                fs::remove_dir(path)
+            } else {
+                Err(error)
+            }
+        })
+    };
+    removed.map_err(|error| MaterialiseError::io(path, error))
 }
 
 /// Clones one file, or plain-copies it when the file system refuses the

@@ -30,6 +30,7 @@ pub mod pool;
 mod pool_worker;
 mod prepare;
 mod sparse;
+mod staging_sweep;
 mod template;
 mod write;
 
@@ -109,6 +110,8 @@ pub struct Report {
 pub enum MaterialiseError {
     #[error("{0} already exists; a workspace is materialised only into a new directory")]
     Exists(PathBuf),
+    #[error("{0} has the name form Rosen reserves for staging; choose another name")]
+    ReservedName(PathBuf),
     #[error("{0:?} is not a sparse path: give a path from the workspace root")]
     InvalidSparsePath(String),
     #[error("the tree holds {0:?}, which this OS cannot store as a file name")]
@@ -150,6 +153,11 @@ pub fn materialise_with_budget(
 ) -> Result<Report, MaterialiseError> {
     let target = Layout::of_tree(store, tree, &options.sparse)?;
     let staging = Staging::create(dest)?;
+    // Only a budgeted build sweeps: moving abandoned staging must keep its
+    // bytes charged to the budget until they are deleted.
+    if let Some(budget) = budget {
+        staging_sweep::sweep_abandoned(staging.parent(), budget);
+    }
     let _permit = reserve(budget, store, &target, options, dest, staging.path())?;
     let mut fallback = None;
     if let Some(source) = &options.source {
@@ -248,6 +256,7 @@ fn from_source(
     let before = Layout::of_tree(store, source.tree, sparse)?;
     let cloned =
         clone::clone_workspace(&source.dir, root, sparse, clone::pick_probe(&before.files))?;
+    clone::clear_for_tree(root, &before, target)?;
     let changed = bring_to_tree(root, &before, target)?;
     let bytes = write_all(store, root, &changed)?;
     Ok(Report {
@@ -303,7 +312,8 @@ fn bring_to_tree<'a>(
 }
 
 /// A hidden directory beside the destination that a workspace is built in.
-/// It is removed on drop unless published.
+/// It is removed on drop unless published; one a crash left behind is
+/// removed by [`staging_sweep`].
 struct Staging {
     parent: PathBuf,
     path: PathBuf,
@@ -321,6 +331,11 @@ impl Staging {
                 io::Error::new(io::ErrorKind::InvalidInput, "no directory name"),
             )
         })?;
+        // A sweep removes directories of this form once their builder exits,
+        // so a workspace must never carry it.
+        if staging_sweep::is_staging_name(name) {
+            return Err(MaterialiseError::ReservedName(dest.to_path_buf()));
+        }
         let parent = std::path::absolute(dest)
             .map_err(|error| MaterialiseError::io(dest, error))?
             .parent()
@@ -330,18 +345,23 @@ impl Staging {
         for attempt in 0u32.. {
             let mut hidden = std::ffi::OsString::from(".");
             hidden.push(name);
-            hidden.push(format!(".rosen-partial-{}-{attempt}", std::process::id()));
+            hidden.push(format!(
+                "{}{}-{attempt}",
+                staging_sweep::STAGING_TAG,
+                std::process::id()
+            ));
             let path = parent.join(hidden);
-            match fs::create_dir(&path) {
-                Ok(()) => {
+            // A crashed run of an earlier process with this id can leave
+            // its staging directory behind until a sweep; try the next name.
+            match staging_sweep::create_marked(&path) {
+                Ok(true) => {
                     return Ok(Self {
                         parent,
                         path,
                         published: false,
                     })
                 }
-                // A crashed run can leave its staging directory behind.
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Ok(false) => continue,
                 Err(error) => return Err(MaterialiseError::io(&path, error)),
             }
         }
@@ -372,6 +392,7 @@ impl Staging {
             match fs::rename(&self.path, dest) {
                 Ok(()) => {
                     self.published = true;
+                    staging_sweep::unmark(&self.path);
                     return Ok(());
                 }
                 Err(error)
@@ -390,7 +411,7 @@ impl Staging {
 impl Drop for Staging {
     fn drop(&mut self) {
         if !self.published {
-            let _ = fs::remove_dir_all(&self.path);
+            staging_sweep::remove_marked(&self.path);
         }
     }
 }
