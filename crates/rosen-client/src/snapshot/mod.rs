@@ -23,7 +23,7 @@ pub mod watch;
 pub use journal::pending_journal;
 pub use marker::{WorkspaceMarker, STATE_DIR};
 pub use seed::seed_tree_cache;
-pub use upload::{Sent, MAX_FILE_BYTES};
+pub use upload::Sent;
 pub use watch::{watch, WatchEvent};
 
 use crate::connection::unexpected;
@@ -44,8 +44,6 @@ pub enum SnapshotError {
     NoWorkspace(PathBuf),
     #[error("the stored tree holds a path that is not UTF-8: {:?}", String::from_utf8_lossy(.0))]
     NonUtf8Path(Vec<u8>),
-    #[error("{0} is {1} bytes; a snapshot carries files up to {MAX_FILE_BYTES} bytes")]
-    TooLarge(String, u64),
     #[error(transparent)]
     Core(#[from] rosen_core::Error),
     #[error(transparent)]

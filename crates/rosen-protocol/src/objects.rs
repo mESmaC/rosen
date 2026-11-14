@@ -5,6 +5,11 @@
 use rosen_core::{ObjectId, ObjectKind};
 use serde::{Deserialize, Serialize};
 
+/// The largest object body sent whole in one frame, and the size of each
+/// slice of a larger one. Base64 grows a body by a third, so a slice stays
+/// well inside the 64 MiB frame limit.
+pub const OBJECT_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
 /// The kind of a stored object, as sent on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,12 +56,37 @@ pub struct ObjectQuery {
 }
 
 /// The answer to [`crate::Request::GetObjects`]. An asked ID that is in
-/// neither list was deferred because the frame was full; ask for it again.
+/// none of the lists was deferred because the frame was full; ask for it
+/// again.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectBatch {
     pub objects: Vec<WireObject>,
     /// IDs the store does not hold.
     pub missing: Vec<ObjectId>,
+    /// IDs the store holds but that are too large for one frame; read them
+    /// with [`crate::Request::GetObjectChunk`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub large: Vec<ObjectId>,
+}
+
+/// Parameters of [`crate::Request::GetObjectChunk`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectChunkQuery {
+    pub id: ObjectId,
+    pub offset: u64,
+    /// The most bytes to return; the server may return fewer.
+    pub len: u64,
+}
+
+/// The answer to [`crate::Request::GetObjectChunk`]: `data` is the object
+/// body from `offset`, empty at or past the end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectChunk {
+    pub kind: WireKind,
+    /// The object body's whole length in bytes.
+    pub total: u64,
+    #[serde(with = "crate::snapshot::base64_bytes")]
+    pub data: Vec<u8>,
 }
 
 /// Parameters of [`crate::Request::EnsureObjects`].
