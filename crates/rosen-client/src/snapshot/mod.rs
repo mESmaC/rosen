@@ -17,12 +17,14 @@ mod marker;
 mod rebase;
 mod scan;
 mod seed;
+mod stat_cache;
 mod upload;
 pub mod watch;
 
 pub use journal::pending_journal;
 pub use marker::{WorkspaceMarker, STATE_DIR};
 pub use seed::seed_tree_cache;
+pub(crate) use stat_cache::seed as seed_stat_cache;
 pub use upload::Sent;
 pub use watch::{watch, WatchEvent};
 
@@ -150,12 +152,13 @@ impl Snapshotter {
             _ => SnapshotError::io(&WorkspaceMarker::path(&root), err),
         })?;
         let journal = journal::Journal::open(&root).map_err(|e| SnapshotError::io(&root, e))?;
-        let (index, known_trees, captured_root) = {
+        let (mut index, known_trees, captured_root) = {
             // Another writer may be appending or replaying; read its tail
             // only once it is done.
             let _writer = journal.writer().map_err(|e| SnapshotError::io(&root, e))?;
             open_index(store, &root, &journal, marker.tree)?
         };
+        stat_cache::apply(&root, &mut index);
         let sparse = Sparse::paths(&marker.sparse).map_err(|err| {
             SnapshotError::io(
                 &WorkspaceMarker::path(&root),
@@ -221,9 +224,11 @@ impl Snapshotter {
     fn prepare(&mut self, dirty: &Dirty) -> Result<Prepared, SnapshotError> {
         let mut outcome = ScanOutcome::default();
         self.scan(dirty, &mut outcome)?;
-        if outcome.ignore_changed && *dirty != Dirty::Full {
+        let mut full = *dirty == Dirty::Full;
+        if outcome.ignore_changed && !full {
             // New rules can un-ignore files nobody wrote to since.
             self.scan(&Dirty::Full, &mut outcome)?;
+            full = true;
         }
         if outcome.ignore_changed {
             scan::drop_ignored(&mut self.ignore, &self.index, &mut outcome);
@@ -236,6 +241,11 @@ impl Snapshotter {
             self.defer_unreadable,
         )?;
         self.unreadable = read.unreadable;
+        if full {
+            // Only a speed-up for the next snapshotter's full scan, so a
+            // failed save just leaves it rereading files.
+            let _ = stat_cache::save(&self.root, &self.index);
+        }
         let built = self.index.build_trees()?;
         let all_trees = built.trees.iter().map(|(id, _)| *id).collect();
         let trees = built.trees.into_iter().collect();

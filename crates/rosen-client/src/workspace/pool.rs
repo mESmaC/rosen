@@ -382,10 +382,19 @@ fn matches_tree(root: &Path, entry: &super::layout::FileEntry) -> bool {
 
 /// Fills a ready workspace's snapshot tree cache before any take, so the
 /// take does not spend seconds writing thousands of trees (R3: ready in
-/// under 2 s). A failure is only logged: the take seeds whatever is missing.
+/// under 2 s), and records its files' stats, so the first snapshot after the
+/// take does not reread every file (#174). Call only while the slot's
+/// tracked files hold `tree`. A failure is only logged: the take seeds
+/// whatever trees are missing, and a missing stat only costs a reread.
 pub(super) fn seed_slot(store: &LooseObjectStore, path: &Path, tree: ObjectId) {
     if let Err(error) = crate::snapshot::seed_tree_cache(store, path, tree) {
         eprintln!("rosen warm pool: seeding {}: {error}", path.display());
+    }
+    if let Err(error) = super::seed_stats(store, path, tree) {
+        eprintln!(
+            "rosen warm pool: recording file stats in {}: {error}",
+            path.display()
+        );
     }
 }
 
