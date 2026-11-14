@@ -346,17 +346,17 @@ impl Staging {
                 std::process::id()
             ));
             let path = parent.join(hidden);
-            match fs::create_dir(&path) {
-                Ok(()) => {
+            // A crashed run of an earlier process with this id can leave
+            // its staging directory behind until a sweep; try the next name.
+            match staging_sweep::create_marked(&path) {
+                Ok(true) => {
                     return Ok(Self {
                         parent,
                         path,
                         published: false,
                     })
                 }
-                // A crashed run of an earlier process with this id can
-                // leave its staging directory behind until a sweep.
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Ok(false) => continue,
                 Err(error) => return Err(MaterialiseError::io(&path, error)),
             }
         }
@@ -387,6 +387,7 @@ impl Staging {
             match fs::rename(&self.path, dest) {
                 Ok(()) => {
                     self.published = true;
+                    staging_sweep::unmark(&self.path);
                     return Ok(());
                 }
                 Err(error)
@@ -405,7 +406,7 @@ impl Staging {
 impl Drop for Staging {
     fn drop(&mut self) {
         if !self.published {
-            let _ = fs::remove_dir_all(&self.path);
+            staging_sweep::remove_marked(&self.path);
         }
     }
 }

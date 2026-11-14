@@ -3,13 +3,20 @@
 //! A workspace is built in `.<name>.rosen-partial-<pid>-<attempt>` beside its
 //! destination, and only the building process removes it when the build does
 //! not publish. A process killed mid-build leaves it there for good, holding
-//! a partial tree and, on the clone path, the template's build output. The
-//! name carries the builder's process id, so a directory whose builder no
-//! longer runs is abandoned and nothing else can be writing to it.
+//! a partial tree and, on the clone path, the template's build output.
+//!
+//! The builder writes a marker file, the directory's name plus
+//! [`MARKER_SUFFIX`], right after creating the directory, and removes it once
+//! the directory is published or removed. The marker is the evidence a
+//! directory is unpublished staging: a sweep removes only a marked directory
+//! whose builder, named by the process id in the name, no longer runs. A
+//! directory that merely has a staging name, such as one made before markers
+//! existed, is never touched.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -17,10 +24,54 @@ use std::time::{Duration, Instant};
 /// The tag between a staging directory's destination name and its owner.
 pub(super) const STAGING_TAG: &str = ".rosen-partial-";
 
+/// Appended to a staging directory's name to name its marker file.
+const MARKER_SUFFIX: &str = ".rosen-staging";
+
 /// How often one process looks for abandoned staging in the same directory.
 /// The pool materialises at every land, and a crash is rare, so a listing per
 /// build would be wasted work.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The marker file that shows `dir` is unpublished staging.
+fn marker_of(dir: &Path) -> PathBuf {
+    let mut name = dir.as_os_str().to_owned();
+    name.push(MARKER_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Creates the staging directory `dir`, then its marker. Returns false when
+/// `dir` already exists, so the caller tries another name. A crash between
+/// the two leaves an unmarked directory, which is only ever leaked, never a
+/// wrong deletion.
+pub(super) fn create_marked(dir: &Path) -> io::Result<bool> {
+    match fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    // The directory is new, so a marker already beside it was left by a
+    // builder with the same id that crashed after publishing; it now
+    // describes this directory, and truncating it takes it over.
+    if let Err(error) = fs::File::create(marker_of(dir)) {
+        let _ = fs::remove_dir(dir);
+        return Err(error);
+    }
+    Ok(true)
+}
+
+/// Called once `dir` is renamed into place: the published workspace must
+/// carry no evidence that would let a sweep take it for staging.
+pub(super) fn unmark(dir: &Path) {
+    let _ = fs::remove_file(marker_of(dir));
+}
+
+/// Removes unpublished staging `dir` and then its marker. The marker stays
+/// while any of `dir` does, so a later sweep finishes the removal.
+pub(super) fn remove_marked(dir: &Path) {
+    if fs::remove_dir_all(dir).is_ok() {
+        unmark(dir);
+    }
+}
 
 /// Starts removing the abandoned staging directories in `parent`, at most
 /// once per [`SWEEP_INTERVAL`] for each `parent` in this process. Removal runs
@@ -49,41 +100,54 @@ pub(super) fn sweep_abandoned(parent: &Path) {
     }
     let _ = std::thread::Builder::new()
         .name("rosen-staging-sweep".into())
-        .spawn(move || {
-            for dir in abandoned {
-                // Best effort: whatever stays is retried at the next sweep.
-                let _ = fs::remove_dir_all(dir);
-            }
-        });
+        .spawn(move || abandoned.iter().for_each(|dir| remove_abandoned(dir)));
 }
 
-/// The staging directories in `parent` whose building process no longer
-/// runs. A link carrying a staging name is skipped, so removal never follows
-/// it out of `parent`.
-pub(super) fn find_abandoned(parent: &Path) -> Vec<PathBuf> {
+/// The staging directories in `parent` that carry a marker file and whose
+/// building process no longer runs. A marker whose directory is gone, left
+/// by a crash just after publishing, is listed too, so it is cleared.
+fn find_abandoned(parent: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(parent) else {
         return Vec::new();
     };
     let own = std::process::id();
     entries
         .flatten()
-        .filter(|entry| {
-            staging_owner(&entry.file_name()).is_some_and(|pid| {
-                pid != own && !rosen_platform::process_may_be_running(pid)
-            })
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            let marker = entry.path();
+            // The staging name ends in `-<attempt>`, with no dot, so the
+            // marker's only extension is the suffix and its stem is the
+            // directory's name, whatever encoding that name has.
+            if marker.extension()? != OsStr::new(&MARKER_SUFFIX[1..]) {
+                return None;
+            }
+            let pid = staging_owner(marker.file_stem()?)?;
+            let abandoned = pid != own && !rosen_platform::process_may_be_running(pid);
+            abandoned.then(|| marker.with_extension(""))
         })
-        // `DirEntry::file_type` does not follow links, and a junction or
-        // symlink is never a directory here.
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .map(|entry| entry.path())
         .collect()
 }
 
-/// Whether `name` has the staging form. Rosen refuses it for a workspace, so
-/// a directory with this name beside workspaces is only ever staging and a
-/// sweep never removes a published workspace.
+/// Removes an abandoned staging directory and its marker. Only a real
+/// directory is removed: a link or file carrying the name is left, so
+/// removal never follows a link out of the parent.
+fn remove_abandoned(dir: &Path) {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.is_dir() => remove_marked(dir),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => unmark(dir),
+        _ => {}
+    }
+}
+
+/// Whether `name` has the form of a staging directory or its marker. Rosen
+/// refuses it for a workspace, so it never publishes one a sweep could
+/// mistake for staging.
 pub(crate) fn is_staging_name(name: &OsStr) -> bool {
+    let path = Path::new(name);
     staging_owner(name).is_some()
+        || (path.extension() == Some(OsStr::new(&MARKER_SUFFIX[1..]))
+            && path.file_stem().and_then(staging_owner).is_some())
 }
 
 /// The process id in a staging directory's name, or `None` for any other
@@ -106,10 +170,11 @@ mod tests {
     use super::*;
 
     // Risk: removing a live build's staging would make a concurrent
-    // materialisation fail or publish a damaged workspace, so only a dead
-    // builder's directory may be found, and never a workspace's.
+    // materialisation fail or publish a damaged workspace, and removing an
+    // unmarked directory could delete a workspace or user data. Only a dead
+    // builder's marked directory may be found.
     #[test]
-    fn finds_only_dead_builders_staging() {
+    fn finds_only_dead_builders_marked_staging() {
         let root = tempfile::tempdir().unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--list")
@@ -119,16 +184,15 @@ mod tests {
         let dead = child.id();
         child.wait().unwrap();
         let own = std::process::id();
-        let dead_dir = root.path().join(format!(".ws{STAGING_TAG}{dead}-3"));
-        for name in [
-            format!(".ws{STAGING_TAG}{dead}-3"),
-            format!(".ws{STAGING_TAG}{own}-0"),
-            format!("ws{STAGING_TAG}{dead}-0"),
-            format!(".ws{STAGING_TAG}{dead}-0x"),
-            "ws".to_string(),
-        ] {
-            fs::create_dir(root.path().join(name)).unwrap();
-        }
-        assert_eq!(find_abandoned(root.path()), vec![dead_dir]);
+        let staging = |name: String| root.path().join(name);
+        let dead_marked = staging(format!(".ws{STAGING_TAG}{dead}-3"));
+        assert!(create_marked(&dead_marked).unwrap());
+        assert!(create_marked(&staging(format!(".ws{STAGING_TAG}{own}-0"))).unwrap());
+        fs::create_dir(staging(format!(".ws{STAGING_TAG}{dead}-4"))).unwrap();
+        fs::create_dir(staging(format!(".ws{STAGING_TAG}{dead}-0x"))).unwrap();
+        fs::write(marker_of(&staging(format!(".ws{STAGING_TAG}{dead}-0x"))), b"").unwrap();
+        assert_eq!(find_abandoned(root.path()), vec![dead_marked.clone()]);
+        remove_abandoned(&dead_marked);
+        assert!(!dead_marked.exists() && !marker_of(&dead_marked).exists());
     }
 }
