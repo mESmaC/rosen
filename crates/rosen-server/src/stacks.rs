@@ -66,32 +66,58 @@ pub fn reconcile(state: &ServerState) -> Result<(), ChangeError> {
             _ => MergePolicy::Text,
         }
     };
-    loop {
-        let result = state.changes.with_conn(|conn| step(conn, &ctx, &policy))?;
-        deliver(state)?;
-        let Some(_) = result else {
+    // Every snapshot ends here, and most find no stack to move: that look
+    // takes no write lock. A step's merge runs with nothing held, then
+    // `apply` checks the step's inputs still stand and commits it. Inputs
+    // that moved are read again; more than a few such rounds in a row mean
+    // the stack is being written steadily, and the next snapshot or land
+    // comes back here.
+    let mut moved = 0;
+    while moved < MOVED_ROUNDS {
+        let Some(step) = state.changes.with_conn(|conn| pending_step(conn))? else {
             return Ok(());
         };
+        let trees = [step.base, step.onto, step.current.head];
+        let merged = history::merge::merge_trees(&ctx, trees, &policy).map_err(failure)?;
+        let sides = conflict_sides(&ctx, [step.base, step.current.head, step.onto], &merged)?;
+        let applied = state
+            .changes
+            .with_conn(|conn| apply(conn, &step, merged, sides))?;
+        deliver(state)?;
+        moved = if applied { 0 } else { moved + 1 };
     }
+    Ok(())
 }
 
-type Notification = (ChangeId, EventKind, serde_json::Value);
+/// Each conflicting path with its content at the base, in the change and in
+/// the parent.
+type ConflictSides = Vec<(String, [Vec<u8>; 3])>;
 
-fn step(
-    conn: &mut Connection,
-    ctx: &history::Ctx<'_>,
-    policy: &dyn Fn(&str) -> rosen_merge::MergePolicy,
-) -> Result<Option<Notification>, ChangeError> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let pending: Option<(String, String, String)> = tx
-        .query_row(
-            "SELECT c.id, b.tree, p.head FROM changes c
+/// How many times in a row a stack step may find its inputs moved.
+const MOVED_ROUNDS: u32 = 8;
+
+/// One stacked change whose parent's head moved past the tree it was last
+/// rebased onto, with everything its rebase is computed from.
+struct Step {
+    current: rosen_core::Change,
+    /// The parent tree the change's edits are measured from.
+    base: ObjectId,
+    /// The parent's head now.
+    onto: ObjectId,
+}
+
+const PENDING: &str = "SELECT c.id, b.tree, p.head FROM changes c
          JOIN stack_bases b ON b.change_id = c.id
          JOIN changes p ON p.id = c.parent_change
          WHERE c.state IN ('open', 'ready') AND p.state IN ('open', 'ready')
            AND b.tree <> p.head
-           AND NOT EXISTS (SELECT 1 FROM conflicts f WHERE f.change_id = c.id AND f.state = 'open')
-         ORDER BY c.created_at, c.id LIMIT 1",
+           AND NOT EXISTS (SELECT 1 FROM conflicts f WHERE f.change_id = c.id AND f.state = 'open')";
+
+/// The oldest stacked change that needs a rebase, read without a write lock.
+fn pending_step(conn: &Connection) -> Result<Option<Step>, ChangeError> {
+    let pending: Option<(String, String, String)> = conn
+        .query_row(
+            &format!("{PENDING} ORDER BY c.created_at, c.id LIMIT 1"),
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -99,53 +125,79 @@ fn step(
     let Some((id, base, onto)) = pending else {
         return Ok(None);
     };
-    let id: ChangeId = id.parse().map_err(failure)?;
+    step_of(conn, id.parse().map_err(failure)?, &base, &onto)
+}
+
+/// The step for `id` from `base` onto `onto`, if the change may be rebased.
+fn step_of(
+    conn: &Connection,
+    id: ChangeId,
+    base: &str,
+    onto: &str,
+) -> Result<Option<Step>, ChangeError> {
     let base: ObjectId = base.parse().map_err(failure)?;
     let onto: ObjectId = onto.parse().map_err(failure)?;
-    let current = changes::get(&tx, id)?.change;
+    let current = changes::get(conn, id)?.change;
     let rosen_core::ChangeParent::Change(parent) = current.parent else {
         return Ok(None);
     };
-    if !eligible(
+    let may = eligible(
         current.state.is_closed(),
-        changes::get(&tx, parent)?.change.state.is_closed(),
+        changes::get(conn, parent)?.change.state.is_closed(),
         !current.conflicts.is_empty(),
         base == onto,
-    ) {
-        return Ok(None);
-    }
-    let merged =
-        history::merge::merge_trees(ctx, [base, onto, current.head], policy).map_err(failure)?;
-    finish_step(tx, ctx, current, base, onto, merged)
+    );
+    Ok(may.then_some(Step {
+        current,
+        base,
+        onto,
+    }))
 }
 
-fn finish_step(
-    tx: rusqlite::Transaction<'_>,
-    ctx: &history::Ctx<'_>,
-    current: rosen_core::Change,
-    base: ObjectId,
-    onto: ObjectId,
+/// Commits a step whose merge is done, if what it was computed from still
+/// stands: the change exactly as read, still pending from the same basis
+/// onto the same parent head. `false` when any of it moved, and nothing is
+/// written.
+fn apply(
+    conn: &mut Connection,
+    step: &Step,
     merged: history::merge::TreeMerge,
-) -> Result<Option<Notification>, ChangeError> {
-    let id = current.id;
+    sides: ConflictSides,
+) -> Result<bool, ChangeError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let id = step.current.id;
+    let still: Option<(String, String)> = tx
+        .query_row(&format!("{PENDING} AND c.id = ?1"), [id.to_string()], |r| {
+            Ok((r.get(1)?, r.get(2)?))
+        })
+        .optional()?;
+    let stands = match still {
+        Some((base, onto)) => step_of(&tx, id, &base, &onto)?.is_some_and(|now| {
+            now.current == step.current && now.base == step.base && now.onto == step.onto
+        }),
+        None => false,
+    };
+    if !stands {
+        return Ok(false);
+    }
     let (kind, detail) = if let Some(tree) = merged.tree {
-        changes::update_in(&tx, id, |c| c.rebase(current.parent, tree))?;
-        track(&tx, id, onto)?;
+        changes::update_in(&tx, id, |c| c.rebase(step.current.parent, tree))?;
+        track(&tx, id, step.onto)?;
         (
             EventKind::Rebased,
-            serde_json::json!({"tree":tree,"onto":onto,"regenerate":merged.regenerate}),
+            serde_json::json!({"tree":tree,"onto":step.onto,"regenerate":merged.regenerate}),
         )
     } else {
-        store_conflicts(&tx, ctx, id, [base, current.head, onto], &merged.conflicts)?;
+        store_conflicts(&tx, id, sides)?;
         (
             EventKind::Conflict,
             serde_json::json!({"paths":merged.conflicts}),
         )
     };
     // Staged with the update it announces, so both commit or neither does.
-    crate::events::stage(&tx, &Staged::about(kind, id, detail.clone()))?;
+    crate::events::stage(&tx, &Staged::about(kind, id, detail))?;
     tx.commit()?;
-    Ok(Some((id, kind, detail)))
+    Ok(true)
 }
 
 /// Hands staged stack events to the event log, which stores each staged
@@ -194,34 +246,45 @@ fn adopt_legacy_rows(conn: &mut Connection) -> Result<(), ChangeError> {
     Ok(())
 }
 
+/// Each conflicting file's content in the three trees, read from the object
+/// store before the step's transaction starts. Empty for a clean merge.
+fn conflict_sides(
+    ctx: &history::Ctx<'_>,
+    trees: [ObjectId; 3],
+    merged: &history::merge::TreeMerge,
+) -> Result<ConflictSides, ChangeError> {
+    if merged.tree.is_some() {
+        return Ok(Vec::new());
+    }
+    let side = |tree: ObjectId, path: &str| -> Result<Vec<u8>, ChangeError> {
+        let entry = file_at(&ctx.store, tree, path).map_err(failure)?;
+        Ok(content(&ctx.store, entry)
+            .map_err(failure)?
+            .unwrap_or_default())
+    };
+    merged
+        .conflicts
+        .iter()
+        .map(|path| {
+            let sides = [
+                side(trees[0], path)?,
+                side(trees[1], path)?,
+                side(trees[2], path)?,
+            ];
+            Ok((path.clone(), sides))
+        })
+        .collect()
+}
+
 fn store_conflicts(
     tx: &rusqlite::Transaction<'_>,
-    ctx: &history::Ctx<'_>,
     id: ChangeId,
-    trees: [ObjectId; 3],
-    paths: &[String],
+    sides: ConflictSides,
 ) -> Result<(), ChangeError> {
     let mut set = crate::conflicts::load(tx, &id.to_string()).map_err(failure)?;
-    for path in paths {
-        let mut sides = Vec::new();
-        for tree in trees {
-            let entry = file_at(&ctx.store, tree, path).map_err(failure)?;
-            sides.push(
-                content(&ctx.store, entry)
-                    .map_err(failure)?
-                    .unwrap_or_default(),
-            );
-        }
-        set.record_merge(
-            path,
-            vec![Conflict::new(
-                path,
-                1,
-                sides[0].clone(),
-                sides[1].clone(),
-                sides[2].clone(),
-            )],
-        );
+    for (path, [base, ours, theirs]) in sides {
+        let conflict = Conflict::new(&path, 1, base, ours, theirs);
+        set.record_merge(&path, vec![conflict]);
     }
     crate::conflicts::save(tx, &id.to_string(), &set).map_err(failure)
 }
@@ -260,14 +323,16 @@ pub(crate) enum LandRebase {
     Conflicted,
 }
 
-/// Re-read the live child while holding the writer lock. The landing engine's
-/// preview may predate an author snapshot, so its tree cannot be installed.
+/// Rebases the live child onto a landed commit. The landing engine's preview
+/// may predate an author snapshot, so its tree cannot be installed: the child
+/// is read here, merged with nothing held, and the result is installed only
+/// if the child is still exactly as it was read. A child that moved meanwhile
+/// (its author's next snapshot) is read and merged again.
 pub(crate) fn land_rebase(
     state: &ServerState,
     id: ChangeId,
     onto: ObjectId,
 ) -> Result<LandRebase, ChangeError> {
-    use rosen_core::ChangeParent;
     use rosen_store::ObjectStore;
     let ctx = history::open(state).map_err(failure)?;
     let config = state
@@ -276,14 +341,22 @@ pub(crate) fn land_rebase(
         .map_err(failure)?
         .config;
     let onto_tree = ctx.store.read_commit(&onto).map_err(failure)?.tree;
-    state.changes.with_conn(|conn| {
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = changes::get(&tx, id)?.change;
-        if current.state.is_closed() {
-            return Ok(LandRebase::Skipped);
+    let policy = |path: &str| {
+        if config.is_generated(path) {
+            rosen_merge::MergePolicy::Generated
+        } else if config.is_registration_list(path) {
+            rosen_merge::MergePolicy::RegistrationList
+        } else {
+            rosen_merge::MergePolicy::Text
         }
-        let base = match current.parent {
-            ChangeParent::Base(commit) => {
+    };
+    for _ in 0..LAND_REBASE_ATTEMPTS {
+        let Some(child) = state.changes.with_conn(|conn| land_child(conn, id))? else {
+            return Ok(LandRebase::Skipped);
+        };
+        let base = match child.basis {
+            Basis::Tree(tree) => tree,
+            Basis::Commit(commit) => {
                 // Recovery can replay an older land after a later rebase.
                 // Moving back would discard the intervening base additions.
                 // Already on `onto`: a replay of this land moved it.
@@ -292,35 +365,90 @@ pub(crate) fn land_rebase(
                 }
                 ctx.store.read_commit(&commit).map_err(failure)?.tree
             }
-            ChangeParent::Change(parent) => {
-                // Overlap alone cannot detach a child from its unlanded parent.
-                if changes::get(&tx, parent)?.change.state != rosen_core::ChangeState::Landed {
-                    return Ok(LandRebase::Skipped);
-                }
-                basis(&tx, id, parent)?
-            }
         };
-        let merged = history::merge::merge_trees(&ctx, [base, onto_tree, current.head], &|path| {
-            if config.is_generated(path) {
-                rosen_merge::MergePolicy::Generated
-            } else if config.is_registration_list(path) {
-                rosen_merge::MergePolicy::RegistrationList
-            } else {
-                rosen_merge::MergePolicy::Text
+        let merged =
+            history::merge::merge_trees(&ctx, [base, onto_tree, child.current.head], &policy)
+                .map_err(failure)?;
+        let installed = state
+            .changes
+            .with_conn(|conn| install(conn, &child, onto, merged.tree))?;
+        if let Some(outcome) = installed {
+            return Ok(outcome);
+        }
+    }
+    // The author's snapshots kept moving the child: this land leaves it on
+    // its old base, and the next land or `rosen rebase` moves it.
+    Ok(LandRebase::Skipped)
+}
+
+/// How often a land's rebase of one child is tried again because the child
+/// moved while it was merged.
+const LAND_REBASE_ATTEMPTS: u32 = 8;
+
+/// A child change as a land's rebase read it.
+struct LandChild {
+    current: rosen_core::Change,
+    basis: Basis,
+}
+
+/// What the child's edits are measured from.
+#[derive(PartialEq, Eq)]
+enum Basis {
+    /// The base commit the child sits on.
+    Commit(ObjectId),
+    /// The tree of the landed parent it was last rebased onto.
+    Tree(ObjectId),
+}
+
+/// The child and its basis; `None` when a land moves nothing for it: it is
+/// closed, or stacked on a parent that has not landed.
+fn land_child(conn: &Connection, id: ChangeId) -> Result<Option<LandChild>, ChangeError> {
+    use rosen_core::ChangeParent;
+    let current = changes::get(conn, id)?.change;
+    if current.state.is_closed() {
+        return Ok(None);
+    }
+    let basis = match current.parent {
+        ChangeParent::Base(commit) => Basis::Commit(commit),
+        ChangeParent::Change(parent) => {
+            // Overlap alone cannot detach a child from its unlanded parent.
+            if changes::get(conn, parent)?.change.state != rosen_core::ChangeState::Landed {
+                return Ok(None);
             }
-        })
-        .map_err(failure)?;
-        let Some(tree) = merged.tree else {
-            return Ok(LandRebase::Conflicted);
-        };
-        changes::update_in(&tx, id, |c| c.rebase(ChangeParent::Base(onto), tree))?;
-        tx.execute(
-            "DELETE FROM stack_bases WHERE change_id = ?1",
-            [id.to_string()],
-        )?;
-        tx.commit()?;
-        Ok(LandRebase::Moved)
-    })
+            Basis::Tree(basis(conn, id, parent)?)
+        }
+    };
+    Ok(Some(LandChild { current, basis }))
+}
+
+/// Installs the merged tree, or reports the conflict, if the child is still
+/// as `child` read it. `None` when it moved: nothing is written and the
+/// caller reads it again.
+fn install(
+    conn: &mut Connection,
+    child: &LandChild,
+    onto: ObjectId,
+    tree: Option<ObjectId>,
+) -> Result<Option<LandRebase>, ChangeError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let id = child.current.id;
+    let stands = land_child(&tx, id)?
+        .is_some_and(|now| now.current == child.current && now.basis == child.basis);
+    if !stands {
+        return Ok(None);
+    }
+    let Some(tree) = tree else {
+        return Ok(Some(LandRebase::Conflicted));
+    };
+    changes::update_in(&tx, id, |c| {
+        c.rebase(rosen_core::ChangeParent::Base(onto), tree)
+    })?;
+    tx.execute(
+        "DELETE FROM stack_bases WHERE change_id = ?1",
+        [id.to_string()],
+    )?;
+    tx.commit()?;
+    Ok(Some(LandRebase::Moved))
 }
 
 fn descends_from(

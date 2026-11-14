@@ -185,10 +185,21 @@ fn ensure_complete(
     Ok(())
 }
 
-/// Writes the snapshot commit and appends it to the change, holding the
-/// registry's connection throughout, so two snapshots of one change can never
-/// both pick the same parent commit. Also returns the paths whose conflicts
-/// the snapshot stored.
+/// How often a snapshot is prepared again because its change moved meanwhile.
+/// Only another snapshot of the same change or a rebase of it moves it, so
+/// more tries than this mean something writes it in a loop.
+const RECORD_ATTEMPTS: u32 = 8;
+
+/// Writes the snapshot commit and appends it to the change.
+///
+/// Every change operation of every agent shares the registry's connection,
+/// so it is held only to read the change and, at the end, to append the
+/// snapshot. The merge with a pending rebase and the write of the commit
+/// object, which is synced to disk, run between the two with nothing held.
+/// The append checks the change is still exactly as it was read, so two
+/// snapshots of one change can never both pick the same parent commit: the
+/// one that loses is prepared again from the new head. A commit object
+/// written for a try that lost is never named by anything.
 fn record(
     state: &ServerState,
     store: &dyn ObjectStore,
@@ -198,12 +209,66 @@ fn record(
         return Err(SnapshotError::MissingTree(request.tree));
     }
     let ctx = crate::history::open(state).map_err(history_failure)?;
-    let outcome = state.changes.with_conn(|conn| {
-        let current = changes::get(conn, changes::resolve(conn, &request.change)?)?;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let (current, parent) = state.changes.with_conn(|conn| {
+            let current = changes::get(conn, changes::resolve(conn, &request.change)?)?;
+            let parent = snapshot_parent(conn, &current.change)?;
+            Ok((current, parent))
+        })?;
+        if request.message.is_none() && holds_tree(&current.change, request) {
+            return Ok(unrecorded(current));
+        }
         let head = merge_snapshot(&ctx, &current.change, request)?;
-        record_at(conn, store, request, &current.change, head)
-    })?;
-    Ok(outcome)
+        let commit = snapshot_commit(parent, &current.change, request);
+        let commit_id = store.put_commit(&commit).map_err(store_failure)?;
+        let snapshot = snapshot_of(commit_id, request);
+        let events = events(current.change.id, commit_id, request, &head.conflicts);
+        let appended = state.changes.with_conn(|conn| {
+            let (tree, conflicts) = (head.tree, head.conflicts);
+            changes::record_snapshot_merged(
+                conn,
+                &current.change,
+                snapshot,
+                tree,
+                conflicts,
+                &events,
+            )
+        });
+        match appended {
+            Ok(change) => {
+                return Ok(SnapshotOutcome {
+                    change,
+                    commit: Some(commit_id),
+                    recorded: true,
+                });
+            }
+            Err(error) if changes::snapshot_moved(&error) && attempt < RECORD_ATTEMPTS => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// The answer to a snapshot of the tree the change already holds.
+fn unrecorded(current: rosen_protocol::ChangeRecord) -> SnapshotOutcome {
+    let commit = current.change.snapshots.last().map(|s| s.commit);
+    SnapshotOutcome {
+        change: current,
+        commit,
+        recorded: false,
+    }
+}
+
+fn snapshot_of(commit: ObjectId, request: &SnapshotRequest) -> Snapshot {
+    Snapshot {
+        commit,
+        tree: request.tree,
+        kind: request
+            .message
+            .clone()
+            .map_or(SnapshotKind::Automatic, SnapshotKind::Named),
+    }
 }
 
 /// Records while the caller holds the registry connection, allowing a tree
@@ -234,23 +299,12 @@ fn record_at(
     let id = expected.id;
     let current = changes::get(conn, id)?;
     if request.message.is_none() && holds_tree(&current.change, request) {
-        let commit = current.change.snapshots.last().map(|s| s.commit);
-        return Ok(SnapshotOutcome {
-            change: current,
-            commit,
-            recorded: false,
-        });
+        return Ok(unrecorded(current));
     }
-    let commit = snapshot_commit(conn, &current.change, request)?;
+    let parent = snapshot_parent(conn, &current.change)?;
+    let commit = snapshot_commit(parent, &current.change, request);
     let commit_id = store.put_commit(&commit).map_err(store_failure)?;
-    let snapshot = Snapshot {
-        commit: commit_id,
-        tree: request.tree,
-        kind: request
-            .message
-            .clone()
-            .map_or(SnapshotKind::Automatic, SnapshotKind::Named),
-    };
+    let snapshot = snapshot_of(commit_id, request);
     let events = events(id, commit_id, request, &head.conflicts);
     Ok(SnapshotOutcome {
         change: changes::record_snapshot_merged(
@@ -307,15 +361,15 @@ fn resends_latest(change: &Change, request: &SnapshotRequest) -> bool {
             .is_some_and(|s| s.tree == request.tree)
 }
 
-fn snapshot_commit(
-    conn: &Connection,
-    change: &Change,
-    request: &SnapshotRequest,
-) -> Result<Commit, ChangeError> {
-    let parent = match change.snapshots.last() {
-        Some(latest) => Some(latest.commit),
-        None => first_parent(conn, change.parent)?,
-    };
+/// The commit a new snapshot of `change` follows.
+fn snapshot_parent(conn: &Connection, change: &Change) -> Result<Option<ObjectId>, ChangeError> {
+    match change.snapshots.last() {
+        Some(latest) => Ok(Some(latest.commit)),
+        None => first_parent(conn, change.parent),
+    }
+}
+
+fn snapshot_commit(parent: Option<ObjectId>, change: &Change, request: &SnapshotRequest) -> Commit {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
@@ -329,14 +383,14 @@ fn snapshot_commit(
     if !message.ends_with('\n') {
         message.push('\n');
     }
-    Ok(Commit {
+    Commit {
         tree: request.tree,
         parents: parent.into_iter().collect(),
         author: Signature::new(owner, format!("{owner}@rosen"), now),
         committer: Signature::new("rosen-server", "rosen-server@rosen", now),
         extra_headers: Vec::new(),
         message: message.into_bytes(),
-    })
+    }
 }
 
 /// A change's first snapshot follows what it was started from: the base

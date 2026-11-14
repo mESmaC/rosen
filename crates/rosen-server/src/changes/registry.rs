@@ -544,6 +544,17 @@ fn store_open_conflicts(
 /// `conflicts` are the regions where the snapshot's edits did not merge
 /// onto the rebased head, which then holds their markers (R5); they are
 /// stored in the same transaction, so that head never lands unresolved.
+const SNAPSHOT_MOVED: &str = "snapshot inputs moved; retry";
+
+/// Whether [`record_snapshot_merged`] refused because the change was no
+/// longer as the snapshot was prepared from: the caller prepares it again.
+pub(crate) fn snapshot_moved(error: &ChangeError) -> bool {
+    matches!(
+        error,
+        ChangeError::Refused(rosen_core::Error::InvalidPath(why)) if why == SNAPSHOT_MOVED
+    )
+}
+
 pub fn record_snapshot_merged(
     conn: &mut Connection,
     expected: &Change,
@@ -555,9 +566,7 @@ pub fn record_snapshot_merged(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let record = update_in(&tx, expected.id, |current| {
         if current != expected {
-            return Err(rosen_core::Error::InvalidPath(
-                "snapshot inputs moved; retry".into(),
-            ));
+            return Err(rosen_core::Error::InvalidPath(SNAPSHOT_MOVED.into()));
         }
         current.record_snapshot(snapshot)?;
         current.head = head;
