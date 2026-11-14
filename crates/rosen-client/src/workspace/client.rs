@@ -64,6 +64,8 @@ impl Client {
         } else {
             Err(None)
         };
+        // A ready workspace's stats were recorded before the take.
+        let seed_stats = pooled.is_err();
         let report = match pooled {
             Ok(taken) => Report {
                 method: if taken.from_template {
@@ -97,9 +99,15 @@ impl Client {
         // the head tree cached and returns at once.
         let store = self.local_store().await?;
         let (root, head) = (dest.to_path_buf(), change.change.head);
-        tokio::task::spawn_blocking(move || crate::snapshot::seed_tree_cache(&store, &root, head))
-            .await
-            .map_err(|error| Error::Unexpected(format!("tree cache seeding stopped: {error}")))??;
+        tokio::task::spawn_blocking(move || {
+            if seed_stats {
+                // Only a speed-up for the first snapshot (#174).
+                let _ = super::seed_stats(&store, &root, head);
+            }
+            crate::snapshot::seed_tree_cache(&store, &root, head)
+        })
+        .await
+        .map_err(|error| Error::Unexpected(format!("tree cache seeding stopped: {error}")))??;
         self.register_workspace(change.change.id, dest).await?;
         Ok(report)
     }

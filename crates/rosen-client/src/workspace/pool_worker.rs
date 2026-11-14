@@ -635,10 +635,9 @@ async fn run_prepare(pool: &WarmPool, path: &std::path::Path, base: &Base) -> Op
     let restored = tokio::task::spawn_blocking(move || {
         let store = LooseObjectStore::open(&objects).map_err(MaterialiseError::Store)?;
         let changed = restore_tracked(&store, &root, tree)?;
-        if !changed.is_empty() {
-            // Rewritten files would otherwise be rehashed on the first take.
-            seed_slot(&store, &root, tree);
-        }
+        // The tracked files now hold the tree again, and after the prepare
+        // most are old enough for their stats to be trusted (#174).
+        seed_slot(&store, &root, tree);
         Ok::<_, MaterialiseError>(changed)
     })
     .await;

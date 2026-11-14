@@ -14,15 +14,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 /// Raw bytes per `put_objects` frame. Base64 grows them by a third, which
 /// keeps a full batch well inside the protocol's 64 MiB frame limit. A blob
 /// larger than this goes in slices of the same size instead.
 const BATCH_BYTES: usize = OBJECT_CHUNK_BYTES;
-/// A timestamp this close to the read is not trusted to detect later writes:
-/// a second write in the same clock tick would leave it unchanged.
-const RACY_WINDOW: Duration = Duration::from_secs(2);
 
 /// A blob to send, with the file it came from.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -130,11 +127,7 @@ fn read_file(
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         other => other.map_err(|err| SnapshotError::io(&path, err))?,
     };
-    let trusted = stat_of(&meta).filter(|stat| {
-        SystemTime::now()
-            .duration_since(stat.modified)
-            .is_ok_and(|age| age > RACY_WINDOW)
-    });
+    let trusted = stat_of(&meta).filter(|stat| stat.trusted_at(SystemTime::now()));
     let entry = Entry {
         mode: mode_of(&meta, old.map(|entry| entry.mode)),
         blob: ObjectId::hash_object("blob", &data),
