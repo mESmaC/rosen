@@ -19,7 +19,7 @@ pub mod stack;
 pub use change::{AgentId, Change, ChangeId, ChangeParent, ChangeState, Snapshot, SnapshotKind};
 pub use claim::{blockers, Blocker, HeldClaim, PathPattern};
 pub use conflict::{Conflict, ConflictId, ConflictSet};
-pub use hash::ObjectId;
+pub use hash::{ObjectHasher, ObjectId};
 pub use history::{CommitGraph, LandedCommit, LandedTrailers, ReceiptTrailer};
 pub use object::{Blob, Commit, FileMode, Object, ObjectKind, Signature, Tree, TreeEntry};
 pub use piece::{decide as decide_piece, piece_key, PieceDecision};
