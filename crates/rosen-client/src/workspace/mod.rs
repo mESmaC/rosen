@@ -256,6 +256,7 @@ fn from_source(
     let before = Layout::of_tree(store, source.tree, sparse)?;
     let cloned =
         clone::clone_workspace(&source.dir, root, sparse, clone::pick_probe(&before.files))?;
+    clone::clear_for_tree(root, &before, target)?;
     let changed = bring_to_tree(root, &before, target)?;
     let bytes = write_all(store, root, &changed)?;
     Ok(Report {
