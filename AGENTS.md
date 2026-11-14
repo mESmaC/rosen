@@ -47,6 +47,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Only after the feature works, add the proofs, tests or docs it needs in the same PR.
 - Lockfiles and generated files count on neither side of the implementation size comparison.
 - Never claim only proofs, tests or docs while implementation work in the milestone is unclaimed.
+- The size rule binds a PR that builds or changes a feature. A piece an issue or review opens to add or strengthen proofs, tests or docs for a merged feature is exempt: it carries only the code fixes that work exposes, and never padding to meet the rule. Its PR description says it is such a piece and links that issue or review.
 
 ## Proofs
 - Write Lean only for features on the proof list in SPEC.md. Every other piece ships with no Lean.
