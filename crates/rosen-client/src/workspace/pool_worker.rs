@@ -6,9 +6,10 @@ use crate::{Client, Error};
 use rosen_core::ObjectId;
 use rosen_protocol::{Endpoint, Event, EventKind, LogRequest};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{self, error::TryRecvError};
+use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
 
 /// Bounds on the delay before a refused workspace cleanup is retried.
@@ -50,12 +51,19 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
     let client = Client::connect(endpoint).await?;
     // Subscribe before reading base: a concurrent land is either reflected
     // in the read or queued in the stream, never missed between the two.
-    let mut events = client.subscribe(None).await?;
+    let events = client.subscribe(None).await?;
+    // A reader task drains the stream however long a pass takes. Read only
+    // between passes, more than a buffer of events during one pass stalled
+    // the connection reader, and with it the reply the pass was awaiting
+    // (#203). The JoinSet aborts the reader when this connection is left.
+    let flags = Arc::new(EventFlags::default());
+    let mut reader = tokio::task::JoinSet::new();
+    reader.spawn(read_events(events, Arc::clone(&flags)));
     // Clean up at every (re)connect: events missed while disconnected are
     // covered by reading each registration's current change state.
     let mut schedule = CleanupSchedule::default();
     loop {
-        schedule.take_queued(&mut events)?;
+        schedule.take_queued(&flags)?;
         if schedule.due {
             schedule.ran(cleanup(&client).await?);
         }
@@ -84,7 +92,7 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
         // A pool that is off waits like one that knows its base: a land
         // or a resize, which wakes it, is what can turn it on.
         let settled = base.is_some() || pool.state.lock().await.size == 0;
-        wait_for_work(pool, &mut events, &mut schedule, settled).await?;
+        wait_for_work(pool, &flags, &mut schedule, settled).await?;
     }
 }
 
@@ -96,21 +104,22 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
 /// an import, which publishes no event, any event is a reason to look again.
 async fn wait_for_work(
     pool: &WarmPool,
-    events: &mut mpsc::Receiver<Event>,
+    flags: &EventFlags,
     schedule: &mut CleanupSchedule,
     settled: bool,
 ) -> Result<(), Error> {
     loop {
+        let arrived = flags.take();
+        schedule.due |= arrived.closes;
+        if arrived.closes || arrived.moves || (arrived.any && !settled) {
+            return Ok(());
+        }
+        if flags.ended.load(SeqCst) {
+            return Err(Error::Disconnected);
+        }
         let retry_at = schedule.retry_at;
         tokio::select! {
-            event = events.recv() => {
-                let kind = event.ok_or(Error::Disconnected)?.kind;
-                let closes = may_close_or_reopen(kind);
-                schedule.due |= closes;
-                if closes || moves_base(kind) || !settled {
-                    return Ok(());
-                }
-            }
+            _ = flags.arrived.notified() => {}
             _ = pool.wake.notified() => return Ok(()),
             _ = sleep_until(retry_at), if retry_at.is_some() => {
                 schedule.due = true;
@@ -118,6 +127,51 @@ async fn wait_for_work(
             }
         }
     }
+}
+
+/// What the event stream carried since the worker last looked. The worker
+/// acts only on event kinds, so a few flags stand for any number of events
+/// and the reader never has to wait for the worker.
+#[derive(Default)]
+struct EventFlags {
+    closes: AtomicBool,
+    moves: AtomicBool,
+    any: AtomicBool,
+    /// The stream ended: the connection dropped.
+    ended: AtomicBool,
+    arrived: Notify,
+}
+
+struct Arrived {
+    closes: bool,
+    moves: bool,
+    any: bool,
+}
+
+impl EventFlags {
+    fn note(&self, kind: EventKind) {
+        self.closes.fetch_or(may_close_or_reopen(kind), SeqCst);
+        self.moves.fetch_or(moves_base(kind), SeqCst);
+        self.any.store(true, SeqCst);
+        self.arrived.notify_one();
+    }
+
+    /// What arrived since the last take, clearing it.
+    fn take(&self) -> Arrived {
+        Arrived {
+            closes: self.closes.swap(false, SeqCst),
+            moves: self.moves.swap(false, SeqCst),
+            any: self.any.swap(false, SeqCst),
+        }
+    }
+}
+
+async fn read_events(mut events: mpsc::Receiver<Event>, flags: Arc<EventFlags>) {
+    while let Some(event) = events.recv().await {
+        flags.note(event.kind);
+    }
+    flags.ended.store(true, SeqCst);
+    flags.arrived.notify_one();
 }
 
 /// Events after which the base may hold a new tree. A revert is a land too.
@@ -159,18 +213,13 @@ impl CleanupSchedule {
         }
     }
 
-    /// Notes events queued while the worker was busy, without waiting. A
-    /// pass that ran a prepare skips the wait below, so without this a
-    /// steady run of prepares postpones cleanup after every land (R4). It
-    /// also keeps the bounded event buffer from filling, which would stall
-    /// the connection reader and with it this worker's own replies.
-    fn take_queued(&mut self, events: &mut mpsc::Receiver<Event>) -> Result<(), Error> {
-        loop {
-            match events.try_recv() {
-                Ok(event) => self.due |= may_close_or_reopen(event.kind),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return Err(Error::Disconnected),
-            }
+    /// Notes events that arrived while the worker was busy, without
+    /// waiting. A pass that ran a prepare skips the wait below, so without
+    /// this a steady run of prepares postpones cleanup after every land (R4).
+    fn take_queued(&mut self, flags: &EventFlags) -> Result<(), Error> {
+        self.due |= flags.take().closes;
+        if flags.ended.load(SeqCst) {
+            return Err(Error::Disconnected);
         }
         if self.retry_at.is_some_and(|at| at <= Instant::now()) {
             self.due = true;
