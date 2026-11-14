@@ -68,6 +68,8 @@ async fn turn(root: &Path) -> Option<Turn> {
 async fn run_one(root: &Path, command: &str) -> Result<(), String> {
     let mut child = shell(command)
         .current_dir(root)
+        // A prepare command that runs `rosen run` runs in this prepare's turn.
+        .env(run_queue::HELD_ENV, RunClass::Prepare.name())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -173,6 +175,8 @@ fn shell(command: &str) -> Command {
 #[cfg(not(windows))]
 fn shell(command: &str) -> Command {
     let mut shell = Command::new("nice");
-    shell.args(["-n", "10", "sh", "-c", command]).process_group(0);
+    shell
+        .args(["-n", "10", "sh", "-c", command])
+        .process_group(0);
     shell
 }
