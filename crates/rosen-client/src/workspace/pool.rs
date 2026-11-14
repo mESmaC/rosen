@@ -105,6 +105,16 @@ impl WarmPool {
                 "a pool destination must be absolute and outside the ready pool",
             ));
         }
+        // A staging sweep would remove a workspace carrying the staging form.
+        if destination
+            .file_name()
+            .is_some_and(super::staging_sweep::is_staging_name)
+        {
+            return Outcome::Error(ErrorBody::new(
+                ErrorCode::InvalidArgument,
+                "a pool destination may not have the name form Rosen reserves for staging",
+            ));
+        }
         if state.size == 0 {
             return Outcome::Ok(Response::PoolTaken(None));
         }

@@ -79,10 +79,19 @@ pub(super) fn find_abandoned(parent: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether `name` has the staging form. Rosen refuses it for a workspace, so
+/// a directory with this name beside workspaces is only ever staging and a
+/// sweep never removes a published workspace.
+pub(crate) fn is_staging_name(name: &OsStr) -> bool {
+    staging_owner(name).is_some()
+}
+
 /// The process id in a staging directory's name, or `None` for any other
-/// name, so a workspace or user file is never taken for staging.
+/// name. The tag and owner are ASCII, so a destination name that is not
+/// valid Unicode still parses.
 fn staging_owner(name: &OsStr) -> Option<u32> {
-    let rest = name.to_str()?.strip_prefix('.')?;
+    let name = name.to_string_lossy();
+    let rest = name.strip_prefix('.')?;
     let (dest_name, owner) = rest.rsplit_once(STAGING_TAG)?;
     let (pid, attempt) = owner.split_once('-')?;
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());

@@ -110,6 +110,8 @@ pub struct Report {
 pub enum MaterialiseError {
     #[error("{0} already exists; a workspace is materialised only into a new directory")]
     Exists(PathBuf),
+    #[error("{0} has the name form Rosen reserves for staging; choose another name")]
+    ReservedName(PathBuf),
     #[error("{0:?} is not a sparse path: give a path from the workspace root")]
     InvalidSparsePath(String),
     #[error("the tree holds {0:?}, which this OS cannot store as a file name")]
@@ -323,6 +325,11 @@ impl Staging {
                 io::Error::new(io::ErrorKind::InvalidInput, "no directory name"),
             )
         })?;
+        // A sweep removes directories of this form once their builder exits,
+        // so a workspace must never carry it.
+        if staging_sweep::is_staging_name(name) {
+            return Err(MaterialiseError::ReservedName(dest.to_path_buf()));
+        }
         let parent = std::path::absolute(dest)
             .map_err(|error| MaterialiseError::io(dest, error))?
             .parent()
