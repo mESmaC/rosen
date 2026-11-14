@@ -552,13 +552,22 @@ async fn change_seen(
 async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotReport, Error> {
     let trees = journal::cache(&state.root)?;
     let mut reports = Vec::new();
-    for id in state.journal.pending()? {
+    let pending = state.journal.pending()?;
+    // Read before any record is sent, so a halt records the change as it
+    // stood no later than the refusal. Read after, it could already show a
+    // server rebase made in between, and the halt would wait for a further
+    // move. A move before the refusal costs only one more replay. Unread,
+    // the halt resumes whenever the change is open.
+    let seen = if pending.is_empty() {
+        None
+    } else {
+        change_seen(client, state.change()).await.ok().flatten()
+    };
+    for id in pending {
         let record = state.journal.load(id, &trees)?;
         match replay_record(client, state, id, record).await {
             Ok(report) => reports.push(report),
             Err(Error::Server(refusal)) if !transient(refusal.code) => {
-                // Unread, the halt resumes whenever the change is open.
-                let seen = change_seen(client, state.change()).await.ok().flatten();
                 state.journal.halt(id, &refusal, seen)?;
                 return Err(Error::JournalHalted {
                     record: id,
