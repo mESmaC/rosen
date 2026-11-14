@@ -12,14 +12,22 @@
 //! every subtree the cache already holds (R3: reading only the directories
 //! that changed). That is sound because every tree is written after all of
 //! its subtrees: a cached tree implies its whole subtree is cached.
+//! Seeders before #208 wrote trees before their subtrees, so a cache they
+//! left after a crash may break that; only a cache this build started from
+//! empty is trusted to skip subtrees.
 
 use super::index::empty_tree;
-use super::{journal, SnapshotError};
+use super::{journal, SnapshotError, STATE_DIR};
 use crate::workspace::parallel;
 use rosen_core::{Object, ObjectId, ObjectKind};
 use rosen_store::{LooseObjectStore, ObjectStore, StoreError};
+use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
+
+/// Present when every tree in the workspace's tree cache was written after
+/// all of its subtrees, so a cached subtree holds all of its descendants.
+const SUBTREES_COMPLETE: &str = "snapshot-trees-complete";
 
 /// Copies every tree reachable from `tree` in `store` into the tree cache of
 /// the workspace at `root`, as the stored bytes, reading only trees the cache
@@ -35,7 +43,8 @@ pub fn seed_tree_cache(
     if tree == empty_tree() || cache.contains(&tree)? {
         return Ok(());
     }
-    let levels = read_uncached_levels(store, &cache, tree)?;
+    let skip_cached = trusts_cached_subtrees(root, &cache)?;
+    let levels = read_uncached_levels(store, &cache, tree, skip_cached)?;
     // Deepest first, so a crash part way never leaves a cached tree whose
     // subtrees are missing, which a later seed would wrongly skip.
     for level in levels.iter().rev() {
@@ -47,12 +56,34 @@ pub fn seed_tree_cache(
     Ok(())
 }
 
+/// Whether a subtree found in the cache may be skipped as complete. A cache
+/// that is empty when first seeded by this build gets a marker saying so; a
+/// cache an earlier seeder filled lacks it, and every seed of it reads all
+/// subtrees, as before. Losing the marker in a crash only costs reads.
+fn trusts_cached_subtrees(root: &Path, cache: &LooseObjectStore) -> Result<bool, SnapshotError> {
+    let marker = root.join(STATE_DIR).join(SUBTREES_COMPLETE);
+    if marker.is_file() {
+        return Ok(true);
+    }
+    let dir = cache.objects_dir();
+    let empty = fs::read_dir(dir)
+        .map_err(|err| SnapshotError::io(dir, err))?
+        .next()
+        .is_none();
+    if empty {
+        fs::write(&marker, b"").map_err(|err| SnapshotError::io(&marker, err))?;
+    }
+    Ok(empty)
+}
+
 /// Reads the trees under `tree` that `cache` lacks, one depth at a time, and
-/// returns their bodies grouped by depth, `tree` itself first.
+/// returns their bodies grouped by depth, `tree` itself first. Subtrees the
+/// cache holds are skipped only when `skip_cached` is set.
 fn read_uncached_levels(
     store: &dyn ObjectStore,
     cache: &LooseObjectStore,
     tree: ObjectId,
+    skip_cached: bool,
 ) -> Result<Vec<Vec<Vec<u8>>>, SnapshotError> {
     let mut levels = Vec::new();
     let mut depth = vec![tree];
@@ -63,11 +94,13 @@ fn read_uncached_levels(
             let (body, children) = read_tree(store, id)?;
             let mut uncached = Vec::with_capacity(children.len());
             for child in children {
-                if !cache.contains(&child)? {
+                if !(skip_cached && cache.contains(&child)?) {
                     uncached.push(child);
                 }
             }
-            next.lock().unwrap_or_else(|p| p.into_inner()).extend(uncached);
+            next.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .extend(uncached);
             bodies.lock().unwrap_or_else(|p| p.into_inner()).push(body);
             Ok(())
         })?;
