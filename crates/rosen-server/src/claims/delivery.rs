@@ -83,8 +83,9 @@ pub(super) fn enqueue(
 
 /// Publishes pending notifications after a release has committed. A failure
 /// is logged, not returned: the release itself succeeded and its caller
-/// cannot undo it. The rows stay stored, and the next release or a restart
-/// publishes them.
+/// cannot undo it. Every owed event has reached the event log by then, which
+/// retries its own failed writes; the rows stay until a later release or a
+/// restart sees them through.
 pub(super) fn deliver(state: &ServerState) {
     if let Err(err) = recover(state) {
         eprintln!("rosen-server: claim release notifications retained for retry: {err}");
@@ -106,6 +107,7 @@ pub fn recover(state: &ServerState) -> Result<(), ChangeError> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     })?;
+    let mut retained = 0;
     for (id, payload) in pending {
         // A row that cannot be read is left in place for inspection and
         // skipped, so it cannot hold back every later release's waiters.
@@ -113,10 +115,13 @@ pub fn recover(state: &ServerState) -> Result<(), ChangeError> {
             eprintln!("rosen-server: claim release notification {id} is unreadable; skipped");
             continue;
         };
+        // An event whose write failed is already queued in the event log,
+        // which stores it, in order, on its own retry. The row stays only so
+        // a crash before then cannot lose it; later rows still go out, so
+        // their waiters are not left waiting for the next release.
         if !publish(state, &pending) {
-            return Err(ChangeError::Base(
-                "could not publish claim release; retained for retry".into(),
-            ));
+            retained += 1;
+            continue;
         }
         state.changes.with_conn(|conn| {
             conn.execute(
@@ -126,14 +131,19 @@ pub fn recover(state: &ServerState) -> Result<(), ChangeError> {
             Ok(())
         })?;
     }
+    if retained > 0 {
+        return Err(ChangeError::Base(format!(
+            "{retained} claim release notifications wait on the event log's retry"
+        )));
+    }
     Ok(())
 }
 
+/// Hands every event the note owes to the event log, even after a write
+/// fails, and reports whether all of them were stored at once.
 fn publish(state: &ServerState, pending: &Pending) -> bool {
     let outcome = &pending.outcome;
-    if pending.announce_releaser && !announce_releaser(state, outcome) {
-        return false;
-    }
+    let mut stored = !pending.announce_releaser || announce_releaser(state, outcome);
     for woken in &outcome.woken {
         // The waiter may itself have closed since the release committed.
         // Retain its original owner rather than depending on live claims.
@@ -143,17 +153,15 @@ fn publish(state: &ServerState, pending: &Pending) -> bool {
         };
         let detail =
             json!({ "path": woken.path, "released_by": outcome.change.to_string(), "wake": true });
-        if state.events.publish_to(
+        let seq = state.events.publish_to(
             EventKind::Released,
             Some(woken.change.to_string()),
             detail,
             &concern,
-        ) == 0
-        {
-            return false;
-        }
+        );
+        stored &= seq != 0;
     }
-    true
+    stored
 }
 
 /// The releaser's own `released` event, to whoever holds overlapping paths.
