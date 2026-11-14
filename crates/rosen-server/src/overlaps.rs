@@ -65,6 +65,23 @@ pub enum OverlapError {
 }
 
 impl OverlapError {
+    /// Whether trying again may succeed: a database or object-store I/O
+    /// failure, as opposed to stored content, which reads the same way every
+    /// time. Post-land capture retries the first kind and settles the second
+    /// as an empty selection (SPEC R8 step 4, issue #284).
+    pub(crate) fn may_pass(&self) -> bool {
+        match self {
+            OverlapError::Change(err) | OverlapError::History(HistoryError::Change(err)) => {
+                change_may_pass(err)
+            }
+            OverlapError::Store(err) | OverlapError::History(HistoryError::Store(err)) => {
+                matches!(err, StoreError::Io(_))
+            }
+            OverlapError::History(HistoryError::Index(err)) => sqlite_may_pass(err),
+            _ => false,
+        }
+    }
+
     fn code(&self) -> ErrorCode {
         match self {
             OverlapError::Change(err) => crate::rpc::change_error_code(err),
@@ -75,6 +92,32 @@ impl OverlapError {
             }
         }
     }
+}
+
+fn change_may_pass(err: &ChangeError) -> bool {
+    match err {
+        ChangeError::Io(_) => true,
+        ChangeError::Store(err) => sqlite_may_pass(err),
+        _ => false,
+    }
+}
+
+/// Busy, locked, I/O, open and space failures depend on the moment, not on
+/// what is stored.
+fn sqlite_may_pass(err: &rusqlite::Error) -> bool {
+    use rusqlite::ErrorCode as Code;
+    let rusqlite::Error::SqliteFailure(failure, _) = err else {
+        return false;
+    };
+    matches!(
+        failure.code,
+        Code::DatabaseBusy
+            | Code::DatabaseLocked
+            | Code::SystemIoFailure
+            | Code::CannotOpen
+            | Code::DiskFull
+            | Code::OutOfMemory
+    )
 }
 
 /// Answers [`rosen_protocol::Request::Overlaps`] for the channel and Velocity.
