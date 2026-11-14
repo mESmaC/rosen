@@ -19,12 +19,14 @@ use crate::history::{
     ReadAnswer, ReadRequest,
 };
 use crate::land::LandAnswer;
-use crate::objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal};
+use crate::objects::{EnsureObjects, ObjectBatch, ObjectChunk, ObjectChunkQuery, ObjectQuery, ObjectsLocal};
 use crate::receipt::{ReceiptRecord, SubmitReceipt};
 use crate::review::{
     Approval, ApproveRequest, CommentRequest, ResolveRequest, ReviewThread, ThreadFilter,
 };
-use crate::snapshot::{ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest};
+use crate::snapshot::{
+    BlobChunk, BlobChunkStored, ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest,
+};
 use rosen_core::AgentId;
 use serde::{Deserialize, Serialize};
 
@@ -236,11 +238,15 @@ pub enum Request {
     },
     /// Stores blobs and trees a snapshot needs (SPEC R2). Idempotent.
     PutObjects(ObjectUpload),
+    /// Stores one slice of a blob too large for a `PutObjects` frame (R2).
+    PutBlobChunk(BlobChunk),
     /// Records a snapshot of a workspace's tree on its change: automatic
     /// from the watcher, or named by `rosen commit` (SPEC R2, D17).
     Snapshot(SnapshotRequest),
     /// Reads stored objects (D8). A machine's cache fills its store with it.
     GetObjects(ObjectQuery),
+    /// Reads one slice of an object `GetObjects` lists as too large (D8).
+    GetObjectChunk(ObjectChunkQuery),
     /// Makes every object reachable from a root readable from this daemon's
     /// local store, fetching what a cache lacks from the server (D8, R3).
     /// Clients ask before reading a tree from the local store.
@@ -322,6 +328,7 @@ pub enum Response {
     EditRegions(crate::edits::EditRegions),
     Overlaps(OverlapAnswer),
     ObjectsStored(ObjectsStored),
+    BlobChunkStored(BlobChunkStored),
     Snapshot(SnapshotOutcome),
     EventsAcked(EventCursor),
     /// The answer to `review_comment` and `review_resolve`.
@@ -333,6 +340,7 @@ pub enum Response {
     Land(LandAnswer),
     ConflictsResolved(crate::ConflictsResolved),
     Objects(ObjectBatch),
+    ObjectChunk(ObjectChunk),
     ObjectsLocal(ObjectsLocal),
     Log(Log),
     Blame(Blame),

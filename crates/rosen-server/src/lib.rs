@@ -35,6 +35,7 @@ pub mod reviews;
 pub mod rpc;
 pub mod snapshots;
 pub mod stacks;
+pub mod uploads;
 pub mod workspaces;
 
 use events::EventLog;
@@ -227,6 +228,12 @@ impl ServerConfig {
     /// objects of its own: git reads them from the object store.
     pub fn mirror_staging_dir(&self) -> PathBuf {
         self.data_dir.join("mirror.git")
+    }
+
+    /// Chunked blob uploads in progress (SPEC R2), one file each until the
+    /// last slice arrives and the blob is stored.
+    pub fn uploads_dir(&self) -> PathBuf {
+        self.data_dir.join("uploads")
     }
 }
 
