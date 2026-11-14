@@ -84,8 +84,8 @@ pub(super) fn enqueue(
 /// Publishes pending notifications after a release has committed. A failure
 /// is logged, not returned: the release itself succeeded and its caller
 /// cannot undo it. Every owed event has reached the event log by then, which
-/// retries its own failed writes; the rows stay until a later release or a
-/// restart sees them through.
+/// retries its own failed writes; the row stays until a restart sees it
+/// through.
 pub(super) fn deliver(state: &ServerState) {
     if let Err(err) = recover(state) {
         eprintln!("rosen-server: claim release notifications retained for retry: {err}");
@@ -99,20 +99,13 @@ pub(super) fn deliver(state: &ServerState) {
 /// Publishes with the change registry unlocked: publishing reads the registry
 /// to find the event's audience (R9), so holding it here would deadlock.
 pub fn recover(state: &ServerState) -> Result<(), ChangeError> {
-    let pending = state.changes.with_conn(|conn| {
-        let mut stmt =
-            conn.prepare("SELECT id, outcome FROM claim_release_delivery ORDER BY id")?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
-    })?;
     let mut retained = 0;
-    for (id, payload) in pending {
+    for (id, payload) in unhanded_rows(state)? {
         // A row that cannot be read is left in place for inspection and
         // skipped, so it cannot hold back every later release's waiters.
         let Ok(pending) = Pending::from_json(&payload) else {
             eprintln!("rosen-server: claim release notification {id} is unreadable; skipped");
+            mark_handed(state, id)?;
             continue;
         };
         // An event whose write failed is already queued in the event log,
@@ -121,6 +114,7 @@ pub fn recover(state: &ServerState) -> Result<(), ChangeError> {
         // their waiters are not left waiting for the next release.
         if !publish(state, &pending) {
             retained += 1;
+            mark_handed(state, id)?;
             continue;
         }
         state.changes.with_conn(|conn| {
@@ -137,6 +131,38 @@ pub fn recover(state: &ServerState) -> Result<(), ChangeError> {
         )));
     }
     Ok(())
+}
+
+/// Pending rows this server has not yet handed to its event log. A row
+/// handed once stays queued in the log until it is stored, so handing it
+/// again on each release during an outage would only multiply its events.
+/// The record is a TEMP table on the change registry's connection, which
+/// lives exactly as long as this server: after a restart the queue is gone,
+/// and every kept row is published once more.
+fn unhanded_rows(state: &ServerState) -> Result<Vec<(i64, String)>, ChangeError> {
+    state.changes.with_conn(|conn| {
+        conn.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS claim_release_handed (id INTEGER PRIMARY KEY);",
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT id, outcome FROM claim_release_delivery
+             WHERE id NOT IN (SELECT id FROM temp.claim_release_handed) ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+}
+
+fn mark_handed(state: &ServerState, id: i64) -> Result<(), ChangeError> {
+    state.changes.with_conn(|conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO temp.claim_release_handed(id) VALUES (?1)",
+            params![id],
+        )?;
+        Ok(())
+    })
 }
 
 /// Hands every event the note owes to the event log, even after a write
