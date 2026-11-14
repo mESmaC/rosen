@@ -282,6 +282,34 @@ fn from_store(
     })
 }
 
+/// Records each tracked file's size and timestamp with the blob `tree` gives
+/// it, so the workspace's first full snapshot scan rereads only files that
+/// changed since, instead of hashing every file (#174). Call only while the
+/// tracked files hold `tree`, as right after they were written or verified.
+/// A file missing from disk, as outside a sparse selection, is left out.
+pub(crate) fn seed_stats(
+    store: &dyn ObjectStore,
+    root: &Path,
+    tree: ObjectId,
+) -> Result<(), MaterialiseError> {
+    let layout = Layout::of_tree(store, tree, &Sparse::all())?;
+    let written = std::sync::Mutex::new(Vec::with_capacity(layout.files.len()));
+    parallel::for_each::<_, MaterialiseError, _>(&layout.files, |entry| {
+        let (Ok(rel), Ok(meta)) = (
+            std::str::from_utf8(&entry.path),
+            fs::symlink_metadata(disk_path(root, &entry.path)),
+        ) else {
+            return Ok(());
+        };
+        let mut written = written.lock().unwrap_or_else(|p| p.into_inner());
+        written.push((rel.to_owned(), entry.blob, meta));
+        Ok(())
+    })?;
+    let written = written.into_inner().unwrap_or_else(|p| p.into_inner());
+    crate::snapshot::seed_stat_cache(root, &written)
+        .map_err(|error| MaterialiseError::io(root, error))
+}
+
 fn write_all(
     store: &dyn ObjectStore,
     root: &Path,

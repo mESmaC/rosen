@@ -4,7 +4,7 @@
 use rosen_core::{FileMode, Object, ObjectId, Tree, TreeEntry};
 use rosen_store::ObjectStore;
 use std::collections::BTreeMap;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use super::SnapshotError;
 
@@ -14,6 +14,18 @@ use super::SnapshotError;
 pub struct Stat {
     pub len: u64,
     pub modified: SystemTime,
+}
+
+/// A timestamp this close to the read is not trusted to detect later writes:
+/// a second write in the same clock tick would leave it unchanged.
+const RACY_WINDOW: Duration = Duration::from_secs(2);
+
+impl Stat {
+    /// Whether this stat, taken at `at`, will show any later write.
+    pub fn trusted_at(&self, at: SystemTime) -> bool {
+        at.duration_since(self.modified)
+            .is_ok_and(|age| age > RACY_WINDOW)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
