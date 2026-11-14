@@ -20,8 +20,18 @@ pub(super) fn load_or_capture(state: &ServerState, landed: ChangeId) -> LandResu
     if let Some(targets) = cached {
         return Ok(targets);
     }
-    let targets = overlaps::find(state, &Subject::Change(landed.to_string()))
-        .map_err(|err| LandError::Backend(err.to_string()))?;
+    // Overlap rebases only bring conflicts forward; each target still rebases
+    // when it lands. Claim release and marking the change landed wait on this
+    // capture, and a failure that persists (such as an unreadable project
+    // config at base) would fail every replay, so it saves an empty selection.
+    let targets =
+        overlaps::find(state, &Subject::Change(landed.to_string())).unwrap_or_else(|err| {
+            eprintln!(
+                "rosen-server: no overlap rebases after landing {landed}: \
+                 selecting overlaps failed: {err}"
+            );
+            Vec::new()
+        });
     state
         .changes
         .with_conn(|conn| {

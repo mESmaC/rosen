@@ -251,7 +251,7 @@ Landing is the core algorithm. No global queue or lock exists, and unrelated cha
    - claims are released;
    - the server rebases, without rewriting commits:
      - changes stacked on the landed change, onto the new base;
-     - changes that overlap the landed change, with a `rebased` event to each; overlap targets are saved before closing the landed change or releasing its claims, so recovery reuses the same selection, including an empty selection;
+     - changes that overlap the landed change, with a `rebased` event to each; overlap targets are saved before closing the landed change or releasing its claims, so recovery reuses the same selection, including an empty selection. A selection that fails, such as on an unreadable project configuration at base, is logged and saved as empty, so the landed change is still closed and its claims released; its overlapping changes rebase at their own landing time;
      - a rebased change's local workspace is updated when its owner asks (R2);
    - every other change rebases only at its own landing time;
    - the mirror push is scheduled.
