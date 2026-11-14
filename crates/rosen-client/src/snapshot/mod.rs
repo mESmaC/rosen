@@ -87,6 +87,9 @@ pub struct SnapshotReport {
     pub changed_files: Vec<String>,
     /// Files no longer in the workspace.
     pub removed: usize,
+    /// Files another process held open, so the snapshot kept their last
+    /// stored content. Only a watcher's snapshots skip them.
+    pub unreadable: Vec<String>,
     pub sent: Sent,
 }
 
@@ -103,6 +106,12 @@ pub struct Snapshotter {
     /// Files whose blob was read but whose snapshot failed. They are sent
     /// again with the next one, even if unchanged since.
     unconfirmed: BTreeSet<String>,
+    /// Whether a file another process holds open is skipped rather than
+    /// failing the snapshot. The watcher sets it and reads such a file
+    /// again later; `rosen commit` names the file and fails instead.
+    defer_unreadable: bool,
+    /// The files the last prepared snapshot skipped.
+    unreadable: BTreeSet<String>,
 }
 
 /// A snapshot read from disk and ready to send.
@@ -146,6 +155,8 @@ impl Snapshotter {
             marker,
             index,
             unconfirmed: BTreeSet::new(),
+            defer_unreadable: false,
+            unreadable: BTreeSet::new(),
         })
     }
 
@@ -165,6 +176,12 @@ impl Snapshotter {
     /// The tree last stored on the server for this workspace.
     pub fn stored_tree(&self) -> ObjectId {
         self.marker.tree
+    }
+
+    /// Makes later snapshots skip, and report, a file another process holds
+    /// open instead of failing, so one held file never delays the others.
+    pub fn defer_unreadable(&mut self) {
+        self.defer_unreadable = true;
     }
 
     /// Whether a write to `rel` can change the next snapshot. Writes to
@@ -192,17 +209,19 @@ impl Snapshotter {
         if outcome.ignore_changed {
             scan::drop_ignored(&mut self.ignore, &self.index, &mut outcome);
         }
-        let blobs = upload::read_candidates(
+        let read = upload::read_candidates(
             &self.root,
             &mut self.index,
             &outcome.candidates,
             &self.unconfirmed,
+            self.defer_unreadable,
         )?;
+        self.unreadable = read.unreadable;
         let built = self.index.build_trees()?;
         let all_trees = built.trees.iter().map(|(id, _)| *id).collect();
         let trees = built.trees.into_iter().collect();
         Ok(Prepared {
-            blobs,
+            blobs: read.changed,
             trees,
             root: built.root,
             all_trees,
@@ -347,7 +366,12 @@ async fn capture(
         Ok(pair) => pair,
         Err(err) => return (snapshotter, Err(err.into())),
     };
-    let result = queue_and_replay(client, &mut snapshotter, prepared, message).await;
+    let result = queue_and_replay(client, &mut snapshotter, prepared, message)
+        .await
+        .map(|mut report| {
+            report.unreadable = snapshotter.unreadable.iter().cloned().collect();
+            report
+        });
     drop(lease);
     (snapshotter, result)
 }
@@ -393,6 +417,7 @@ async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotRepo
         recorded: false,
         changed_files: Vec::new(),
         removed: 0,
+        unreadable: Vec::new(),
         sent: Sent::default(),
     };
     for id in state.journal.pending()? {
@@ -438,6 +463,7 @@ async fn send(
             .map(|blob| blob.path.clone())
             .collect(),
         removed: prepared.removed,
+        unreadable: Vec::new(),
         sent: Sent::default(),
     };
     if unchanged && message.is_none() {

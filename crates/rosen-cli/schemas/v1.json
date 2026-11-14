@@ -2008,6 +2008,12 @@
           "type": "integer",
           "minimum": 0
         },
+        "unreadable_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "blobs_sent": {
           "type": "integer",
           "minimum": 0
@@ -2029,6 +2035,7 @@
         "recorded",
         "changed_files",
         "removed_files",
+        "unreadable_files",
         "blobs_sent",
         "trees_sent",
         "bytes_sent"
