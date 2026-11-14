@@ -492,7 +492,7 @@ impl Budget {
         for entry in registry.workspaces.iter().rev() {
             let mut paths = Vec::new();
             for path in [&entry.destination, &entry.staging] {
-                if claimed.insert(path.clone()) && exists(path)? {
+                if claimed.insert(path.clone()) && exists(path) {
                     paths.push(path.clone());
                 }
             }
@@ -637,6 +637,12 @@ fn scan_due(registry: &Registry) -> bool {
 
 /// Walks targets in order, in parallel since each walk waits mostly on the
 /// file system, starting none after the scan's slice; returns the walked.
+/// A walk that fails leaves its target unwalked, like one past the slice:
+/// it keeps the charge it had and is walked first next scan. On Windows a
+/// workspace deleted while a virus scanner or indexer still holds its
+/// directory lingers, pending deletion, and listing it is access denied
+/// (#102). Failing the scan for that would fail every admission on the
+/// machine, though the walk succeeds or finds it gone moments later.
 fn measure(targets: &[ScanTarget], started: Instant) -> io::Result<HashMap<u64, (u64, bool)>> {
     let walked: Vec<OnceLock<u64>> = targets.iter().map(|_| OnceLock::new()).collect();
     let indexed: Vec<usize> = (0..targets.len()).collect();
@@ -646,7 +652,10 @@ fn measure(targets: &[ScanTarget], started: Instant) -> io::Result<HashMap<u64, 
         }
         let mut bytes = 0u64;
         for path in &targets[index].paths {
-            bytes = bytes.saturating_add(disk_bytes(path)?);
+            let Ok(size) = disk_bytes(path) else {
+                return Ok(());
+            };
+            bytes = bytes.saturating_add(size);
         }
         let _ = walked[index].set(bytes);
         Ok::<(), io::Error>(())
@@ -669,12 +678,10 @@ fn now_ms() -> u64 {
         })
 }
 
-fn exists(path: &Path) -> io::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
+/// A path that cannot be checked counts as present, so its record keeps
+/// charging, rather than one unreadable path failing every admission.
+fn exists(path: &Path) -> bool {
+    !fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
 }
 
 fn open_lock(path: &Path) -> io::Result<File> {
