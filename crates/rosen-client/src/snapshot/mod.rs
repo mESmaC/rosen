@@ -30,7 +30,7 @@ use crate::connection::unexpected;
 use crate::workspace::Sparse;
 use crate::{Client, Error};
 use index::Index;
-use rosen_core::{ChangeId, ObjectId};
+use rosen_core::{ChangeId, ObjectId, SnapshotKind};
 use rosen_protocol::{Request, Response, SnapshotOutcome, SnapshotRequest};
 use rosen_store::{ObjectStore, StoreError};
 use scan::ScanOutcome;
@@ -119,6 +119,15 @@ pub struct Snapshotter {
     /// or in the journal. A failed attempt that was captured needs only a
     /// replay on retry, not another scan of what it already read.
     captured: bool,
+    /// The tree this snapshotter last captured, or opened at. When the
+    /// workspace's newest captured tree is another, a second writer such as
+    /// `rosen commit` captured since, and the next scan must be full (#93).
+    captured_root: ObjectId,
+    /// The last root tree whose objects the server took. The server keeps
+    /// every object (D5) and takes a tree only once all it names is stored,
+    /// so a retry of this tree, as after an internal server error, sends
+    /// only the snapshot request again rather than every blob (#93).
+    uploaded_root: Option<ObjectId>,
 }
 
 /// A snapshot read from disk and ready to send.
@@ -141,7 +150,7 @@ impl Snapshotter {
             _ => SnapshotError::io(&WorkspaceMarker::path(&root), err),
         })?;
         let journal = journal::Journal::open(&root).map_err(|e| SnapshotError::io(&root, e))?;
-        let (index, known_trees) = {
+        let (index, known_trees, captured_root) = {
             // Another writer may be appending or replaying; read its tail
             // only once it is done.
             let _writer = journal.writer().map_err(|e| SnapshotError::io(&root, e))?;
@@ -165,6 +174,8 @@ impl Snapshotter {
             defer_unreadable: false,
             unreadable: BTreeSet::new(),
             captured: false,
+            captured_root,
+            uploaded_root: None,
         })
     }
 
@@ -278,7 +289,26 @@ impl Snapshotter {
         self.marker.tree = WorkspaceMarker::read(&self.root)
             .map_err(|err| SnapshotError::io(&path, err))?
             .tree;
+        // That writer may have read files whose events this one has not had
+        // yet. Building on this index's older view of them would store them
+        // reverted, so look at every file. A full scan rereads only files
+        // whose size or time moved since this index read them.
+        let dirty = if self.newest_captured()? == self.captured_root {
+            dirty
+        } else {
+            &Dirty::Full
+        };
         Ok((lease, self.prepare(dirty)?))
+    }
+
+    /// The newest tree any writer captured: the last journal record's, or
+    /// the stored one. Call while holding the writer lock.
+    fn newest_captured(&self) -> Result<ObjectId, SnapshotError> {
+        let io = |err| SnapshotError::io(&self.root, err);
+        match self.journal.pending().map_err(io)?.last() {
+            Some(&last) => self.journal.root_of(last).map_err(io),
+            None => Ok(self.marker.tree),
+        }
     }
 
     fn journal_record(
@@ -286,10 +316,30 @@ impl Snapshotter {
         last: Option<u64>,
         prepared: Prepared,
         message: Option<String>,
+        unanswered: bool,
     ) -> Result<(), SnapshotError> {
         journal::save_trees(&self.root, &prepared)?;
-        self.journal
-            .append(last, &journal::Record { prepared, message })
+        let record = journal::Record {
+            prepared,
+            message,
+            unanswered,
+        };
+        self.journal.append(last, &record)
+    }
+
+    /// A report of `prepared`, not yet stored.
+    fn report(&self, prepared: &Prepared) -> SnapshotReport {
+        SnapshotReport {
+            change: self.change(),
+            tree: prepared.root,
+            commit: None,
+            recorded: false,
+            changed_files: prepared.blobs.iter().map(|b| b.path.clone()).collect(),
+            removed: prepared.removed,
+            unreadable: Vec::new(),
+            sent: Sent::default(),
+            replayed: Vec::new(),
+        }
     }
 
     /// Takes the workspace for deletion (SPEC R4). Fails while any other
@@ -303,13 +353,14 @@ impl Snapshotter {
 
 /// Builds the index from the last journal record, or from the stored tree
 /// when nothing waits, and caches the stored tree's trees so a watcher can
-/// start offline. Returns the trees the server is known to hold.
+/// start offline. Returns the trees the server is known to hold, and the
+/// tree the index holds.
 fn open_index(
     store: &dyn ObjectStore,
     root: &Path,
     journal: &journal::Journal,
     stored: ObjectId,
-) -> Result<(Index, HashSet<ObjectId>), SnapshotError> {
+) -> Result<(Index, HashSet<ObjectId>, ObjectId), SnapshotError> {
     let index = Index::from_tree(store, stored)?;
     seed_tree_cache(store, root, stored)?;
     let cache = journal::cache(root)?;
@@ -317,14 +368,15 @@ fn open_index(
     known_trees.extend(index.build_trees()?.trees.into_iter().map(|(id, _)| id));
     let io = |err| SnapshotError::io(root, err);
     let Some(last) = journal.pending().map_err(io)?.last().copied() else {
-        return Ok((index, known_trees));
+        return Ok((index, known_trees, stored));
     };
     let last_root = journal.root_of(last).map_err(io)?;
     if !cache.contains(&last_root)? {
         // Records from an earlier build carried their trees inline.
         journal::save_trees(root, &journal.load(last, &cache)?.prepared)?;
     }
-    Ok((Index::from_tree(&cache, last_root)?, known_trees))
+    let index = Index::from_tree(&cache, last_root)?;
+    Ok((index, known_trees, last_root))
 }
 
 /// Takes one snapshot of `dirty` paths. The snapshotter is handed back
@@ -390,10 +442,12 @@ async fn queue_and_replay(
     message: Option<String>,
 ) -> Result<SnapshotReport, Error> {
     let read: Vec<String> = prepared.blobs.iter().map(|b| b.path.clone()).collect();
+    let root = prepared.root;
     let result = store_or_queue(client, state, prepared, message).await;
     if state.captured {
         // Every unconfirmed path was read into this snapshot's blobs.
         state.unconfirmed.clear();
+        state.captured_root = root;
     } else {
         state.unconfirmed.extend(read);
     }
@@ -416,7 +470,9 @@ async fn store_or_queue(
             if !worth_journaling(err) {
                 return result;
             }
-            state.journal_record(None, prepared, message)?;
+            // Without the server's answer, a named snapshot may be stored.
+            let unanswered = message.is_some() && !matches!(err, Error::Server(_));
+            state.journal_record(None, prepared, message, unanswered)?;
         }
         state.captured = true;
         return result;
@@ -428,7 +484,7 @@ async fn store_or_queue(
     };
     // An unchanged tree is already held by the last record, or the server.
     if prepared.root != previous || message.is_some() {
-        state.journal_record(last, prepared, message)?;
+        state.journal_record(last, prepared, message, false)?;
     }
     state.captured = true;
     let client = client.ok_or(Error::Disconnected)?;
@@ -465,7 +521,7 @@ async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotRepo
     let mut reports = Vec::new();
     for id in state.journal.pending()? {
         let record = state.journal.load(id, &trees)?;
-        match send(client, state, &record.prepared, record.message).await {
+        match replay_record(client, state, id, record).await {
             Ok(report) => reports.push(report),
             Err(Error::Server(refusal)) if !transient(refusal.code) => {
                 state.journal.halt(id, &refusal)?;
@@ -493,6 +549,38 @@ async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotRepo
     });
     last.replayed = reports;
     Ok(last)
+}
+
+/// Sends one journal record. A named record whose earlier request may have
+/// been stored without the answer arriving is first looked up, so the
+/// commit is not recorded twice (#93). An automatic record needs no lookup:
+/// the server stores nothing for the tree its change already holds.
+async fn replay_record(
+    client: &Client,
+    state: &mut Snapshotter,
+    id: u64,
+    record: journal::Record,
+) -> Result<SnapshotReport, Error> {
+    let Some(message) = record.message else {
+        return send(client, state, &record.prepared, None).await;
+    };
+    if record.unanswered {
+        let shown = client.change_show(&state.change().to_string()).await?;
+        let named = SnapshotKind::Named(message.clone());
+        let latest = shown.change.snapshots.last();
+        if let Some(stored) = latest.filter(|s| s.tree == record.prepared.root && s.kind == named) {
+            state.confirm(&record.prepared)?;
+            let mut report = state.report(&record.prepared);
+            report.commit = Some(stored.commit);
+            report.recorded = true;
+            return Ok(report);
+        }
+    } else {
+        // Past this point the server may store it with the answer lost,
+        // or this process may stop before hearing it.
+        state.journal.mark_unanswered(id)?;
+    }
+    send(client, state, &record.prepared, Some(message)).await
 }
 
 /// Failures the server may not have seen, so the snapshot is kept for a
@@ -523,31 +611,20 @@ async fn send(
     message: Option<String>,
 ) -> Result<SnapshotReport, Error> {
     let unchanged = prepared.root == snapshotter.marker.tree && prepared.blobs.is_empty();
-    let mut report = SnapshotReport {
-        change: snapshotter.change(),
-        tree: prepared.root,
-        commit: None,
-        recorded: false,
-        changed_files: prepared
-            .blobs
-            .iter()
-            .map(|blob| blob.path.clone())
-            .collect(),
-        removed: prepared.removed,
-        unreadable: Vec::new(),
-        sent: Sent::default(),
-        replayed: Vec::new(),
-    };
+    let mut report = snapshotter.report(prepared);
     if unchanged && message.is_none() {
         return Ok(report);
     }
-    let trees = prepared
-        .trees
-        .iter()
-        .filter(|(id, _)| !snapshotter.known_trees.contains(id))
-        .cloned()
-        .collect::<Vec<_>>();
-    report.sent = upload::send_objects(client, &prepared.blobs, &trees).await?;
+    if snapshotter.uploaded_root != Some(prepared.root) {
+        let trees = prepared
+            .trees
+            .iter()
+            .filter(|(id, _)| !snapshotter.known_trees.contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        report.sent = upload::send_objects(client, &prepared.blobs, &trees).await?;
+        snapshotter.uploaded_root = Some(prepared.root);
+    }
     let outcome = client
         .snapshot(SnapshotRequest {
             change: snapshotter.change().to_string(),
