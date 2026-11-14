@@ -10,7 +10,7 @@ repository.workspace = true
 windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security_Credentials", "Win32_Security_Authorization", "Win32_System_Threading"] }
 
 # The only unsafe code is the audited Windows ABI boundary: file disposition,
-# Credential Manager, process creation and owner-only file creation. All
+# Credential Manager, process creation and liveness, and owner-only file creation. All
 # consumers continue to inherit the workspace's unsafe_code = forbid policy.
 [lints.rust]
 unsafe_code = "deny"
