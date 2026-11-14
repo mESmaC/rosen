@@ -257,7 +257,7 @@ async fn base_moves_only_with_a_receipt_for_the_exact_head_and_a_trusted_base() 
         (commit, Some(trailers.change))
     );
     assert_eq!(entry.receipt.as_ref(), Some(&expected));
-    assert_eq!(entry.approvers, [AgentId::new("reviewer").unwrap()]);
+    assert_eq!(entry.approvers, [AgentId::new("reviewer@server").unwrap()]);
     let again = land(&state, &a).await;
     assert_eq!(again.outcome, LandStatus::AlreadyLanded { commit });
 
@@ -478,5 +478,5 @@ async fn a_land_needs_an_approval_that_still_holds_for_the_current_head() {
     };
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let trailers = LandedTrailers::parse(&store.read_commit(&commit).unwrap().message).unwrap();
-    assert_eq!(trailers.approvers, [AgentId::new("reviewer").unwrap()]);
+    assert_eq!(trailers.approvers, [AgentId::new("reviewer@server").unwrap()]);
 }

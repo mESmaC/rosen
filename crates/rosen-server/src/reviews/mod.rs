@@ -69,7 +69,8 @@ impl From<rosen_core::Error> for ReviewError {
 /// One review operation, as received from a client.
 pub enum ReviewCall {
     Comment(CommentRequest),
-    Approve(rosen_protocol::ApproveRequest),
+    /// With the reviewer's machine, taken from the connection (R14).
+    Approve(rosen_protocol::ApproveRequest, String),
     Approvals(String),
     Resolve(ResolveRequest),
     List(ThreadFilter),
@@ -89,8 +90,8 @@ pub async fn handle(state: &Arc<ServerState>, call: ReviewCall) -> Outcome {
 
 fn run(state: &ServerState, call: ReviewCall) -> Result<Response, ReviewError> {
     match call {
-        ReviewCall::Approve(req) => {
-            let approval = on_conn(state, |c| approvals::approve(c, &req))?;
+        ReviewCall::Approve(req, machine) => {
+            let approval = on_conn(state, |c| approvals::approve_on(c, &req, &machine))?;
             state.events.deliver_staged();
             Ok(Response::Approval(approval))
         }

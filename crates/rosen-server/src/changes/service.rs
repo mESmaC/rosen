@@ -65,7 +65,18 @@ impl ChangeService {
         *self.base.write().unwrap_or_else(PoisonError::into_inner) = base;
     }
 
+    /// Creates a change for a client on the server's own machine.
     pub fn create(&self, request: &NewChange) -> Result<ChangeRecord, ChangeError> {
+        self.create_on(request, crate::machines::signing::SERVER_MACHINE)
+    }
+
+    /// Creates a change whose owner works on `machine`, which the caller
+    /// took from the connection (R14). The request names only the nick, so
+    /// one holding `@` could pass for another machine's agent: refused.
+    pub fn create_on(&self, request: &NewChange, machine: &str) -> Result<ChangeRecord, ChangeError> {
+        if request.owner.as_str().contains('@') {
+            return Err(ChangeError::QualifiedOwner(request.owner.to_string()));
+        }
         let base = self
             .base
             .read()
@@ -82,7 +93,7 @@ impl ChangeService {
                     }
                 }
             };
-            registry::create(conn, &request.owner, parent)
+            registry::create_on(conn, &request.owner, machine, parent)
         })
     }
 

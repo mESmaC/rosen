@@ -225,6 +225,12 @@ pub struct Snapshot {
 pub struct Change {
     pub id: ChangeId,
     pub owner: AgentId,
+    /// The machine the owner created the change from (R14): an enrolled
+    /// machine's id, or `server` for the server's own. The server takes it
+    /// from the connection, never the request. Absent on changes created
+    /// before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_machine: Option<String>,
     pub parent: ChangeParent,
     /// The change's own commits, oldest first. Append-only (R2).
     pub snapshots: Vec<Snapshot>,
@@ -261,12 +267,22 @@ impl Change {
         Change {
             id,
             owner,
+            owner_machine: None,
             parent,
             snapshots: Vec::new(),
             head: parent_tree,
             state: ChangeState::Open,
             conflicts: Vec::new(),
         }
+    }
+
+    /// The owner as `<nick>@<machine>` when its machine is known (R14), as
+    /// the landed commit's author names it; otherwise the bare nick.
+    pub fn qualified_owner(&self) -> AgentId {
+        self.owner_machine
+            .as_deref()
+            .and_then(|machine| self.owner.on_machine(machine).ok())
+            .unwrap_or_else(|| self.owner.clone())
     }
 
     /// Appends a snapshot and moves the head to its tree.
