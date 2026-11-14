@@ -114,11 +114,19 @@ fn inverse_gate_matches_proved_fixtures() {
     }
 }
 
+/// The server owns the revert, on its own machine (R14), so the change
+/// reads `rosen-server@server` rather than as a row from before machines
+/// were recorded (#320).
 fn insert_server_change(tx: &Connection, p: &Revert) -> LandResult<()> {
     tx.execute(
-        "INSERT INTO changes(id,owner,parent_base,state,head,created_at,updated_at)
-        VALUES(?1,'rosen-server',?2,'landed',?3,0,0)",
-        params![p.id.to_string(), p.base.to_hex(), p.tree.to_hex()],
+        "INSERT INTO changes(id,owner,parent_base,state,head,created_at,updated_at,owner_machine)
+        VALUES(?1,'rosen-server',?2,'landed',?3,0,0,?4)",
+        params![
+            p.id.to_string(),
+            p.base.to_hex(),
+            p.tree.to_hex(),
+            crate::machines::signing::SERVER_MACHINE
+        ],
     )?;
     Ok(())
 }
