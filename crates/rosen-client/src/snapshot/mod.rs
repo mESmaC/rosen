@@ -111,6 +111,10 @@ pub struct Snapshotter {
     /// Files whose blob was read but whose snapshot failed. They are sent
     /// again with the next one, even if unchanged since.
     unconfirmed: BTreeSet<String>,
+    /// The captured entry of each unconfirmed file, for when it is skipped.
+    fallback: upload::Fallback,
+    /// The captured entries the last prepared snapshot replaced.
+    replaced: Vec<(String, Option<index::Entry>)>,
     /// Whether a file another process holds open is skipped rather than
     /// failing the snapshot. The watcher sets it and reads such a file
     /// again later; `rosen commit` names the file and fails instead.
@@ -174,6 +178,8 @@ impl Snapshotter {
             marker,
             index,
             unconfirmed: BTreeSet::new(),
+            fallback: upload::Fallback::new(),
+            replaced: Vec::new(),
             defer_unreadable: false,
             unreadable: BTreeSet::new(),
             captured: false,
@@ -238,9 +244,11 @@ impl Snapshotter {
             &mut self.index,
             &outcome.candidates,
             &self.unconfirmed,
+            &self.fallback,
             self.defer_unreadable,
         )?;
         self.unreadable = read.unreadable;
+        self.replaced = read.previous;
         if full {
             // Only a speed-up for the next snapshotter's full scan, so a
             // failed save just leaves it rereading files.
@@ -454,12 +462,18 @@ async fn queue_and_replay(
     let read: Vec<String> = prepared.blobs.iter().map(|b| b.path.clone()).collect();
     let root = prepared.root;
     let result = store_or_queue(client, state, prepared, message).await;
+    let replaced = std::mem::take(&mut state.replaced);
     if state.captured {
-        // Every unconfirmed path was read into this snapshot's blobs.
+        // Every unconfirmed path was read into this snapshot's blobs, or
+        // skipped at the entry it last had captured.
         state.unconfirmed.clear();
+        state.fallback.clear();
         state.captured_root = root;
     } else {
         state.unconfirmed.extend(read);
+        for (path, entry) in replaced {
+            state.fallback.entry(path).or_insert(entry);
+        }
     }
     result
 }

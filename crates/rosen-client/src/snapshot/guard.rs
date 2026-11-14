@@ -70,7 +70,9 @@ impl Snapshotter {
                 &mut scanned,
                 &BTreeSet::from([path.clone()]),
                 &BTreeSet::new(),
-                // Deletion must see every file's content; a held one fails it.
+                &upload::Fallback::new(),
+                // Deletion must see every file's content; a held or busy
+                // one fails it.
                 false,
             )?;
         }
