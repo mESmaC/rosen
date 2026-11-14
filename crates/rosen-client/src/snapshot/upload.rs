@@ -31,20 +31,42 @@ pub struct ChangedBlob {
     pub data: Vec<u8>,
 }
 
-/// Reads each candidate into the index. Returns the blobs the server may
-/// lack: those whose content changed, and those of `unconfirmed` paths, whose
-/// last upload failed. Every file is read before the index changes, so a
-/// failed read leaves the index as it was and nothing is half-recorded.
+/// What reading the candidates found.
+pub struct ReadOutcome {
+    /// The blobs the server may lack.
+    pub changed: Vec<ChangedBlob>,
+    /// Files another process holds open, left at their indexed entry.
+    pub unreadable: BTreeSet<String>,
+}
+
+/// Reads each candidate into the index. The blobs returned are those the
+/// server may lack: those whose content changed, and those of `unconfirmed`
+/// paths, whose last upload failed. Every file is read before the index
+/// changes, so a failed read leaves the index as it was and nothing is
+/// half-recorded. With `defer_unreadable`, a file another process holds open
+/// is skipped instead of failing the snapshot (issue #59).
 pub fn read_candidates(
     root: &Path,
     index: &mut Index,
     candidates: &BTreeSet<String>,
     unconfirmed: &BTreeSet<String>,
-) -> Result<Vec<ChangedBlob>, SnapshotError> {
+    defer_unreadable: bool,
+) -> Result<ReadOutcome, SnapshotError> {
     let paths: BTreeSet<&String> = candidates.iter().chain(unconfirmed).collect();
     let mut read = Vec::with_capacity(paths.len());
+    let mut unreadable = BTreeSet::new();
     for path in paths {
-        read.push((path, read_file(root, path, index.files.get(path))?));
+        match read_file(root, path, index.files.get(path)) {
+            Ok(file) => read.push((path, file)),
+            // An unconfirmed path's indexed blob may be missing on the
+            // server, so the tree cannot fall back to it.
+            Err(SnapshotError::Io { source, .. })
+                if defer_unreadable && is_held(&source) && !unconfirmed.contains(path) =>
+            {
+                unreadable.insert(path.clone());
+            }
+            Err(err) => return Err(err),
+        }
     }
     let mut changed = Vec::new();
     for (path, file) in read {
@@ -65,7 +87,26 @@ pub fn read_candidates(
         }
         index.files.insert(path.clone(), entry);
     }
-    Ok(changed)
+    Ok(ReadOutcome {
+        changed,
+        unreadable,
+    })
+}
+
+/// Whether a read failed because another process holds the file: a running
+/// executable or an exclusively opened database refuses with a sharing or
+/// lock violation, and a file being deleted refuses access. Such a file can
+/// be read later, so the snapshot keeps its last stored content until then,
+/// as git keeps the indexed blob of a path it cannot read.
+fn is_held(err: &io::Error) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    err.kind() == io::ErrorKind::PermissionDenied
+        || (cfg!(windows)
+            && matches!(
+                err.raw_os_error(),
+                Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+            ))
 }
 
 /// Reads one file as a blob. A symlink's blob is its target, as git stores

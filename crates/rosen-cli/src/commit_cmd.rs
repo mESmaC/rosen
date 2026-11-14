@@ -43,8 +43,13 @@ pub async fn watch(
         // terminal, which also ends the process.
         let _ = tokio::signal::ctrl_c().await;
     };
+    // A held file is retried every second; say so only when the set changes.
+    let mut unreadable = Vec::new();
     rosen_client::snapshot::watch(endpoint, &root, stop, |event| match event {
-        WatchEvent::Snapshot(report) if report.recorded => print_report(json, &report),
+        WatchEvent::Snapshot(report) if report.recorded || report.unreadable != unreadable => {
+            unreadable.clone_from(&report.unreadable);
+            print_report(json, &report);
+        }
         WatchEvent::Snapshot(_) => {}
         WatchEvent::Failed(err) if json => {
             crate::output::print_error(Some("workspace watch"), &err.to_string());
@@ -73,6 +78,7 @@ fn print_report(json: bool, report: &SnapshotReport) {
             "recorded": report.recorded,
             "changed_files": report.changed_files,
             "removed_files": report.removed,
+            "unreadable_files": report.unreadable,
             "blobs_sent": report.sent.blobs,
             "trees_sent": report.sent.trees,
             "bytes_sent": report.sent.bytes,
@@ -90,4 +96,10 @@ fn print_report(json: bool, report: &SnapshotReport) {
         report.removed,
         report.sent.bytes
     );
+    if !report.unreadable.is_empty() {
+        println!(
+            "  held open by another process, kept at last stored content: {}",
+            report.unreadable.join(", ")
+        );
+    }
 }

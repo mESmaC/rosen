@@ -48,6 +48,7 @@ pub async fn watch(
         Some(client) => client.open_snapshotter(root).await?,
         None => Snapshotter::open_offline(root)?,
     };
+    snapshotter.defer_unreadable();
     let mut link = Link {
         endpoint: endpoint.clone(),
         client,
@@ -75,16 +76,33 @@ pub async fn watch(
                 let dirty = pending.take().expect("a wake time means a pending snapshot").dirty;
                 let (back, result) = link.snapshot(snapshotter, dirty.clone()).await;
                 snapshotter = back;
-                match result {
-                    Ok(done) => report(WatchEvent::Snapshot(done)),
-                    // The change is closed or gone: no retry can store it.
-                    Err(err) if is_final(&err) => return Err(err),
-                    Err(err) => {
-                        report(WatchEvent::Failed(err));
-                        pending = Pending::retry(dirty);
-                    }
-                }
+                pending = after_attempt(result, dirty, &mut report)?;
             }
+        }
+    }
+}
+
+/// Reports one attempt and returns what is left to snapshot.
+fn after_attempt(
+    result: Result<SnapshotReport, Error>,
+    dirty: Dirty,
+    report: &mut impl FnMut(WatchEvent),
+) -> Result<Option<Pending>, Error> {
+    match result {
+        Ok(done) => {
+            // A held file is read again once it may be free; the writes
+            // stored meanwhile did not wait for it.
+            let retry = (!done.unreadable.is_empty())
+                .then(|| Pending::retry(Dirty::Paths(done.unreadable.iter().cloned().collect())))
+                .flatten();
+            report(WatchEvent::Snapshot(done));
+            Ok(retry)
+        }
+        // The change is closed or gone: no retry can store it.
+        Err(err) if is_final(&err) => Err(err),
+        Err(err) => {
+            report(WatchEvent::Failed(err));
+            Ok(Pending::retry(dirty))
         }
     }
 }
