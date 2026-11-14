@@ -52,6 +52,13 @@ struct Args {
     /// $ROSEN_WARM_POOL_DIR, then the data directory.
     #[arg(long, value_name = "DIR")]
     warm_pool_dir: Option<PathBuf>,
+
+    /// Append this daemon's diagnostics (its standard error) to FILE,
+    /// relative to the data directory. A client that starts the daemon
+    /// passes `--log daemon.log`: that daemon has no console, so without a
+    /// log a pool worker's wait report or a failed prepare's output is lost.
+    #[arg(long, value_name = "FILE")]
+    log: Option<PathBuf>,
 }
 
 /// Inherited by a daemon a client starts with no flags, as `ROSEN_LISTEN` is.
@@ -99,12 +106,47 @@ impl Args {
 /// failure so a launcher that lost a start race can just connect to the winner.
 const EXIT_ALREADY_RUNNING: u8 = 3;
 
+/// A log past this size at start is set aside as `<FILE>.old`, replacing the
+/// previous one, so a long-lived machine's log never grows without bound.
+const LOG_ROTATE_BYTES: u64 = 4 << 20;
+
+/// Points standard error at the log file, appending, after setting a large
+/// one aside.
+fn open_log(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > LOG_ROTATE_BYTES) {
+        let mut old = path.as_os_str().to_owned();
+        old.push(".old");
+        // A daemon losing a start race may find the winner holding the file;
+        // the log then just grows until a later start.
+        let _ = std::fs::rename(path, old);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    rosen_platform::redirect_stderr(file)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
     // Clients on this machine open the object store at the data dir that
     // `status` reports (SPEC R3), so it must not depend on the daemon's cwd.
     let data_dir = std::path::absolute(&args.data_dir).unwrap_or_else(|_| args.data_dir.clone());
+    if let Some(log) = &args.log {
+        let path = data_dir.join(log);
+        match open_log(&path) {
+            Ok(()) => eprintln!(
+                "rosen-server {}: started, process {}",
+                env!("CARGO_PKG_VERSION"),
+                std::process::id()
+            ),
+            Err(err) => eprintln!("rosen-server: cannot log to {}: {err}", path.display()),
+        }
+    }
     let network = match args.network(&data_dir) {
         Ok(network) => network,
         Err(err) => {

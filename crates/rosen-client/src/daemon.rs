@@ -40,6 +40,11 @@ pub fn server_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(file_name))
 }
 
+/// The started daemon's log, in its data directory. It has no console or
+/// inherited stderr, so this is where its diagnostics go (SPEC R3: a pool
+/// worker's wait report, a failed prepare's output).
+const DAEMON_LOG: &str = "daemon.log";
+
 /// The launched daemon, polled until it listens or exits.
 #[cfg(windows)]
 type Daemon = rosen_platform::process::DetachedProcess;
@@ -57,7 +62,12 @@ fn spawn_daemon(endpoint: &Endpoint) -> Result<Daemon, Error> {
     use rosen_platform::process::spawn_detached;
     use std::ffi::OsStr;
     let binary = resolve_binary(server_binary())?;
-    let args = [OsStr::new("--endpoint"), OsStr::new(endpoint.as_str())];
+    let args = [
+        OsStr::new("--endpoint"),
+        OsStr::new(endpoint.as_str()),
+        OsStr::new("--log"),
+        OsStr::new(DAEMON_LOG),
+    ];
     spawn_detached(&binary, &args, true)
         .or_else(|_| spawn_detached(&binary, &args, false))
         .map_err(|err| Error::Start(format!("could not run {}: {err}", binary.display())))
@@ -102,6 +112,8 @@ fn spawn_daemon(endpoint: &Endpoint) -> Result<Daemon, Error> {
     Command::new(&binary)
         .arg("--endpoint")
         .arg(endpoint.as_str())
+        .arg("--log")
+        .arg(DAEMON_LOG)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

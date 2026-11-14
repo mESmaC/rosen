@@ -40,6 +40,42 @@ pub fn delete_on_close(_file: &std::fs::File) -> std::io::Result<()> {
     ))
 }
 
+/// Sends everything this process writes to standard error from now on,
+/// including panic messages, to `file`. Rust looks the standard handle up on
+/// each write, so `eprintln!` follows. The handle stays open for the rest of
+/// the process, as a standard handle must.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn redirect_stderr(file: std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+    let handle = file.into_raw_handle();
+    // SAFETY: `handle` is a live file handle whose ownership this process
+    // just released from `file`, so nothing else closes it while it is the
+    // standard error handle.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, handle.cast()) } == 0 {
+        let error = std::io::Error::last_os_error();
+        // SAFETY: the call failed, so the handle is still only ours to close.
+        drop(unsafe { OwnedHandle::from_raw_handle(handle) });
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Sends everything this process writes to standard error from now on,
+/// including panic messages, to `file`.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn redirect_stderr(file: std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: both descriptors are open for the whole call. dup2 replaces
+    // descriptor 2 with a copy of `file`'s, which then closes on drop.
+    if unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 pub mod credentials;
