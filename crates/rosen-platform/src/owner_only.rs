@@ -112,27 +112,17 @@ fn create_new(_path: &Path) -> io::Result<File> {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows {
+    use crate::security::{OwnerOnlyDescriptor, Rights};
     use std::fs::File;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use std::path::Path;
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, LocalFree, GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
-    };
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        SDDL_REVISION_1,
-    };
-    use windows_sys::Win32::Security::{
-        GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-        TOKEN_USER,
-    };
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, MoveFileExW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, MOVEFILE_REPLACE_EXISTING,
         MOVEFILE_WRITE_THROUGH,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     fn wide(path: &Path) -> io::Result<Vec<u16>> {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -161,12 +151,9 @@ mod windows {
     }
 
     pub(super) fn create_new(path: &Path) -> io::Result<File> {
-        let descriptor = OwnerOnlyDescriptor::for_current_user()?;
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor.0,
-            bInheritHandle: 0,
-        };
+        // Nothing is inherited from the data directory.
+        let descriptor = OwnerOnlyDescriptor::for_current_user(Rights::FileAll)?;
+        let attributes = descriptor.attributes();
         let wide = wide(path)?;
         // SAFETY: `wide` is NUL-terminated and `attributes` points at a live
         // descriptor; both outlive this synchronous call. CREATE_NEW applies
@@ -187,90 +174,5 @@ mod windows {
         }
         // SAFETY: CreateFileW returned a valid handle this function owns.
         Ok(unsafe { File::from_raw_handle(handle) })
-    }
-
-    /// A protected DACL granting full access to the current user and SYSTEM
-    /// only, so nothing is inherited from the data directory.
-    struct OwnerOnlyDescriptor(PSECURITY_DESCRIPTOR);
-
-    impl OwnerOnlyDescriptor {
-        fn for_current_user() -> io::Result<Self> {
-            let sid = current_user_sid()?;
-            let sddl: Vec<u16> = format!("D:P(A;;FA;;;{sid})(A;;FA;;;SY)")
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
-            let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-            // SAFETY: `sddl` is NUL-terminated; on success the OS allocates
-            // the descriptor with LocalAlloc, and Drop frees it.
-            let ok = unsafe {
-                ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    sddl.as_ptr(),
-                    SDDL_REVISION_1,
-                    &mut descriptor,
-                    std::ptr::null_mut(),
-                )
-            };
-            if ok == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Self(descriptor))
-        }
-    }
-
-    impl Drop for OwnerOnlyDescriptor {
-        fn drop(&mut self) {
-            // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
-            unsafe { LocalFree(self.0 as HLOCAL) };
-        }
-    }
-
-    /// The current process user's SID as a string, for example `S-1-5-21-…`.
-    fn current_user_sid() -> io::Result<String> {
-        let mut token: HANDLE = std::ptr::null_mut();
-        // SAFETY: GetCurrentProcess returns a pseudo-handle; `token` is closed below.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let sid = token_user_sid(token);
-        // SAFETY: `token` was opened above and is not used after this.
-        unsafe { CloseHandle(token) };
-        sid
-    }
-
-    fn token_user_sid(token: HANDLE) -> io::Result<String> {
-        let mut needed = 0u32;
-        // SAFETY: a size query with a null buffer; it fails and reports `needed`.
-        unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed) };
-        // u64 storage keeps the buffer aligned for TOKEN_USER.
-        let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
-        // SAFETY: `buffer` holds at least `needed` bytes.
-        let ok = unsafe {
-            GetTokenInformation(
-                token,
-                TokenUser,
-                buffer.as_mut_ptr().cast(),
-                needed,
-                &mut needed,
-            )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: GetTokenInformation filled the buffer with a TOKEN_USER.
-        let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
-        let mut wide: *mut u16 = std::ptr::null_mut();
-        // SAFETY: the SID points into `buffer`, which is alive; `wide` is freed below.
-        if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut wide) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `wide` is a NUL-terminated string allocated by the OS.
-        let sid = unsafe {
-            let len = (0..).take_while(|&i| *wide.add(i) != 0).count();
-            String::from_utf16_lossy(std::slice::from_raw_parts(wide, len))
-        };
-        // SAFETY: allocated by ConvertSidToStringSidW with LocalAlloc.
-        unsafe { LocalFree(wide as HLOCAL) };
-        Ok(sid)
     }
 }
