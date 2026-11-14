@@ -56,6 +56,19 @@ const ABANDONED: Duration = Duration::from_secs(60);
 /// Names another folder for the queue, for tests and for a run that must not
 /// wait in the machine's real line.
 pub const QUEUE_ENV: &str = "ROSEN_RUN_QUEUE";
+/// Set on every process a turn runs, to the name of the turn's class. A run
+/// started beneath one is part of that turn: `rosen run` there runs at once,
+/// where waiting would wait on its own ancestor, which holds the class it
+/// would wait for. A build script that queues its own steps can then be run
+/// through `rosen run` whole.
+pub const HELD_ENV: &str = "ROSEN_RUN_HELD";
+
+/// The class whose turn an ancestor of this process holds, if any.
+pub fn held() -> Option<RunClass> {
+    std::env::var(HELD_ENV)
+        .ok()
+        .and_then(|class| RunClass::parse(&class))
+}
 
 /// What a run is for, most important first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
