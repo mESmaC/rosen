@@ -86,6 +86,18 @@ fn a_block_clone_is_brought_to_the_new_tree_and_keeps_build_output() {
     materialise(&store, before, &source, &Options::default()).unwrap();
     fs::create_dir(source.join("target")).unwrap();
     fs::write(source.join("target/out.bin"), b"build output").unwrap();
+    // Risk: a clone stamped with the time it was made looks newer than the
+    // build output that depends on it, and cargo rebuilds every crate in a
+    // prepared workspace's first build. Clones keep their sources' times.
+    let built_at =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    for old in ["keep.rs", "target/out.bin"] {
+        let file = OpenOptions::new()
+            .write(true)
+            .open(source.join(old))
+            .unwrap();
+        file.set_modified(built_at).unwrap();
+    }
     // Untracked output where the new tree tracks a path (issue #40): a file
     // over a file, a directory over a file, a file over a directory.
     fs::write(source.join("added.rs"), b"stale generated").unwrap();
@@ -120,6 +132,10 @@ fn a_block_clone_is_brought_to_the_new_tree_and_keeps_build_output() {
     );
     assert!(!dest.join("gone.rs").exists());
     assert!(!dest.join("emptied").exists());
+    for kept in ["keep.rs", "target/out.bin"] {
+        let modified = fs::metadata(dest.join(kept)).unwrap().modified().unwrap();
+        assert_eq!(modified, built_at, "{kept}");
+    }
 }
 
 /// Stores a tree of regular files given as `/`-separated paths, one level of
