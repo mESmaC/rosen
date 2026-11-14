@@ -110,10 +110,10 @@ pub enum Error {
     /// change landed or was abandoned while the client was away. The record
     /// and every later snapshot stay in the workspace's journal, so no edit
     /// is lost and R4 keeps the workspace; replay resumes once the change
-    /// is open again.
+    /// is open and has moved since: reopened, or given a new head.
     #[error(
         "the server refused offline snapshot {record} for good ({refusal}); it and later \
-         snapshots stay in the workspace's journal until the change is open again"
+         snapshots stay in the workspace's journal until the change is open and has moved"
     )]
     JournalHalted { record: u64, refusal: ErrorBody },
     /// A workspace could not be scanned or snapshotted.
