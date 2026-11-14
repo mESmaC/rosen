@@ -58,6 +58,9 @@
       "$ref": "#/$defs/rosen.workspace.list~1v1"
     },
     {
+      "$ref": "#/$defs/rosen.workspace.limits~1v1"
+    },
+    {
       "$ref": "#/$defs/rosen.workspace.delete~1v1"
     },
     {
@@ -1220,6 +1223,43 @@
       ],
       "additionalProperties": false
     },
+    "WorkspaceLoad": {
+      "type": "object",
+      "properties": {
+        "settings": {
+          "type": "object",
+          "properties": {
+            "materialisations": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "disk_bytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "materialisations",
+            "disk_bytes"
+          ],
+          "additionalProperties": false
+        },
+        "running": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "charged_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "settings",
+        "running",
+        "charged_bytes"
+      ],
+      "additionalProperties": false
+    },
     "ClaimOutcome": {
       "oneOf": [
         {
@@ -1863,6 +1903,25 @@
       "additionalProperties": false,
       "x-commands": [
         "workspace list"
+      ]
+    },
+    "rosen.workspace.limits/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.workspace.limits/v1"
+        },
+        "limits": {
+          "$ref": "#/$defs/WorkspaceLoad"
+        }
+      },
+      "required": [
+        "schema",
+        "limits"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "workspace limits"
       ]
     },
     "rosen.workspace.delete/v1": {

@@ -9,7 +9,7 @@ use rosen_protocol::{
 use rosen_store::LooseObjectStore;
 
 use super::{
-    limits::{Budget, Settings},
+    limits::{Budget, Load, Settings},
     materialise_with_budget, Options, Report,
 };
 use crate::connection::unexpected;
@@ -94,11 +94,9 @@ impl Client {
         // the head tree cached and returns at once.
         let store = self.local_store().await?;
         let (root, head) = (dest.to_path_buf(), change.change.head);
-        tokio::task::spawn_blocking(move || {
-            crate::snapshot::seed_tree_cache(&store, &root, head)
-        })
-        .await
-        .map_err(|error| Error::Unexpected(format!("tree cache seeding stopped: {error}")))??;
+        tokio::task::spawn_blocking(move || crate::snapshot::seed_tree_cache(&store, &root, head))
+            .await
+            .map_err(|error| Error::Unexpected(format!("tree cache seeding stopped: {error}")))??;
         self.register_workspace(change.change.id, dest).await?;
         Ok(report)
     }
@@ -127,6 +125,27 @@ impl Client {
         .await
         .map_err(|error| Error::Unexpected(format!("materialisation stopped: {error}")))?
         .map_err(Error::Workspace)
+    }
+
+    /// Sets either of this machine's materialisation admission caps, when
+    /// given, and returns the caps in force with the load against them
+    /// (SPEC R3). The caps persist under the daemon's data directory, so
+    /// they hold for every client and pool worker until changed again.
+    pub async fn load_limits(
+        &self,
+        materialisations: Option<usize>,
+        disk_bytes: Option<u64>,
+    ) -> Result<Load, Error> {
+        let limits_root = PathBuf::from(self.status().await?.data_dir).join("workspace-limits");
+        let path = limits_root.clone();
+        tokio::task::spawn_blocking(move || {
+            let budget = Budget::open(&limits_root, Settings::default())?;
+            budget.set_caps(materialisations, disk_bytes)?;
+            budget.load()
+        })
+        .await
+        .map_err(|error| Error::Unexpected(format!("load limits stopped: {error}")))?
+        .map_err(|error| Error::Workspace(super::MaterialiseError::io(&path, error)))
     }
 }
 
