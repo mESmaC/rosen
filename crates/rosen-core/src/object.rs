@@ -7,6 +7,7 @@
 use crate::hash::ObjectId;
 use crate::{Error, Result};
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 /// The three object kinds Rosen stores. Git tags are not used: the base is
 /// the only ref (D18), and release refs point at commits.
@@ -157,10 +158,15 @@ impl Tree {
     /// Sorts entries into git order and rejects duplicate names.
     pub fn new(mut entries: Vec<TreeEntry>) -> Result<Self> {
         entries.sort_by(|a, b| a.sort_key().cmp(b.sort_key()));
-        if let Some(pair) = entries.windows(2).find(|w| w[0].name == w[1].name) {
+        // Checked by name alone, not across adjacent git-ordered entries: git
+        // order sorts directory `a` as `a/`, so another entry such as `a.b`
+        // can fall between file `a` and directory `a`. git fsck rejects that
+        // tree as duplicateEntries, which would fail a mirror push (R1).
+        let mut seen = HashSet::with_capacity(entries.len());
+        if let Some(entry) = entries.iter().find(|entry| !seen.insert(&entry.name[..])) {
             return Err(Error::InvalidTreeEntry(format!(
                 "duplicate name {:?}",
-                String::from_utf8_lossy(&pair[0].name)
+                String::from_utf8_lossy(&entry.name)
             )));
         }
         Ok(Tree { entries })
