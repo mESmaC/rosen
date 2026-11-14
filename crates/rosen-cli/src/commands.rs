@@ -283,6 +283,34 @@ pub enum Command {
     /// under that machine's credential.
     #[command(subcommand)]
     Machine(MachineCommand),
+    /// Serve these commands as tools over the Model Context Protocol (MCP).
+    ///
+    /// For an agent host to start, not to run by hand: it speaks MCP on
+    /// stdin and stdout until stdin closes. Each tool is one `rosen`
+    /// command, named by its words joined with `_` (`change_new`), taking
+    /// the command's arguments by name and returning its `--json` output.
+    /// A command that fails or is refused comes back as an error result
+    /// holding its `rosen.error/v1` object.
+    ///
+    /// The commands read $ROSEN_ENDPOINT, $ROSEN_AGENT and $ROSEN_CHANGE as
+    /// they do from a shell, so the host sets them for this server.
+    ///
+    /// Commands that run until something happens elsewhere (`wait`,
+    /// `events`, `workspace watch`) and the operator's commands (`import`,
+    /// `server start`, `machine`) are not offered.
+    Mcp(McpArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    /// Run the tools' commands in this workspace, so they act on its
+    /// change. Without it they run in the directory the server started in.
+    #[arg(long, value_name = "DIR")]
+    pub workspace: Option<PathBuf>,
+    /// Also offer `review approve`, `receipt submit` and `land`: a
+    /// reviewer's or checker's tools, which an author's agent does not need.
+    #[arg(long)]
+    pub landing: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -680,6 +708,7 @@ impl Command {
             Command::Config(ConfigCommand::Show { .. }) => "config show",
             Command::Events { .. } => "events",
             Command::Machine(sub) => sub.path(),
+            Command::Mcp(_) => "mcp",
         }
     }
 }
