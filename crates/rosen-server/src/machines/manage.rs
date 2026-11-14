@@ -107,7 +107,9 @@ pub fn list(conn: &Connection) -> Result<Vec<MachineRecord>, ErrorBody> {
         .prepare("SELECT id,name,role,status,last_contact,running_agents FROM machines ORDER BY id")
         .map_err(database)?;
     let rows = query.query_map([], machine).map_err(database)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(database)
+    rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database)
 }
 
 fn get(conn: &Connection, id: &str) -> Result<MachineRecord, ErrorBody> {
@@ -162,7 +164,9 @@ pub fn keys(conn: &Connection) -> Result<Vec<JoinKeyRecord>, ErrorBody> {
         .prepare("SELECT id,expires_at,remaining,role FROM join_keys ORDER BY id")
         .map_err(database)?;
     let rows = query.query_map([], key).map_err(database)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(database)
+    rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database)
 }
 
 pub fn revoke_key(conn: &Connection, id: &str) -> Result<JoinKeyRecord, ErrorBody> {

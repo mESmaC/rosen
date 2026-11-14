@@ -81,7 +81,7 @@ fn break_gates(conn: &mut Connection, record: &mut LandRecord, flags: &[bool]) {
     }
 }
 
-fn new_attempt() -> (tempfile::TempDir, Ledger, Connection, LandRecord) {
+fn new_attempt() ->(tempfile::TempDir, Ledger, Connection, LandRecord) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("metadata.sqlite");
     let ledger = Ledger::open(&path).unwrap();

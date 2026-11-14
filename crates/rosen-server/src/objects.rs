@@ -54,9 +54,7 @@ pub fn read_chunk(
         return Ok(None);
     };
     let total = raw.data.len();
-    let start = usize::try_from(query.offset)
-        .unwrap_or(usize::MAX)
-        .min(total);
+    let start = usize::try_from(query.offset).unwrap_or(usize::MAX).min(total);
     let len = usize::try_from(query.len)
         .unwrap_or(usize::MAX)
         .min(OBJECT_CHUNK_BYTES);

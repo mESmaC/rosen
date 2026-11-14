@@ -59,10 +59,7 @@ pub fn store_chunk(
     }
     let received = chunk.offset.saturating_add(chunk.data.len() as u64);
     if received > chunk.total {
-        let why = format!(
-            "chunk ends at {received}, past the blob's {} bytes",
-            chunk.total
-        );
+        let why = format!("chunk ends at {received}, past the blob's {} bytes", chunk.total);
         return Err(ErrorBody::new(ErrorCode::InvalidArgument, why));
     }
     append(staging, &path, chunk)?;

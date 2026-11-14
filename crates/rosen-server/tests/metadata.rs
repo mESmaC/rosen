@@ -56,6 +56,5 @@ fn adopts_existing_metadata_and_reopens_with_wal() {
 }
 
 fn pragma<T: rusqlite::types::FromSql>(conn: &Connection, name: &str) -> T {
-    conn.pragma_query_value(None, name, |row| row.get(0))
-        .unwrap()
+    conn.pragma_query_value(None, name, |row| row.get(0)).unwrap()
 }
