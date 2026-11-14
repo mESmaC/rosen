@@ -1,5 +1,6 @@
 //! R8: carry parent updates through a stack without rewriting authored commits.
 use crate::changes::{self, ChangeError};
+use crate::events::Staged;
 use crate::history::{
     self,
     trees::{content, file_at},
@@ -141,52 +142,55 @@ fn finish_step(
             serde_json::json!({"paths":merged.conflicts}),
         )
     };
-    tx.execute(
-        "INSERT INTO stack_delivery (change_id, conflicted, detail) VALUES (?1, ?2, ?3)",
-        params![
-            id.to_string(),
-            kind == EventKind::Conflict,
-            detail.to_string()
-        ],
-    )?;
+    // Staged with the update it announces, so both commit or neither does.
+    crate::events::stage(&tx, &Staged::about(kind, id, detail.clone()))?;
     tx.commit()?;
     Ok(Some((id, kind, detail)))
 }
 
+/// Hands staged stack events to the event log, which stores each staged
+/// row exactly once and keeps it staged until then (R9).
 fn deliver(state: &ServerState) -> Result<(), ChangeError> {
-    let pending = state.changes.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT seq, change_id, conflicted, detail FROM stack_delivery ORDER BY seq",
-        )?;
+    state.changes.with_conn(adopt_legacy_rows)?;
+    state.events.deliver_staged();
+    Ok(())
+}
+
+/// Moves rows a server from before the shared event outbox left in
+/// `stack_delivery` into the outbox, in one transaction, so none is lost or
+/// delivered twice. That table had its own delivery loop, which published a
+/// row again on every pass while the event log still held it queued.
+fn adopt_legacy_rows(conn: &mut Connection) -> Result<(), ChangeError> {
+    let any: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM stack_delivery)", [], |r| {
+        r.get(0)
+    })?;
+    if !any {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let rows = {
+        let mut stmt =
+            tx.prepare("SELECT change_id, conflicted, detail FROM stack_delivery ORDER BY seq")?;
         let rows = stmt.query_map([], |r| {
             Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, bool>(2)?,
-                r.get::<_, String>(3)?,
+                r.get::<_, String>(0)?,
+                r.get::<_, bool>(1)?,
+                r.get::<_, String>(2)?,
             ))
         })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    })?;
-    for (seq, id, conflicted, detail) in pending {
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, conflicted, detail) in rows {
         let kind = if conflicted {
             EventKind::Conflict
         } else {
             EventKind::Rebased
         };
-        if state.events.publish(
-            kind,
-            Some(id),
-            serde_json::from_str(&detail).map_err(failure)?,
-        ) == 0
-        {
-            return Ok(());
-        }
-        state.changes.with_conn(|conn| {
-            conn.execute("DELETE FROM stack_delivery WHERE seq = ?1", [seq])?;
-            Ok(())
-        })?;
+        let detail = serde_json::from_str(&detail).map_err(failure)?;
+        crate::events::stage(&tx, &Staged::about(kind, id, detail))?;
     }
+    tx.execute("DELETE FROM stack_delivery", [])?;
+    tx.commit()?;
     Ok(())
 }
 
