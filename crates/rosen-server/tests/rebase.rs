@@ -52,7 +52,8 @@ fn commit(store: &dyn ObjectStore, tree: ObjectId, parents: Vec<ObjectId>) -> Ob
 #[tokio::test(flavor = "multi_thread")]
 async fn server_rebase_preserves_history_and_requires_explicit_clean_apply() {
     let temp = tempfile::tempdir().unwrap();
-    let (state, store, client, server, original, base) = start(&temp.path().join("data")).await;
+    let (state, store, client, server, original, base) =
+        start(&temp.path().join("data"), "clean").await;
     let owner = AgentId::new("owner").unwrap();
     let change = client
         .change_new(NewChange {
@@ -105,6 +106,49 @@ async fn server_rebase_preserves_history_and_requires_explicit_clean_apply() {
     server.abort();
 }
 
+// Risk (#105): a pre-apply snapshot that conflicts with the rebased head was
+// refused, and applying then refused the unstored edit, so the workspace's
+// writes never reached the server. The snapshot must store the conflict and
+// let the owner apply a head that keeps both sides.
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_conflicting_with_pending_rebase_is_stored_and_applies() {
+    let temp = tempfile::tempdir().unwrap();
+    let (state, store, client, server, _, base) = start(&temp.path().join("data"), "apply").await;
+    let owner = AgentId::new("owner").unwrap();
+    let new = NewChange {
+        owner: owner.clone(),
+        on: None,
+    };
+    let change = client.change_new(new).await.unwrap();
+    let id = change.change.id.to_string();
+    let root = temp.path().join("workspace");
+    client
+        .materialise_change(&change, &root, Options::default())
+        .await
+        .unwrap();
+    let next = commit(&store, tree(&store, true), vec![base]);
+    state
+        .changes
+        .with_conn(|conn| {
+            conn.execute("UPDATE base_refs SET target = ?1", [next.to_hex()])?;
+            Ok(())
+        })
+        .unwrap();
+    client.rebase_change(&id).await.unwrap();
+    std::fs::write(root.join("b"), b"mine\n").unwrap();
+    client.snapshot_workspace(&root, None).await.unwrap();
+    // A resend from the old basis must not mark its own edits again.
+    let resent = client.snapshot_workspace(&root, None).await.unwrap();
+    assert!(!resent.recorded);
+    let stored = client.change_show(&id).await.unwrap();
+    assert_eq!(stored.change.conflicts.len(), 1);
+    let head = client.apply_rebase(&root, &owner).await.unwrap();
+    assert_eq!(head, stored.change.head);
+    let shown = String::from_utf8(std::fs::read(root.join("b")).unwrap()).unwrap();
+    assert!(shown.starts_with("<<<<<<<") && shown.contains("mine\n") && shown.contains("b\n"));
+    server.abort();
+}
+
 async fn check_apply(client: &Client, root: &std::path::Path, owner: &AgentId, tree: ObjectId) {
     assert!(client
         .apply_rebase(root, &AgentId::new("other").unwrap())
@@ -125,6 +169,7 @@ async fn check_apply(client: &Client, root: &std::path::Path, owner: &AgentId, t
 
 async fn start(
     data: &std::path::Path,
+    test: &str,
 ) -> (
     Arc<ServerState>,
     LooseObjectStore,
@@ -133,7 +178,7 @@ async fn start(
     ObjectId,
     ObjectId,
 ) {
-    let endpoint = Endpoint::new(format!("rebase-{}", std::process::id()));
+    let endpoint = Endpoint::new(format!("rebase-{test}-{}", std::process::id()));
     let state = ServerState::new(ServerConfig {
         data_dir: data.to_path_buf(),
         endpoint: endpoint.clone(),

@@ -473,22 +473,7 @@ pub fn rebase_checked_storing(
             "rebase inputs moved; retry the rebase".into(),
         ));
     }
-    if !conflicts.is_empty() {
-        let corrupt = |err: crate::conflicts::ConflictStoreError| match err {
-            crate::conflicts::ConflictStoreError::Sql(sql) => ChangeError::Store(sql),
-            other => ChangeError::Corrupt(other.to_string()),
-        };
-        let key = expected.id.to_string();
-        let mut set = crate::conflicts::load(&tx, &key).map_err(corrupt)?;
-        for (path, regions) in conflicts {
-            // An open conflict from an earlier rebase still has its markers
-            // in the head being merged, so this rebase adds to it and never
-            // replaces it.
-            let kept: Vec<_> = set.open().filter(|c| c.path == path).cloned().collect();
-            set.record_merge(&path, kept.into_iter().chain(regions));
-        }
-        crate::conflicts::save(&tx, &key, &set).map_err(corrupt)?;
-    }
+    store_open_conflicts(&tx, expected.id, conflicts)?;
     let record = update_in(&tx, expected.id, |c| {
         c.rebase(ChangeParent::Base(onto), tree)
     })?;
@@ -496,15 +481,45 @@ pub fn rebase_checked_storing(
     Ok(record)
 }
 
+/// Stores `conflicts` open on change `id`, inside the caller's transaction.
+fn store_open_conflicts(
+    tx: &rusqlite::Transaction<'_>,
+    id: ChangeId,
+    conflicts: Vec<(String, Vec<rosen_core::Conflict>)>,
+) -> Result<(), ChangeError> {
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    let corrupt = |err: crate::conflicts::ConflictStoreError| match err {
+        crate::conflicts::ConflictStoreError::Sql(sql) => ChangeError::Store(sql),
+        other => ChangeError::Corrupt(other.to_string()),
+    };
+    let key = id.to_string();
+    let mut set = crate::conflicts::load(tx, &key).map_err(corrupt)?;
+    for (path, regions) in conflicts {
+        // An open conflict from an earlier merge still has its markers in
+        // the head being merged, so this merge adds to it and never
+        // replaces it.
+        let kept: Vec<_> = set.open().filter(|c| c.path == path).cloned().collect();
+        set.record_merge(&path, kept.into_iter().chain(regions));
+    }
+    crate::conflicts::save(tx, &key, &set).map_err(corrupt)
+}
+
 /// Preserve a pending rebase while appending the author's original snapshot.
 /// Both updates are one transaction; a concurrent rebase forces a retry.
+/// `conflicts` are the regions where the snapshot's edits did not merge
+/// onto the rebased head, which then holds their markers (R5); they are
+/// stored in the same transaction, so that head never lands unresolved.
 pub fn record_snapshot_merged(
     conn: &mut Connection,
     expected: &Change,
     snapshot: Snapshot,
     head: ObjectId,
+    conflicts: Vec<(String, Vec<rosen_core::Conflict>)>,
 ) -> Result<ChangeRecord, ChangeError> {
-    update(conn, expected.id, |current| {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let record = update_in(&tx, expected.id, |current| {
         if current != expected {
             return Err(rosen_core::Error::InvalidPath(
                 "snapshot inputs moved; retry".into(),
@@ -513,5 +528,8 @@ pub fn record_snapshot_merged(
         current.record_snapshot(snapshot)?;
         current.head = head;
         Ok(())
-    })
+    })?;
+    store_open_conflicts(&tx, expected.id, conflicts)?;
+    tx.commit()?;
+    Ok(record)
 }

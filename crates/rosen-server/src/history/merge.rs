@@ -216,16 +216,29 @@ pub(crate) fn merge_marked(
     let config = ctx.state.project_config.at_commit(onto)?.config;
     let policy = |path: &str| policy_for(&config, path);
     let sides = [measured_from, onto_tree, change.head];
-    let (edits, mut merge) = merge_paths(ctx, sides, &policy, true)?;
+    let merge = merge_trees_marked(ctx, sides, &policy)?;
+    Ok((merge, [measured_from, onto_tree]))
+}
+
+/// Merges the change's edits since `base` onto `onto`, given as
+/// `[base, onto, change]` trees, writing diff3 markers into each
+/// conflicting file with the change's side as `ours` (R5). `tree` is `None`
+/// only when merged paths collide as a file and a directory.
+pub(crate) fn merge_trees_marked(
+    ctx: &Ctx,
+    sides: [ObjectId; 3],
+    policy: &dyn Fn(&str) -> MergePolicy,
+) -> HistoryResult<TreeMerge> {
+    let (edits, mut merge) = merge_paths(ctx, sides, policy, true)?;
     let mut collisions = Vec::new();
-    let tree = apply(&ctx.store, Some(onto_tree), &edits, &mut collisions)?;
+    let tree = apply(&ctx.store, Some(sides[1]), &edits, &mut collisions)?;
     if collisions.is_empty() {
         merge.tree = Some(tree_or_empty(ctx, tree)?);
     }
     merge.conflicts.extend(collisions);
     merge.conflicts.sort();
     merge.conflicts.dedup();
-    Ok((merge, [measured_from, onto_tree]))
+    Ok(merge)
 }
 
 fn tree_or_empty(ctx: &Ctx, tree: Option<ObjectId>) -> HistoryResult<ObjectId> {
