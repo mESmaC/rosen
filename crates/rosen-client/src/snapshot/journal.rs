@@ -21,6 +21,9 @@ use std::{
 pub(super) struct Record {
     pub prepared: Prepared,
     pub message: Option<String>,
+    /// A request for this record may have reached the server without its
+    /// answer arriving, so the server may hold it already.
+    pub unanswered: bool,
 }
 
 /// A record as stored on disk: object ids only.
@@ -31,6 +34,8 @@ struct StoredRecord {
     all_trees: Vec<ObjectId>,
     removed: usize,
     message: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    unanswered: bool,
 }
 
 /// Records written before blobs moved out of the record carried the whole
@@ -185,6 +190,7 @@ impl Journal {
                 return Ok(Record {
                     prepared: record.prepared,
                     message: record.message,
+                    unanswered: false,
                 })
             }
             OnDisk::Stored(stored) => stored,
@@ -214,6 +220,7 @@ impl Journal {
                 removed: stored.removed,
             },
             message: stored.message,
+            unanswered: stored.unanswered,
         })
     }
 
@@ -232,6 +239,7 @@ impl Journal {
             all_trees: record.prepared.all_trees.clone(),
             removed: record.prepared.removed,
             message: record.message.clone(),
+            unanswered: record.unanswered,
         };
         let bytes = serde_json::to_vec(&stored).map_err(io::Error::other);
         let next = last.map_or(1, |id| id + 1);
@@ -272,6 +280,18 @@ impl Journal {
             Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
             _ => Ok(()),
         }
+    }
+
+    /// Notes that record `id` is about to be sent, so a replay after a lost
+    /// answer or a crash asks the server before sending it again. Records
+    /// from an earlier build, which carry their bytes inline, are left as is.
+    pub fn mark_unanswered(&self, id: u64) -> io::Result<()> {
+        let OnDisk::Stored(mut record) = self.read(id)? else {
+            return Ok(());
+        };
+        record.unanswered = true;
+        let bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
+        self.publish(id, &bytes)
     }
 
     /// Removes a record the server has stored.
