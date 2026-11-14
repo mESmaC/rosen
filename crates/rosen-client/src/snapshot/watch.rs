@@ -262,7 +262,13 @@ fn relevant_paths(
 }
 
 fn is_final(err: &Error) -> bool {
-    matches!(err, Error::Server(body) if matches!(body.code, ErrorCode::Refused | ErrorCode::NotFound))
+    match err {
+        // The journal waits for the change to reopen; retrying on a timer
+        // would only ask the server the same question again.
+        Error::JournalHalted { .. } => true,
+        Error::Server(body) => matches!(body.code, ErrorCode::Refused | ErrorCode::NotFound),
+        _ => false,
+    }
 }
 
 async fn sleep_or_never(wake: Option<Instant>) {

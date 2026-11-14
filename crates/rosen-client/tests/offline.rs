@@ -1,11 +1,12 @@
 //! SPEC R2 critical contract: intermediate offline edits survive restart and
 //! replay in order, even when the file has subsequently been overwritten.
+use rosen_client::protocol::Request;
 use rosen_client::protocol::{Listener, NewChange};
 use rosen_client::snapshot::{
     journal_snapshot, pending_journal, take_snapshot, Dirty, Snapshotter,
 };
 use rosen_client::workspace::Options;
-use rosen_client::{Client, Endpoint};
+use rosen_client::{Client, Endpoint, Error};
 use rosen_core::{AgentId, FileMode, ObjectId, Tree, TreeEntry};
 use rosen_server::changes::{BaseSource, BaseTip};
 use rosen_server::{ServerConfig, ServerState};
@@ -62,6 +63,48 @@ async fn offline_versions_survive_restart_and_replay_in_order() {
     drop(lease);
 }
 
+/// Risk (R2, R4, issue #91): a record the server refuses for good, because
+/// the change was abandoned while the client was away, must neither be
+/// dropped (losing the edit) nor fail every later snapshot by uploading it
+/// again. The journal halts, keeps every record and says why.
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_record_halts_the_journal_and_keeps_every_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let store = LooseObjectStore::open(data.join("objects")).unwrap();
+    let endpoint = start_server(&data, &store);
+    let client = Client::connect(&endpoint).await.unwrap();
+    let owner = AgentId::new("offline").unwrap();
+    let change = client
+        .change_new(NewChange { owner, on: None })
+        .await
+        .unwrap();
+    let workspace = dir.path().join("ws");
+    client
+        .materialise_change(&change, &workspace, Options::default())
+        .await
+        .unwrap();
+    let state = Snapshotter::open_offline(&workspace).unwrap();
+    std::fs::write(workspace.join("main.rs"), b"offline edit").unwrap();
+    let (mut state, _) = journal_snapshot(state, Dirty::Full).await;
+    let id = change.change.id.to_string();
+    let abandon = Request::ChangeAbandon { change: id.clone() };
+    client.request(abandon).await.unwrap();
+    for (content, pending) in [(b"later edit".as_slice(), 2), (b"later edit", 2)] {
+        std::fs::write(workspace.join("main.rs"), content).unwrap();
+        let (back, result) = take_snapshot(&client, state, Dirty::Full, None).await;
+        state = back;
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::JournalHalted { record: 1, .. }),
+            "{err}"
+        );
+        assert_eq!(pending_journal(&workspace).unwrap(), pending);
+    }
+    let held = client.change_show(&id).await.unwrap().change.snapshots;
+    assert!(held.is_empty(), "a refused record was stored: {held:?}");
+}
+
 async fn verify_history(client: &Client, store: &dyn ObjectStore, change: &str, workspace: &Path) {
     let history = client.change_show(change).await.unwrap();
     let versions: Vec<_> = history
@@ -105,7 +148,10 @@ fn start_server(data: &Path, store: &dyn ObjectStore) -> Endpoint {
         file(store, "main.rs", b"fn main() {}\n"),
     ];
     let tree = store.put_tree(&Tree::new(entries).unwrap()).unwrap();
-    let name = format!("rosen-offline-test-{}", std::process::id());
+    // Tests run in parallel in one process, so each needs its own pipe.
+    static SERVERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SERVERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("rosen-offline-test-{}-{n}", std::process::id());
     let endpoint = if cfg!(windows) {
         Endpoint::new(name)
     } else {
