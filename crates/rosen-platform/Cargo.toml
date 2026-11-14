@@ -7,10 +7,14 @@ license.workspace = true
 repository.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security_Credentials", "Win32_Security_Authorization", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security_Credentials", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Console"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 # The only unsafe code is the audited Windows ABI boundary: file disposition,
-# Credential Manager, process creation and liveness, and owner-only file creation. All
+# Credential Manager, process creation and liveness, owner-only file creation,
+# and pointing standard error at a log file (with dup2 on Unix). All
 # consumers continue to inherit the workspace's unsafe_code = forbid policy.
 [lints.rust]
 unsafe_code = "deny"

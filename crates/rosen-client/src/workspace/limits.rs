@@ -554,7 +554,8 @@ fn rename_while_walked(from: &Path, to: &Path) -> io::Result<()> {
 /// Tells whoever started a queued request why it waits. Without it a
 /// request queued behind a full budget looks the same as a hung daemon.
 /// It goes to stderr of the waiting process: the CLI for a client's own
-/// materialisation, the daemon's log for a pool worker's.
+/// materialisation, the daemon's for a pool worker's, which a daemon a
+/// client started sends to `daemon.log` in its data directory.
 struct WaitReport<'a> {
     destination: &'a Path,
     started: Instant,
