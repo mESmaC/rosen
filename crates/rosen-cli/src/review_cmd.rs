@@ -167,8 +167,19 @@ fn print_approval(json: bool, approval: &Approval) {
     } else {
         println!(
             "approval {}: {} approved change {} at {}",
-            approval.id, approval.reviewer, approval.change, approval.head
+            approval.id,
+            reviewer(approval),
+            approval.change,
+            approval.head
         );
+    }
+}
+
+/// `<nick>@<machine>` when the approval's machine is known (R14).
+fn reviewer(approval: &Approval) -> String {
+    match &approval.machine {
+        Some(machine) => format!("{}@{machine}", approval.reviewer),
+        None => approval.reviewer.to_string(),
     }
 }
 
@@ -183,7 +194,10 @@ fn print_approvals(json: bool, approvals: &[Approval]) {
             let status = if approval.valid { "valid" } else { "void" };
             println!(
                 "{}: {} approved {} at {} ({status})",
-                approval.id, approval.reviewer, approval.change, approval.head
+                approval.id,
+                reviewer(approval),
+                approval.change,
+                approval.head
             );
         }
     }

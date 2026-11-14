@@ -55,10 +55,19 @@ fn approvers(
     if approvals::current(conn, change.id, change.head)?.is_none() {
         return Ok(None);
     }
+    // Each named as `<nick>@<machine>` when its machine is known (R14), for
+    // the landed commit's `Rosen-Approved-By` trailers.
     let mut reviewers: Vec<AgentId> = Vec::new();
     for approval in approvals::list(conn, change.id)? {
-        if approval.valid && !reviewers.contains(&approval.reviewer) {
-            reviewers.push(approval.reviewer);
+        if !approval.valid {
+            continue;
+        }
+        let reviewer = match &approval.machine {
+            Some(machine) => approval.reviewer.on_machine(machine)?,
+            None => approval.reviewer,
+        };
+        if !reviewers.contains(&reviewer) {
+            reviewers.push(reviewer);
         }
     }
     Ok(Some((change.head, reviewers)))

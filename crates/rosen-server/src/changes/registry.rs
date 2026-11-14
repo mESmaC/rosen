@@ -14,12 +14,23 @@ pub enum NewParent {
 }
 
 const ID_LETTERS: &str = "klmnopqrstuvwxyz";
-const COLUMNS: &str = "id, owner, parent_base, parent_change, state, head, created_at, updated_at";
+const COLUMNS: &str =
+    "id, owner, parent_base, parent_change, state, head, created_at, updated_at, owner_machine";
 
 /// Creates an open change with a freshly minted ID, in one transaction.
 pub fn create(
     conn: &mut Connection,
     owner: &AgentId,
+    parent: NewParent,
+) -> Result<ChangeRecord, ChangeError> {
+    create_on(conn, owner, crate::machines::signing::SERVER_MACHINE, parent)
+}
+
+/// [`create`] for an owner working on `machine` (R14).
+pub fn create_on(
+    conn: &mut Connection,
+    owner: &AgentId,
+    machine: &str,
     parent: NewParent,
 ) -> Result<ChangeRecord, ChangeError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -37,13 +48,15 @@ pub fn create(
         }
     };
     let now = now_millis();
-    let id = insert_with_fresh_id(&tx, owner, parent, start_tree, now)?;
+    let id = insert_with_fresh_id(&tx, (owner, machine), parent, start_tree, now)?;
     if matches!(parent, ChangeParent::Change(_)) {
         crate::stacks::track(&tx, id, start_tree)?;
     }
     tx.commit()?;
+    let mut change = Change::new(id, owner.clone(), parent, start_tree);
+    change.owner_machine = Some(machine.to_owned());
     Ok(ChangeRecord {
-        change: Change::new(id, owner.clone(), parent, start_tree),
+        change,
         created_at: now,
         updated_at: now,
     })
@@ -53,7 +66,7 @@ pub fn create(
 /// the primary-key conflict costs nothing and turns "practically" into "never".
 fn insert_with_fresh_id(
     conn: &Connection,
-    owner: &AgentId,
+    (owner, machine): (&AgentId, &str),
     parent: ChangeParent,
     head: ObjectId,
     now: i64,
@@ -63,15 +76,17 @@ fn insert_with_fresh_id(
         let id = mint_id()?;
         let inserted = conn.execute(
             "INSERT OR IGNORE INTO changes
-                 (id, owner, parent_base, parent_change, state, head, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, ?6)",
+                 (id, owner, parent_base, parent_change, state, head, created_at, updated_at,
+                  owner_machine)
+             VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, ?6, ?7)",
             params![
                 id.to_string(),
                 owner.as_str(),
                 base,
                 below,
                 head.to_hex(),
-                now
+                now,
+                machine
             ],
         )?;
         if inserted == 1 {
@@ -391,6 +406,7 @@ struct StoredRow {
     head: String,
     created_at: i64,
     updated_at: i64,
+    owner_machine: String,
 }
 
 impl StoredRow {
@@ -404,6 +420,7 @@ impl StoredRow {
             head: row.get(5)?,
             created_at: row.get(6)?,
             updated_at: row.get(7)?,
+            owner_machine: row.get(8)?,
         })
     }
 
@@ -422,6 +439,7 @@ impl StoredRow {
             id: parse_column(&self.id, "change id")?,
             owner: AgentId::new(self.owner.as_str())
                 .map_err(|_| ChangeError::Corrupt(format!("owner {:?}", self.owner)))?,
+            owner_machine: Some(self.owner_machine).filter(|machine| !machine.is_empty()),
             parent,
             snapshots: load_snapshots(conn, &self.id)?,
             head: parse_column(&self.head, "head")?,
