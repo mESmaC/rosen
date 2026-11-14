@@ -79,6 +79,8 @@ impl Tier {
 #[derive(Clone, Debug)]
 pub struct ChangeFacts {
     pub id: ChangeId,
+    /// The landed commit's author: `<nick>@<machine>` when the machine is
+    /// known (R14).
     pub owner: AgentId,
     /// The change's description, which becomes the landed commit's message.
     pub description: String,

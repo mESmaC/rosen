@@ -21,8 +21,51 @@ pub async fn dispatch_from(
         Request::ReceiptSubmit(req) if !state.is_shutting_down() => {
             crate::receipts::submit(state, req, origin).await
         }
+        Request::ChangeNew(params) if !state.is_shutting_down() => {
+            match origin_machine(state, origin).await {
+                Ok(machine) => {
+                    on_changes(state, move |c| {
+                        c.create_on(&params, &machine).map(Response::Change)
+                    })
+                    .await
+                }
+                Err(refused) => Outcome::Error(refused),
+            }
+        }
+        Request::ReviewApprove(req) if !state.is_shutting_down() => {
+            match origin_machine(state, origin).await {
+                Ok(machine) => {
+                    crate::reviews::handle(state, ReviewCall::Approve(req, machine)).await
+                }
+                Err(refused) => Outcome::Error(refused),
+            }
+        }
         request => dispatch(state, request).await,
     }
+}
+
+/// The machine a request came from, for recording owners and reviewers as
+/// machine plus nick (R14): `server` for the local transport, otherwise the
+/// enrolled machine whose credential the connection carries.
+async fn origin_machine(
+    state: &Arc<ServerState>,
+    origin: crate::receipts::Origin,
+) -> Result<String, ErrorBody> {
+    let credential = match origin {
+        crate::receipts::Origin::Local => {
+            return Ok(crate::machines::signing::SERVER_MACHINE.to_owned())
+        }
+        crate::receipts::Origin::Machine(credential) => credential,
+    };
+    let dir = state.config.data_dir.clone();
+    let found = tokio::task::spawn_blocking(move || crate::machines::machine_of(&dir, &credential))
+        .await
+        .map_err(|join| ErrorBody::new(ErrorCode::Internal, join.to_string()))?;
+    found
+        .map_err(|err| ErrorBody::new(ErrorCode::Internal, err.to_string()))?
+        .ok_or_else(|| {
+            ErrorBody::new(ErrorCode::Refused, "machine credential required or revoked")
+        })
 }
 
 /// Runs one request to completion for a client on the server's own machine.
@@ -118,7 +161,8 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
             crate::events::acknowledge(state, subscriber, seq).await
         }
         Request::ReviewApprove(req) => {
-            crate::reviews::handle(state, ReviewCall::Approve(req)).await
+            let machine = crate::machines::signing::SERVER_MACHINE.to_owned();
+            crate::reviews::handle(state, ReviewCall::Approve(req, machine)).await
         }
         Request::ReviewApprovals { change } => {
             crate::reviews::handle(state, ReviewCall::Approvals(change)).await
@@ -174,7 +218,9 @@ pub(crate) fn change_error_code(err: &ChangeError) -> ErrorCode {
     match err {
         ChangeError::Refused(rosen_core::Error::InvalidPath(_)) => ErrorCode::InvalidArgument,
         ChangeError::NotFound(_) => ErrorCode::NotFound,
-        ChangeError::InvalidId(_) | ChangeError::Ambiguous(_) => ErrorCode::InvalidArgument,
+        ChangeError::InvalidId(_) | ChangeError::Ambiguous(_) | ChangeError::QualifiedOwner(_) => {
+            ErrorCode::InvalidArgument
+        }
         ChangeError::ParentClosed { .. } | ChangeError::Refused(_) | ChangeError::Base(_) => {
             ErrorCode::Refused
         }

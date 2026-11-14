@@ -193,7 +193,7 @@ fn print_change(json: bool, record: &ChangeRecord) {
     }
     let change = &record.change;
     println!("change:    {}", change.id);
-    println!("owner:     {}", change.owner);
+    println!("owner:     {}", change.qualified_owner());
     println!("state:     {}", change.state);
     println!("parent:    {}", parent_text(&change.parent));
     println!("head:      {}", change.head);
@@ -213,7 +213,7 @@ fn print_list(json: bool, records: &[ChangeRecord]) {
             "{}  {:<9}  {}  {}",
             change.id,
             change.state.as_str(),
-            change.owner,
+            change.qualified_owner(),
             parent_text(&change.parent)
         );
     }

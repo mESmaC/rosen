@@ -233,6 +233,9 @@
         "owner": {
           "$ref": "#/$defs/AgentId"
         },
+        "owner_machine": {
+          "type": "string"
+        },
         "parent": {
           "$ref": "#/$defs/ChangeParent"
         },
@@ -294,6 +297,9 @@
         },
         "owner": {
           "$ref": "#/$defs/AgentId"
+        },
+        "owner_machine": {
+          "type": "string"
         },
         "parent": {
           "$ref": "#/$defs/ChangeParent"
@@ -914,6 +920,9 @@
         },
         "reviewer": {
           "$ref": "#/$defs/AgentId"
+        },
+        "machine": {
+          "type": "string"
         },
         "head": {
           "$ref": "#/$defs/ObjectId"

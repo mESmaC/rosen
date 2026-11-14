@@ -9,6 +9,10 @@ pub enum ChangeError {
     /// A prefix matched more than one change; the caller must type more of it.
     #[error("{0:?} matches more than one change; give more of the ID")]
     Ambiguous(String),
+    /// An owner named with `@`, which could pass for another machine's
+    /// agent once the server appends the machine (R14).
+    #[error("owner {0} must be a nick without '@'; the server records its machine")]
+    QualifiedOwner(String),
     /// A change cannot be stacked on one that is landed or abandoned.
     #[error("cannot stack on change {parent}: it is {state}")]
     ParentClosed {

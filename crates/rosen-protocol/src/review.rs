@@ -91,6 +91,11 @@ pub struct Approval {
     pub id: u64,
     pub change: ChangeId,
     pub reviewer: AgentId,
+    /// The machine the approval came from (R14), taken from the connection:
+    /// an enrolled machine's id, or `server`. Absent on approvals recorded
+    /// before it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
     pub head: ObjectId,
     pub created_at: i64,
     pub valid: bool,
