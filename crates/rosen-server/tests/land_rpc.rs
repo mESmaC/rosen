@@ -79,6 +79,7 @@ async fn receipt(state: &Arc<ServerState>, change: &str, head: ObjectId, base: O
         base,
         check_set: "pre-land".into(),
         submitter: AgentId::new("checker").unwrap(),
+        signature: None,
     });
     call(state, request).await;
 }

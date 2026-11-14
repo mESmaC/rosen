@@ -150,6 +150,7 @@ async fn approve_land(
             base,
             check_set: "pre-land".into(),
             submitter: AgentId::new("checker").unwrap(),
+            signature: None,
         }),
     )
     .await;

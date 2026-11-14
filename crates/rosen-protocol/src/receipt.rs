@@ -16,6 +16,19 @@ pub struct SubmitReceipt {
     /// The checker's identity, recorded on the receipt and in the landed
     /// commit's `Rosen-Receipt` trailer.
     pub submitter: AgentId,
+    /// The submitting machine's signature over the receipt. A client leaves
+    /// it empty: its machine's daemon signs the receipt on the way to the
+    /// server, and the server signs one submitted on its own machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<ReceiptSignature>,
+}
+
+/// A machine's Ed25519 signature over [`Receipt::signing_payload`], with
+/// the public key that checks it, both in lowercase hex.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptSignature {
+    pub public_key: String,
+    pub signature: String,
 }
 
 /// The answer to [`crate::Request::ReceiptSubmit`]: the receipt as stored.
