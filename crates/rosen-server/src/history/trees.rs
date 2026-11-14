@@ -51,11 +51,16 @@ pub fn normalise(path: &str) -> HistoryResult<String> {
 /// Whether `path` is one of `filters` or lies under one. No filters keeps
 /// every path.
 pub fn selected(path: &str, filters: &[String]) -> bool {
-    filters.is_empty() || filters.iter().any(|f| f.is_empty() || within(path, f))
+    filters.is_empty() || filters.iter().any(|f| within(path, f))
 }
 
+/// Whether `path` is `dir` or lies under it. The root (`""`) holds every
+/// path; the separator test alone would reject it, since no path starts
+/// with `"/"`.
 fn within(path: &str, dir: &str) -> bool {
-    path == dir || (path.starts_with(dir) && path.as_bytes().get(dir.len()) == Some(&b'/'))
+    dir.is_empty()
+        || path == dir
+        || (path.starts_with(dir) && path.as_bytes().get(dir.len()) == Some(&b'/'))
 }
 
 /// Whether a directory can hold a selected path, so it is worth opening.
@@ -319,5 +324,50 @@ fn join(prefix: &str, name: &str) -> String {
         name.to_owned()
     } else {
         format!("{prefix}/{name}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rosen_store::LooseObjectStore;
+
+    fn tree(store: &dyn ObjectStore, files: &[(&str, &[u8])]) -> Option<ObjectId> {
+        let edits = files
+            .iter()
+            .map(|(path, data)| {
+                let id = store.put_blob(data).unwrap();
+                let file = Entry {
+                    mode: FileMode::Regular,
+                    id,
+                };
+                ((*path).to_owned(), Some(file))
+            })
+            .collect();
+        apply(store, None, &edits, &mut Vec::new()).unwrap()
+    }
+
+    // Risk (SPEC R11, issue #70): a path-limited diff silently answered "no
+    // changes" because the walk refused to open the root for any filter.
+    #[test]
+    fn path_filters_reach_files_below_the_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LooseObjectStore::open(temp.path()).unwrap();
+        let old = tree(&store, &[("a.txt", b"1"), ("b.txt", b"1")]);
+        let new = tree(
+            &store,
+            &[("a.txt", b"2"), ("b.txt", b"1"), ("dir/c.txt", b"3")],
+        );
+        let paths = |filters: &[&str]| -> Vec<String> {
+            let filters: Vec<String> = filters.iter().map(|f| (*f).to_owned()).collect();
+            let changes = changed_files(&store, old, new, &filters).unwrap();
+            changes.into_iter().map(|c| c.path).collect()
+        };
+        assert_eq!(paths(&["a.txt"]), ["a.txt"]);
+        assert_eq!(paths(&["dir"]), ["dir/c.txt"]);
+        assert_eq!(paths(&["dir/c.txt"]), ["dir/c.txt"]);
+        assert!(paths(&["b.txt"]).is_empty());
+        assert!(paths(&["di"]).is_empty());
+        assert_eq!(paths(&[""]), ["a.txt", "dir/c.txt"]);
     }
 }
