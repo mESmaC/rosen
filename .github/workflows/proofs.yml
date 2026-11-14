@@ -1,0 +1,58 @@
+# Lean checks from SPEC.md §5 "Done means (v1)" and AGENTS.md "Proofs":
+#   lake build in proofs/, with warnings as errors so `sorry` cannot pass
+#   an axiom audit of every declaration: only propext, Classical.choice and Quot.sound
+# Lean output does not depend on the host, so one Linux job covers both platforms.
+name: Proofs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "proofs/**"
+      - ".github/scripts/audit_axioms.lean"
+      - ".github/workflows/proofs.yml"
+  pull_request:
+    paths:
+      - "proofs/**"
+      - ".github/scripts/audit_axioms.lean"
+      - ".github/workflows/proofs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a PR makes the run for its previous head useless.
+concurrency:
+  group: proofs-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lean:
+    name: Lean (lake build, axiom audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: proofs
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain is about 1 GB; reuse it until lean-toolchain changes.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('proofs/lean-toolchain') }}
+
+      # elan reads proofs/lean-toolchain and installs that exact Lean on first use.
+      - name: Install elan
+        run: |
+          if [ ! -x "$HOME/.elan/bin/elan" ]; then
+            curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | sh -s -- -y --default-toolchain none --no-modify-path
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: lake build (warnings are errors)
+        run: lake build --wfail
+
+      - name: Axiom audit
+        run: lake env lean --run ../.github/scripts/audit_axioms.lean
