@@ -77,9 +77,13 @@ pub(super) struct Journal {
     writer: PathBuf,
 }
 
-/// How often to retry a presence lease whose file a deletion removed while
-/// it was being taken.
-const PRESENCE_ATTEMPTS: u32 = 5;
+/// How long to retry a presence lease whose file a deletion removed while
+/// it was being taken, and the pause between tries. Without POSIX delete
+/// semantics, Windows keeps a removed file's name until every handle on it
+/// closes, including a virus scanner's or the search indexer's, which can
+/// outlast the deletion by far more than a few tries (issue #262).
+const PRESENCE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const PRESENCE_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Holds the journal's writer lock until dropped.
 pub(super) struct WriterLease {
@@ -351,36 +355,49 @@ fn lock_file(path: &Path) -> io::Result<File> {
 /// sees, letting a later deletion run beside this writer; so the lock
 /// counts only while the path still names the locked file.
 fn lock_presence(path: &Path) -> io::Result<File> {
-    for _ in 0..PRESENCE_ATTEMPTS {
-        let file = match lock_file(path) {
-            Ok(file) => file,
-            // Without POSIX delete semantics, Windows refuses opening a
-            // removed file until its last handle closes.
-            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
+    let deadline = std::time::Instant::now() + PRESENCE_WAIT;
+    loop {
+        let retry = std::time::Instant::now() < deadline;
+        match try_presence(path) {
+            Ok(Some(file)) => return Ok(file),
+            Ok(None) if retry => {}
+            Ok(None) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "the workspace lease file kept being removed",
+                ))
             }
-            Err(err) => return Err(err),
-        };
-        file.try_lock_shared().map_err(|_| {
-            io::Error::new(io::ErrorKind::WouldBlock, "the workspace is being deleted")
-        })?;
-        let locked = same_file::Handle::from_file(file.try_clone()?)?;
-        match same_file::Handle::from_path(path) {
-            Ok(named) if named == locked => return Ok(file),
-            Ok(_) => {}
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                ) => {}
+            // Windows refuses opening a removed file until its last handle
+            // closes. A denial that outlasts the wait has another cause,
+            // such as the lock directory's access list, so it is returned
+            // as itself.
+            Err(err) if retry && err.kind() == io::ErrorKind::PermissionDenied => {}
             Err(err) => return Err(err),
         }
+        std::thread::sleep(PRESENCE_PAUSE);
     }
-    Err(io::Error::new(
-        io::ErrorKind::WouldBlock,
-        "the workspace lease file kept being removed",
-    ))
+}
+
+/// One try: the shared lock on the file `path` names, or `None` when a
+/// deletion removed or replaced the file meanwhile.
+fn try_presence(path: &Path) -> io::Result<Option<File>> {
+    let file = lock_file(path)?;
+    file.try_lock_shared()
+        .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "the workspace is being deleted"))?;
+    let locked = same_file::Handle::from_file(file.try_clone()?)?;
+    match same_file::Handle::from_path(path) {
+        Ok(named) if named == locked => Ok(Some(file)),
+        Ok(_) => Ok(None),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn sequence(path: &Path) -> Option<u64> {
