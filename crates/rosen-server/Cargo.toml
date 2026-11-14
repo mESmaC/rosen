@@ -34,6 +34,8 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 # Durable atomic replacement of the cache's partial-objects log.
 atomicwrites.workspace = true
+# Whether the daemon still writes the file at its log path (daemon_log.rs).
+same-file.workspace = true
 
 [lints]
 workspace = true
