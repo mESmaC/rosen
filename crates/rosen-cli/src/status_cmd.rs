@@ -21,11 +21,13 @@ struct WorkspaceState {
     stored_tree: ObjectId,
     /// Snapshots captured offline and not yet acknowledged by the server.
     journal_pending: usize,
-    /// Files whose content differs from what the server holds. While
-    /// journal records wait these are the files only those records carry.
+    /// Files whose content differs from what the server holds: those the
+    /// waiting journal records carry, and those edited on disk since the
+    /// newest captured snapshot.
     unsnapshotted: Vec<String>,
-    /// The server moved the change head without this workspace, which
-    /// means a server rebase is waiting to be applied (SPEC.md R2).
+    /// The server moved the change head past this workspace's tree by a
+    /// rebase, which is waiting to be applied (SPEC.md R2). A newer snapshot
+    /// stored from another workspace of the change does not count.
     rebase_waiting: bool,
 }
 
@@ -94,14 +96,16 @@ async fn scan_workspace(
     }
     let mut snapshotter = client.open_snapshotter(root).await?;
     let pending = pending_journal(root)?;
-    // The full scan only compares against the stored tree, so while journal
-    // records wait, report the files they carry instead.
+    // Edits not captured yet, plus, while journal records wait, the files
+    // only those records carry: together everything the server lacks (#98).
     let unsnapshotted = tokio::task::spawn_blocking(move || {
+        let mut paths = snapshotter.uncaptured_paths()?;
         if pending > 0 {
-            snapshotter.unuploaded_paths()
-        } else {
-            snapshotter.unstored_paths()
+            paths.extend(snapshotter.unuploaded_paths()?);
+            paths.sort();
+            paths.dedup();
         }
+        Ok::<_, SnapshotError>(paths)
     })
     .await
     .map_err(|err| Error::Unexpected(format!("workspace scan stopped: {err}")))??;
@@ -109,9 +113,18 @@ async fn scan_workspace(
         path: root.to_path_buf(),
         stored_tree: marker.tree,
         journal_pending: pending,
-        rebase_waiting: pending == 0 && marker.tree != record.change.head,
+        rebase_waiting: pending == 0 && rebased_past(record, marker.tree),
         unsnapshotted,
     })
+}
+
+/// True when the change head is neither this workspace's tree nor simply
+/// the change's newest snapshot, so only a server rebase can have set it.
+/// A rebase moves the head without a snapshot, and a snapshot taken after
+/// one keeps its own tree while the head holds the merge onto the rebase.
+fn rebased_past(record: &ChangeRecord, local: ObjectId) -> bool {
+    let change = &record.change;
+    change.head != local && change.snapshots.last().map(|s| s.tree) != Some(change.head)
 }
 
 fn print_text(record: &ChangeRecord, claims: &[PathClaim], local: Option<&WorkspaceState>) {
