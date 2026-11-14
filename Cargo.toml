@@ -22,6 +22,7 @@ atomicwrites = "0.4"
 base64 = "0.22"
 getrandom = "0.3"
 ignore = "0.4"
+libc = "0.2"
 notify = "8"
 reflink-copy = "0.1.32"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
