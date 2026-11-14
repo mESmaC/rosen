@@ -18,6 +18,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Auto-revert fixtures: `lake exe auto-revert-fixtures > fixtures/auto-revert.tsv` in `proofs/`.
 - Re-check fixtures: `lake exe recheck-fixtures > fixtures/recheck.tsv` in `proofs/`.
 - Workspace deletion fixtures: `lake exe workspace-deletion-fixtures > fixtures/workspace-deletion.tsv` in `proofs/`.
+- Path claims fixtures: `lake exe claims-fixtures > fixtures/claims.tsv` in `proofs/`.
 - Piece claims fixtures: `lake exe piece-claims-fixtures > fixtures/piece-claims.tsv` in `proofs/`.
 - Crash recovery fixtures: `lake exe crash-recovery-fixtures > fixtures/crash-recovery.tsv` in `proofs/`.
 - Batch green fixtures: `lake exe batch-green-fixtures > fixtures/batch-green.tsv` in `proofs/`.
