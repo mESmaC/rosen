@@ -451,6 +451,20 @@ pub fn rebase_checked(
     onto: ObjectId,
     tree: ObjectId,
 ) -> Result<ChangeRecord, ChangeError> {
+    rebase_checked_storing(conn, expected, onto, tree, Vec::new())
+}
+
+/// [`rebase_checked`] for a rebase whose merge conflicted (R5): `tree` holds
+/// conflict markers, and `conflicts` are each conflicting file's regions.
+/// Both commit in one transaction, so a head with markers is never stored
+/// without the open conflicts that keep it from landing.
+pub fn rebase_checked_storing(
+    conn: &mut Connection,
+    expected: &Change,
+    onto: ObjectId,
+    tree: ObjectId,
+    conflicts: Vec<(String, Vec<rosen_core::Conflict>)>,
+) -> Result<ChangeRecord, ChangeError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let current = load(&tx, expected.id)?;
     let base: String = tx.query_row("SELECT target FROM base_refs LIMIT 1", [], |r| r.get(0))?;
@@ -458,6 +472,18 @@ pub fn rebase_checked(
         return Err(ChangeError::Base(
             "rebase inputs moved; retry the rebase".into(),
         ));
+    }
+    if !conflicts.is_empty() {
+        let corrupt = |err: crate::conflicts::ConflictStoreError| match err {
+            crate::conflicts::ConflictStoreError::Sql(sql) => ChangeError::Store(sql),
+            other => ChangeError::Corrupt(other.to_string()),
+        };
+        let key = expected.id.to_string();
+        let mut set = crate::conflicts::load(&tx, &key).map_err(corrupt)?;
+        for (path, regions) in conflicts {
+            set.record_merge(&path, regions);
+        }
+        crate::conflicts::save(&tx, &key, &set).map_err(corrupt)?;
     }
     let record = update_in(&tx, expected.id, |c| {
         c.rebase(ChangeParent::Base(onto), tree)

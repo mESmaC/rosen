@@ -376,6 +376,51 @@ async fn resolved_conflicts_land_only_once_the_file_merges() {
     ));
 }
 
+// Risk (SPEC R5, #186): after a land conflict the owner must be able to keep
+// both sides. A rebase that conflicts moves the change onto the base with
+// diff3 markers in its head, and its conflicts stay open with that head, so
+// the markers can never land unresolved.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conflicting_rebase_writes_markers_so_both_sides_can_land() {
+    let (_temp, state, root) = setup();
+    let (a, b) = (new_change(&state).await, new_change(&state).await);
+    let ha = write(&state, &a, "shared.rs", b"first\n").await;
+    receipt(&state, &a, ha, root).await;
+    let tip = land(&state, &a).await.base;
+    let hb = write(&state, &b, "shared.rs", b"second\n").await;
+    receipt(&state, &b, hb, tip).await;
+    assert_eq!(refused(&land(&state, &b).await), Some("merge_conflict"));
+
+    let rebase = Request::ChangeRebase { change: b.clone() };
+    let Response::Change(rebased) = call(&state, rebase).await else {
+        panic!("a conflicting rebase still moves the change");
+    };
+    assert_eq!(rebased.change.parent, rosen_core::ChangeParent::Base(tip));
+    assert_eq!(rebased.change.conflicts.len(), 1);
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let file = store.read_tree(&rebased.change.head).unwrap();
+    let file = file.get(b"shared.rs").unwrap().id;
+    assert_eq!(
+        store.read_blob(&file).unwrap().data,
+        b"<<<<<<< ours\nsecond\n||||||| base\n=======\nfirst\n>>>>>>> theirs\n"
+    );
+    assert_eq!(refused(&land(&state, &b).await), Some("conflicts"));
+
+    let head = write(&state, &b, "shared.rs", b"first\nsecond\n").await;
+    let resolve = Request::ConflictResolve(ResolveConflicts {
+        change: b.clone(),
+        paths: vec!["shared.rs".into()],
+    });
+    call(&state, resolve).await;
+    receipt(&state, &b, head, tip).await;
+    let LandStatus::Landed { commit, .. } = land(&state, &b).await.outcome else {
+        panic!("both sides land once the markers are resolved");
+    };
+    let landed = store.read_tree(&store.read_commit(&commit).unwrap().tree).unwrap();
+    let landed = store.read_blob(&landed.get(b"shared.rs").unwrap().id).unwrap();
+    assert_eq!(landed.data, b"first\nsecond\n");
+}
+
 // Risk (SPEC R7 "Accept when"): a change lands only with an approval for its
 // current head. An author snapshot voids it for good, even one that puts the
 // head back where the approval and a racing land read it.

@@ -15,7 +15,7 @@ use rosen_core::{
     Change as StackedChange, ChangeParent, ChangeState, FileMode, ObjectId, ObjectKind,
     ProjectConfig, Tree,
 };
-use rosen_merge::{merge_file, FileMerge, MergePolicy};
+use rosen_merge::{merge_file, FileMerge, MarkerLabels, MergePolicy};
 use rosen_protocol::MergeResultAnswer;
 use rosen_store::ObjectStore;
 use std::collections::BTreeMap;
@@ -183,9 +183,68 @@ enum FileOutcome {
 /// `[base, ours, theirs]` trees, with each path merged under `policy`.
 pub(crate) fn merge_trees(
     ctx: &Ctx,
-    [base, ours, theirs]: [ObjectId; 3],
+    sides: [ObjectId; 3],
     policy: &dyn Fn(&str) -> MergePolicy,
 ) -> HistoryResult<TreeMerge> {
+    let (edits, mut merge) = merge_paths(ctx, sides, policy, false)?;
+    let tree = apply(&ctx.store, Some(sides[1]), &edits, &mut merge.conflicts)?;
+    if !merge.conflicts.is_empty() {
+        merge.conflicts.sort();
+        merge.conflicts.dedup();
+        return Ok(merge);
+    }
+    merge.tree = Some(tree_or_empty(ctx, tree)?);
+    Ok(merge)
+}
+
+/// An explicit rebase of an unstacked change onto commit `onto` (R2, R5).
+/// Unlike [`merge_result`], a conflicting file still gets a tree: it holds
+/// the file as the workspace shows it, with diff3 markers around each
+/// conflicting region, so the owner can combine both sides and land.
+/// `tree` is `None` only when merged paths collide as a file and a
+/// directory, which no tree can hold.
+///
+/// Returns the merge and the `[merge base, onto]` trees it read, from which
+/// the caller stores each conflict's three sides.
+pub(crate) fn merge_marked(
+    ctx: &Ctx,
+    change: &StackedChange,
+    onto: &ObjectId,
+) -> HistoryResult<(TreeMerge, [ObjectId; 2])> {
+    let measured_from = built_on(ctx, change)?;
+    let onto_tree = ctx.index.commit(&ctx.store, onto)?.tree;
+    let config = ctx.state.project_config.at_commit(onto)?.config;
+    let policy = |path: &str| policy_for(&config, path);
+    let sides = [measured_from, onto_tree, change.head];
+    let (edits, mut merge) = merge_paths(ctx, sides, &policy, true)?;
+    let mut collisions = Vec::new();
+    let tree = apply(&ctx.store, Some(onto_tree), &edits, &mut collisions)?;
+    if collisions.is_empty() {
+        merge.tree = Some(tree_or_empty(ctx, tree)?);
+    }
+    merge.conflicts.extend(collisions);
+    merge.conflicts.sort();
+    merge.conflicts.dedup();
+    Ok((merge, [measured_from, onto_tree]))
+}
+
+fn tree_or_empty(ctx: &Ctx, tree: Option<ObjectId>) -> HistoryResult<ObjectId> {
+    Ok(match tree {
+        Some(tree) => tree,
+        None => ctx.store.put_tree(&Tree::default())?,
+    })
+}
+
+type PathEdits = BTreeMap<String, Option<Entry>>;
+
+/// Merges every path both sides changed. With `mark`, a conflicting path is
+/// still edited, to the content [`marked_entry`] gives it.
+fn merge_paths(
+    ctx: &Ctx,
+    [base, ours, theirs]: [ObjectId; 3],
+    policy: &dyn Fn(&str) -> MergePolicy,
+    mark: bool,
+) -> HistoryResult<(PathEdits, TreeMerge)> {
     let ours_changes: BTreeMap<String, Change> =
         changed_files(&ctx.store, Some(base), Some(ours), &[])?
             .into_iter()
@@ -202,25 +261,57 @@ pub(crate) fn merge_trees(
             continue;
         }
         let sides = [change.old, ours.new, change.new];
-        match merge_one(ctx, sides, policy(&change.path))? {
+        let policy = policy(&change.path);
+        match merge_one(ctx, sides, policy)? {
             FileOutcome::Merged(file) => {
                 edits.insert(change.path, file);
             }
-            FileOutcome::Conflict => merge.conflicts.push(change.path),
+            FileOutcome::Conflict => {
+                if mark {
+                    edits.insert(change.path.clone(), marked_entry(ctx, sides, policy)?);
+                }
+                merge.conflicts.push(change.path)
+            }
             FileOutcome::Regenerate => merge.regenerate.push(change.path),
         }
     }
-    let tree = apply(&ctx.store, Some(ours), &edits, &mut merge.conflicts)?;
-    if !merge.conflicts.is_empty() {
-        merge.conflicts.sort();
-        merge.conflicts.dedup();
-        return Ok(merge);
+    Ok((edits, merge))
+}
+
+/// What a workspace shows for a conflicting file, given as
+/// `[base, onto, change]` (R5): the merge with the change's side as `ours`,
+/// as stored conflicts name it, and diff3 markers around each conflicting
+/// region. A gitlink has no lines, so the change's own commit is kept.
+fn marked_entry(
+    ctx: &Ctx,
+    sides: [Option<Entry>; 3],
+    policy: MergePolicy,
+) -> HistoryResult<Option<Entry>> {
+    let [_, onto, change] = sides;
+    if sides.iter().flatten().any(|e| !e.is_blob()) {
+        return Ok(change);
     }
-    merge.tree = Some(match tree {
-        Some(tree) => tree,
-        None => ctx.store.put_tree(&Tree::default())?,
-    });
-    Ok(merge)
+    let [base, onto_text, change_text] = sides.map(|e| content(&ctx.store, e));
+    let (base, onto_text, change_text) = (base?, onto_text?, change_text?);
+    let shown = match merge_file(
+        base.as_deref(),
+        change_text.as_deref(),
+        onto_text.as_deref(),
+        policy,
+    ) {
+        FileMerge::Conflicted(conflict) => Some(conflict.workspace_text(MarkerLabels::default())),
+        FileMerge::Resolved(data) => data,
+        // A generated file never conflicts; it keeps the base's version.
+        FileMerge::Regenerate => return Ok(onto),
+    };
+    let mode = change.or(onto).map_or(FileMode::Regular, |e| e.mode);
+    Ok(match shown {
+        Some(data) => Some(Entry {
+            mode,
+            id: ctx.store.put_blob(&data)?,
+        }),
+        None => None,
+    })
 }
 
 /// Merges one file both sides changed, given as `[base, ours, theirs]`.
