@@ -122,9 +122,17 @@ impl ServerState {
         ))
     }
 
-    /// Revalidates a machine's credential, expiry and revocation status.
-    pub fn credential_matches(&self, given: &str) -> bool {
-        machines::authenticate(&self.config.data_dir, given).unwrap_or(false)
+    /// Revalidates a machine's credential, expiry and revocation status. It
+    /// reads SQLite, so it runs on the blocking pool: on an async worker it
+    /// stalled every connection that worker carries, once per network frame
+    /// (#156).
+    pub async fn credential_matches(self: &Arc<Self>, given: &str) -> bool {
+        let (state, given) = (Arc::clone(self), given.to_owned());
+        tokio::task::spawn_blocking(move || {
+            machines::authenticate(&state.config.data_dir, &given).unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
     }
 
     pub fn open_connections(&self) -> u64 {

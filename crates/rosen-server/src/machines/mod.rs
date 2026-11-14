@@ -35,13 +35,39 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         expires_at INTEGER NOT NULL, remaining INTEGER NOT NULL, role TEXT NOT NULL);",
     )
 }
+/// How stale a machine's recorded last contact may get, in seconds. Every
+/// network request authenticates, so writing it each time took the metadata
+/// write lock once per frame, contending with landing (#156).
+const LAST_CONTACT_EVERY: u64 = 60;
+
+/// Whether `secret` is an active, unexpired machine's credential. A read, so
+/// in WAL mode it never waits on a writer; the last-contact record it
+/// refreshes is written only when stale and never waited for.
 pub fn authenticate(dir: &Path, secret: &str) -> rusqlite::Result<bool> {
+    use rusqlite::OptionalExtension;
     let conn = open(dir)?;
-    Ok(conn.execute(
-        "UPDATE machines SET last_contact=?1 WHERE credential_hash=?2
-        AND status='active' AND expires_at>?1",
-        rusqlite::params![now(), keys::digest(secret)],
-    )? == 1)
+    let now = now();
+    let found: Option<(String, u64)> = conn
+        .query_row(
+            "SELECT id,last_contact FROM machines WHERE credential_hash=?1
+            AND status='active' AND expires_at>?2",
+            rusqlite::params![keys::digest(secret), now],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, last_contact)) = found else {
+        return Ok(false);
+    };
+    if now.saturating_sub(last_contact) >= LAST_CONTACT_EVERY {
+        // Only a record of the visit: a busy database skips it until a later
+        // request, rather than delaying or refusing a valid machine.
+        conn.busy_timeout(std::time::Duration::ZERO)?;
+        let _ = conn.execute(
+            "UPDATE machines SET last_contact=?1 WHERE id=?2 AND last_contact<?1",
+            rusqlite::params![now, id],
+        );
+    }
+    Ok(true)
 }
 /// The active, unexpired machine a credential belongs to, if any.
 pub fn machine_of(dir: &Path, secret: &str) -> rusqlite::Result<Option<String>> {
