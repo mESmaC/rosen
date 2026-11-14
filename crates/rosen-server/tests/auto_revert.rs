@@ -169,6 +169,7 @@ fn setup(path: &std::path::Path) -> (Arc<ServerState>, LooseObjectStore, Ledger,
     let s = ServerState::new(ServerConfig {
         data_dir: path.into(),
         endpoint: Endpoint::new("revert-contract"),
+        warm_pool_dir: None,
     });
     let store = LooseObjectStore::open(s.config.objects_dir()).unwrap();
     let who = Signature::new("test", "test@test", 0);

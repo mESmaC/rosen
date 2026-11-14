@@ -18,6 +18,7 @@ fn setup() -> (tempfile::TempDir, Arc<ServerState>, ObjectId) {
     let state = ServerState::new(ServerConfig {
         data_dir: temp.path().into(),
         endpoint: rosen_protocol::Endpoint::new("land-contract"),
+        warm_pool_dir: None,
     });
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let who = Signature::new("test", "test@test", 0);
@@ -321,6 +322,7 @@ async fn conflicted_land_routes_regions_and_files_to_its_owner() {
     let restarted = ServerState::new(ServerConfig {
         data_dir: temp.path().into(),
         endpoint: rosen_protocol::Endpoint::new("restart"),
+        warm_pool_dir: None,
     });
     let record = restarted.changes.show(&b).unwrap().change;
     assert_eq!(record.head, hb);

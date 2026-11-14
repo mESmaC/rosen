@@ -126,6 +126,7 @@ fn lands_reach_the_mirror_as_fast_forwards_only() {
     let state = ServerState::new(ServerConfig {
         data_dir: data.path().to_path_buf(),
         endpoint: Endpoint::new("rosen-mirror-test-unused"),
+        warm_pool_dir: None,
     });
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let source_arg = source.path().to_string_lossy().into_owned();

@@ -59,9 +59,9 @@ pub(super) fn source(template: &Option<Slot>, tree: ObjectId) -> Option<(SourceW
 /// client materialises the workspace itself.
 pub(super) async fn take_clone(
     template: &Arc<RwLock<Option<Slot>>>,
-    pool_root: &Path,
+    data_dir: &Path,
     tree: ObjectId,
-    dest: String,
+    dest: &str,
 ) -> Outcome {
     // While the worker holds the template to rewrite it, a take does not
     // wait: the client makes the workspace itself straight away.
@@ -71,10 +71,7 @@ pub(super) async fn take_clone(
     let Some((source, prepared)) = source(&guard, tree) else {
         return Outcome::Ok(Response::PoolTaken(None));
     };
-    let data_dir = pool_root
-        .parent()
-        .expect("pool data directory")
-        .to_path_buf();
+    let (data_dir, dest) = (data_dir.to_path_buf(), dest.to_owned());
     let cloned = tokio::task::spawn_blocking(move || {
         // The read guard keeps the worker from rewriting the template
         // until the clone is done.

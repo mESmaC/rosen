@@ -115,6 +115,7 @@ fn start_server(data: &Path, store: &dyn ObjectStore) -> Endpoint {
     let state = ServerState::new(ServerConfig {
         data_dir: data.to_path_buf(),
         endpoint: endpoint.clone(),
+        warm_pool_dir: None,
     });
     let commit = ObjectId::hash_object("commit", b"base");
     let base = FixedBase(BaseTip { commit, tree });
