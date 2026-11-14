@@ -1,6 +1,8 @@
 //! Event-driven refill; one worker per daemon serializes refresh work and
 //! runs at most one prepare at a time (SPEC R3).
-use super::pool::{refresh, seed_slot, Prep, Slot, WarmPool};
+use super::pool::{refresh, restore_tracked, seed_slot, Prep, Slot, WarmPool};
+use super::MaterialiseError;
+use rosen_store::LooseObjectStore;
 use super::{prepare, template, Method, Options};
 use crate::{Client, Error};
 use rosen_core::ObjectId;
@@ -564,7 +566,7 @@ async fn prepare_next(pool: &WarmPool, base: &Base) -> bool {
         slot.prep = Prep::Running;
         slot.path.clone()
     };
-    let prep = run_prepare(&path, &base.commands).await;
+    let prep = run_prepare(pool, &path, base).await;
     let mut state = pool.state.lock().await;
     if let Some(slot) = state.ready.iter_mut().find(|slot| slot.path == path) {
         slot.prep = prep;
@@ -583,18 +585,49 @@ async fn prepare_template(pool: &WarmPool, base: &Base) -> bool {
             _ => return false,
         }
     };
-    let prep = run_prepare(&path, &base.commands).await;
+    let prep = run_prepare(pool, &path, base).await;
     if let Some(slot) = pool.template.write().await.as_mut() {
         slot.prep = prep;
     }
     true
 }
 
-async fn run_prepare(path: &std::path::Path, commands: &[String]) -> Prep {
-    match prepare::run(path, commands).await {
-        Ok(()) => Prep::Done,
-        Err(why) => {
-            eprintln!("rosen warm pool: {why}");
+/// Runs the prepare commands in `path`, which holds `base.tree`, then puts
+/// back any tracked file they changed, so the workspace an agent takes
+/// matches the base exactly (#168).
+async fn run_prepare(pool: &WarmPool, path: &std::path::Path, base: &Base) -> Prep {
+    if let Err(why) = prepare::run(path, &base.commands).await {
+        eprintln!("rosen warm pool: {why}");
+        return Prep::Failed;
+    }
+    let objects = pool.data_dir.join("objects");
+    let (root, tree) = (path.to_path_buf(), base.tree);
+    let restored = tokio::task::spawn_blocking(move || {
+        let store = LooseObjectStore::open(&objects).map_err(MaterialiseError::Store)?;
+        let changed = restore_tracked(&store, &root, tree)?;
+        if !changed.is_empty() {
+            // Rewritten files would otherwise be rehashed on the first take.
+            seed_slot(&store, &root, tree);
+        }
+        Ok::<_, MaterialiseError>(changed)
+    })
+    .await;
+    match restored {
+        Ok(Ok(changed)) if changed.is_empty() => Prep::Done,
+        Ok(Ok(changed)) => {
+            eprintln!(
+                "rosen warm pool: prepare changed tracked files in {}; restored {}",
+                path.display(),
+                changed.join(", ")
+            );
+            Prep::Done
+        }
+        Ok(Err(error)) => {
+            eprintln!("rosen warm pool: restoring tracked files in {}: {error}", path.display());
+            Prep::Failed
+        }
+        Err(join) => {
+            eprintln!("rosen warm pool: restoring tracked files stopped: {join}");
             Prep::Failed
         }
     }
