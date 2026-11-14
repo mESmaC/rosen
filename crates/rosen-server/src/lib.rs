@@ -25,6 +25,7 @@ pub mod machines;
 pub mod metadata;
 pub mod mirror;
 pub mod network;
+pub mod object_slices;
 pub mod objects;
 pub mod overlaps;
 pub mod post_land;
@@ -266,6 +267,12 @@ impl ServerConfig {
     /// last slice arrives and the blob is stored.
     pub fn uploads_dir(&self) -> PathBuf {
         self.data_dir.join("uploads")
+    }
+
+    /// Checked, inflated copies of objects too large for one frame, which
+    /// `GetObjectChunk` reads slices from (SPEC D8).
+    pub fn slices_dir(&self) -> PathBuf {
+        self.data_dir.join("slices")
     }
 }
 

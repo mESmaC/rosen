@@ -17,8 +17,8 @@ use super::session::LinkSlot;
 use super::upstream::UpstreamLink;
 use rosen_core::{FileMode, Object, ObjectId, ObjectKind};
 use rosen_protocol::{
-    ErrorBody, ErrorCode, ObjectBatch, ObjectChunkQuery, ObjectQuery, Outcome, Request, Response,
-    WireObject, OBJECT_CHUNK_BYTES,
+    ErrorBody, ErrorCode, ObjectBatch, ObjectChunk, ObjectChunkQuery, ObjectQuery, Outcome,
+    Request, Response, WireObject, OBJECT_CHUNK_BYTES,
 };
 use rosen_store::{LooseObjectStore, ObjectStore, StoreError};
 use std::collections::{HashMap, HashSet};
@@ -46,7 +46,7 @@ pub async fn ensure(
     if !wanted.is_empty() {
         let link = links.get().await?;
         while !wanted.is_empty() {
-            let batch = fetch_all(&link, &wanted).await?;
+            let batch = fetch_all(&link, store, &wanted).await?;
             (wanted, walk) =
                 blocking(store, move |store, walk| walk.absorb(store, batch), walk).await?;
         }
@@ -246,9 +246,14 @@ impl Walk {
     fn absorb(
         &mut self,
         store: &LooseObjectStore,
-        objects: Vec<WireObject>,
+        fetched: Fetched,
     ) -> Result<Vec<ObjectId>, StoreError> {
-        for object in objects {
+        for id in fetched.stored {
+            self.fetched += 1;
+            self.fetching.remove(&id);
+            self.complete.insert(id);
+        }
+        for object in fetched.objects {
             self.fetched += 1;
             let kind = ObjectKind::from(object.kind);
             let id = ObjectId::hash_object(kind.as_str(), &object.data);
@@ -416,10 +421,22 @@ fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
     path
 }
 
+/// What a fetch brought: objects held for the walk, and large blobs already
+/// stored as their slices arrived.
+#[derive(Default)]
+struct Fetched {
+    objects: Vec<WireObject>,
+    stored: Vec<ObjectId>,
+}
+
 /// Fetches every object in `ids`, asking again for any the server deferred.
 /// Every object returned is checked against the asked IDs by its hash.
-async fn fetch_all(link: &UpstreamLink, ids: &[ObjectId]) -> Result<Vec<WireObject>, ErrorBody> {
-    let mut objects = Vec::with_capacity(ids.len());
+async fn fetch_all(
+    link: &UpstreamLink,
+    store: &LooseObjectStore,
+    ids: &[ObjectId],
+) -> Result<Fetched, ErrorBody> {
+    let mut all = Fetched::default();
     for chunk in ids.chunks(IDS_PER_FETCH) {
         let mut remaining: Vec<ObjectId> = chunk.to_vec();
         while !remaining.is_empty() {
@@ -428,27 +445,35 @@ async fn fetch_all(link: &UpstreamLink, ids: &[ObjectId]) -> Result<Vec<WireObje
                 let message = format!("the server does not hold {id}");
                 return Err(ErrorBody::new(ErrorCode::NotFound, message));
             }
-            let mut fetched = batch.objects;
+            let mut fetched = Fetched {
+                objects: batch.objects,
+                stored: Vec::new(),
+            };
             for id in batch.large {
                 if !remaining.contains(&id) {
                     return Err(protocol_error("the server listed an object not asked for"));
                 }
-                fetched.push(fetch_large(link, id).await?);
+                match fetch_large(link, store, id).await? {
+                    Large::Stored => fetched.stored.push(id),
+                    Large::Held(object) => fetched.objects.push(object),
+                }
             }
-            if fetched.is_empty() {
+            if fetched.objects.is_empty() && fetched.stored.is_empty() {
                 return Err(protocol_error("the server answered a fetch with nothing"));
             }
-            let got: HashSet<ObjectId> = fetched.iter().map(wire_id).collect();
+            let mut got: HashSet<ObjectId> = fetched.objects.iter().map(wire_id).collect();
             if got.iter().any(|id| !remaining.contains(id)) {
                 return Err(protocol_error(
                     "the server sent an object that was not asked for",
                 ));
             }
+            got.extend(fetched.stored.iter().copied());
             remaining.retain(|id| !got.contains(id));
-            objects.extend(fetched);
+            all.objects.extend(fetched.objects);
+            all.stored.extend(fetched.stored);
         }
     }
-    Ok(objects)
+    Ok(all)
 }
 
 async fn fetch(link: &UpstreamLink, ids: Vec<ObjectId>) -> Result<ObjectBatch, ErrorBody> {
@@ -459,33 +484,86 @@ async fn fetch(link: &UpstreamLink, ids: Vec<ObjectId>) -> Result<ObjectBatch, E
     }
 }
 
-/// Reads an object too large for one frame slice by slice. The caller
-/// checks the assembled bytes against the asked ID, as for any object.
-async fn fetch_large(link: &UpstreamLink, id: ObjectId) -> Result<WireObject, ErrorBody> {
-    let mut data = Vec::new();
+/// An object too large for one frame, as [`fetch_large`] read it.
+enum Large {
+    /// A blob, checked and stored slice by slice, never held whole.
+    Stored,
+    /// A tree or commit, which the walk must parse, held whole. One this
+    /// large is rare: a tree of hundreds of thousands of entries.
+    Held(WireObject),
+}
+
+/// Reads an object too large for one frame slice by slice. A blob streams
+/// into the store, which checks it against `id`; the caller checks a held
+/// object's bytes against the asked ID, as for any object.
+async fn fetch_large(
+    link: &UpstreamLink,
+    store: &LooseObjectStore,
+    id: ObjectId,
+) -> Result<Large, ErrorBody> {
+    let first = fetch_slice(link, id, 0).await?;
+    if ObjectKind::from(first.kind) != ObjectKind::Blob {
+        return fetch_held(link, id, first).await.map(Large::Held);
+    }
+    let (total, writer) = (first.total, store.clone());
+    let mut pending = run_blocking(move || writer.begin_put(ObjectKind::Blob, id, total)).await?;
+    let mut slice = first;
     loop {
-        let query = ObjectChunkQuery {
-            id,
-            offset: data.len() as u64,
-            len: OBJECT_CHUNK_BYTES as u64,
-        };
-        let chunk = match link.request(Request::GetObjectChunk(query)).await {
-            Outcome::Ok(Response::ObjectChunk(chunk)) => chunk,
-            Outcome::Ok(other) => {
-                return Err(protocol_error(&format!("unexpected answer {other:?}")))
-            }
-            Outcome::Error(error) => return Err(error),
-        };
-        if chunk.data.is_empty() && (data.len() as u64) < chunk.total {
+        let more = pending.written().saturating_add(slice.data.len() as u64) < total;
+        if slice.data.is_empty() && more {
             return Err(protocol_error("the server sent an empty slice mid-object"));
         }
-        data.extend_from_slice(&chunk.data);
-        if data.len() as u64 >= chunk.total {
-            return Ok(WireObject {
-                kind: chunk.kind,
-                data,
-            });
+        pending = run_blocking(move || {
+            std::io::Write::write_all(&mut pending, &slice.data)?;
+            Ok(pending)
+        })
+        .await?;
+        if !more {
+            break;
         }
+        slice = fetch_slice(link, id, pending.written()).await?;
+    }
+    if run_blocking(move || pending.finish()).await? {
+        Ok(Large::Stored)
+    } else {
+        Err(protocol_error(
+            "the server sent a blob that does not hash to its ID",
+        ))
+    }
+}
+
+/// Assembles a large tree or commit in memory from its first slice on.
+async fn fetch_held(
+    link: &UpstreamLink,
+    id: ObjectId,
+    first: ObjectChunk,
+) -> Result<WireObject, ErrorBody> {
+    let kind = first.kind;
+    let mut data = first.data;
+    while (data.len() as u64) < first.total {
+        let slice = fetch_slice(link, id, data.len() as u64).await?;
+        if slice.data.is_empty() {
+            return Err(protocol_error("the server sent an empty slice mid-object"));
+        }
+        data.extend_from_slice(&slice.data);
+    }
+    Ok(WireObject { kind, data })
+}
+
+async fn fetch_slice(
+    link: &UpstreamLink,
+    id: ObjectId,
+    offset: u64,
+) -> Result<ObjectChunk, ErrorBody> {
+    let query = ObjectChunkQuery {
+        id,
+        offset,
+        len: OBJECT_CHUNK_BYTES as u64,
+    };
+    match link.request(Request::GetObjectChunk(query)).await {
+        Outcome::Ok(Response::ObjectChunk(chunk)) => Ok(chunk),
+        Outcome::Ok(other) => Err(protocol_error(&format!("unexpected answer {other:?}"))),
+        Outcome::Error(error) => Err(error),
     }
 }
 
