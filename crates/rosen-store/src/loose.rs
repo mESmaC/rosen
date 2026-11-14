@@ -9,6 +9,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -20,6 +21,13 @@ use crate::backend::{ObjectStore, RawObject, StoreError};
 /// Distinguishes temporary files written concurrently by threads of one
 /// process; the process ID in the name separates processes.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// How long a put whose publish failed keeps checking and retrying, and the
+/// pause between tries. On Windows, puts repairing one damaged object race:
+/// a replace or read can be denied access while another replace swaps the
+/// file in, though the object ends up valid moments later (issue #229).
+const PUBLISH_RETRY: Duration = Duration::from_millis(500);
+const PUBLISH_PAUSE: Duration = Duration::from_millis(5);
 
 /// A loose-object store rooted at an `objects` directory.
 #[derive(Debug, Clone)]
@@ -63,6 +71,58 @@ impl LooseObjectStore {
             return Err(error);
         }
         Ok(temp)
+    }
+
+    /// Moves `temp` to the object's path. Both moves make the new directory
+    /// entry durable (write-through on Windows, a directory fsync elsewhere).
+    /// Without that, a crash just after a land could leave the base ref
+    /// naming a commit whose file never reached the disk. A failed move
+    /// succeeds once the object is valid, as when a concurrent writer of the
+    /// same object got there first with identical bytes; otherwise it is
+    /// tried again for [`PUBLISH_RETRY`], then fails. Removes `temp` unless
+    /// it was moved.
+    fn publish(
+        &self,
+        id: &ObjectId,
+        mut existing: Existing,
+        temp: &Path,
+        path: &Path,
+    ) -> Result<(), StoreError> {
+        let deadline = Instant::now() + PUBLISH_RETRY;
+        loop {
+            let published = match existing {
+                // A damaged file (disk fault, or a foreign writer sharing
+                // `objects/`) would otherwise fail every later read forever;
+                // this put is the one chance to repair it.
+                Existing::Damaged => atomicwrites::replace_atomic(temp, path),
+                // move_atomic refuses to replace, so a concurrent writer's
+                // file is never swapped out under a reader.
+                _ => atomicwrites::move_atomic(temp, path),
+            };
+            let Err(error) = published else {
+                return Ok(());
+            };
+            let retry = Instant::now() < deadline;
+            let outcome = match self.existing_state(id, path) {
+                Ok(Existing::Valid) => Ok(()),
+                Ok(state) if retry => {
+                    existing = state;
+                    std::thread::sleep(PUBLISH_PAUSE);
+                    continue;
+                }
+                // Denied while another put's replace swaps the file in.
+                Err(StoreError::Io(denied))
+                    if retry && denied.kind() == io::ErrorKind::PermissionDenied =>
+                {
+                    std::thread::sleep(PUBLISH_PAUSE);
+                    continue;
+                }
+                Ok(_) => Err(error.into()),
+                Err(other) => Err(other),
+            };
+            let _ = fs::remove_file(temp);
+            return outcome;
+        }
     }
 
     /// Checks the file already stored for `id`. A put must verify it rather
@@ -158,27 +218,7 @@ impl ObjectStore for LooseObjectStore {
         }
         let fan_out = path.parent().expect("object path has a fan-out directory");
         let temp = self.write_temp(fan_out, kind, data)?;
-        // Both moves make the new directory entry durable (write-through on
-        // Windows, a directory fsync elsewhere). Without that, a crash just
-        // after a land could leave the base ref naming a commit whose file
-        // never reached the disk.
-        let published = match existing {
-            // A damaged file (disk fault, or a foreign writer sharing
-            // `objects/`) would otherwise fail every later read forever;
-            // this put is the one chance to repair it.
-            Existing::Damaged => atomicwrites::replace_atomic(&temp, &path),
-            // move_atomic refuses to replace, so a concurrent writer's file
-            // is never swapped out under a reader.
-            _ => atomicwrites::move_atomic(&temp, &path),
-        };
-        if let Err(error) = published {
-            let _ = fs::remove_file(&temp);
-            // A concurrent writer of the same object got there first and
-            // its file holds identical bytes; anything else is a failure.
-            if self.existing_state(&id, &path)? != Existing::Valid {
-                return Err(error.into());
-            }
-        }
+        self.publish(&id, existing, &temp, &path)?;
         Ok(id)
     }
 
