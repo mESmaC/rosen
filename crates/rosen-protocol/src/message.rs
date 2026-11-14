@@ -311,6 +311,9 @@ pub enum Response {
     PoolSized,
     /// The handed-over workspace, or None when the pool had none to give.
     PoolTaken(Option<crate::PooledWorkspace>),
+    /// The pool cannot serve takes into this destination at all, and why:
+    /// as when the ready workspaces are on another volume (SPEC R3).
+    PoolMissed(String),
     /// The answer to `landed_prose`: false when either commit is not in the
     /// base's landed history.
     LandedProse(bool),

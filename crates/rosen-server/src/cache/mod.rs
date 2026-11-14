@@ -114,7 +114,7 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
     let partial = Arc::new(partial::PartialObjects::open(&config.data_dir)?);
     let state = Arc::new(CacheState {
         config: config.clone(),
-        pool: rosen_client::workspace::pool::WarmPool::new(&config.data_dir),
+        pool: config.warm_pool(),
         upstream,
         store,
         partial,

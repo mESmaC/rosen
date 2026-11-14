@@ -71,6 +71,7 @@ async fn server_writes_wait_for_io_capacity_while_ping_still_answers() {
         ServerConfig {
             data_dir: root.path().into(),
             endpoint: Endpoint::new("load-contract"),
+            warm_pool_dir: None,
         },
         NonZeroUsize::new(1).unwrap(),
     );

@@ -25,6 +25,7 @@ fn setup() -> (tempfile::TempDir, Arc<ServerState>, String, BaseTip) {
     let state = ServerState::new(ServerConfig {
         data_dir: temp.path().into(),
         endpoint: rosen_protocol::Endpoint::new("workspace-contract"),
+        warm_pool_dir: None,
     });
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let tree = store.put_tree(&Tree::default()).unwrap();

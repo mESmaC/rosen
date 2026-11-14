@@ -29,6 +29,7 @@ async fn project() -> Project {
     let state = ServerState::new(ServerConfig {
         data_dir: dir.path().into(),
         endpoint: Endpoint::new("unused-enrollment-test"),
+        warm_pool_dir: None,
     });
     state.set_network(identity, address);
     tokio::spawn(network::serve(tcp, acceptor, Arc::clone(&state)));
