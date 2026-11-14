@@ -80,6 +80,7 @@ The proofs use Lean 4, pinned in `proofs/lean-toolchain`. Install [elan](https:/
 ```sh
 cd proofs
 lake build
+lake env lean --run ../.github/scripts/audit_axioms.lean   # the axiom audit CI runs
 ```
 
 ## Getting started
@@ -172,7 +173,7 @@ AGENTS.md lists the commands for each.
 Rosen v1 is in active development. As of 2026-11-13:
 
 - **Built:** R1–R14 in SPEC.md, covering import and mirror, snapshots and the offline journal, local and server-side workspaces with the prepared warm pool, guarded deletion, merge and stored conflicts cleared by `rosen resolve`, claims and overlaps, review, optimistic landing with receipt reuse, events, the CLI, history queries, post-land bisection and auto-revert, the server-side AIRC channel, and network enrollment. Velocity runs its whole agent flow through a `rosen-client` session.
-- **In progress:** the multi-machine §5 stress run and `lake build` in CI.
+- **In progress:** the multi-machine §5 stress run.
 
 This list names only milestones. For current work and open fixes, read the project Task List and the repository's open issues; they stay current where this section does not.
 
