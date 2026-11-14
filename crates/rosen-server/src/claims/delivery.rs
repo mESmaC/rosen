@@ -15,18 +15,80 @@ pub(super) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Whether the releasing change gets a `released` event of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Releaser {
+    Announce,
+    /// A land: landing publishes the change's `released` event itself, with
+    /// the landed commit, so only the woken waiters hear from here.
+    Silent,
+}
+
+/// One stored notification: the outcome, and whether to announce the
+/// releaser. Rows store the outcome's own JSON, plus `announce_releaser:
+/// false` when the releaser stays silent, so rows written before the field
+/// existed still read as announcing, as they did then.
+struct Pending {
+    outcome: ReleaseOutcome,
+    announce_releaser: bool,
+}
+
+const ANNOUNCE_FIELD: &str = "announce_releaser";
+
+impl Pending {
+    fn to_json(&self) -> Result<String, serde_json::Error> {
+        let mut value = serde_json::to_value(&self.outcome)?;
+        if let (false, Some(fields)) = (self.announce_releaser, value.as_object_mut()) {
+            fields.insert(ANNOUNCE_FIELD.into(), false.into());
+        }
+        serde_json::to_string(&value)
+    }
+
+    fn from_json(payload: &str) -> Result<Self, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_str(payload)?;
+        let announce_releaser = value
+            .get(ANNOUNCE_FIELD)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let outcome = serde_json::from_value(value)?;
+        Ok(Pending {
+            outcome,
+            announce_releaser,
+        })
+    }
+}
+
 /// Called inside the transaction that removes the records, including on
 /// abandon. A rollback therefore keeps both the waits and their holders.
-pub(super) fn enqueue(conn: &Connection, outcome: &ReleaseOutcome) -> Result<(), ChangeError> {
-    if outcome.released.is_empty() && outcome.woken.is_empty() {
+pub(super) fn enqueue(
+    conn: &Connection,
+    outcome: &ReleaseOutcome,
+    releaser: Releaser,
+) -> Result<(), ChangeError> {
+    let announce_releaser = releaser == Releaser::Announce && !outcome.released.is_empty();
+    if !announce_releaser && outcome.woken.is_empty() {
         return Ok(());
     }
-    let payload = serde_json::to_string(outcome).map_err(corrupt)?;
+    let pending = Pending {
+        outcome: outcome.clone(),
+        announce_releaser,
+    };
+    let payload = pending.to_json().map_err(corrupt)?;
     conn.execute(
         "INSERT INTO claim_release_delivery(outcome) VALUES (?1)",
         [payload],
     )?;
     Ok(())
+}
+
+/// Publishes pending notifications after a release has committed. A failure
+/// is logged, not returned: the release itself succeeded and its caller
+/// cannot undo it. The rows stay stored, and the next release or a restart
+/// publishes them.
+pub(super) fn deliver(state: &ServerState) {
+    if let Err(err) = recover(state) {
+        eprintln!("rosen-server: claim release notifications retained for retry: {err}");
+    }
 }
 
 /// Replays pending notifications at startup and after each release. Delivery
@@ -45,8 +107,13 @@ pub fn recover(state: &ServerState) -> Result<(), ChangeError> {
         Ok(rows)
     })?;
     for (id, payload) in pending {
-        let outcome: ReleaseOutcome = serde_json::from_str(&payload).map_err(corrupt)?;
-        if !publish(state, &outcome) {
+        // A row that cannot be read is left in place for inspection and
+        // skipped, so it cannot hold back every later release's waiters.
+        let Ok(pending) = Pending::from_json(&payload) else {
+            eprintln!("rosen-server: claim release notification {id} is unreadable; skipped");
+            continue;
+        };
+        if !publish(state, &pending) {
             return Err(ChangeError::Base(
                 "could not publish claim release; retained for retry".into(),
             ));
@@ -62,20 +129,9 @@ pub fn recover(state: &ServerState) -> Result<(), ChangeError> {
     Ok(())
 }
 
-fn publish(state: &ServerState, outcome: &ReleaseOutcome) -> bool {
-    let paths: Vec<String> = outcome.released.iter().map(|r| r.path.clone()).collect();
-    let concern = Concern {
-        paths: paths.clone(),
-        ..Concern::default()
-    };
-    let detail = json!({ "paths": paths, "woken": outcome.woken });
-    if state.events.publish_to(
-        EventKind::Released,
-        Some(outcome.change.to_string()),
-        detail,
-        &concern,
-    ) == 0
-    {
+fn publish(state: &ServerState, pending: &Pending) -> bool {
+    let outcome = &pending.outcome;
+    if pending.announce_releaser && !announce_releaser(state, outcome) {
         return false;
     }
     for woken in &outcome.woken {
@@ -98,6 +154,22 @@ fn publish(state: &ServerState, outcome: &ReleaseOutcome) -> bool {
         }
     }
     true
+}
+
+/// The releaser's own `released` event, to whoever holds overlapping paths.
+fn announce_releaser(state: &ServerState, outcome: &ReleaseOutcome) -> bool {
+    let paths: Vec<String> = outcome.released.iter().map(|r| r.path.clone()).collect();
+    let concern = Concern {
+        paths: paths.clone(),
+        ..Concern::default()
+    };
+    let detail = json!({ "paths": paths, "woken": outcome.woken });
+    state.events.publish_to(
+        EventKind::Released,
+        Some(outcome.change.to_string()),
+        detail,
+        &concern,
+    ) != 0
 }
 
 fn corrupt(err: serde_json::Error) -> ChangeError {

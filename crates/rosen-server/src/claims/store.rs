@@ -3,6 +3,7 @@
 //! every connection, so two claims on one path are decided one after the
 //! other and the second always sees the first (R6 accept rule).
 
+use super::delivery::Releaser;
 use crate::changes::{self, ChangeError};
 use rosen_core::{blockers, ChangeId, HeldClaim, PathPattern};
 use rosen_protocol::{
@@ -126,10 +127,12 @@ pub fn release(
     Ok(outcome)
 }
 
-/// Drops every record of a change that landed or was abandoned (R6, R8 step 4).
+/// Drops every record of a change that landed (R6, R8 step 4). Landing
+/// announces the land's own `released` event, so only woken waiters get one
+/// from here.
 pub fn release_all(conn: &mut Connection, id: ChangeId) -> Result<ReleaseOutcome, ChangeError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let outcome = release_in(&tx, id, None)?;
+    let outcome = release_records(&tx, id, None, Releaser::Silent)?;
     tx.commit()?;
     Ok(outcome)
 }
@@ -149,10 +152,21 @@ pub fn list(conn: &mut Connection, change: Option<&str>) -> Result<Vec<PathClaim
     }
 }
 
+/// Releases a change's records and queues a `released` event for the
+/// releaser and one for each woken waiter.
 pub(crate) fn release_in(
     tx: &Transaction,
     id: ChangeId,
     only: Option<&[PathPattern]>,
+) -> Result<ReleaseOutcome, ChangeError> {
+    release_records(tx, id, only, Releaser::Announce)
+}
+
+fn release_records(
+    tx: &Transaction,
+    id: ChangeId,
+    only: Option<&[PathPattern]>,
+    releaser: Releaser,
 ) -> Result<ReleaseOutcome, ChangeError> {
     let sql = format!("{SELECT} WHERE pc.change_id = ?1");
     let mut released = rows(tx, &sql, [id.to_string()])?;
@@ -176,7 +190,7 @@ pub(crate) fn release_in(
         released,
         woken,
     };
-    super::delivery::enqueue(tx, &outcome)?;
+    super::delivery::enqueue(tx, &outcome, releaser)?;
     Ok(outcome)
 }
 
