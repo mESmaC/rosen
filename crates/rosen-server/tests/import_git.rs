@@ -67,6 +67,7 @@ fn import_keeps_git_ids_and_never_replaces_the_base() {
     let state = ServerState::new(ServerConfig {
         data_dir: data.path().to_path_buf(),
         endpoint: Endpoint::new("rosen-import-test-unused"),
+        warm_pool_dir: None,
     });
 
     let Outcome::Ok(Response::Imported(summary)) = import(&state, source.path()) else {

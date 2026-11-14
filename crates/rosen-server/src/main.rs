@@ -45,7 +45,17 @@ struct Args {
     /// A file holding the machine credential to present to the server.
     #[arg(long, value_name = "FILE", requires = "upstream")]
     credential_file: Option<PathBuf>,
+
+    /// Keep the warm pool in a directory under DIR. A take is served only
+    /// when DIR is on the same volume as the workspace, so put it on the
+    /// volume agents' workspaces live on, such as a Dev Drive. Defaults to
+    /// $ROSEN_WARM_POOL_DIR, then the data directory.
+    #[arg(long, value_name = "DIR")]
+    warm_pool_dir: Option<PathBuf>,
 }
+
+/// Inherited by a daemon a client starts with no flags, as `ROSEN_LISTEN` is.
+const WARM_POOL_DIR_ENV: &str = "ROSEN_WARM_POOL_DIR";
 
 impl Args {
     /// Flags win; otherwise a cache reads `upstream.json` and a server reads
@@ -102,9 +112,15 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let warm_pool_dir = args
+        .warm_pool_dir
+        .or_else(|| std::env::var_os(WARM_POOL_DIR_ENV).map(PathBuf::from))
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| std::path::absolute(&dir).unwrap_or(dir));
     let config = ServerConfig {
         data_dir,
         endpoint: args.endpoint.map_or_else(Endpoint::resolve, Endpoint::new),
+        warm_pool_dir,
     };
     // Ctrl-C stops the daemon as a `shutdown` request would.
     let result = tokio::select! {

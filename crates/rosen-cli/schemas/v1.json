@@ -1496,6 +1496,16 @@
             }
           ]
         },
+        "pool_missed": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "prepared": {
           "type": "boolean"
         }
@@ -1509,6 +1519,7 @@
         "written",
         "bytes_written",
         "fallback",
+        "pool_missed",
         "prepared"
       ],
       "additionalProperties": false

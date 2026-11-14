@@ -87,7 +87,7 @@ impl ServerState {
         // Cyclic because landing's adapters reach back into this state.
         let state = Arc::new_cyclic(|this| Self {
             machine_agents: std::sync::Mutex::new(Default::default()),
-            pool: rosen_client::workspace::pool::WarmPool::new(&config.data_dir),
+            pool: config.warm_pool(),
             changes: changes::ChangeService::new(&config.data_dir),
             receipts: receipts::ReceiptService::new(config.clone()),
             landing: landing::LandingService::new(this.clone()),
@@ -203,9 +203,33 @@ pub struct ServerConfig {
     pub data_dir: PathBuf,
     /// The pipe or socket clients connect to.
     pub endpoint: Endpoint,
+    /// A directory on the volume agents' workspaces live on, such as a Dev
+    /// Drive, to keep the warm pool in (SPEC R3). `None` keeps it in the
+    /// data directory, whose volume a take must share to be served.
+    pub warm_pool_dir: Option<PathBuf>,
 }
 
 impl ServerConfig {
+    /// The warm pool's ready root, which the daemon removes whole on start.
+    /// Under a configured directory it is a subdirectory named for this
+    /// data directory, so the operator's own files there are never removed
+    /// and daemons of several projects can share one setting.
+    pub fn warm_pool_root(&self) -> PathBuf {
+        let Some(dir) = &self.warm_pool_dir else {
+            return self.data_dir.join("warm-pool");
+        };
+        let data_dir =
+            std::path::absolute(&self.data_dir).unwrap_or_else(|_| self.data_dir.clone());
+        let owner =
+            rosen_core::ObjectId::hash_object("warm-pool", data_dir.as_os_str().as_encoded_bytes());
+        dir.join(format!("rosen-warm-pool-{}", &owner.to_hex()[..16]))
+    }
+
+    /// The daemon's warm pool, at [`ServerConfig::warm_pool_root`].
+    pub fn warm_pool(&self) -> Arc<rosen_client::workspace::pool::WarmPool> {
+        rosen_client::workspace::pool::WarmPool::with_root(&self.data_dir, &self.warm_pool_root())
+    }
+
     /// The loose object store (SPEC D5): every imported, snapshotted and
     /// landed object.
     pub fn objects_dir(&self) -> PathBuf {

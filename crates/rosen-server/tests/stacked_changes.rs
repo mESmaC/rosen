@@ -11,6 +11,7 @@ fn setup() -> (tempfile::TempDir, Arc<ServerState>) {
     let state = ServerState::new(ServerConfig {
         data_dir: temp.path().into(),
         endpoint: rosen_protocol::Endpoint::new("stack-contract"),
+        warm_pool_dir: None,
     });
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let who = Signature::new("test", "test@test", 0);

@@ -42,6 +42,7 @@ async fn only_the_pinned_server_and_a_credentialed_peer_get_through() {
     let state = ServerState::new(ServerConfig {
         data_dir: dir.path().to_path_buf(),
         endpoint: Endpoint::new(format!("rosen-network-test-{}", std::process::id())),
+        warm_pool_dir: None,
     });
     state.set_network(identity, address);
     let key = rosen_server::machines::keys::create(
