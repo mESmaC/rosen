@@ -38,6 +38,9 @@ async fn run_one(root: &Path, command: &str) -> Result<(), String> {
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| error.to_string())?;
+    // Declared after `child`, so it drops first, while the child's handle
+    // still keeps its process ID from being reused.
+    let tree = TreeGuard(child.id());
     let (mut stdout, mut stderr) = (child.stdout.take(), child.stderr.take());
     // Both pipes are drained while the command runs, so a chatty build never
     // blocks on a full pipe.
@@ -57,6 +60,7 @@ async fn run_one(root: &Path, command: &str) -> Result<(), String> {
                 COMMAND_LIMIT.as_secs() / 60
             )
         })?;
+    tree.finished();
     let status = status.map_err(|error| error.to_string())?;
     if status.success() {
         return Ok(());
@@ -66,6 +70,50 @@ async fn run_one(root: &Path, command: &str) -> Result<(), String> {
         "{status}\n{}",
         String::from_utf8_lossy(&output[start..]).trim_end()
     ))
+}
+
+/// Ends a prepare's whole process tree if dropped before it finished: at
+/// the time limit, or when the daemon stops the pool worker. `kill_on_drop`
+/// ends only the shell, and a build it started, such as cargo or rustc,
+/// would keep running with files open in the workspace, so removing the
+/// slot or template would fail until it exited (issue #169).
+struct TreeGuard(Option<u32>);
+
+impl TreeGuard {
+    fn finished(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // Waited for, so the files are closed before the caller goes
+            // on to remove the workspace. Rare: only a cut-short prepare.
+            let _ = kill_tree(pid)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// `/T` finds the shell's descendants by parent process ID, which holds
+/// while the shell still waits on them, as it does at the time limit.
+#[cfg(windows)]
+fn kill_tree(pid: u32) -> std::process::Command {
+    let mut kill = std::process::Command::new("taskkill");
+    kill.args(["/F", "/T", "/PID", &pid.to_string()]);
+    kill
+}
+
+/// The shell leads its own process group (see `shell`), which everything
+/// it starts joins.
+#[cfg(not(windows))]
+fn kill_tree(pid: u32) -> std::process::Command {
+    let mut kill = std::process::Command::new("kill");
+    kill.args(["-KILL", "--", &format!("-{pid}")]);
+    kill
 }
 
 async fn read_all<R: AsyncReadExt + Unpin>(pipe: Option<&mut R>, into: &mut Vec<u8>) {
@@ -89,6 +137,6 @@ fn shell(command: &str) -> Command {
 #[cfg(not(windows))]
 fn shell(command: &str) -> Command {
     let mut shell = Command::new("nice");
-    shell.args(["-n", "10", "sh", "-c", command]);
+    shell.args(["-n", "10", "sh", "-c", command]).process_group(0);
     shell
 }
