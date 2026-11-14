@@ -206,6 +206,13 @@ impl ProjectConfig {
         !self.is_generated(path) && !self.is_registration_list(path)
     }
 
+    /// The patterns whose paths never count as an overlap (§2), for
+    /// comparing two globs with [`PathPattern::overlaps_outside`].
+    pub fn uncounted_patterns(&self) -> Vec<PathPattern> {
+        let lists = self.generated.iter().chain(&self.registration_lists);
+        lists.cloned().collect()
+    }
+
     /// Whether a change to `path` puts its change in the sensitive tier (R7).
     pub fn is_sensitive(&self, path: &str) -> bool {
         matches_any(&self.sensitive, path)
