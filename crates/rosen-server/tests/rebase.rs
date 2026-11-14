@@ -137,6 +137,7 @@ async fn start(
     let state = ServerState::new(ServerConfig {
         data_dir: data.to_path_buf(),
         endpoint: endpoint.clone(),
+        warm_pool_dir: None,
     });
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let original = tree(&store, false);

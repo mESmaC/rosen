@@ -130,6 +130,9 @@ async fn new_workspace(
         if let Some(reason) = &report.fallback {
             println!("note:      not block cloned: {reason}");
         }
+        if let Some(reason) = &report.pool_missed {
+            println!("note:      warm pool not used: {reason}");
+        }
     }
     Ok(())
 }
@@ -144,6 +147,7 @@ fn workspace_json(dir: &Path, report: &Report) -> serde_json::Value {
         "written": report.written,
         "bytes_written": report.bytes_written,
         "fallback": report.fallback,
+        "pool_missed": report.pool_missed,
         "prepared": report.prepared,
     })
 }

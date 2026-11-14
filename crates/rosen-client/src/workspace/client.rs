@@ -62,10 +62,10 @@ impl Client {
             self.ensure_local(change.change.head).await?;
             self.take_workspace(change.change.head, dest).await?
         } else {
-            None
+            Err(None)
         };
         let report = match pooled {
-            Some(taken) => Report {
+            Ok(taken) => Report {
                 method: if taken.from_template {
                     super::Method::BlockClone
                 } else {
@@ -77,12 +77,15 @@ impl Client {
                 written: 0,
                 bytes_written: 0,
                 fallback: None,
+                pool_missed: None,
                 prepared: taken.prepared,
             },
-            None => {
-                self.materialise_tree(change.change.head, dest, options)
+            Err(missed) => Report {
+                pool_missed: missed,
+                ..self
+                    .materialise_tree(change.change.head, dest, options)
                     .await?
-            }
+            },
         };
         // The base's ignore list, never the change's own `rosen.toml` (R2).
         let ignore = self.base_config().await?.ignore;
@@ -159,15 +162,17 @@ impl Client {
     }
 
     /// Takes a ready workspace holding `tree`, prepared ones first, or a
-    /// clone of the daemon's template. `None` when the daemon has neither.
+    /// clone of the daemon's template. When the daemon has neither, the
+    /// inner error says why if the pool can never serve this destination.
     async fn take_workspace(
         &self,
         tree: ObjectId,
         dest: &Path,
-    ) -> Result<Option<PooledWorkspace>, Error> {
+    ) -> Result<Result<PooledWorkspace, Option<String>>, Error> {
         let dest = std::path::absolute(dest)?.to_string_lossy().into_owned();
         match self.request(Request::PoolTake { tree, dest }).await? {
-            Response::PoolTaken(taken) => Ok(taken),
+            Response::PoolTaken(taken) => Ok(taken.ok_or(None)),
+            Response::PoolMissed(why) => Ok(Err(Some(why))),
             other => Err(unexpected(other)),
         }
     }

@@ -79,6 +79,7 @@ async fn project() -> (
     let state = ServerState::new(ServerConfig {
         data_dir: dir.path().into(),
         endpoint: Endpoint::new("unused-machine-test"),
+        warm_pool_dir: None,
     });
     let identity = Identity::load_or_create(dir.path()).unwrap();
     let pin = identity.fingerprint();
