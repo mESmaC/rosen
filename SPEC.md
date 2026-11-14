@@ -55,7 +55,7 @@ Rosen is a version control system built so that many coding agents can work on o
 | D21 | Network access and enrollment *(new)* | The server listens on a network listener with TLS as well as the local transport. Machines join with **join keys**, with no login, monitor or remote desktop on the joining machine. Each machine gets its own revocable credential. Every agent on a machine works under that machine's credential, and Velocity names the agent and its role (R14). One enrollment adds a machine to both Rosen and Velocity. |
 
 Defaults set during spec writing. These follow from the decisions above, and changing one is a product decision:
-- **Transport.** Each daemon listens on a local transport for its own machine's clients: a named pipe on Windows and a Unix socket elsewhere, limited to the OS user. The server also listens on a TCP port with TLS for enrolled machines' daemons (R14). The protocol is versioned and does not assume a local peer.
+- **Transport.** Each daemon listens on a local transport for its own machine's clients: a named pipe on Windows and a Unix socket elsewhere, limited to the OS user. A client refuses an endpoint served by another OS user, since another user can create the endpoint first. The server also listens on a TCP port with TLS for enrolled machines' daemons (R14). The protocol is versioned and does not assume a local peer.
 - **Events.** The server pushes events to subscribed clients. Clients never poll.
 - **Garbage collection.** v1 never deletes objects from the store.
 

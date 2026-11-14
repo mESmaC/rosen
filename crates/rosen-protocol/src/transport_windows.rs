@@ -4,8 +4,11 @@
 use super::BoxStream;
 use std::ffi::c_void;
 use std::io;
+use std::os::windows::io::AsRawHandle;
 use std::time::Duration;
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+};
 use windows_sys::Win32::Foundation::{
     CloseHandle, LocalFree, ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY, HANDLE, HLOCAL,
 };
@@ -16,7 +19,10 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
     TOKEN_USER,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 const PIPE_PREFIX: &str = r"\\.\pipe\";
 
@@ -31,8 +37,12 @@ pub(super) fn normalize(name: String) -> String {
     }
 }
 
+/// The pipe namespace is machine-wide, so the default name carries the user's
+/// SID: unlike `USERNAME`, it is unique across local and domain accounts.
 pub(super) fn default_endpoint() -> String {
-    let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
+    let user = current_user_sid()
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "default".into());
     format!("{PIPE_PREFIX}rosen-{user}")
 }
 
@@ -97,7 +107,10 @@ pub(super) async fn connect(name: &str) -> io::Result<BoxStream> {
     let started = tokio::time::Instant::now();
     loop {
         match ClientOptions::new().open(name) {
-            Ok(client) => return Ok(Box::new(client)),
+            Ok(client) => {
+                verify_server_owner(name, &client)?;
+                return Ok(Box::new(client));
+            }
             // Every instance is taken for the moment; the listener makes a new one
             // right after each accept, so a short wait is enough.
             Err(err)
@@ -109,6 +122,30 @@ pub(super) async fn connect(name: &str) -> io::Result<BoxStream> {
             Err(err) => return Err(err),
         }
     }
+}
+
+/// Refuses a pipe whose server process runs as another user. Pipe names are
+/// machine-wide, so another account can create ours first and impersonate the
+/// daemon; the DACL the real server sets cannot stop that, only this check can.
+fn verify_server_owner(name: &str, pipe: &NamedPipeClient) -> io::Result<()> {
+    let mut pid = 0u32;
+    // SAFETY: the handle is a connected pipe client, alive for this call.
+    if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let owner = process_id_user_sid(pid).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("cannot verify the owner of {name} (server process {pid}): {err}"),
+        )
+    })?;
+    if owner != current_user_sid()? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{name} is served by another user ({owner}, process {pid}); refusing to connect"),
+        ));
+    }
+    Ok(())
 }
 
 /// A security descriptor granting full access to the current user and SYSTEM
@@ -164,9 +201,28 @@ impl Drop for OwnerOnlySecurity {
 
 /// The current process user's SID as a string, for example `S-1-5-21-…`.
 fn current_user_sid() -> io::Result<String> {
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no closing.
+    process_user_sid(unsafe { GetCurrentProcess() })
+}
+
+/// The user SID of the process with id `pid`.
+fn process_id_user_sid(pid: u32) -> io::Result<String> {
+    // Limited query rights are granted even across integrity levels.
+    // SAFETY: plain call; the returned handle is closed below.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let sid = process_user_sid(process);
+    // SAFETY: `process` was opened above and is not used after this.
+    unsafe { CloseHandle(process) };
+    sid
+}
+
+fn process_user_sid(process: HANDLE) -> io::Result<String> {
     let mut token: HANDLE = std::ptr::null_mut();
-    // SAFETY: GetCurrentProcess returns a pseudo-handle; `token` is closed below.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+    // SAFETY: `process` is a valid process handle; `token` is closed below.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let sid = token_user_sid(token);
