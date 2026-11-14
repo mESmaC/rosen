@@ -54,6 +54,8 @@ impl Snapshotter {
                 &mut scanned,
                 &BTreeSet::from([path.clone()]),
                 &BTreeSet::new(),
+                // Deletion must see every file's content; a held one fails it.
+                false,
             )?;
         }
         let paths: BTreeSet<_> = self
