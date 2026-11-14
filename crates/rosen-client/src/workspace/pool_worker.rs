@@ -81,16 +81,48 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
                 continue;
             }
         }
+        // A pool that is off waits like one that knows its base: a land
+        // or a resize, which wakes it, is what can turn it on.
+        let settled = base.is_some() || pool.state.lock().await.size == 0;
+        wait_for_work(pool, &mut events, &mut schedule, settled).await?;
+    }
+}
+
+/// Waits until a refill or cleanup pass has something to do: a land or
+/// revert moved the base, a change may have closed or reopened, a take or
+/// resize woke the pool, or a cleanup retry fell due. Snapshots, claims and
+/// reviews are most of the stream, and a refill pass costs requests to the
+/// server, so they are skipped (#87). Until the pool is `settled`, as before
+/// an import, which publishes no event, any event is a reason to look again.
+async fn wait_for_work(
+    pool: &WarmPool,
+    events: &mut mpsc::Receiver<Event>,
+    schedule: &mut CleanupSchedule,
+    settled: bool,
+) -> Result<(), Error> {
+    loop {
         let retry_at = schedule.retry_at;
         tokio::select! {
             event = events.recv() => {
-                let event = event.ok_or(Error::Disconnected)?;
-                schedule.due |= may_close_or_reopen(event.kind);
+                let kind = event.ok_or(Error::Disconnected)?.kind;
+                let closes = may_close_or_reopen(kind);
+                schedule.due |= closes;
+                if closes || moves_base(kind) || !settled {
+                    return Ok(());
+                }
             }
-            _ = pool.wake.notified() => {}
-            _ = sleep_until(retry_at), if retry_at.is_some() => schedule.due = true,
+            _ = pool.wake.notified() => return Ok(()),
+            _ = sleep_until(retry_at), if retry_at.is_some() => {
+                schedule.due = true;
+                return Ok(());
+            }
         }
     }
+}
+
+/// Events after which the base may hold a new tree. A revert is a land too.
+fn moves_base(kind: EventKind) -> bool {
+    matches!(kind, EventKind::Landed | EventKind::Reverted)
 }
 
 /// When the daemon next runs guarded cleanup of landed and abandoned
