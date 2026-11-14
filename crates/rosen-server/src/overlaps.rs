@@ -182,6 +182,7 @@ pub fn find(state: &ServerState, subject: &Subject) -> Result<Vec<Overlap>, Over
     let finder = Finder {
         store: &store,
         config: &config,
+        uncounted: config.uncounted_patterns(),
         heads,
     };
     let ours = match (own_id, subject) {
@@ -232,6 +233,9 @@ fn parent_heads(
 struct Finder<'a> {
     store: &'a dyn ObjectStore,
     config: &'a ProjectConfig,
+    /// Generated files and registration lists: two claims meeting only on
+    /// these paths do not overlap.
+    uncounted: Vec<PathPattern>,
     /// Live changes' heads and their parents', so a stacked change finds its
     /// parent's tree.
     heads: HashMap<ChangeId, ObjectId>,
@@ -273,7 +277,7 @@ impl Finder<'_> {
 
     fn footprint_of_paths(&self, patterns: &[PathPattern]) -> Footprint {
         Footprint {
-            claims: self.counting(patterns.iter().cloned()),
+            claims: patterns.to_vec(),
             edits: BTreeMap::new(),
         }
     }
@@ -285,19 +289,10 @@ impl Finder<'_> {
     ) -> Result<Footprint, OverlapError> {
         let mut edits = edits::edited_files(self.store, &self.heads, &record.change)?;
         edits.retain(|path, _| self.config.counts_for_overlap(path));
+        // Claims are kept whole: a claim's uncounted paths are set aside where
+        // it is compared, since a glob can cover counted paths too.
         let claims = claimed.get(&record.change.id).cloned().unwrap_or_default();
-        Ok(Footprint {
-            claims: self.counting(claims.into_iter()),
-            edits,
-        })
-    }
-
-    /// Drops claims on a single generated file or registration list. A glob
-    /// is kept: it covers other paths that do count.
-    fn counting(&self, patterns: impl Iterator<Item = PathPattern>) -> Vec<PathPattern> {
-        patterns
-            .filter(|pattern| self.config.counts_for_overlap(pattern.as_str()))
-            .collect()
+        Ok(Footprint { claims, edits })
     }
 
     /// The paths where two footprints overlap.
@@ -307,8 +302,11 @@ impl Finder<'_> {
         theirs: &Footprint,
     ) -> Result<BTreeSet<String>, OverlapError> {
         let mut paths = BTreeSet::new();
+        // Edits on uncounted paths were dropped in `footprint`, so only the
+        // claim-to-claim test needs the uncounted patterns.
         for pattern in &ours.claims {
-            if theirs.claims.iter().any(|other| other.overlaps(pattern)) {
+            let meets = |other: &PathPattern| other.overlaps_outside(pattern, &self.uncounted);
+            if theirs.claims.iter().any(meets) {
                 paths.insert(pattern.to_string());
             }
             paths.extend(theirs.edits.keys().filter(|p| pattern.matches(p)).cloned());

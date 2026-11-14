@@ -64,6 +64,22 @@ impl PathPattern {
         Matcher::new(&self.0).intersects(&Matcher::new(&other.0))
     }
 
+    /// Whether some path matches both patterns and none of `excluded`, as
+    /// overlap detection asks when generated files and registration lists
+    /// never count (SPEC §2 "Overlap"). Answers true when the search passes
+    /// [`MAX_SEARCH_STATES`]: an extra overlap only orders two changes, while
+    /// a missed one lets them collide.
+    pub fn overlaps_outside(&self, other: &PathPattern, excluded: &[PathPattern]) -> bool {
+        if !self.overlaps(other) {
+            return false;
+        }
+        if excluded.is_empty() {
+            return true;
+        }
+        let excluded: Vec<Matcher> = excluded.iter().map(|p| Matcher::new(&p.0)).collect();
+        ExcludingSearch::new(Matcher::new(&self.0), Matcher::new(&other.0), excluded).run()
+    }
+
     /// Whether `path` (a plain path, not a glob) matches this pattern.
     pub fn matches(&self, path: &str) -> bool {
         let literal = Matcher::literal(path);
@@ -101,6 +117,14 @@ enum Class {
 }
 
 impl Class {
+    fn accepts(self, c: char) -> bool {
+        match self {
+            Class::Char(own) => own == c,
+            Class::NotSlash => c != '/',
+            Class::Any => true,
+        }
+    }
+
     /// Whether some single character is in both classes.
     fn meets(self, other: Class) -> bool {
         match (self, other) {
@@ -222,6 +246,127 @@ impl Matcher {
             }
         }
         false
+    }
+}
+
+/// Distinct search states [`PathPattern::overlaps_outside`] visits before it
+/// gives up and reports an overlap. Generated and registration patterns are
+/// few and short, so real configurations stay far below it.
+pub const MAX_SEARCH_STATES: usize = 20_000;
+
+/// A path both of two matchers accept, read one character at a time, while
+/// tracking every state of the excluded matchers that the path so far could
+/// reach. The two claims may each guess a way through, but the excluded set
+/// is followed exactly, so an accepted path is one no excluded pattern takes.
+struct ExcludingSearch {
+    a: Matcher,
+    b: Matcher,
+    excluded: Vec<Matcher>,
+    /// One character for each way a step class can treat one: every literal
+    /// in any pattern, `/`, and one character that none of them names.
+    alphabet: Vec<char>,
+}
+
+/// Where the search stands: a state of each claim, and the sorted
+/// (excluded pattern, state) pairs the path so far reaches.
+type SearchState = (usize, usize, Vec<(usize, usize)>);
+
+impl ExcludingSearch {
+    fn new(a: Matcher, b: Matcher, excluded: Vec<Matcher>) -> Self {
+        let mut named: HashSet<char> = HashSet::from(['/']);
+        for matcher in [&a, &b].into_iter().chain(&excluded) {
+            for (class, _) in matcher.steps.iter().flatten() {
+                if let Class::Char(c) = class {
+                    named.insert(*c);
+                }
+            }
+        }
+        let unnamed = ('a'..=char::MAX).find(|c| !named.contains(c));
+        let mut alphabet: Vec<char> = named.into_iter().chain(unnamed).collect();
+        alphabet.sort_unstable();
+        ExcludingSearch {
+            a,
+            b,
+            excluded,
+            alphabet,
+        }
+    }
+
+    fn run(&self) -> bool {
+        let start = self.close((0..self.excluded.len()).map(|i| (i, 0)).collect());
+        let mut seen: HashSet<SearchState> = HashSet::new();
+        let mut pending: Vec<SearchState> = vec![(0, 0, start)];
+        while let Some(state) = pending.pop() {
+            if seen.contains(&state) {
+                continue;
+            }
+            if seen.len() >= MAX_SEARCH_STATES {
+                return true;
+            }
+            let (a, b, ref reached) = state;
+            if a == self.a.accept() && b == self.b.accept() && !self.excluded_accept(reached) {
+                return true;
+            }
+            pending.extend(self.a.skips[a].iter().map(|&n| (n, b, reached.clone())));
+            pending.extend(self.b.skips[b].iter().map(|&n| (a, n, reached.clone())));
+            for &c in &self.alphabet {
+                self.read(&state, c, &mut pending);
+            }
+            seen.insert(state);
+        }
+        false
+    }
+
+    /// Queues every state reading `c` leads to from `state`.
+    fn read(&self, state: &SearchState, c: char, pending: &mut Vec<SearchState>) {
+        let (a, b, reached) = state;
+        let mut next_reached = None;
+        for &(class_a, next_a) in &self.a.steps[*a] {
+            if !class_a.accepts(c) {
+                continue;
+            }
+            for &(class_b, next_b) in &self.b.steps[*b] {
+                if class_b.accepts(c) {
+                    let after = next_reached.get_or_insert_with(|| self.advance(reached, c));
+                    pending.push((next_a, next_b, after.clone()));
+                }
+            }
+        }
+    }
+
+    fn excluded_accept(&self, reached: &[(usize, usize)]) -> bool {
+        reached
+            .iter()
+            .any(|&(i, state)| state == self.excluded[i].accept())
+    }
+
+    fn advance(&self, reached: &[(usize, usize)], c: char) -> Vec<(usize, usize)> {
+        let mut next = Vec::new();
+        for &(i, state) in reached {
+            for &(class, to) in &self.excluded[i].steps[state] {
+                if class.accepts(c) {
+                    next.push((i, to));
+                }
+            }
+        }
+        self.close(next)
+    }
+
+    /// Adds every state a skip reaches, sorted and without repeats.
+    fn close(&self, mut reached: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+        let mut index = 0;
+        while index < reached.len() {
+            let (i, state) = reached[index];
+            for &to in &self.excluded[i].skips[state] {
+                if !reached.contains(&(i, to)) {
+                    reached.push((i, to));
+                }
+            }
+            index += 1;
+        }
+        reached.sort_unstable();
+        reached.dedup();
+        reached
     }
 }
 
