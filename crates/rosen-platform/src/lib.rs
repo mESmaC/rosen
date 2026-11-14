@@ -49,3 +49,24 @@ pub mod credentials;
 pub mod process;
 
 pub mod owner_only;
+
+/// False only when no running process has id `pid`; any doubt answers true,
+/// so a caller that cleans up after dead processes never touches a live
+/// one's files. A reused id reads as running, which only delays cleanup.
+#[cfg(windows)]
+pub fn process_may_be_running(pid: u32) -> bool {
+    process::may_be_running(pid)
+}
+
+/// Without a Windows process handle, Linux's `/proc` answers; other systems
+/// cannot tell here, so every process counts as running. An entry `/proc`
+/// refuses to stat, as under `hidepid`, counts as running too.
+#[cfg(not(windows))]
+pub fn process_may_be_running(pid: u32) -> bool {
+    let proc_root = std::path::Path::new("/proc");
+    !proc_root.join("self").exists()
+        || proc_root
+            .join(pid.to_string())
+            .try_exists()
+            .unwrap_or(true)
+}
