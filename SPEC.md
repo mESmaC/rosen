@@ -136,6 +136,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - A push to the mirror is a fast-forward and never a force-push.
 - `rosen import --mirror <remote>` names the remote, a URL or a path. It is kept in the metadata store, so it survives restarts.
 - A remote named in the base's project configuration replaces the stored one at the next push. Removing it from the configuration keeps the last remote.
+- A configured remote must be a network remote: an `https://`, `ssh://` or `git://` URL, or an scp-style `[user@]host:path` ssh address. The configuration is repository content, so a local path, a remote helper (`<helper>::…`) or a URL with credentials in it makes the file invalid. Only `rosen import --mirror`, which the operator runs on the server, can name a local path.
 - One background task on the server does every push. It pushes the base tip, so lands made during a push go out with the next one. It also pushes at server start, so a push a crash interrupted still happens.
 - Each failed push publishes a `mirror` event with the error and the retry delay. Retries back off from 1 s to at most 5 min. A push the remote refused, for example because the mirror has commits the base lacks, is marked `rejected`: only a person can fix that. The first push that succeeds after failures publishes a `mirror` event too.
 - **Accept when:** a repo imported and then landed on shows the same history in `git log` on the mirror, with one commit per change and its trailers.
