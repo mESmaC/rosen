@@ -4,11 +4,11 @@
 //! A record holds only ids: its blobs go to a workspace-local object store
 //! and its trees to the tree cache, so a record stays small however large
 //! the files are, and reading the journal never parses file contents.
-use super::upload::ChangedBlob;
+use super::upload::{ChangedBlob, LargeBlob, BATCH_BYTES};
 use super::{Prepared, SnapshotError, STATE_DIR};
 use rosen_core::{ChangeState, ObjectId, ObjectKind};
 use rosen_protocol::ErrorBody;
-use rosen_store::{LooseObjectStore, ObjectStore};
+use rosen_store::{LooseObjectStore, ObjectStore, StoreError};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -53,6 +53,10 @@ enum OnDisk {
     Stored(StoredRecord),
     Inline(InlineRecord),
 }
+
+/// Large journaled blobs inflated for sending, which reads them in slices
+/// from a file. Kept with the blobs, and removed with them.
+const INFLATED: &str = "inflated";
 
 /// Why replay stopped: the server refused a record for good (issue #91).
 /// Its name has no number and no `.json`, so it never reads as a record.
@@ -216,12 +220,7 @@ impl Journal {
         let blobs = stored
             .blobs
             .into_iter()
-            .map(|(path, id)| {
-                Ok(ChangedBlob {
-                    path,
-                    data: raw(&blobs_store, &id)?,
-                })
-            })
+            .map(|(path, id)| self.load_blob(&blobs_store, path, id))
             .collect::<Result<Vec<_>, SnapshotError>>()?;
         let tree_bodies = stored
             .all_trees
@@ -247,7 +246,10 @@ impl Journal {
         let blobs_store = self.blobs()?;
         let mut blobs = Vec::with_capacity(record.prepared.blobs.len());
         for blob in &record.prepared.blobs {
-            let id = blobs_store.put_raw(ObjectKind::Blob, &blob.data)?;
+            let id = match &blob.large {
+                Some(large) => journal_large(&blobs_store, large)?,
+                None => blobs_store.put_raw(ObjectKind::Blob, &blob.data)?,
+            };
             blobs.push((blob.path.clone(), id));
         }
         let stored = StoredRecord {
@@ -343,14 +345,52 @@ impl Journal {
         Ok(LooseObjectStore::open(self.dir.join("objects"))?)
     }
 
+    /// A journaled blob, ready to send. A large one is inflated into a file
+    /// once, checked against its ID on the way, and sent from there in
+    /// slices, so replay never holds it whole (issue #334).
+    fn load_blob(
+        &self,
+        store: &LooseObjectStore,
+        path: String,
+        id: ObjectId,
+    ) -> Result<ChangedBlob, SnapshotError> {
+        let len = match store.object_size(&id) {
+            Err(StoreError::NotFound(_)) => return Err(missing(&id)),
+            other => other?,
+        };
+        if len <= BATCH_BYTES as u64 {
+            let data = raw(store, &id)?;
+            return Ok(ChangedBlob {
+                path,
+                data,
+                large: None,
+            });
+        }
+        let dir = self.dir.join(INFLATED);
+        let source = dir.join(id.to_hex());
+        let inflated = fs::metadata(&source).is_ok_and(|meta| meta.len() == len);
+        if !inflated {
+            inflate(store, &dir, &source, &id).map_err(|err| SnapshotError::io(&dir, err))?;
+        }
+        let large = Some(LargeBlob { id, len, source });
+        Ok(ChangedBlob {
+            path,
+            data: Vec::new(),
+            large,
+        })
+    }
+
     /// Blob bytes are needed only while a record waits, so they go with the
     /// last record. Content addressing means records cannot share them safely
     /// any other way without reference counts.
     fn clear_blobs(&self) -> io::Result<()> {
-        match fs::remove_dir_all(self.dir.join("objects")) {
-            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
-            _ => Ok(()),
+        for dir in ["objects", INFLATED] {
+            match fs::remove_dir_all(self.dir.join(dir)) {
+                Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+                _ => {}
+            }
         }
+        Ok(())
     }
 }
 
@@ -418,16 +458,61 @@ fn sequence(path: &Path) -> Option<u64> {
     path.file_stem()?.to_str()?.parse().ok()
 }
 
+/// Copies a large blob into the journal's store from its file, checked
+/// against the ID it was hashed to. A file written again since then no
+/// longer matches and the record is not written: the snapshot fails, and
+/// the next one reads the file at its new content.
+fn journal_large(store: &LooseObjectStore, large: &LargeBlob) -> Result<ObjectId, SnapshotError> {
+    let source = &large.source;
+    let mut file = File::open(source).map_err(|err| SnapshotError::io(source, err))?;
+    if store.put_raw_from(ObjectKind::Blob, large.id, large.len, &mut file)? {
+        return Ok(large.id);
+    }
+    let why = "the file changed while it was being journaled";
+    Err(SnapshotError::io(source, io::Error::other(why)))
+}
+
+/// Inflates a journaled blob into `source`, by way of a temporary file so
+/// a cut-short copy is never taken for a whole one.
+fn inflate(store: &LooseObjectStore, dir: &Path, source: &Path, id: &ObjectId) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let temp = dir.join(format!("{}.tmp", id.to_hex()));
+    let copied = (|| {
+        let mut out = io::BufWriter::new(File::create(&temp)?);
+        let copied = store.copy_raw_to(id, &mut out).map_err(io::Error::other)?;
+        out.into_inner().map_err(|err| err.into_error())?;
+        Ok::<_, io::Error>(copied)
+    })();
+    match copied {
+        Ok(Some(_)) => fs::rename(&temp, source),
+        Ok(None) => {
+            let _ = fs::remove_file(&temp);
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("journal object {id} is missing"),
+            ))
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+fn missing(id: &ObjectId) -> SnapshotError {
+    SnapshotError::io(
+        Path::new(".rosen/journal"),
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("journal object {id} is missing"),
+        ),
+    )
+}
+
 fn raw(store: &dyn ObjectStore, id: &ObjectId) -> Result<Vec<u8>, SnapshotError> {
     match store.get_raw(id)? {
         Some(object) => Ok(object.data),
-        None => Err(SnapshotError::io(
-            Path::new(".rosen/journal"),
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("journal object {id} is missing"),
-            ),
-        )),
+        None => Err(missing(id)),
     }
 }
 
