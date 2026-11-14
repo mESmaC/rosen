@@ -16,6 +16,7 @@ rosen-protocol.workspace = true
 rosen-platform.workspace = true
 rosen-store.workspace = true
 reflink-copy.workspace = true
+same-file.workspace = true
 atomicwrites.workspace = true
 ignore.workspace = true
 notify.workspace = true

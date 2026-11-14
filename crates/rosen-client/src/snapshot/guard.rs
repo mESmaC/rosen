@@ -190,4 +190,11 @@ impl Snapshotter {
         })
         .map_err(|err| SnapshotError::io(&self.root, err))
     }
+
+    /// Closes a workspace whose directory deletion removed, along with its
+    /// lease files outside it. Keeps them unless this snapshotter held the
+    /// workspace for deletion.
+    pub(crate) fn close_deleted(self) {
+        self.journal.remove_leases();
+    }
 }

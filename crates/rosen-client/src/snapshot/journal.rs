@@ -13,6 +13,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 /// A captured snapshot waiting for the server.
@@ -52,10 +53,17 @@ pub(super) struct Journal {
     /// Held shared for the snapshotter's life, so a deletion (which needs it
     /// exclusive) cannot start while any snapshotter has the workspace open.
     presence: File,
+    presence_path: PathBuf,
+    /// Set once [`Journal::exclusive`] holds the presence lease exclusive.
+    held_exclusive: AtomicBool,
     /// Taken exclusive around each capture and replay. Writers queue on it
     /// instead of failing, so `rosen commit` runs beside a watcher.
     writer: PathBuf,
 }
+
+/// How often to retry a presence lease whose file a deletion removed while
+/// it was being taken.
+const PRESENCE_ATTEMPTS: u32 = 5;
 
 /// Holds the journal's writer lock until dropped.
 pub(super) struct WriterLease {
@@ -75,15 +83,30 @@ impl Journal {
             .join(".rosen-locks");
         fs::create_dir_all(&locks)?;
         let key = ObjectId::hash_object("blob", canonical.to_string_lossy().as_bytes());
-        let presence = lock_file(&locks.join(format!("{key}.lock")))?;
-        presence.try_lock_shared().map_err(|_| {
-            io::Error::new(io::ErrorKind::WouldBlock, "the workspace is being deleted")
-        })?;
+        let presence_path = locks.join(format!("{key}.lock"));
         Ok(Self {
             dir,
-            presence,
+            presence: lock_presence(&presence_path)?,
+            presence_path,
+            held_exclusive: AtomicBool::new(false),
             writer: locks.join(format!("{key}.writer.lock")),
         })
+    }
+
+    /// Removes the lease files of a deleted workspace, so deletions leave
+    /// nothing behind in the shared parent. Does nothing unless
+    /// [`Journal::exclusive`] succeeded: no other journal holds the files
+    /// then, and an opener that reached one before its removal retries
+    /// ([`lock_presence`]). A leftover empty file is harmless, so this
+    /// reports nothing.
+    pub fn remove_leases(self) {
+        if !self.held_exclusive.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = fs::remove_file(&self.writer);
+        let _ = fs::remove_file(&self.presence_path);
+        // The lock goes only now, after both names are gone.
+        drop(self.presence);
     }
 
     /// Waits for the writer lock. Blocking.
@@ -98,6 +121,7 @@ impl Journal {
     pub fn exclusive(&self) -> io::Result<()> {
         self.presence.unlock()?;
         if self.presence.try_lock().is_ok() {
+            self.held_exclusive.store(true, Ordering::Release);
             return Ok(());
         }
         self.presence.try_lock_shared().map_err(io::Error::other)?;
@@ -252,6 +276,44 @@ fn lock_file(path: &Path) -> io::Result<File> {
         .create(true)
         .truncate(false)
         .open(path)
+}
+
+/// Takes the presence lease shared. A deletion removes the lease file while
+/// holding it exclusive, so an opener that reached the file first can lock
+/// it once the deletion ends. That lock would guard a name no one else
+/// sees, letting a later deletion run beside this writer; so the lock
+/// counts only while the path still names the locked file.
+fn lock_presence(path: &Path) -> io::Result<File> {
+    for _ in 0..PRESENCE_ATTEMPTS {
+        let file = match lock_file(path) {
+            Ok(file) => file,
+            // Without POSIX delete semantics, Windows refuses opening a
+            // removed file until its last handle closes.
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        file.try_lock_shared().map_err(|_| {
+            io::Error::new(io::ErrorKind::WouldBlock, "the workspace is being deleted")
+        })?;
+        let locked = same_file::Handle::from_file(file.try_clone()?)?;
+        match same_file::Handle::from_path(path) {
+            Ok(named) if named == locked => return Ok(file),
+            Ok(_) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "the workspace lease file kept being removed",
+    ))
 }
 
 fn sequence(path: &Path) -> Option<u64> {
