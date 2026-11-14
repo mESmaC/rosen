@@ -31,7 +31,7 @@ use crate::workspace::Sparse;
 use crate::{Client, Error};
 use index::Index;
 use rosen_core::{ChangeId, ObjectId, SnapshotKind};
-use rosen_protocol::{ErrorBody, ErrorCode, Request, Response, SnapshotOutcome, SnapshotRequest};
+use rosen_protocol::{Request, Response, SnapshotOutcome, SnapshotRequest};
 use rosen_store::{ObjectStore, StoreError};
 use scan::ScanOutcome;
 use std::collections::{BTreeSet, HashSet};
@@ -123,14 +123,12 @@ pub struct Snapshotter {
     /// workspace's newest captured tree is another, a second writer such as
     /// `rosen commit` captured since, and the next scan must be full (#93).
     captured_root: ObjectId,
-    /// The journal record replay last failed on with an internal server
-    /// error, and how many times in a row.
-    internal_failures: (u64, u32),
+    /// The last root tree whose objects the server took. The server keeps
+    /// every object (D5) and takes a tree only once all it names is stored,
+    /// so a retry of this tree, as after an internal server error, sends
+    /// only the snapshot request again rather than every blob (#93).
+    uploaded_root: Option<ObjectId>,
 }
-
-/// Replay attempts of one record that may fail with an internal server
-/// error before that error counts as the server's final word on it.
-const INTERNAL_ATTEMPTS: u32 = 3;
 
 /// A snapshot read from disk and ready to send.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -177,8 +175,7 @@ impl Snapshotter {
             unreadable: BTreeSet::new(),
             captured: false,
             captured_root,
-            // Records are numbered from 1, so record 0 never matches.
-            internal_failures: (0, 0),
+            uploaded_root: None,
         })
     }
 
@@ -328,20 +325,6 @@ impl Snapshotter {
             unanswered,
         };
         self.journal.append(last, &record)
-    }
-
-    /// Whether the server's refusal of journal record `id` is final. An
-    /// internal error may pass, so it is retried; but one that repeats for
-    /// the same record [`INTERNAL_ATTEMPTS`] times is taken as final too,
-    /// so replay stops uploading that record again on every snapshot (#93).
-    fn refused_for_good(&mut self, id: u64, refusal: &ErrorBody) -> bool {
-        if refusal.code != ErrorCode::Internal {
-            return !transient(refusal.code);
-        }
-        let (record, count) = self.internal_failures;
-        let count = if record == id { count + 1 } else { 1 };
-        self.internal_failures = (id, count);
-        count >= INTERNAL_ATTEMPTS
     }
 
     /// A report of `prepared`, not yet stored.
@@ -540,7 +523,7 @@ async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotRepo
         let record = state.journal.load(id, &trees)?;
         match replay_record(client, state, id, record).await {
             Ok(report) => reports.push(report),
-            Err(Error::Server(refusal)) if state.refused_for_good(id, &refusal) => {
+            Err(Error::Server(refusal)) if !transient(refusal.code) => {
                 state.journal.halt(id, &refusal)?;
                 return Err(Error::JournalHalted {
                     record: id,
@@ -632,13 +615,16 @@ async fn send(
     if unchanged && message.is_none() {
         return Ok(report);
     }
-    let trees = prepared
-        .trees
-        .iter()
-        .filter(|(id, _)| !snapshotter.known_trees.contains(id))
-        .cloned()
-        .collect::<Vec<_>>();
-    report.sent = upload::send_objects(client, &prepared.blobs, &trees).await?;
+    if snapshotter.uploaded_root != Some(prepared.root) {
+        let trees = prepared
+            .trees
+            .iter()
+            .filter(|(id, _)| !snapshotter.known_trees.contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        report.sent = upload::send_objects(client, &prepared.blobs, &trees).await?;
+        snapshotter.uploaded_root = Some(prepared.root);
+    }
     let outcome = client
         .snapshot(SnapshotRequest {
             change: snapshotter.change().to_string(),
