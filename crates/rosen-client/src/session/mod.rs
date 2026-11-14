@@ -269,6 +269,7 @@ impl Session {
             base,
             check_set: check_set.to_owned(),
             submitter: self.agent.clone(),
+            signature: None,
         };
         self.client.submit_receipt(request).await
     }

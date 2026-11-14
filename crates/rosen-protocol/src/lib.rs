@@ -48,7 +48,7 @@ pub use message::*;
 pub use objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal, WireKind, WireObject};
 pub use pool::{LandedProseQuery, PooledWorkspace};
 pub use post_land::{PostLandJob, PostLandWork};
-pub use receipt::{ReceiptRecord, SubmitReceipt};
+pub use receipt::{ReceiptRecord, ReceiptSignature, SubmitReceipt};
 pub use review::{
     Approval, ApproveRequest, CommentRequest, CommentTarget, ResolveRequest, ReviewComment,
     ReviewThread, ThreadFilter,

@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use rosen_server::landing::*;
+use rosen_server::machines::signing::{MachineKey, SERVER_MACHINE};
+
+/// Every receipt here is signed as the server's own machine.
+static SIGNER: std::sync::LazyLock<MachineKey> = std::sync::LazyLock::new(MachineKey::generate);
 
 #[derive(Default)]
 struct World {
@@ -117,6 +121,7 @@ fn setup(changes: Vec<ChangeFacts>) -> (Arc<World>, Arc<Landing>) {
         events: Box::new(Shared(world.clone())),
     };
     let ledger = Ledger::open_in_memory().unwrap();
+    ledger.set_server_key(&SIGNER.public_key()).unwrap();
     assert_eq!(
         ledger.init_base("main", &root()).unwrap(),
         InitBase::Created
@@ -172,13 +177,19 @@ fn change(n: u8, tier: Tier, parent: ChangeParent) -> ChangeFacts {
     }
 }
 
-fn receipt(n: u8, base: CommitId) -> Receipt {
-    Receipt {
+fn receipt(n: u8, base: CommitId) -> SignedReceipt {
+    let receipt = Receipt {
         change: cid(n),
         head: oid(HEAD, n),
         base,
         check_set: "pre-land".into(),
         submitter: AgentId::new("checker").unwrap(),
+    };
+    let signature = SIGNER.sign(&receipt.signing_payload()).signature;
+    SignedReceipt {
+        receipt,
+        machine: SERVER_MACHINE.into(),
+        signature,
     }
 }
 
