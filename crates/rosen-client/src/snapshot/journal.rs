@@ -480,7 +480,13 @@ fn inflate(store: &LooseObjectStore, dir: &Path, source: &Path, id: &ObjectId) -
     let copied = (|| {
         let mut out = io::BufWriter::new(File::create(&temp)?);
         let copied = store.copy_raw_to(id, &mut out).map_err(io::Error::other)?;
-        out.into_inner().map_err(|err| err.into_error())?;
+        // A copy is reused when its length is right (#343). After an OS
+        // crash an unsynced one renamed into place can have that length
+        // but not its bytes, and the server's refusal of it would halt the
+        // journal, so it reaches the disk before it gets its name.
+        out.into_inner()
+            .map_err(|err| err.into_error())?
+            .sync_all()?;
         Ok::<_, io::Error>(copied)
     })();
     match copied {
