@@ -7,9 +7,10 @@ use crate::history::trees::{self, Entry};
 use rosen_core::{Change, ChangeId, ChangeParent, FileMode, ObjectId};
 use rosen_merge::FileEdit;
 use rosen_store::ObjectStore;
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap};
 
-/// One file a change edited: its entry in the parent and in the head.
+/// One file a change edited, with its line regions: what [`read`] reports.
 #[derive(Debug, Clone)]
 pub struct EditedFile {
     pub parent: Option<Entry>,
@@ -17,7 +18,33 @@ pub struct EditedFile {
     /// Zero-based, half-open spans in the parent's lines; insertions are empty
     /// spans. Non-text edits cover the whole file.
     pub regions: FileEdit,
+}
+
+/// One file a change edited, as an overlap query sees it. Most changed paths
+/// are touched by no other change, so the line diff, and the parent bytes it
+/// keeps for carrying, are computed only when [`edits_overlap`] first needs
+/// them, then reused for every later comparison of the same file.
+#[derive(Debug, Clone)]
+pub struct ChangedFile {
+    pub parent: Option<Entry>,
+    pub head: Option<Entry>,
+    diff: OnceCell<LineDiff>,
+}
+
+#[derive(Debug, Clone)]
+struct LineDiff {
+    regions: FileEdit,
     parent_bytes: Option<Vec<u8>>,
+}
+
+impl ChangedFile {
+    fn diff(&self, store: &dyn ObjectStore) -> Result<&LineDiff, OverlapError> {
+        if let Some(diff) = self.diff.get() {
+            return Ok(diff);
+        }
+        let diff = file_edit(store, self.parent, self.head)?;
+        Ok(self.diff.get_or_init(|| diff))
+    }
 }
 
 /// A consistent view of a change's durable live edits. Objects are immutable,
@@ -45,38 +72,50 @@ pub fn read(state: &crate::ServerState, change: &str) -> Result<LiveEdits, Overl
         Ok((current, heads))
     })?;
     let store = rosen_store::LooseObjectStore::open(state.config.objects_dir())?;
+    let files = changed_files(&store, &heads, &current)?
+        .into_iter()
+        .map(|(path, file)| {
+            let regions = file_edit(&store, file.parent, file.head)?.regions;
+            let (parent, head) = (file.parent, file.head);
+            Ok((
+                path,
+                EditedFile {
+                    parent,
+                    head,
+                    regions,
+                },
+            ))
+        })
+        .collect::<Result<_, OverlapError>>()?;
     Ok(LiveEdits {
         change: current.id,
         head: current.head,
         parent_tree: parent_tree(&store, &heads, &current)?,
-        files: edited_files(&store, &heads, &current)?,
+        files,
     })
 }
 
 /// Every file `change` edited against its parent, by path. The parent is the
-/// base commit's tree, or the head of the change it is stacked on.
-pub fn edited_files(
+/// base commit's tree, or the head of the change it is stacked on. This reads
+/// only trees; no file is diffed until an overlap test asks for its regions.
+pub fn changed_files(
     store: &dyn ObjectStore,
     heads: &HashMap<ChangeId, ObjectId>,
     change: &Change,
-) -> Result<BTreeMap<String, EditedFile>, OverlapError> {
+) -> Result<BTreeMap<String, ChangedFile>, OverlapError> {
     let parent_tree = parent_tree(store, heads, change)?;
     let changed = trees::changed_files(store, Some(parent_tree), Some(change.head), &[])?;
-    changed
+    Ok(changed
         .into_iter()
         .map(|file| {
-            let (regions, parent_bytes) = file_edit(store, file.old, file.new)?;
-            Ok((
-                file.path,
-                EditedFile {
-                    parent: file.old,
-                    head: file.new,
-                    regions,
-                    parent_bytes,
-                },
-            ))
+            let edit = ChangedFile {
+                parent: file.old,
+                head: file.new,
+                diff: OnceCell::new(),
+            };
+            (file.path, edit)
         })
-        .collect()
+        .collect())
 }
 
 fn parent_tree(
@@ -144,19 +183,23 @@ impl From<LiveEdits> for rosen_protocol::EditRegions {
 
 /// Whether two changes' edits of the same path overlap. Edits against
 /// different parent versions are compared in the second one's lines.
-pub fn edits_overlap(ours: &EditedFile, theirs: &EditedFile) -> bool {
-    let (our_edit, our_parent) = (&ours.regions, &ours.parent_bytes);
-    let (their_edit, their_parent) = (&theirs.regions, &theirs.parent_bytes);
-    let (FileEdit::Lines(_), FileEdit::Lines(_)) = (&our_edit, &their_edit) else {
-        return true;
+pub fn edits_overlap(
+    store: &dyn ObjectStore,
+    ours: &ChangedFile,
+    theirs: &ChangedFile,
+) -> Result<bool, OverlapError> {
+    let ours = ours.diff(store)?;
+    let theirs = theirs.diff(store)?;
+    let (FileEdit::Lines(_), FileEdit::Lines(_)) = (&ours.regions, &theirs.regions) else {
+        return Ok(true);
     };
     // A line edit always has a parent file: `file_edit` makes an added or
     // deleted file a whole-file edit.
-    let (Some(our_parent), Some(their_parent)) = (our_parent, their_parent) else {
-        return true;
+    let (Some(our_parent), Some(their_parent)) = (&ours.parent_bytes, &theirs.parent_bytes) else {
+        return Ok(true);
     };
-    let ours_carried = our_edit.carried(our_parent, their_parent);
-    ours_carried.overlaps(their_edit)
+    let ours_carried = ours.regions.carried(our_parent, their_parent);
+    Ok(ours_carried.overlaps(&theirs.regions))
 }
 
 /// The edit one file underwent, with its parent's bytes for carrying.
@@ -164,18 +207,25 @@ fn file_edit(
     store: &dyn ObjectStore,
     parent: Option<Entry>,
     head: Option<Entry>,
-) -> Result<(FileEdit, Option<Vec<u8>>), OverlapError> {
+) -> Result<LineDiff, OverlapError> {
+    let whole = LineDiff {
+        regions: FileEdit::Whole,
+        parent_bytes: None,
+    };
     let (Some(parent), Some(head)) = (parent, head) else {
-        return Ok((FileEdit::Whole, None));
+        return Ok(whole);
     };
     // A mode change, symlink or gitlink has no lines to tell apart.
     if parent.mode != head.mode || !is_text_mode(parent.mode) {
-        return Ok((FileEdit::Whole, None));
+        return Ok(whole);
     }
     let parent_bytes = store.read_blob(&parent.id)?.data;
     let head_bytes = store.read_blob(&head.id)?.data;
-    let edit = FileEdit::between(Some(&parent_bytes), Some(&head_bytes));
-    Ok((edit, Some(parent_bytes)))
+    let regions = FileEdit::between(Some(&parent_bytes), Some(&head_bytes));
+    Ok(LineDiff {
+        regions,
+        parent_bytes: Some(parent_bytes),
+    })
 }
 
 fn is_text_mode(mode: FileMode) -> bool {

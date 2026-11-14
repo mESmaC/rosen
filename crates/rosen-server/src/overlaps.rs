@@ -17,7 +17,7 @@ pub mod edits;
 use crate::changes::{self, ChangeError};
 use crate::history::HistoryError;
 use crate::ServerState;
-use edits::EditedFile;
+use edits::ChangedFile;
 use rosen_core::{
     AgentId, ChangeId, ChangeParent, ChangeState, ObjectId, PathPattern, ProjectConfig,
 };
@@ -244,7 +244,7 @@ struct Finder<'a> {
 /// One side of a comparison: the patterns it claims and the files it edited.
 struct Footprint {
     claims: Vec<PathPattern>,
-    edits: BTreeMap<String, EditedFile>,
+    edits: BTreeMap<String, ChangedFile>,
 }
 
 impl Finder<'_> {
@@ -287,7 +287,7 @@ impl Finder<'_> {
         record: &ChangeRecord,
         claimed: &HashMap<ChangeId, Vec<PathPattern>>,
     ) -> Result<Footprint, OverlapError> {
-        let mut edits = edits::edited_files(self.store, &self.heads, &record.change)?;
+        let mut edits = edits::changed_files(self.store, &self.heads, &record.change)?;
         edits.retain(|path, _| self.config.counts_for_overlap(path));
         // Claims are kept whole: a claim's uncounted paths are set aside where
         // it is compared, since a glob can cover counted paths too.
@@ -315,7 +315,7 @@ impl Finder<'_> {
             if theirs.claims.iter().any(|pattern| pattern.matches(path)) {
                 paths.insert(path.clone());
             } else if let Some(other) = theirs.edits.get(path) {
-                if edits::edits_overlap(edit, other) {
+                if edits::edits_overlap(self.store, edit, other)? {
                     paths.insert(path.clone());
                 }
             }
