@@ -113,11 +113,13 @@ pub async fn pending(
 fn save(dir: &Path, target: &str, value: Enrollment) -> io::Result<()> {
     store(target, &value)?;
     let json = serde_json::json!({"address":value.address,"fingerprint":hex(&value.fingerprint),"credential":format!("credman:{target}")});
-    let path = dir.join("upstream.json");
-    atomicwrites::AtomicFile::new(&path, atomicwrites::AllowOverwrite)
-        .write(|f| io::Write::write_all(f, &serde_json::to_vec(&json).map_err(invalid)?))
-        .map_err(invalid)?;
-    Ok(())
+    // Owner-only: a user who could rewrite the address and fingerprint would
+    // have the daemon send its credential to their own server.
+    rosen_platform::owner_only::write(
+        &dir.join("upstream.json"),
+        &serde_json::to_vec(&json).map_err(invalid)?,
+        rosen_platform::owner_only::Replace::Allow,
+    )
 }
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

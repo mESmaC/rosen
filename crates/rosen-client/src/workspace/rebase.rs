@@ -30,8 +30,11 @@ impl Client {
                 "only the owner can apply a rebase".into(),
             ));
         }
-        self.ensure_local(marker.tree).await?;
-        self.ensure_local(change.change.head).await?;
+        // The workspace holds only its sparse paths, before and after (R3).
+        self.ensure_sparse_local(marker.tree, marker.sparse.clone())
+            .await?;
+        self.ensure_sparse_local(change.change.head, marker.sparse.clone())
+            .await?;
         let store = self.local_store().await?;
         // A rebase moves the workspace onto a newer base, whose ignore list
         // may have landed since the workspace was made.

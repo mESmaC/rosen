@@ -201,6 +201,26 @@ pub enum Command {
         /// Change to land.
         change: String,
     },
+    /// Rebase a change onto the current base and write it into its workspace.
+    ///
+    /// The server merges the change's edits onto the base. A file where
+    /// both changed the same lines gets diff3 conflict markers (`<<<<<<<
+    /// ours` is the change's side, `>>>>>>> theirs` the base's) and an open
+    /// conflict. Combine both sides between the markers, then run `rosen
+    /// resolve <file>` and land. A land refused with merge_conflict is fixed
+    /// this way.
+    ///
+    /// Run inside the change's workspace, with its watcher stopped, this
+    /// stores a snapshot first and then writes the rebased files into the
+    /// workspace. With --change, or $ROSEN_CHANGE outside a workspace, only
+    /// the server rebases; the workspace takes the result at its next
+    /// `rosen rebase` there. A stacked change moves when its parent lands.
+    Rebase {
+        /// Change to rebase: its ID or a unique prefix. Defaults to the
+        /// current workspace's change, then $ROSEN_CHANGE.
+        #[arg(long)]
+        change: Option<String>,
+    },
     /// Mark conflicts in paths as resolved after editing the conflict markers.
     ///
     /// A conflict blocks its change from landing until it is resolved. Fix
@@ -634,6 +654,7 @@ impl Command {
             Command::Review(sub) => sub.path(),
             Command::Receipt(ReceiptCommand::Submit { .. }) => "receipt submit",
             Command::Land { .. } => "land",
+            Command::Rebase { .. } => "rebase",
             Command::Resolve { .. } => "resolve",
             Command::Workspace(WorkspaceCommand::List) => "workspace list",
             Command::Workspace(WorkspaceCommand::Watch { .. }) => "workspace watch",

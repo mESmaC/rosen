@@ -13,6 +13,7 @@ sha2.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 rosen-protocol.workspace = true
+rosen-platform.workspace = true
 rosen-store.workspace = true
 reflink-copy.workspace = true
 atomicwrites.workspace = true
@@ -23,9 +24,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 mdns-sd = "0.21"
-
-[target.'cfg(windows)'.dependencies]
-rosen-platform.workspace = true
 
 [dev-dependencies]
 rosen-server.workspace = true

@@ -171,9 +171,10 @@ AGENTS.md lists the commands for each.
 
 Rosen v1 is in active development. As of 2026-11-13:
 
-- **Built:** R1–R14 in SPEC.md, covering import and mirror, snapshots and the offline journal, local and server-side workspaces with the prepared warm pool, guarded deletion, merge and stored conflicts cleared by `rosen resolve`, claims and overlaps, review, optimistic landing with receipt reuse, events, the CLI, history queries, post-land bisection and auto-revert, the server-side AIRC channel, and network enrollment.
-- **In progress:** the multi-machine §5 stress run, Velocity running its whole flow through `rosen-client`, and `lake build` in CI.
-- **Open fixes:** a stacked-change land that can revert other landed edits (#146), and the hardening items on the project Task List.
+- **Built:** R1–R14 in SPEC.md, covering import and mirror, snapshots and the offline journal, local and server-side workspaces with the prepared warm pool, guarded deletion, merge and stored conflicts cleared by `rosen resolve`, claims and overlaps, review, optimistic landing with receipt reuse, events, the CLI, history queries, post-land bisection and auto-revert, the server-side AIRC channel, and network enrollment. Velocity runs its whole agent flow through a `rosen-client` session.
+- **In progress:** the multi-machine §5 stress run and `lake build` in CI.
+
+This list names only milestones. For current work and open fixes, read the project Task List and the repository's open issues; they stay current where this section does not.
 
 Out of scope for v1: a hosted server, regional caches, a virtual filesystem, two-way git sync, object garbage collection, per-directory access control and a GUI. SPEC.md §6 has the full list.
 

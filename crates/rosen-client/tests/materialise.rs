@@ -8,7 +8,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
-use rosen_client::workspace::{materialise, Options, SourceWorkspace};
+use rosen_client::workspace::{materialise, Method, Options, SourceWorkspace};
 use rosen_core::{FileMode, Tree, TreeEntry};
 use rosen_store::{LooseObjectStore, ObjectStore};
 
@@ -49,4 +49,89 @@ fn an_in_place_write_reaches_no_other_workspace_or_the_store() {
     let third = dir.path().join("third");
     materialise(&store, tree, &third, &Options::default()).unwrap();
     assert_eq!(fs::read(third.join("main.rs")).unwrap(), original);
+}
+
+/// SPEC.md R3, issue #39: the block clone path on a real ReFS volume.
+///
+/// Risk: CI's NTFS runners and most machines never take the clone path, so
+/// a clone that fails or returns wrong bytes there would ship unnoticed and
+/// every warm pool workspace would silently fall back to a full copy. The
+/// `windows-refs` CI job puts the temp directory on a Dev Drive and sets
+/// `ROSEN_REQUIRE_BLOCK_CLONE`, so there the fallback fails this test.
+#[test]
+fn a_block_clone_is_brought_to_the_new_tree_and_keeps_build_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LooseObjectStore::open(dir.path().join("objects")).unwrap();
+    let before = put_tree(
+        &store,
+        &[
+            ("keep.rs", b"keep"),
+            ("edit.rs", b"old"),
+            ("gone.rs", b"gone"),
+            ("becomes_dir", b"a file"),
+            ("emptied/only.rs", b"only"),
+        ],
+    );
+    let after_files: &[(&str, &[u8])] = &[
+        ("keep.rs", b"keep"),
+        ("edit.rs", b"new"),
+        ("added.rs", b"added"),
+        ("becomes_dir/inner.rs", b"inner"),
+    ];
+    let after = put_tree(&store, after_files);
+
+    let source = dir.path().join("source");
+    materialise(&store, before, &source, &Options::default()).unwrap();
+    fs::create_dir(source.join("target")).unwrap();
+    fs::write(source.join("target/out.bin"), b"build output").unwrap();
+
+    let dest = dir.path().join("dest");
+    let options = Options {
+        source: Some(SourceWorkspace {
+            dir: source,
+            tree: before,
+        }),
+        ..Options::default()
+    };
+    let report = materialise(&store, after, &dest, &options).unwrap();
+    for (path, data) in after_files {
+        assert_eq!(fs::read(dest.join(path)).unwrap(), *data, "{path}");
+    }
+    if report.method != Method::BlockClone {
+        assert!(
+            std::env::var_os("ROSEN_REQUIRE_BLOCK_CLONE").is_none(),
+            "block clone required, got {report:?}"
+        );
+        return;
+    }
+    // Five tracked files and the build output, all cloned, none copied.
+    assert_eq!((report.cloned, report.copied, report.written), (6, 0, 3));
+    assert_eq!(
+        fs::read(dest.join("target/out.bin")).unwrap(),
+        b"build output"
+    );
+    assert!(!dest.join("gone.rs").exists());
+    assert!(!dest.join("emptied").exists());
+}
+
+/// Stores a tree of regular files given as `/`-separated paths, one level of
+/// directories deep.
+fn put_tree(store: &LooseObjectStore, files: &[(&str, &[u8])]) -> rosen_core::ObjectId {
+    let mut entries = Vec::new();
+    let mut dirs: std::collections::BTreeMap<&str, Vec<TreeEntry>> = Default::default();
+    for (path, data) in files {
+        let blob = store.put_blob(data).unwrap();
+        match path.split_once('/') {
+            Some((dir, name)) => dirs
+                .entry(dir)
+                .or_default()
+                .push(TreeEntry::new(FileMode::Regular, name, blob).unwrap()),
+            None => entries.push(TreeEntry::new(FileMode::Regular, *path, blob).unwrap()),
+        }
+    }
+    for (dir, children) in dirs {
+        let id = store.put_tree(&Tree::new(children).unwrap()).unwrap();
+        entries.push(TreeEntry::new(FileMode::Directory, dir, id).unwrap());
+    }
+    store.put_tree(&Tree::new(entries).unwrap()).unwrap()
 }

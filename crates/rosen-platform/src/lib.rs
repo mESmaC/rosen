@@ -43,3 +43,9 @@ pub fn delete_on_close(_file: &std::fs::File) -> std::io::Result<()> {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 pub mod credentials;
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub mod process;
+
+pub mod owner_only;
