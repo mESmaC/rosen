@@ -7,6 +7,7 @@
 use super::upload::ChangedBlob;
 use super::{Prepared, SnapshotError, STATE_DIR};
 use rosen_core::{ObjectId, ObjectKind};
+use rosen_protocol::ErrorBody;
 use rosen_store::{LooseObjectStore, ObjectStore};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -46,6 +47,16 @@ struct InlineRecord {
 enum OnDisk {
     Stored(StoredRecord),
     Inline(InlineRecord),
+}
+
+/// Why replay stopped: the server refused a record for good (issue #91).
+/// Its name has no number and no `.json`, so it never reads as a record.
+const HALT: &str = "halt";
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct Halt {
+    pub record: u64,
+    pub refusal: ErrorBody,
 }
 
 pub(super) struct Journal {
@@ -150,6 +161,8 @@ impl Journal {
         ids.sort_unstable();
         if ids.is_empty() {
             self.clear_blobs()?;
+            // A halt only guards records; with none left it means nothing.
+            self.resume()?;
         }
         Ok(ids)
     }
@@ -225,6 +238,40 @@ impl Journal {
         bytes
             .and_then(|bytes| self.publish(next, &bytes))
             .map_err(|err| SnapshotError::io(&self.dir, err))
+    }
+
+    /// Stops replay after the server refused record `id` for good. The
+    /// record stays, so the edit it holds survives for R4 to keep.
+    pub fn halt(&self, id: u64, refusal: &ErrorBody) -> io::Result<()> {
+        let halt = Halt {
+            record: id,
+            refusal: refusal.clone(),
+        };
+        let bytes = serde_json::to_vec(&halt).map_err(io::Error::other)?;
+        let temp = self.dir.join("halt.tmp");
+        let mut file = File::create(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(temp, self.dir.join(HALT))
+    }
+
+    /// The refusal that stopped replay, if one did.
+    pub fn halted(&self) -> io::Result<Option<Halt>> {
+        match fs::read(self.dir.join(HALT)) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(io::Error::other),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Lets replay run again.
+    pub fn resume(&self) -> io::Result<()> {
+        match fs::remove_file(self.dir.join(HALT)) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        }
     }
 
     /// Removes a record the server has stored.
