@@ -135,6 +135,9 @@ pub struct Landing {
     /// never releases, rebases or announces twice in parallel. Shared with
     /// the engine that replaces this one ([`Landing::taking_over`]).
     post_landing: Arc<Mutex<HashSet<CommitId>>>,
+    /// Build units of the last base re-checked, carried to the engine that
+    /// replaces this one so a config reload does not cost a full tree walk.
+    units_cache: Arc<super::reach_store::UnitsCache>,
 }
 
 impl Landing {
@@ -145,6 +148,7 @@ impl Landing {
             config,
             recheck_store: None,
             post_landing: Arc::new(Mutex::new(HashSet::new())),
+            units_cache: Arc::default(),
         }
     }
 
@@ -152,6 +156,7 @@ impl Landing {
     /// on the engine this one replaces keeps excluding runs of the same land.
     pub fn taking_over(mut self, old: &Landing) -> Self {
         self.post_landing = Arc::clone(&old.post_landing);
+        self.units_cache = Arc::clone(&old.units_cache);
         self
     }
 
@@ -424,7 +429,9 @@ impl Landing {
             return Ok(true);
         }
         match &self.recheck_store {
-            Some(store) => super::reach_store::reusable(store.as_ref(), base, facts, &lands),
+            Some(store) => {
+                super::reach_store::reusable(store.as_ref(), &self.units_cache, base, facts, &lands)
+            }
             None => Ok(false),
         }
     }
