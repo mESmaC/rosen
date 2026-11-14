@@ -448,12 +448,19 @@ impl Landing {
             commit,
             tier: facts.tier,
         };
-        match self.ledger.compare_and_swap(&base, &record)? {
+        let swap = self
+            .ledger
+            .compare_and_swap_with(&base, &record, receipt.as_ref())?;
+        match swap {
             CasResult::Swapped { .. } => Ok(Attempt::Committed(CommittedLand { record, attempts })),
             // A moved change is decided afresh, like a moved base: the retry
             // reads its new head and state, and refuses if the receipt or
             // approval no longer covers them.
-            CasResult::BaseMoved { .. } | CasResult::ChangeMoved => Ok(Attempt::Retry),
+            // An untrusted receipt is decided afresh too: the retry finds it
+            // invalid and refuses the land.
+            CasResult::BaseMoved { .. }
+            | CasResult::ChangeMoved
+            | CasResult::ReceiptUntrusted => Ok(Attempt::Retry),
             CasResult::OpenConflicts => Ok(Attempt::Done(LandOutcome::Refused(Refusal::Conflicts))),
             CasResult::AlreadyLanded { commit } => {
                 Ok(Attempt::Done(LandOutcome::AlreadyLanded { commit }))

@@ -206,6 +206,32 @@ impl Ledger {
     }
 }
 
+/// True when the stored row for `receipt`'s binding still verifies, read
+/// on the caller's connection so it can run inside the land transaction.
+pub(super) fn stored_receipt_verifies(
+    connection: &Connection,
+    receipt: &Receipt,
+) -> LandResult<bool> {
+    let stored: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT submitter, machine, signature FROM receipts
+             WHERE change_id = ?1 AND head = ?2 AND base = ?3 AND check_set = ?4",
+            params![
+                receipt.change.to_string(),
+                receipt.head.to_string(),
+                receipt.base.to_string(),
+                receipt.check_set
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((submitter, machine, signature)) = stored else {
+        return Ok(false);
+    };
+    let unchanged = submitter == receipt.submitter.as_str();
+    Ok(unchanged && verifies(connection, receipt, &machine, &signature)?)
+}
+
 type Candidate = (String, String, String, String, i64);
 
 /// Receipts for the change's head and check set on a base the ref held,

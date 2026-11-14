@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::conflicts::{self, ConflictStoreError};
 
-use super::{ChangeId, CommitId, LandError, LandResult, ObjectId, Tier};
+use super::{ChangeId, CommitId, LandError, LandResult, ObjectId, Receipt, Tier};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS base_refs (
@@ -79,6 +79,9 @@ pub enum CasResult {
     /// The change's head or state moved after the land read it, so the
     /// receipt and approval it decided on may no longer be for its head.
     ChangeMoved,
+    /// The receipt the land decided on no longer verifies, because its
+    /// machine was revoked or its row changed after the land read it.
+    ReceiptUntrusted,
 }
 
 /// What [`Ledger::init_base`] did.
@@ -253,10 +256,27 @@ impl Ledger {
         expected: &CommitId,
         record: &LandRecord,
     ) -> LandResult<CasResult> {
+        self.compare_and_swap_with(expected, record, None)
+    }
+
+    /// [`Ledger::compare_and_swap`] for a land decided on `receipt`, which
+    /// must still verify inside the swap's transaction: a machine revoked
+    /// after the land read its receipt then stops the base from moving.
+    pub fn compare_and_swap_with(
+        &self,
+        expected: &CommitId,
+        record: &LandRecord,
+        receipt: Option<&Receipt>,
+    ) -> LandResult<CasResult> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(result) = check_attempt(&tx, expected, record)? {
             return Ok(result);
+        }
+        if let Some(receipt) = receipt {
+            if !super::receipt_store::stored_receipt_verifies(&tx, receipt)? {
+                return Ok(CasResult::ReceiptUntrusted);
+            }
         }
         // The predicate is also on the write itself, rather than relying on
         // the earlier read to be the compare half of compare-and-swap.

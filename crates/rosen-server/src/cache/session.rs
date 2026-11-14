@@ -244,10 +244,17 @@ impl Session {
             check_set: submit.check_set.clone(),
             submitter: submit.submitter.clone(),
         };
-        let key = self.state.signing_key().map_err(|err| {
-            let why = format!("could not load this machine's receipt signing key: {err}");
-            ErrorBody::new(ErrorCode::Internal, why)
-        })?;
+        // Loading may create the key file, so it runs off the async workers.
+        let state = Arc::clone(&self.state);
+        let loaded = tokio::task::spawn_blocking(move || state.signing_key()).await;
+        let key = match loaded {
+            Ok(Ok(key)) => key,
+            Ok(Err(err)) => {
+                let why = format!("could not load this machine's receipt signing key: {err}");
+                return Err(ErrorBody::new(ErrorCode::Internal, why));
+            }
+            Err(join) => return Err(ErrorBody::new(ErrorCode::Internal, join.to_string())),
+        };
         submit.change = change.to_string();
         submit.signature = Some(key.sign(&receipt.signing_payload()));
         Ok(())

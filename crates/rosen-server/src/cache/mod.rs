@@ -42,7 +42,7 @@ pub struct CacheState {
 
 impl CacheState {
     /// The key this machine signs its receipts with (SPEC.md §2, R14).
-    fn signing_key(&self) -> io::Result<Arc<crate::machines::signing::MachineKey>> {
+    pub(crate) fn signing_key(&self) -> io::Result<Arc<crate::machines::signing::MachineKey>> {
         let mut slot = self
             .signing_key
             .lock()

@@ -21,7 +21,7 @@ use rosen_protocol::{
 };
 
 use crate::landing::{KeyBinding, LandError, Ledger, SignedReceipt};
-use crate::machines::signing::{MachineKey, SERVER_MACHINE};
+use crate::machines::signing::{self, MachineKey, SERVER_MACHINE};
 use crate::rpc::change_error_code;
 use crate::{ServerConfig, ServerState};
 
@@ -148,6 +148,12 @@ impl ReceiptService {
             .ok_or_else(|| refused("the machine credential is not accepted"))?;
         let signature = signature
             .ok_or_else(|| refused("it is not signed; submit it through the machine's daemon"))?;
+        // Proof of possession first: a signature its own key does not verify
+        // must never bind that key to the machine.
+        let payload = receipt.signing_payload();
+        if !signing::verify(&signature.public_key, &payload, &signature.signature) {
+            return Err(refused("its signature does not verify"));
+        }
         let binding = ledger
             .bind_signing_key(&machine, &signature.public_key)
             .map_err(land_body)?;
