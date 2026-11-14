@@ -18,16 +18,24 @@ ignore = [
 
 # Regenerated after a merge, never merged by hand (R5; AGENTS.md "Shared
 # files"). When both sides change one, the merge result holds the base's copy
-# and the change's owner regenerates it. The pre-land build runs `--locked`,
-# so a lockfile left stale by that never lands.
+# and the change's owner regenerates it.
 generated = [
-    "Cargo.lock",
     "proofs/lake-manifest.json",
-    "proofs/fixtures/*.tsv",
 ]
 
 # Both sides' additions are kept (R5; AGENTS.md "Shared files").
+#
+# `Cargo.lock` and the fixture tables are here, not under `generated`. A
+# generated file both sides changed gets the base's copy, which drops the
+# change's own entries, so every such change would fail `--locked` and go
+# back to its author. Merged as lists they come out right: replaying the
+# last 28 pairs of consecutive changes to `Cargo.lock` as concurrent ones,
+# 20 merged to exactly the regenerated file and the other 8 touched the same
+# lines. The pre-land build runs `--locked`, so a lockfile that merged wrong
+# never lands, and the fixture tests catch a table that did.
 registration_lists = [
+    "Cargo.lock",
+    "proofs/fixtures/*.tsv",
     "Cargo.toml",
     "crates/rosen-protocol/src/message.rs",
     "crates/rosen-server/src/rpc.rs",
