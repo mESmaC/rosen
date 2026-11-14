@@ -1,4 +1,5 @@
 //! Explicit server-side rebases (SPEC R2). No local path is accepted here.
+use crate::events::Staged;
 use crate::history::{self, HistoryError, HistoryResult};
 use crate::{changes, ServerState};
 use rosen_core::{Conflict, ObjectId};
@@ -58,27 +59,26 @@ pub fn rebase(state: &ServerState, change: &str) -> HistoryResult<ChangeRecord> 
         None => marked(&ctx, &before.change, &merged.base)?,
     };
     let paths: Vec<String> = conflicts.iter().map(|(path, _)| path.clone()).collect();
-    let record = state.changes.with_conn(|conn| {
-        changes::rebase_checked_storing(conn, &before.change, merged.base, tree, conflicts)
-    })?;
-    let id = record.change.id.to_string();
-    state.events.publish(
+    // Staged with the rebase, so a stop after it commits cannot lose them (R9).
+    let id = before.change.id;
+    let mut events = vec![Staged::about(
         EventKind::Rebased,
-        Some(id.clone()),
+        id,
         serde_json::json!({
             "onto": merged.base,
             "tree": tree,
             "regenerate": regenerate,
             "conflicts": paths,
         }),
-    );
+    )];
     if !paths.is_empty() {
-        state.events.publish(
-            EventKind::Conflict,
-            Some(id),
-            serde_json::json!({ "paths": paths }),
-        );
+        let detail = serde_json::json!({ "paths": paths });
+        events.push(Staged::about(EventKind::Conflict, id, detail));
     }
+    let record = state.changes.with_conn(|conn| {
+        changes::rebase_checked_storing(conn, &before.change, merged.base, tree, conflicts, &events)
+    })?;
+    state.events.deliver_staged();
     crate::stacks::refresh(state);
     Ok(record)
 }

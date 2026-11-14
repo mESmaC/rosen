@@ -19,6 +19,7 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 use crate::changes::{self, ChangeError};
+use crate::events::Staged;
 use crate::ServerState;
 use rosen_core::review::{anchor_path, check_body};
 use rosen_core::{AgentId, ChangeId, ObjectId};
@@ -90,11 +91,7 @@ fn run(state: &ServerState, call: ReviewCall) -> Result<Response, ReviewError> {
     match call {
         ReviewCall::Approve(req) => {
             let approval = on_conn(state, |c| approvals::approve(c, &req))?;
-            state.events.publish(
-                EventKind::Review,
-                Some(approval.change.to_string()),
-                json!({"action": "approve", "head": approval.head, "by": approval.reviewer}),
-            );
+            state.events.deliver_staged();
             Ok(Response::Approval(approval))
         }
         ReviewCall::Approvals(change) => {
@@ -106,10 +103,8 @@ fn run(state: &ServerState, call: ReviewCall) -> Result<Response, ReviewError> {
         }
         ReviewCall::Comment(req) => comment(state, req).map(Response::ReviewThread),
         ReviewCall::Resolve(req) => {
-            let (thread, changed) = on_conn(state, |c| store::resolve(c, req.thread, &req.by))?;
-            if changed {
-                publish(state, &thread, "resolve", &req.by);
-            }
+            let (thread, _) = on_conn(state, |c| store::resolve(c, req.thread, &req.by))?;
+            state.events.deliver_staged();
             Ok(Response::ReviewThread(thread))
         }
         ReviewCall::List(filter) => {
@@ -129,15 +124,14 @@ fn comment(state: &ServerState, req: CommentRequest) -> Result<ReviewThread, Rev
         CommentTarget::Line { path, line } => {
             let path = anchor_path(&path)?;
             let thread = start_thread(state, id, req.head, &path, line, &req.author, &req.body)?;
-            publish(state, &thread, "comment", &req.author);
+            state.events.deliver_staged();
             Ok(thread)
         }
         CommentTarget::Thread { thread } => {
-            let (thread, reopened) = on_conn(state, |c| {
+            let (thread, _) = on_conn(state, |c| {
                 store::reply(c, id, req.head, thread, &req.author, &req.body)
             })?;
-            let action = if reopened { "reopen" } else { "comment" };
-            publish(state, &thread, action, &req.author);
+            state.events.deliver_staged();
             Ok(thread)
         }
     }
@@ -206,8 +200,9 @@ fn check_head(expected: Option<ObjectId>, actual: ObjectId) -> Result<(), Review
 }
 
 /// A `review` event for the thread's change. R9 delivers it to the change's
-/// owner and reviewers.
-fn publish(state: &ServerState, thread: &ReviewThread, action: &str, by: &AgentId) {
+/// owner and reviewers. The store stages it in the transaction that changes
+/// the thread, so a stop after that commit cannot lose it.
+fn thread_event(thread: &ReviewThread, action: &str, by: &AgentId) -> Staged {
     let detail = json!({
         "thread": thread.id,
         "action": action,
@@ -217,9 +212,7 @@ fn publish(state: &ServerState, thread: &ReviewThread, action: &str, by: &AgentI
         "head": thread.head,
         "by": by,
     });
-    state
-        .events
-        .publish(EventKind::Review, Some(thread.change.to_string()), detail);
+    Staged::about(EventKind::Review, thread.change, detail)
 }
 
 /// Runs review store work on the change registry's connection, which also

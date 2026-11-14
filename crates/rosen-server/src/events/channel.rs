@@ -25,7 +25,7 @@ impl EventLog {
             .iter()
             .map(|agent| agent.as_str().to_owned())
             .collect();
-        self.enqueue(EventKind::Channel, None, detail, |_| Some(audience))
+        self.enqueue(EventKind::Channel, None, detail, |_| Some(audience), None)
     }
 
     /// Commits a channel mutation and its event together. A failure rolls back

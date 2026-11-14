@@ -72,6 +72,7 @@ pub fn ensure_schema(connection: &Connection) -> rusqlite::Result<()> {
     crate::reviews::ensure_schema(&tx)?;
     crate::landing::ensure_schema(&tx)?;
     crate::channel::ensure_schema(&tx)?;
+    crate::events::ensure_outbox_schema(&tx)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()
 }

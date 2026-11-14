@@ -4,6 +4,7 @@
 
 use super::ReviewError;
 use crate::changes;
+use crate::events::stage;
 use rosen_core::{AgentId, ChangeId, ObjectId, ThreadState};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -82,6 +83,7 @@ pub fn open_thread(
         .map_err(|_| ReviewError::Store("negative thread id".into()))?;
     insert_comment(&tx, thread, new.author, new.body, new.head, now)?;
     let stored = load(&tx, thread)?;
+    stage(&tx, &super::thread_event(&stored, "comment", new.author))?;
     tx.commit()?;
     Ok(Some(stored))
 }
@@ -115,8 +117,11 @@ pub fn reply(
         params![thread, next.as_str(), now],
     )?;
     let after = load(&tx, thread)?;
+    let reopened = before.state != next;
+    let action = if reopened { "reopen" } else { "comment" };
+    stage(&tx, &super::thread_event(&after, action, author))?;
     tx.commit()?;
-    Ok((after, before.state != next))
+    Ok((after, reopened))
 }
 
 /// Resolves a thread. Returns it and whether this call changed its state;
@@ -133,6 +138,9 @@ pub fn resolve(
         params![thread, by.as_str(), now_millis()],
     )? == 1;
     let stored = load(&tx, thread)?;
+    if changed {
+        stage(&tx, &super::thread_event(&stored, "resolve", by))?;
+    }
     tx.commit()?;
     Ok((stored, changed))
 }

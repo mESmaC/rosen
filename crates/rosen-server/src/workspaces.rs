@@ -69,7 +69,7 @@ fn edit(
         )
     })?;
     if answer.recorded {
-        snapshots::publish(state, &answer, false);
+        snapshots::delivered(state);
     }
     Ok(answer)
 }
