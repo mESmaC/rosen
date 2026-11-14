@@ -239,9 +239,11 @@ async fn base_moves_only_with_a_receipt_for_the_exact_head_and_a_trusted_base() 
     let landed = store.read_commit(&commit).unwrap();
     assert_eq!((landed.parents, landed.tree), (vec![root], head_a));
     // D15: the landed commit names its change, the receipt that counted and
-    // its approver, and the log reads them back from the commit.
+    // its approver, and the log reads them back from the commit. R14: the
+    // receipt was submitted on the server's own machine, so its submitter is
+    // recorded as the nick on machine `server`, whatever the request said.
     let trailers = LandedTrailers::parse(&landed.message).unwrap();
-    let checker = AgentId::new("checker").unwrap();
+    let checker = AgentId::new("checker@server").unwrap();
     let expected = ReceiptTrailer::new("pre-land", head_a, root, checker).unwrap();
     assert_eq!(trailers.change.to_string(), a);
     assert_eq!(trailers.receipt.as_ref(), Some(&expected));
