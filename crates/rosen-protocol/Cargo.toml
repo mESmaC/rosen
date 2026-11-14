@@ -14,6 +14,9 @@ serde_json.workspace = true
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# The audited Windows ABI code: the current user's SID, the pipe server's
+# owner, and the owner-only descriptor the pipe is created with.
+rosen-platform.workspace = true
 windows-sys = { workspace = true, features = ["Win32_System_Pipes"] }
 
 [target.'cfg(unix)'.dependencies]
