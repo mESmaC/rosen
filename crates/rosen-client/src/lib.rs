@@ -44,6 +44,7 @@ pub mod post_land;
 pub mod project_config;
 pub mod receipts;
 pub mod reviews;
+pub mod run_queue;
 pub mod server_workspace;
 mod session;
 pub mod snapshot;

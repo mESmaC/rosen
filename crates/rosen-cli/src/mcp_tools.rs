@@ -13,13 +13,16 @@ use crate::commands::Cli;
 /// - `mcp` is this server.
 /// - `wait`, `events` and `workspace watch` run until something happens
 ///   elsewhere, and a tool call has to return.
+/// - `run` runs another program with the caller's terminal, for as long as
+///   that takes.
 /// - `import` and `server start` are the operator's: the host that starts
 ///   this server has already started the project's server.
-const NOT_TOOLS: [&str; 6] = [
+const NOT_TOOLS: [&str; 7] = [
     "mcp",
     "wait",
     "events",
     "workspace watch",
+    "run",
     "import",
     "server start",
 ];

@@ -17,6 +17,7 @@ mod rebase_cmd;
 mod receipt_cmd;
 mod resolve_cmd;
 mod review_cmd;
+mod run_cmd;
 mod server;
 mod status_cmd;
 mod workspace_cmd;
@@ -47,12 +48,32 @@ fn main() -> ExitCode {
             "a command is required",
         ));
     };
+    if let Command::Run(args) = command {
+        return run_in_turn(cli.json, args);
+    }
     let operation = command.path();
     match run(&cli, command) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {
             report_error(cli.json, operation, &error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `rosen run`: exits with the command's own status, so a script sees the
+/// build's failure and not just "failed".
+fn run_in_turn(json: bool, args: &commands::RunArgs) -> ExitCode {
+    match run_cmd::run(&args.class, &args.command) {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(status) => match status.code().map(u8::try_from) {
+            Some(Ok(code)) => ExitCode::from(code),
+            // Ended by a signal, or a status a process can't pass on.
+            _ => ExitCode::FAILURE,
+        },
+        Err(error) => {
+            report_error(json, "run", &rosen_client::Error::Io(error));
             ExitCode::FAILURE
         }
     }

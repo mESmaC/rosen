@@ -296,9 +296,33 @@ pub enum Command {
     /// they do from a shell, so the host sets them for this server.
     ///
     /// Commands that run until something happens elsewhere (`wait`,
-    /// `events`, `workspace watch`) and the operator's commands (`import`,
-    /// `server start`, `machine`) are not offered.
+    /// `events`, `workspace watch`), `run`, and the operator's commands
+    /// (`import`, `server start`, `machine`) are not offered.
     Mcp(McpArgs),
+    /// Run a command in its turn in this machine's run queue.
+    ///
+    /// Builds and tests on one machine take turns: each then has the cores
+    /// to itself and finishes sooner than many running side by side. Put a
+    /// heavy command behind it, such as `rosen run -- cargo build -p
+    /// my-crate`. It waits for the turn, runs the command with this
+    /// terminal's input and output, and exits with the command's status.
+    /// While it waits it says, on standard error, what is running.
+    ///
+    /// The checks a land waits on go first, then agents' own runs, then the
+    /// tests after a land, then the warm pool's prepares. Nothing waits for
+    /// ever: after a few minutes a run stops yielding to more important ones.
+    Run(RunArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// What the run is for: `landing`, `build`, `verify` or `prepare`, most
+    /// important first. An agent's own builds and tests are `build`.
+    #[arg(long, default_value = "build", value_name = "CLASS")]
+    pub class: String,
+    /// The command and its arguments, after `--`.
+    #[arg(last = true, required = true, value_name = "COMMAND")]
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -709,6 +733,7 @@ impl Command {
             Command::Events { .. } => "events",
             Command::Machine(sub) => sub.path(),
             Command::Mcp(_) => "mcp",
+            Command::Run(_) => "run",
         }
     }
 }
