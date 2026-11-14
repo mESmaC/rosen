@@ -267,7 +267,10 @@ impl Landing {
             return Ok(RestackReport::default());
         };
         // A finished run announced the land; announcing it here would repeat it.
-        match self.ledger.post_land_pending(&record.ref_name, &record.commit) {
+        match self
+            .ledger
+            .post_land_pending(&record.ref_name, &record.commit)
+        {
             Ok(true) => {}
             Ok(false) => return Ok(RestackReport::default()),
             Err(error) => return Err(error.to_string()),
@@ -465,9 +468,9 @@ impl Landing {
             // approval no longer covers them.
             // An untrusted receipt is decided afresh too: the retry finds it
             // invalid and refuses the land.
-            CasResult::BaseMoved { .. }
-            | CasResult::ChangeMoved
-            | CasResult::ReceiptUntrusted => Ok(Attempt::Retry),
+            CasResult::BaseMoved { .. } | CasResult::ChangeMoved | CasResult::ReceiptUntrusted => {
+                Ok(Attempt::Retry)
+            }
             CasResult::OpenConflicts => Ok(Attempt::Done(LandOutcome::Refused(Refusal::Conflicts))),
             CasResult::AlreadyLanded { commit } => {
                 Ok(Attempt::Done(LandOutcome::AlreadyLanded { commit }))

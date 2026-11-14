@@ -141,20 +141,35 @@ async fn prose_skips_only_receipts_and_base_selects_the_check_set() {
     let (_temp, state, _) = setup();
     let prose = new_change(&state).await;
     write(&state, &prose, "README.md", b"Guide\n").await;
-    assert_eq!(refused(&land_as_is(&state, &prose).await), Some("unapproved"));
-    assert!(matches!(land(&state, &prose).await.outcome, LandStatus::Landed { .. }));
+    assert_eq!(
+        refused(&land_as_is(&state, &prose).await),
+        Some("unapproved")
+    );
+    assert!(matches!(
+        land(&state, &prose).await.outcome,
+        LandStatus::Landed { .. }
+    ));
     let change = new_change(&state).await;
     let config = b"[checks.pre_land]\nname='build-lint'\ncommands=['build','lint']\n";
     let head_config = write(&state, &change, "rosen.toml", config).await;
     assert_eq!(refused(&land(&state, &change).await), Some("no_receipt"));
-    let base = Ledger::open(&state.config.metadata_path()).unwrap().base("main").unwrap().unwrap();
+    let base = Ledger::open(&state.config.metadata_path())
+        .unwrap()
+        .base("main")
+        .unwrap()
+        .unwrap();
     receipt(&state, &change, head_config, base).await;
-    assert!(matches!(land(&state, &change).await.outcome, LandStatus::Landed { .. }));
+    assert!(matches!(
+        land(&state, &change).await.outcome,
+        LandStatus::Landed { .. }
+    ));
     let code = new_change(&state).await;
     write(&state, &code, "code.rs", b"fn main() {}\n").await;
     let answer = land(&state, &code).await;
     assert_eq!(refused(&answer), Some("no_receipt"));
-    let LandStatus::Refused { message, .. } = answer.outcome else { unreachable!() };
+    let LandStatus::Refused { message, .. } = answer.outcome else {
+        unreachable!()
+    };
     assert!(message.contains("`build-lint`"));
 }
 
@@ -421,8 +436,12 @@ async fn a_conflicting_rebase_writes_markers_so_both_sides_can_land() {
     let LandStatus::Landed { commit, .. } = land(&state, &b).await.outcome else {
         panic!("both sides land once the markers are resolved");
     };
-    let landed = store.read_tree(&store.read_commit(&commit).unwrap().tree).unwrap();
-    let landed = store.read_blob(&landed.get(b"shared.rs").unwrap().id).unwrap();
+    let landed = store
+        .read_tree(&store.read_commit(&commit).unwrap().tree)
+        .unwrap();
+    let landed = store
+        .read_blob(&landed.get(b"shared.rs").unwrap().id)
+        .unwrap();
     assert_eq!(landed.data, b"first\nsecond\n");
 }
 
