@@ -118,9 +118,11 @@ pub fn check_tracked_dirs(root: &Path, before: &Layout) -> Result<(), Materialis
 /// artefact of the same name. Left there, the write would fail and the whole
 /// clone would fall back to a plain copy (issue #40).
 ///
-/// Only call this on a fresh clone in a staging directory: it deletes
-/// untracked files, which in an agent's workspace would be its work. A link
-/// is removed, never followed, so nothing outside `root` is touched.
+/// Only call this on a directory Rosen owns and no agent works in: a fresh
+/// clone in a staging directory, or a warm pool slot or template being
+/// refreshed (issue #236). It deletes untracked files, which in an agent's
+/// workspace would be its work. A link is removed, never followed, so
+/// nothing outside `root` is touched.
 pub fn clear_for_tree(
     root: &Path,
     before: &Layout,
