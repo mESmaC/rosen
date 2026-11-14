@@ -41,15 +41,20 @@ pub(super) async fn run(pool: Arc<WarmPool>, endpoint: Endpoint) {
         .await
         .unwrap_or(false);
     pool.state.lock().await.block_clones = block_clones;
+    let mut linking = LinkingPrepare::default();
     loop {
-        if let Err(error) = connected(&pool, &endpoint).await {
+        if let Err(error) = connected(&pool, &endpoint, &mut linking).await {
             eprintln!("rosen warm pool: {error}");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
-async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Error> {
+async fn connected(
+    pool: &Arc<WarmPool>,
+    endpoint: &Endpoint,
+    linking: &mut LinkingPrepare,
+) -> Result<(), Error> {
     let client = Client::connect(endpoint).await?;
     // Subscribe before reading base: a concurrent land is either reflected
     // in the read or queued in the stream, never missed between the two.
@@ -87,7 +92,7 @@ async fn connected(pool: &Arc<WarmPool>, endpoint: &Endpoint) -> Result<(), Erro
         // that arrived during a long prepare is followed before the next one
         // starts.
         if let Some(base) = &base {
-            if prepare_next(pool, base).await {
+            if prepare_next(pool, base, linking).await {
                 continue;
             }
         }
@@ -547,19 +552,52 @@ async fn stop_template(pool: &WarmPool, why: Option<&str>) -> Result<(), Error> 
     Ok(())
 }
 
+/// The base whose prepare commands left a link where it tracks a
+/// directory (#324). Every workspace so prepared is dropped, and its
+/// replacement would run the same commands again at once, back to back for
+/// good. So until the base or its prepare commands change, its workspaces
+/// are handed out unprepared, as after a failed prepare.
+#[derive(Default)]
+struct LinkingPrepare(Option<(ObjectId, Vec<String>)>);
+
+impl LinkingPrepare {
+    fn applies(&self, base: &Base) -> bool {
+        let Some((commit, commands)) = &self.0 else {
+            return false;
+        };
+        *commit == base.commit && *commands == base.commands
+    }
+
+    fn record(&mut self, base: &Base) {
+        if self.applies(base) {
+            return;
+        }
+        eprintln!(
+            "rosen warm pool: the prepare commands at {} replace a tracked directory with a link; \
+             workspaces at this base are handed out unprepared until the base or the commands change",
+            base.commit
+        );
+        self.0 = Some((base.commit, base.commands.clone()));
+    }
+}
+
 /// Runs the prepare commands in one workspace that needs them: the template
 /// when there is one, otherwise a ready slot. Answers whether it ran.
-async fn prepare_next(pool: &WarmPool, base: &Base) -> bool {
+async fn prepare_next(pool: &WarmPool, base: &Base, linking: &mut LinkingPrepare) -> bool {
     if pool.state.lock().await.block_clones {
-        return prepare_template(pool, base).await;
+        return prepare_template(pool, base, linking).await;
     }
     let path = {
         let mut state = pool.state.lock().await;
-        let next = state
+        let mut needed = state
             .ready
             .iter_mut()
-            .find(|slot| slot.prep == Prep::Needed && slot.commit == base.commit);
-        let Some(slot) = next else {
+            .filter(|slot| slot.prep == Prep::Needed && slot.commit == base.commit);
+        if linking.applies(base) {
+            needed.for_each(|slot| slot.prep = Prep::Failed);
+            return false;
+        }
+        let Some(slot) = needed.next() else {
             return false;
         };
         // Running keeps takes away while the commands write into it.
@@ -577,6 +615,7 @@ async fn prepare_next(pool: &WarmPool, base: &Base) -> bool {
             let slot = state.ready.remove(index);
             drop(state);
             drop_unsafe(&slot.path);
+            linking.record(base);
         }
     }
     true
@@ -591,11 +630,16 @@ fn drop_unsafe(path: &std::path::Path) {
     }
 }
 
-async fn prepare_template(pool: &WarmPool, base: &Base) -> bool {
+async fn prepare_template(pool: &WarmPool, base: &Base, linking: &mut LinkingPrepare) -> bool {
     let path = {
         let mut template = pool.template.write().await;
         match template.as_mut() {
+            // Clones of a failed template are handed out unprepared.
             Some(slot) if slot.prep == Prep::Needed && slot.commit == base.commit => {
+                if linking.applies(base) {
+                    slot.prep = Prep::Failed;
+                    return false;
+                }
                 slot.prep = Prep::Running;
                 slot.path.clone()
             }
@@ -615,6 +659,7 @@ async fn prepare_template(pool: &WarmPool, base: &Base) -> bool {
             if let Some(slot) = template.take() {
                 drop_unsafe(&slot.path);
             }
+            linking.record(base);
         }
     }
     true
