@@ -89,9 +89,10 @@ pub fn clone_workspace(
     })
 }
 
-/// Refuses a clone in which a directory the source's tree tracks is not a
-/// real directory: an agent may have replaced it with a link or junction to
-/// somewhere outside its workspace, and the clone copies links as links.
+/// Refuses a clone, or a warm pool refresh, in which a directory the source's
+/// tree tracks is not a real directory: an agent or a prepare command may
+/// have replaced it with a link or junction to somewhere outside its
+/// workspace, and the clone copies links as links.
 /// Every later step resolves tracked paths through it, so it would delete
 /// and write files outside `root`; and the files the source tracks under it
 /// were never cloned. The caller falls back to a plain copy (issue #245).

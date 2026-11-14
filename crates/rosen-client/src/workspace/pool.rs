@@ -309,6 +309,10 @@ pub(super) fn refresh(
     // Only the differing subtrees: walking both whole trees for every slot
     // after every land kept the pool behind a steady stream of lands.
     let (before, after) = Layout::diff(store, slot.tree, tree)?;
+    // A prepare may have left a link where a tracked directory was. Every
+    // step below resolves tracked paths through it, so it would clear and
+    // write files outside the slot; the caller drops the slot (issue #312).
+    super::clone::check_tracked_dirs(&slot.path, &before)?;
     super::clone::clear_for_tree(&slot.path, &before, &after)?;
     let changed = super::bring_to_tree(&slot.path, &before, &after)?;
     super::write_all(store, &slot.path, &changed)?;
