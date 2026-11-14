@@ -68,7 +68,7 @@ fn tree(store: &dyn ObjectStore, id: ObjectId) -> LandResult<ObjectId> {
 
 /// `ours` always means the owning change, even though the landing merge
 /// applies that change onto the base's tree in the opposite argument order.
-fn regions(
+pub(crate) fn regions(
     store: &dyn ObjectStore,
     trees: [ObjectId; 3],
     path: &str,

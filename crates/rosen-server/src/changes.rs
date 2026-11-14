@@ -13,8 +13,8 @@ mod service;
 
 pub use error::ChangeError;
 pub use registry::{
-    abandon, behind_after_land, create, get, list, rebase, rebase_checked, record_snapshot,
-    record_snapshot_merged, resolve, update, AfterLand, NewParent,
+    abandon, behind_after_land, create, get, list, rebase, rebase_checked, rebase_checked_storing,
+    record_snapshot, record_snapshot_merged, resolve, update, AfterLand, NewParent,
 };
 pub use schema::migrate;
 pub use service::{BaseSource, BaseTip, ChangeService, NoBase, METADATA_DB};
