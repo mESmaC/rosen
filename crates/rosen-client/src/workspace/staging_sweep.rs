@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use super::limits::Budget;
+
 /// The tag between a staging directory's destination name and its owner.
 pub(super) const STAGING_TAG: &str = ".rosen-partial-";
 
@@ -58,14 +60,13 @@ pub(super) fn create_marked(dir: &Path) -> io::Result<bool> {
         .create_new(true)
         .open(marker_of(dir));
     match created {
-        Ok(_) => Ok(true),
-        Err(error) => {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             let _ = fs::remove_dir(dir);
-            if error.kind() == io::ErrorKind::AlreadyExists {
-                return Ok(false);
-            }
-            Err(error)
+            Ok(false)
         }
+        // Any other failure, such as a name too long for its suffix, leaves
+        // the build unmarked: it still runs, and a crash only leaks it.
+        _ => Ok(true),
     }
 }
 
@@ -88,7 +89,7 @@ pub(super) fn remove_marked(dir: &Path) {
 /// on its own thread, since a partial clone can hold a whole build's output
 /// and deleting it must not delay the workspace being built. A removal cut
 /// short when the process exits resumes at the next sweep.
-pub(super) fn sweep_abandoned(parent: &Path) {
+pub(super) fn sweep_abandoned(parent: &Path, budget: &Budget) {
     static LAST_SWEEP: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
     let now = Instant::now();
     {
@@ -108,9 +109,14 @@ pub(super) fn sweep_abandoned(parent: &Path) {
     if abandoned.is_empty() {
         return;
     }
+    let budget = budget.clone();
     let _ = std::thread::Builder::new()
         .name("rosen-staging-sweep".into())
-        .spawn(move || abandoned.iter().for_each(|marker| remove_abandoned(marker)));
+        .spawn(move || {
+            for marker in &abandoned {
+                remove_abandoned(marker, &budget);
+            }
+        });
 }
 
 /// The markers in `parent` whose building process no longer runs. A marker
@@ -149,8 +155,10 @@ fn find_abandoned(parent: &Path) -> Vec<PathBuf> {
 /// uses, and the builder is checked after the move. Whoever made the moved
 /// directory had that id and was running when it made it, so if no process
 /// has the id now, the moved directory is abandoned whatever the listing
-/// said; if one does, it goes back. Removal never follows a link.
-fn remove_abandoned(marker: &Path) {
+/// said; if one does, it goes back. Each move goes through `budget`, so the
+/// directory's bytes stay charged until they are deleted. Removal never
+/// follows a link.
+fn remove_abandoned(marker: &Path, budget: &Budget) {
     let Some(pid) = marker.file_stem().and_then(staging_owner) else {
         return;
     };
@@ -170,12 +178,12 @@ fn remove_abandoned(marker: &Path) {
     let Some(tomb) = mark_tombstone(&dir) else {
         return;
     };
-    if fs::rename(&dir, &tomb).is_err() {
+    if budget.rename_staging(&dir, &tomb).is_err() {
         unmark(&tomb);
         return;
     }
     if rosen_platform::process_may_be_running(pid) {
-        if fs::rename(&tomb, &dir).is_ok() {
+        if budget.rename_staging(&tomb, &dir).is_ok() {
             unmark(&tomb);
         }
         return;
@@ -184,19 +192,20 @@ fn remove_abandoned(marker: &Path) {
     remove_marked(&tomb);
 }
 
-/// Creates the marker of a fresh tombstone name for `dir`: `dir`'s own name
-/// as the destination name, owned by this process. A destination name in the
-/// staging form is reserved, so no builder ever stages under it, and if this
-/// process dies mid-removal the marked tombstone is swept like any staging.
+/// The destination name of every tombstone. It has the staging form, which
+/// is reserved, so no builder ever stages under it; and it is short, so a
+/// tombstone name fits wherever the staging name it replaces did.
+const TOMBSTONE_DEST: &str = ".sweep.rosen-partial-0-0";
+
+/// Creates the marker of a fresh tombstone name beside `dir`, owned by this
+/// process. If this process dies mid-removal, the marked tombstone is swept
+/// like any staging.
 fn mark_tombstone(dir: &Path) -> Option<PathBuf> {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
     let own = std::process::id();
     for _ in 0..8 {
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
-        let mut name = std::ffi::OsString::from(".");
-        name.push(dir.file_name()?);
-        name.push(format!("{STAGING_TAG}{own}-{serial}"));
-        let tomb = dir.with_file_name(name);
+        let tomb = dir.with_file_name(format!(".{TOMBSTONE_DEST}{STAGING_TAG}{own}-{serial}"));
         if fs::symlink_metadata(&tomb).is_ok() {
             continue;
         }
@@ -249,6 +258,8 @@ mod tests {
     #[test]
     fn finds_only_dead_builders_marked_staging() {
         let root = tempfile::tempdir().unwrap();
+        let limits = tempfile::tempdir().unwrap();
+        let budget = Budget::open(limits.path(), Default::default()).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--list")
             .stdout(std::process::Stdio::null())
@@ -273,7 +284,7 @@ mod tests {
         fs::write(marker_of(&taken), b"user data").unwrap();
         assert!(!create_marked(&taken).unwrap() && !taken.exists());
         assert_eq!(fs::read(marker_of(&taken)).unwrap(), b"user data");
-        remove_abandoned(&marker_of(&dead_marked));
+        remove_abandoned(&marker_of(&dead_marked), &budget);
         assert!(!dead_marked.exists() && !marker_of(&dead_marked).exists());
         let mut tombstones = fs::read_dir(root.path()).unwrap().flatten();
         assert!(tombstones.all(|entry| !entry.file_name().to_string_lossy().starts_with("..")));
@@ -281,7 +292,7 @@ mod tests {
         // staging, which the claim and second check must leave intact.
         let live = staging(format!(".ws{STAGING_TAG}{own}-0"));
         let before = fs::read_dir(root.path()).unwrap().count();
-        remove_abandoned(&marker_of(&live));
+        remove_abandoned(&marker_of(&live), &budget);
         assert!(live.is_dir() && marker_of(&live).is_file());
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), before);
     }

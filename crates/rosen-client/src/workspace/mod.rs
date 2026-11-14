@@ -153,6 +153,11 @@ pub fn materialise_with_budget(
 ) -> Result<Report, MaterialiseError> {
     let target = Layout::of_tree(store, tree, &options.sparse)?;
     let staging = Staging::create(dest)?;
+    // Only a budgeted build sweeps: moving abandoned staging must keep its
+    // bytes charged to the budget until they are deleted.
+    if let Some(budget) = budget {
+        staging_sweep::sweep_abandoned(staging.parent(), budget);
+    }
     let _permit = reserve(budget, store, &target, options, dest, staging.path())?;
     let mut fallback = None;
     if let Some(source) = &options.source {
@@ -336,7 +341,6 @@ impl Staging {
             .map(Path::to_path_buf)
             .unwrap_or_default();
         fs::create_dir_all(&parent).map_err(|error| MaterialiseError::io(&parent, error))?;
-        staging_sweep::sweep_abandoned(&parent);
         for attempt in 0u32.. {
             let mut hidden = std::ffi::OsString::from(".");
             hidden.push(name);

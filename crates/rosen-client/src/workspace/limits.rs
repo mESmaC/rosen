@@ -96,6 +96,7 @@ struct ScanTarget {
 
 /// Coordinates independent clients and daemon pool workers through OS locks.
 /// Locks are released by the OS on a crash; persistent paths retain disk usage.
+#[derive(Clone)]
 pub struct Budget {
     root: PathBuf,
 }
@@ -190,6 +191,25 @@ impl Budget {
 
     /// Keeps pool workspaces charged when atomically taken into a new path.
     pub fn rename_workspace(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.rename_charged(from, to, |entry, from| entry.destination == from)
+    }
+
+    /// Keeps an abandoned staging directory charged while a sweep moves it
+    /// to a tombstone, or back, so its bytes count until they are deleted.
+    pub(super) fn rename_staging(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.rename_charged(from, to, |entry, from| {
+            entry.staging == from || entry.destination == from
+        })
+    }
+
+    /// Renames `from` to `to`, moving the charge of the newest record
+    /// `made_by` picks for `from` to a new record naming both paths.
+    fn rename_charged(
+        &self,
+        from: &Path,
+        to: &Path,
+        made_by: impl Fn(&Reservation, &Path) -> bool,
+    ) -> io::Result<()> {
         let _lock = self.lock()?;
         let mut registry = self.read()?;
         // Record both names before renaming. A crash on either side of the
@@ -203,7 +223,7 @@ impl Budget {
             .workspaces
             .iter_mut()
             .rev()
-            .find(|entry| entry.destination == from_absolute)
+            .find(|entry| made_by(entry, &from_absolute))
         {
             Some(maker) => {
                 let carried = charge(maker, false);
