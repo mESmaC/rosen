@@ -6,9 +6,43 @@ use rosen_core::claim::PathPattern;
 use rosen_core::project_config::BuildUnit;
 use rosen_core::{Object, ObjectId, ProjectConfig};
 use rosen_store::ObjectStore;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, PoisonError};
 
 type Files = BTreeMap<String, (rosen_core::FileMode, ObjectId)>;
+type Units = BTreeMap<String, BuildUnit>;
+
+/// The Cargo build units of the last base tree read. Consecutive bases
+/// usually differ by one land, so the next base costs a tree diff instead of
+/// a full walk and a reparse of every manifest (issue #108). Units are a pure
+/// function of the tree, so a stale entry is only ever a cache miss.
+#[derive(Default)]
+pub struct UnitsCache(Mutex<Option<(ObjectId, Arc<Units>)>>);
+
+impl UnitsCache {
+    fn units(&self, store: &dyn ObjectStore, tree: ObjectId) -> Checked<Arc<Units>> {
+        let cached = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let units = match cached {
+            Some((at, units)) if at == tree => return Ok(units),
+            Some((at, units)) if !touches_manifest(&changed(store, &at, &tree)?) => units,
+            _ => Arc::new(cargo_units(store, &files(store, tree)?)?),
+        };
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((tree, Arc::clone(&units)));
+        Ok(units)
+    }
+}
+
+/// Whether a change can alter the Cargo build units: `cargo_units` reads
+/// only the root and member manifests.
+fn touches_manifest(paths: &[String]) -> bool {
+    paths
+        .iter()
+        .any(|p| p == "Cargo.toml" || p.ends_with("/Cargo.toml"))
+}
 
 /// Why the check stopped before deciding.
 #[derive(Debug)]
@@ -35,11 +69,12 @@ type Checked<T> = Result<T, Stop>;
 /// it that the land failed.
 pub fn reusable(
     store: &dyn ObjectStore,
+    cache: &UnitsCache,
     base: &CommitId,
     facts: &ChangeFacts,
     lands: &[(CommitId, Tier)],
 ) -> LandResult<bool> {
-    match decide(store, base, facts, lands) {
+    match decide(store, cache, base, facts, lands) {
         Ok(reusable) => Ok(reusable),
         Err(Stop::Unreadable(why)) => {
             let change = facts.id;
@@ -52,6 +87,7 @@ pub fn reusable(
 
 fn decide(
     store: &dyn ObjectStore,
+    cache: &UnitsCache,
     base: &CommitId,
     facts: &ChangeFacts,
     lands: &[(CommitId, Tier)],
@@ -59,13 +95,17 @@ fn decide(
     let config = crate::project_config::resolve(store, base)
         .map_err(error)?
         .config;
-    let base_files = files(store, base)?;
-    let graph = graph(store, &base_files, &config)?;
+    let units = if config.build_units.is_empty() {
+        cache
+            .units(store, root_tree(store, base)?)?
+            .as_ref()
+            .clone()
+    } else {
+        config.build_units.clone()
+    };
+    let graph = graph(units, &config);
     let own = graph.reach(
-        &changed(
-            &files(store, &facts.merge_base)?,
-            &files(store, &facts.head)?,
-        ),
+        &changed(store, &facts.merge_base, &facts.head)?,
         facts.tier == Tier::ProseOnly,
     );
     for (commit, tier) in lands {
@@ -76,7 +116,7 @@ fn decide(
         let Some(parent) = record.parents.first() else {
             return Ok(false);
         };
-        let paths = changed(&files(store, parent)?, &files(store, commit)?);
+        let paths = changed(store, parent, commit)?;
         if !independent(&own, &graph.reach(&paths, false)) {
             return Ok(false);
         }
@@ -92,12 +132,15 @@ fn unreadable(e: impl std::fmt::Display) -> Stop {
     Stop::Unreadable(e.to_string())
 }
 
-fn files(store: &dyn ObjectStore, id: &ObjectId) -> Checked<Files> {
-    let tree = match store.read(id).map_err(error)? {
-        Object::Commit(c) => c.tree,
-        Object::Tree(_) => *id,
-        _ => return Err(error("build reach expects a commit or tree").into()),
-    };
+fn root_tree(store: &dyn ObjectStore, id: &ObjectId) -> Checked<ObjectId> {
+    match store.read(id).map_err(error)? {
+        Object::Commit(c) => Ok(c.tree),
+        Object::Tree(_) => Ok(*id),
+        _ => Err(error("build reach expects a commit or tree").into()),
+    }
+}
+
+fn files(store: &dyn ObjectStore, tree: ObjectId) -> Checked<Files> {
     let mut out = Files::new();
     walk(store, tree, "", &mut out)?;
     Ok(out)
@@ -116,26 +159,71 @@ fn walk(store: &dyn ObjectStore, tree: ObjectId, prefix: &str, out: &mut Files) 
     Ok(())
 }
 
-fn changed(old: &Files, new: &Files) -> Vec<String> {
-    old.keys()
-        .chain(new.keys())
-        .filter(|p| old.get(*p) != new.get(*p))
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect()
+/// Paths of files that differ between two commits or trees. Subtrees with
+/// equal ids are skipped, so the cost follows the size of the change rather
+/// than of the repository (issue #108).
+fn changed(store: &dyn ObjectStore, old: &ObjectId, new: &ObjectId) -> Checked<Vec<String>> {
+    let (old, new) = (root_tree(store, old)?, root_tree(store, new)?);
+    let mut out = BTreeSet::new();
+    diff_trees(store, Some(old), Some(new), "", &mut out)?;
+    Ok(out.into_iter().collect())
 }
 
-fn graph(store: &dyn ObjectStore, files: &Files, config: &ProjectConfig) -> Checked<BuildGraph> {
-    let units = if config.build_units.is_empty() {
-        cargo_units(store, files)?
-    } else {
-        config.build_units.clone()
+type Entry = (rosen_core::FileMode, ObjectId);
+
+fn diff_trees(
+    store: &dyn ObjectStore,
+    old: Option<ObjectId>,
+    new: Option<ObjectId>,
+    prefix: &str,
+    out: &mut BTreeSet<String>,
+) -> Checked<()> {
+    if old == new {
+        return Ok(());
+    }
+    let (old, new) = (entries(store, old)?, entries(store, new)?);
+    let names: BTreeSet<&Vec<u8>> = old.keys().chain(new.keys()).collect();
+    let is_file = |e: Option<&Entry>| e.is_some_and(|(mode, _)| !mode.is_tree());
+    // A file replaced by a directory, or the reverse, walks the directory
+    // side against nothing, so every file under it counts as changed.
+    let subtree = |e: Option<&Entry>| e.filter(|(mode, _)| mode.is_tree()).map(|(_, id)| *id);
+    for name in names {
+        let (before, after) = (old.get(name), new.get(name));
+        if before == after {
+            continue;
+        }
+        let path = format!("{prefix}{}", std::str::from_utf8(name).map_err(unreadable)?);
+        if is_file(before) || is_file(after) {
+            out.insert(path.clone());
+        }
+        diff_trees(
+            store,
+            subtree(before),
+            subtree(after),
+            &format!("{path}/"),
+            out,
+        )?;
+    }
+    Ok(())
+}
+
+fn entries(store: &dyn ObjectStore, tree: Option<ObjectId>) -> Checked<BTreeMap<Vec<u8>, Entry>> {
+    let Some(tree) = tree else {
+        return Ok(BTreeMap::new());
     };
-    Ok(BuildGraph {
+    let tree = store.read_tree(&tree).map_err(error)?;
+    Ok(tree
+        .entries()
+        .iter()
+        .map(|e| (e.name.clone(), (e.mode, e.id)))
+        .collect())
+}
+
+fn graph(units: Units, config: &ProjectConfig) -> BuildGraph {
+    BuildGraph {
         units,
         workspace_inputs: config.workspace_inputs.clone(),
-    })
+    }
 }
 
 fn manifest(store: &dyn ObjectStore, id: &ObjectId) -> Checked<toml::Value> {
@@ -144,7 +232,7 @@ fn manifest(store: &dyn ObjectStore, id: &ObjectId) -> Checked<toml::Value> {
     toml::from_str(text).map_err(unreadable)
 }
 
-fn cargo_units(store: &dyn ObjectStore, files: &Files) -> Checked<BTreeMap<String, BuildUnit>> {
+fn cargo_units(store: &dyn ObjectStore, files: &Files) -> Checked<Units> {
     let Some((_, root)) = files.get("Cargo.toml") else {
         return Ok(BTreeMap::new());
     };
@@ -298,15 +386,30 @@ mod tests {
             approved_head: None,
             approvers: vec![],
         };
-        assert!(reusable(&store, &landed, &facts, &[(landed, Tier::Normal)]).unwrap());
+        assert!(reusable(
+            &store,
+            &UnitsCache::default(),
+            &landed,
+            &facts,
+            &[(landed, Tier::Normal)]
+        )
+        .unwrap());
         let shared =
             format!("{config}[build_units.app]\npaths=['app/**']\ndependencies=['a','b']\n");
         let base = commit(&store, tree(&store, "a", "b", &shared), vec![landed]);
-        assert!(!reusable(&store, &base, &facts, &[(landed, Tier::Normal)]).unwrap());
+        assert!(!reusable(
+            &store,
+            &UnitsCache::default(),
+            &base,
+            &facts,
+            &[(landed, Tier::Normal)]
+        )
+        .unwrap());
         let changed_a = commit(&store, tree(&store, "changed a", "b", config), vec![root]);
         let reverted = commit(&store, tree(&store, "a", "b", config), vec![changed_a]);
         assert!(!reusable(
             &store,
+            &UnitsCache::default(),
             &reverted,
             &facts,
             &[(changed_a, Tier::Normal), (reverted, Tier::Normal)]
@@ -345,7 +448,72 @@ mod tests {
             approved_head: None,
             approvers: vec![],
         };
-        assert!(!reusable(&store, &landed, &facts, &[(landed, Tier::Normal)]).unwrap());
+        assert!(!reusable(
+            &store,
+            &UnitsCache::default(),
+            &landed,
+            &facts,
+            &[(landed, Tier::Normal)]
+        )
+        .unwrap());
+    }
+
+    fn nested(store: &dyn ObjectStore, files: &[(&str, &str)]) -> ObjectId {
+        let mut dirs: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+        let mut entries = vec![];
+        for (path, text) in files {
+            match path.split_once('/') {
+                Some((dir, rest)) => dirs.entry(dir).or_default().push((rest, text)),
+                None => entries.push(TreeEntry {
+                    name: path.as_bytes().to_vec(),
+                    mode: FileMode::Regular,
+                    id: store.put_blob(text.as_bytes()).unwrap(),
+                }),
+            }
+        }
+        for (dir, inner) in dirs {
+            entries.push(TreeEntry {
+                name: dir.as_bytes().to_vec(),
+                mode: FileMode::Directory,
+                id: nested(store, &inner),
+            });
+        }
+        store.put_tree(&Tree::new(entries).unwrap()).unwrap()
+    }
+
+    // Risk (issue #108): units cached for one base and reused for the next
+    // after a member manifest changed deep in the tree would miss a new
+    // dependency, so a receipt is reused for code it never built (R8).
+    #[test]
+    fn cached_units_follow_a_nested_manifest_change() {
+        let store = MemoryObjectStore::new();
+        let root = ("Cargo.toml", "[workspace]\nmembers=['crates/*']\n");
+        let a = ("crates/a/Cargo.toml", "[package]\nname='a'\n");
+        let b = ("crates/b/Cargo.toml", "[package]\nname='b'\n");
+        let source = ("crates/b/src/lib.rs", "");
+        let app = ("crates/app/Cargo.toml", "[package]\nname='app'\n");
+        let uses_b = (
+            app.0,
+            "[package]\nname='app'\n[dependencies]\nb={path='../b'}\n",
+        );
+        let cache = UnitsCache::default();
+        let before = nested(&store, &[root, a, b, source, app]);
+        assert!(cache.units(&store, before).unwrap()["app"]
+            .dependencies
+            .is_empty());
+        let edited = nested(&store, &[root, a, b, ("crates/b/src/lib.rs", "x"), app]);
+        assert!(cache.units(&store, edited).unwrap()["app"]
+            .dependencies
+            .is_empty());
+        let after = nested(&store, &[root, a, b, source, uses_b]);
+        assert_eq!(
+            cache.units(&store, after).unwrap()["app"].dependencies,
+            ["b"]
+        );
+        assert_eq!(
+            changed(&store, &before, &after).unwrap(),
+            ["crates/app/Cargo.toml"]
+        );
     }
 
     // Risk: missing inherited or target-specific dependencies makes unrelated
@@ -368,7 +536,10 @@ mod tests {
                 )
             })
             .collect();
-        let graph = graph(&store, &files, &ProjectConfig::default()).unwrap();
+        let graph = graph(
+            cargo_units(&store, &files).unwrap(),
+            &ProjectConfig::default(),
+        );
         let a = graph.reach(&["crates/a/src/lib.rs".into()], false);
         let b = graph.reach(&["crates/b/src/lib.rs".into()], false);
         assert!(a.contains("app") && b.contains("app"));
