@@ -16,6 +16,7 @@ rosen-client.workspace = true
 rosen-store.workspace = true
 rosen-merge.workspace = true
 rosen-protocol.workspace = true
+rosen-platform.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 getrandom.workspace = true
@@ -29,13 +30,9 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
-atomicwrites.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-
-[target.'cfg(windows)'.dev-dependencies]
-rosen-platform.workspace = true
