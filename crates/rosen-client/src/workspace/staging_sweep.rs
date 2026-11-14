@@ -18,6 +18,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -109,13 +110,13 @@ pub(super) fn sweep_abandoned(parent: &Path) {
     }
     let _ = std::thread::Builder::new()
         .name("rosen-staging-sweep".into())
-        .spawn(move || abandoned.iter().for_each(|dir| remove_abandoned(dir)));
+        .spawn(move || abandoned.iter().for_each(|marker| remove_abandoned(marker)));
 }
 
-/// The staging directories in `parent` that carry a marker file and whose
-/// building process no longer runs. A marker is always empty, so a file with
-/// contents is never taken for one and never removed. A marker whose directory is gone, left
-/// by a crash just after publishing, is listed too, so it is cleared.
+/// The markers in `parent` whose building process no longer runs. A marker
+/// is always empty, so a file with contents is never taken for one and never
+/// removed. A marker whose directory is gone, left by a crash just after
+/// publishing, is listed too, so it is cleared.
 fn find_abandoned(parent: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(parent) else {
         return Vec::new();
@@ -135,20 +136,47 @@ fn find_abandoned(parent: &Path) -> Vec<PathBuf> {
             }
             let pid = staging_owner(marker.file_stem()?)?;
             let abandoned = pid != own && !rosen_platform::process_may_be_running(pid);
-            abandoned.then(|| marker.with_extension(""))
+            abandoned.then_some(marker)
         })
         .collect()
 }
 
-/// Removes an abandoned staging directory and its marker. Only a real
-/// directory is removed: a link or file carrying the name is left, so
-/// removal never follows a link out of the parent.
-fn remove_abandoned(dir: &Path) {
-    match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.is_dir() => remove_marked(dir),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => unmark(dir),
-        _ => {}
+/// Removes the staging directory `marker` marks, then the marker, when its
+/// builder still does not run. The listing that found `marker` may be stale:
+/// another sweep may have removed that directory since, and a new builder
+/// with the same, reused id may have made a new one under the name. So the
+/// marker is first claimed by renaming it, which only one sweeper can do,
+/// and the builder is checked again after the claim. A builder that made the
+/// marker before the claim is seen running then; one starting after it finds
+/// the directory still there and takes another name. Only a real directory
+/// is removed, so removal never follows a link out of the parent.
+fn remove_abandoned(marker: &Path) {
+    static CLAIMS: AtomicU64 = AtomicU64::new(0);
+    let Some(pid) = marker.file_stem().and_then(staging_owner) else {
+        return;
+    };
+    let mut claim = marker.as_os_str().to_owned();
+    let serial = CLAIMS.fetch_add(1, Ordering::Relaxed);
+    claim.push(format!(".sweep-{}-{serial}", std::process::id()));
+    let claim = PathBuf::from(claim);
+    if fs::rename(marker, &claim).is_err() {
+        return;
     }
+    let dir = marker.with_extension("");
+    let removed = !rosen_platform::process_may_be_running(pid)
+        && match fs::symlink_metadata(&dir) {
+            Ok(meta) => meta.is_dir() && fs::remove_dir_all(&dir).is_ok(),
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
+        };
+    // Whatever was not removed keeps its marker, so a later sweep retries
+    // it. A restored marker never adopts a directory made since: a builder
+    // taking the name creates its marker exclusively, finds this one and
+    // gives the name up.
+    let _ = if removed {
+        fs::remove_file(&claim)
+    } else {
+        fs::rename(&claim, marker)
+    };
 }
 
 /// Whether `name` has the form of a staging directory or its marker. Rosen
@@ -205,13 +233,18 @@ mod tests {
         let not_marker = staging(format!(".ws{STAGING_TAG}{dead}-5"));
         fs::create_dir(&not_marker).unwrap();
         fs::write(marker_of(&not_marker), b"user data").unwrap();
-        assert_eq!(find_abandoned(root.path()), vec![dead_marked.clone()]);
+        assert_eq!(find_abandoned(root.path()), vec![marker_of(&dead_marked)]);
         // A file already holding a marker's name is kept and the name given up.
         let taken = staging(format!(".ws{STAGING_TAG}{own}-6"));
         fs::write(marker_of(&taken), b"user data").unwrap();
         assert!(!create_marked(&taken).unwrap() && !taken.exists());
         assert_eq!(fs::read(marker_of(&taken)).unwrap(), b"user data");
-        remove_abandoned(&dead_marked);
+        remove_abandoned(&marker_of(&dead_marked));
         assert!(!dead_marked.exists() && !marker_of(&dead_marked).exists());
+        // A listing gone stale: the name now holds a running builder's
+        // staging, which the claim and second check must leave intact.
+        let live = staging(format!(".ws{STAGING_TAG}{own}-0"));
+        remove_abandoned(&marker_of(&live));
+        assert!(live.is_dir() && marker_of(&live).is_file());
     }
 }
