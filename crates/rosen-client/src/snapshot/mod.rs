@@ -189,6 +189,9 @@ impl Snapshotter {
             // New rules can un-ignore files nobody wrote to since.
             self.scan(&Dirty::Full, &mut outcome)?;
         }
+        if outcome.ignore_changed {
+            scan::drop_ignored(&mut self.ignore, &self.index, &mut outcome);
+        }
         let blobs = upload::read_candidates(
             &self.root,
             &mut self.index,
