@@ -537,6 +537,21 @@ pub enum WorkspaceCommand {
         /// Workspace to delete.
         workspace: String,
     },
+    /// Show this machine's materialisation caps and the load against them,
+    /// after setting either cap when given.
+    ///
+    /// A materialisation over a cap waits until it fits, and says why on
+    /// stderr after a few seconds. A raised cap admits waiting requests at
+    /// once; a lowered one stops no running copy. The caps persist in the
+    /// daemon's data directory for every client and the warm pool.
+    Limits {
+        /// Materialisations that may copy at once on this machine.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        materialisations: Option<u32>,
+        /// Disk budget for this machine's workspaces, in GiB.
+        #[arg(long, value_name = "GIB", value_parser = clap::value_parser!(u64).range(1..=(u64::MAX >> 30)))]
+        disk_gib: Option<u64>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -659,6 +674,7 @@ impl Command {
             Command::Workspace(WorkspaceCommand::List) => "workspace list",
             Command::Workspace(WorkspaceCommand::Watch { .. }) => "workspace watch",
             Command::Workspace(WorkspaceCommand::Delete { .. }) => "workspace delete",
+            Command::Workspace(WorkspaceCommand::Limits { .. }) => "workspace limits",
             Command::Server(ServerCommand::Start) => "server start",
             Command::Server(ServerCommand::Status) => "server status",
             Command::Config(ConfigCommand::Show { .. }) => "config show",

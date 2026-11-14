@@ -40,7 +40,39 @@ pub async fn run(
                 );
             }
         }
+        WorkspaceCommand::Limits {
+            materialisations,
+            disk_gib,
+        } => {
+            let load = client
+                .load_limits(
+                    materialisations.map(|n| n as usize),
+                    disk_gib.map(|gib| gib << 30),
+                )
+                .await?;
+            print_limits(json, &load);
+        }
         WorkspaceCommand::Watch { .. } => unreachable!("watch has its own event loop"),
     }
     Ok(true)
+}
+
+fn print_limits(json: bool, load: &rosen_client::workspace::limits::Load) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"schema":crate::output::WORKSPACE_LIMITS_SCHEMA, "limits":load})
+        );
+        return;
+    }
+    let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
+    println!(
+        "materialisations  {} running of {}",
+        load.running, load.settings.materialisations
+    );
+    println!(
+        "disk              {:.1} GiB charged of {:.1} GiB",
+        gib(load.charged_bytes),
+        gib(load.settings.disk_bytes)
+    );
 }

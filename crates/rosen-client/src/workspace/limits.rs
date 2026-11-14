@@ -33,11 +33,93 @@ impl Default for Settings {
     }
 }
 
+/// This machine's admission caps and what currently counts against them.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Load {
+    pub settings: Settings,
+    /// Materialisations whose copy is running and holds a slot.
+    pub running: usize,
+    /// Bytes charged to the disk budget, as of the last scan plus later
+    /// reservations.
+    pub charged_bytes: u64,
+}
+
+/// Why a queued request is not admitted yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Blocked {
+    /// No scan has measured the existing workspaces yet.
+    FirstScan,
+    /// Every one of the `cap` materialisation slots is taken.
+    Slots { cap: usize },
+    /// The request's bytes do not fit beside the bytes already charged.
+    Disk { needed: u64, charged: u64, cap: u64 },
+}
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::FirstScan => write!(f, "waits for the first scan of existing workspaces"),
+            Self::Slots { cap } => write!(
+                f,
+                "waits for a materialisation slot: all {cap} are running; \
+                 raise the cap with `rosen workspace limits --materialisations <N>`"
+            ),
+            // SPEC R3: an over-cap request waits rather than failing, and the
+            // cap can be raised while it waits, so say exactly what it needs.
+            Self::Disk { needed, cap, .. } if needed > cap => write!(
+                f,
+                "needs {}, more than the whole {} disk budget; it waits until the \
+                 cap is raised with `rosen workspace limits --disk-gib <N>`",
+                size(needed),
+                size(cap)
+            ),
+            Self::Disk {
+                needed,
+                charged,
+                cap,
+            } => write!(
+                f,
+                "waits for disk budget: needs {}, {} of {} already charged; delete a \
+                 workspace or raise the cap with `rosen workspace limits --disk-gib <N>`",
+                size(needed),
+                size(charged),
+                size(cap)
+            ),
+        }
+    }
+}
+
+/// Bytes in the largest binary unit they reach, so a small request never
+/// reads as "0.0 GiB".
+fn size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["bytes", "KiB", "MiB", "GiB"];
+    let unit = (1..UNITS.len())
+        .rev()
+        .find(|&unit| bytes >> (10 * unit) > 0)
+        .unwrap_or(0);
+    if unit == 0 {
+        return format!("{bytes} bytes");
+    }
+    format!(
+        "{:.1} {}",
+        bytes as f64 / (1u64 << (10 * unit)) as f64,
+        UNITS[unit]
+    )
+}
+
 /// The slot of a pool take's record, which never holds a slot lease.
 const NO_SLOT: usize = usize::MAX;
 
 /// How often a queued request retries admission.
 const POLL: Duration = Duration::from_millis(100);
+
+/// A queued request says why it waits once it has waited this long, so a
+/// short queue stays quiet but a stuck one is never silent.
+const REPORT_AFTER: Duration = Duration::from_secs(5);
+
+/// A request still waiting repeats its reason this often, and at once when
+/// the reason changes.
+const REPORT_EVERY: Duration = Duration::from_secs(60);
 
 /// The youngest scan that is rescanned. A scan slower than this waits as
 /// long as it took, so scanning never keeps the disk busy more than half
@@ -131,8 +213,10 @@ impl Budget {
     }
 
     /// Waits without changing any existing workspace when disk or slots are full.
+    /// Says on stderr why once it has waited a few seconds (see `WaitReport`).
     pub fn acquire(&self, destination: &Path, staging: &Path, bytes: u64) -> io::Result<Permit> {
         let destination = std::path::absolute(destination)?;
+        let mut report = WaitReport::new(&destination);
         loop {
             let lock = self.lock()?;
             let registry = self.read()?;
@@ -143,50 +227,90 @@ impl Budget {
                     continue;
                 }
             }
-            if let Some(slot) = self.admit(registry, &destination, staging, bytes)? {
-                return Ok(Permit { _slot: slot });
+            match self.admit(registry, &destination, staging, bytes)? {
+                Ok(slot) => {
+                    report.admitted();
+                    return Ok(Permit { _slot: slot });
+                }
+                Err(blocked) => {
+                    drop(lock);
+                    report.waiting(blocked);
+                    std::thread::sleep(POLL);
+                }
             }
-            drop(lock);
-            std::thread::sleep(POLL);
         }
     }
 
     /// Records the reservation and returns its slot lease when the stored
-    /// sizes leave room and a slot is free. Caller holds the registry lock.
+    /// sizes leave room and a slot is free, or else why it cannot be
+    /// admitted yet. Caller holds the registry lock.
     fn admit(
         &self,
         mut registry: Registry,
         destination: &Path,
         staging: &Path,
         bytes: u64,
-    ) -> io::Result<Option<File>> {
+    ) -> io::Result<Result<File, Blocked>> {
         // Before the first scan finishes, existing workspaces are unknown.
         if registry.last_scan.is_none() {
-            return Ok(None);
+            return Ok(Err(Blocked::FirstScan));
         }
-        let free = registry
-            .settings
-            .disk_bytes
-            .saturating_sub(self.usage(&registry)?);
-        if bytes > free {
-            return Ok(None);
+        let (cap, charged) = (registry.settings.disk_bytes, self.charged(&registry)?);
+        if bytes > cap.saturating_sub(charged) {
+            return Ok(Err(Blocked::Disk {
+                needed: bytes,
+                charged,
+                cap,
+            }));
         }
-        let Some((slot, file)) = self.free_slot(registry.settings.materialisations)? else {
-            return Ok(None);
+        let cap = registry.settings.materialisations;
+        let Some((slot, file)) = self.free_slot(cap)? else {
+            return Ok(Err(Blocked::Slots { cap }));
         };
         let (destination, staging) = (destination.to_path_buf(), staging.to_path_buf());
         push_reservation(&mut registry, destination, staging, bytes, slot);
         self.save(&registry)?;
-        Ok(Some(file))
+        Ok(Ok(file))
     }
 
     /// Raises or lowers disk admission without disturbing existing workspaces.
     /// A queued request observes the new cap on its next admission attempt.
     pub fn set_disk_cap(&self, bytes: u64) -> io::Result<()> {
+        self.set_caps(None, Some(bytes))
+    }
+
+    /// Changes either cap, leaving the other as stored. Lowering the slot
+    /// cap never stops a running copy: new admissions use only the lower
+    /// slots, so the running copies above it finish and are not replaced.
+    /// A queued request observes the new caps on its next admission attempt.
+    pub fn set_caps(
+        &self,
+        materialisations: Option<usize>,
+        disk_bytes: Option<u64>,
+    ) -> io::Result<()> {
+        if materialisations == Some(0) || disk_bytes == Some(0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "load caps must be positive",
+            ));
+        }
         let _lock = self.lock()?;
         let mut registry = self.read()?;
-        registry.settings.disk_bytes = bytes;
+        let settings = &mut registry.settings;
+        settings.materialisations = materialisations.unwrap_or(settings.materialisations);
+        settings.disk_bytes = disk_bytes.unwrap_or(settings.disk_bytes);
         self.save(&registry)
+    }
+
+    /// The caps in force and what counts against them now.
+    pub fn load(&self) -> io::Result<Load> {
+        let _lock = self.lock()?;
+        let registry = self.read()?;
+        Ok(Load {
+            settings: registry.settings,
+            running: self.active(&registry)?.len(),
+            charged_bytes: self.charged(&registry)?,
+        })
     }
 
     /// Keeps pool workspaces charged when atomically taken into a new path.
@@ -320,7 +444,7 @@ impl Budget {
         Ok(active)
     }
 
-    fn usage(&self, registry: &Registry) -> io::Result<u64> {
+    fn charged(&self, registry: &Registry) -> io::Result<u64> {
         let active = self.active(registry)?;
         Ok(registry
             .workspaces
@@ -414,6 +538,59 @@ fn rename_while_walked(from: &Path, to: &Path) -> io::Result<()> {
                 delay = (delay * 2).min(Duration::from_millis(100));
             }
             result => return result,
+        }
+    }
+}
+
+/// Tells whoever started a queued request why it waits. Without it a
+/// request queued behind a full budget looks the same as a hung daemon.
+/// It goes to stderr of the waiting process: the CLI for a client's own
+/// materialisation, the daemon's log for a pool worker's.
+struct WaitReport<'a> {
+    destination: &'a Path,
+    started: Instant,
+    /// When it last reported, and the reason it gave.
+    last: Option<(Instant, Blocked)>,
+}
+
+impl<'a> WaitReport<'a> {
+    fn new(destination: &'a Path) -> Self {
+        Self {
+            destination,
+            started: Instant::now(),
+            last: None,
+        }
+    }
+
+    fn waiting(&mut self, blocked: Blocked) {
+        if self.started.elapsed() < REPORT_AFTER {
+            return;
+        }
+        let due = match self.last {
+            None => true,
+            Some((at, last)) => {
+                std::mem::discriminant(&last) != std::mem::discriminant(&blocked)
+                    || at.elapsed() >= REPORT_EVERY
+            }
+        };
+        if due {
+            eprintln!(
+                "rosen: materialising {} {blocked} (queued {} s)",
+                self.destination.display(),
+                self.started.elapsed().as_secs()
+            );
+            self.last = Some((Instant::now(), blocked));
+        }
+    }
+
+    /// Closes a wait it reported, so the reader knows it moved on.
+    fn admitted(&self) {
+        if self.last.is_some() {
+            eprintln!(
+                "rosen: materialising {} admitted after {} s",
+                self.destination.display(),
+                self.started.elapsed().as_secs()
+            );
         }
     }
 }
