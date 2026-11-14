@@ -145,38 +145,72 @@ fn find_abandoned(parent: &Path) -> Vec<PathBuf> {
 /// builder still does not run. The listing that found `marker` may be stale:
 /// another sweep may have removed that directory since, and a new builder
 /// with the same, reused id may have made a new one under the name. So the
-/// marker is first claimed by renaming it, which only one sweeper can do,
-/// and the builder is checked again after the claim. A builder that made the
-/// marker before the claim is seen running then; one starting after it finds
-/// the directory still there and takes another name. Only a real directory
-/// is removed, so removal never follows a link out of the parent.
+/// directory is first moved, atomically, to a tombstone name only this sweep
+/// uses, and the builder is checked after the move. Whoever made the moved
+/// directory had that id and was running when it made it, so if no process
+/// has the id now, the moved directory is abandoned whatever the listing
+/// said; if one does, it goes back. Removal never follows a link.
 fn remove_abandoned(marker: &Path) {
-    static CLAIMS: AtomicU64 = AtomicU64::new(0);
     let Some(pid) = marker.file_stem().and_then(staging_owner) else {
         return;
     };
-    let mut claim = marker.as_os_str().to_owned();
-    let serial = CLAIMS.fetch_add(1, Ordering::Relaxed);
-    claim.push(format!(".sweep-{}-{serial}", std::process::id()));
-    let claim = PathBuf::from(claim);
-    if fs::rename(marker, &claim).is_err() {
+    let dir = marker.with_extension("");
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() => {}
+        // A marker whose directory was published or removed. Removing it
+        // can at worst unmark a newer build, which only leaks that build.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if !rosen_platform::process_may_be_running(pid) {
+                let _ = fs::remove_file(marker);
+            }
+            return;
+        }
+        _ => return,
+    }
+    let Some(tomb) = mark_tombstone(&dir) else {
+        return;
+    };
+    if fs::rename(&dir, &tomb).is_err() {
+        unmark(&tomb);
         return;
     }
-    let dir = marker.with_extension("");
-    let removed = !rosen_platform::process_may_be_running(pid)
-        && match fs::symlink_metadata(&dir) {
-            Ok(meta) => meta.is_dir() && fs::remove_dir_all(&dir).is_ok(),
-            Err(error) => error.kind() == io::ErrorKind::NotFound,
-        };
-    // Whatever was not removed keeps its marker, so a later sweep retries
-    // it. A restored marker never adopts a directory made since: a builder
-    // taking the name creates its marker exclusively, finds this one and
-    // gives the name up.
-    let _ = if removed {
-        fs::remove_file(&claim)
-    } else {
-        fs::rename(&claim, marker)
-    };
+    if rosen_platform::process_may_be_running(pid) {
+        if fs::rename(&tomb, &dir).is_ok() {
+            unmark(&tomb);
+        }
+        return;
+    }
+    unmark(&dir);
+    remove_marked(&tomb);
+}
+
+/// Creates the marker of a fresh tombstone name for `dir`: `dir`'s own name
+/// as the destination name, owned by this process. A destination name in the
+/// staging form is reserved, so no builder ever stages under it, and if this
+/// process dies mid-removal the marked tombstone is swept like any staging.
+fn mark_tombstone(dir: &Path) -> Option<PathBuf> {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    let own = std::process::id();
+    for _ in 0..8 {
+        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+        let mut name = std::ffi::OsString::from(".");
+        name.push(dir.file_name()?);
+        name.push(format!("{STAGING_TAG}{own}-{serial}"));
+        let tomb = dir.with_file_name(name);
+        if fs::symlink_metadata(&tomb).is_ok() {
+            continue;
+        }
+        let created = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(marker_of(&tomb));
+        match created {
+            Ok(_) => return Some(tomb),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// Whether `name` has the form of a staging directory or its marker. Rosen
@@ -241,10 +275,14 @@ mod tests {
         assert_eq!(fs::read(marker_of(&taken)).unwrap(), b"user data");
         remove_abandoned(&marker_of(&dead_marked));
         assert!(!dead_marked.exists() && !marker_of(&dead_marked).exists());
+        let mut tombstones = fs::read_dir(root.path()).unwrap().flatten();
+        assert!(tombstones.all(|entry| !entry.file_name().to_string_lossy().starts_with("..")));
         // A listing gone stale: the name now holds a running builder's
         // staging, which the claim and second check must leave intact.
         let live = staging(format!(".ws{STAGING_TAG}{own}-0"));
+        let before = fs::read_dir(root.path()).unwrap().count();
         remove_abandoned(&marker_of(&live));
         assert!(live.is_dir() && marker_of(&live).is_file());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), before);
     }
 }
