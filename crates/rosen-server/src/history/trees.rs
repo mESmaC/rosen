@@ -4,9 +4,9 @@
 //! a large project reads only the directories that changed.
 
 use super::{HistoryError, HistoryResult};
-use rosen_core::{FileMode, ObjectId, Tree, TreeEntry};
-use rosen_protocol::{DirEntry, ReadAnswer};
-use rosen_store::ObjectStore;
+use rosen_core::{FileMode, ObjectId, ObjectKind, Tree, TreeEntry};
+use rosen_protocol::{DirEntry, LargeFile, ReadAnswer, Response, OBJECT_CHUNK_BYTES};
+use rosen_store::{LooseObjectStore, ObjectStore, ReadWithin, StoreError};
 use std::collections::BTreeMap;
 
 /// A file-like tree entry: a file, executable, symlink or gitlink.
@@ -169,8 +169,9 @@ pub fn file_at(
         }))
 }
 
-/// A file's bytes or a directory's listing (R11 file read).
-pub fn read(store: &dyn ObjectStore, tree: ObjectId, path: &str) -> HistoryResult<ReadAnswer> {
+/// A file's bytes or a directory's listing (R11 file read), or for a file
+/// too large for one frame its length, to be read in slices (#243).
+pub fn read(store: &LooseObjectStore, tree: ObjectId, path: &str) -> HistoryResult<Response> {
     let path = normalise(path)?;
     let entry = if path.is_empty() {
         TreeEntry::new(FileMode::Directory, "root", tree)?
@@ -189,10 +190,10 @@ pub fn read(store: &dyn ObjectStore, tree: ObjectId, path: &str) -> HistoryResul
                 id: e.id,
             })
             .collect();
-        return Ok(ReadAnswer::Directory {
+        return Ok(Response::File(ReadAnswer::Directory {
             id: entry.id,
             entries,
-        });
+        }));
     }
     if entry.mode == FileMode::Submodule {
         return Err(HistoryError::Invalid(format!(
@@ -200,11 +201,29 @@ pub fn read(store: &dyn ObjectStore, tree: ObjectId, path: &str) -> HistoryResul
             entry.id
         )));
     }
-    Ok(ReadAnswer::File {
-        mode: entry.mode.as_octal().into_owned(),
-        id: entry.id,
-        data: store.read_blob(&entry.id)?.data,
-    })
+    file_answer(store, &entry)
+}
+
+/// A file's bytes, or only its length when they would not fit one frame:
+/// the header gives it without inflating the body.
+fn file_answer(store: &LooseObjectStore, entry: &TreeEntry) -> HistoryResult<Response> {
+    let mode = entry.mode.as_octal().into_owned();
+    let id = entry.id;
+    match store.get_raw_within(&id, OBJECT_CHUNK_BYTES as u64)? {
+        ReadWithin::Missing => Err(StoreError::NotFound(id).into()),
+        ReadWithin::TooLarge(len) => Ok(Response::LargeFile(LargeFile { mode, id, len })),
+        ReadWithin::Read(raw) if raw.kind != ObjectKind::Blob => Err(StoreError::WrongKind {
+            id,
+            expected: ObjectKind::Blob,
+            found: raw.kind,
+        }
+        .into()),
+        ReadWithin::Read(raw) => Ok(Response::File(ReadAnswer::File {
+            mode,
+            id,
+            data: raw.data,
+        })),
+    }
 }
 
 /// The bytes of a file entry; a gitlink reads as its commit ID.

@@ -361,9 +361,17 @@ impl Slices<'_> {
     }
 }
 
-/// Uploads one blob in frame-sized slices. A fresh upload name per call keeps
-/// two uploads of the same blob from writing into each other's staging.
-async fn put_large(client: &Client, slices: Slices<'_>) -> Result<(), Error> {
+/// Stores bytes held in memory as one blob, in frame-sized slices, and
+/// returns its ID: a server-side workspace write too large for one frame
+/// (#243).
+pub(crate) async fn put_held(client: &Client, data: &[u8]) -> Result<ObjectId, Error> {
+    put_large(client, Slices::Held(data)).await
+}
+
+/// Uploads one blob in frame-sized slices and returns its ID. A fresh upload
+/// name per call keeps two uploads of the same blob from writing into each
+/// other's staging.
+async fn put_large(client: &Client, slices: Slices<'_>) -> Result<ObjectId, Error> {
     let (id, total) = (slices.id(), slices.len());
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -387,7 +395,7 @@ async fn put_large(client: &Client, slices: Slices<'_>) -> Result<(), Error> {
         };
         // The server may already hold the blob, and then says so early.
         if stored.stored {
-            return Ok(());
+            return Ok(id);
         }
         if end >= total || end == offset {
             return Err(Error::Unexpected(format!(

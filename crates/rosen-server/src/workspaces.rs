@@ -1,12 +1,47 @@
 //! Direct edits of immutable trees, with no server checkout (SPEC R3).
 use crate::changes::ChangeError;
 use crate::{changes, snapshots, ServerState};
-use rosen_core::{FileMode, ObjectId, Tree, TreeEntry};
-use rosen_protocol::{ErrorBody, ErrorCode, Outcome, Response, SnapshotRequest, WorkspaceWrite};
+use rosen_core::{FileMode, ObjectId, ObjectKind, Tree, TreeEntry};
+use rosen_protocol::{
+    ErrorBody, ErrorCode, Outcome, Response, SnapshotRequest, WorkspaceBlobWrite, WorkspaceWrite,
+};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use std::sync::Arc;
 
+/// One server-side file edit.
+struct Edit {
+    change: String,
+    path: String,
+    content: Option<Content>,
+}
+
+/// What a write puts at its path.
+enum Content {
+    /// Bytes sent with the request.
+    Bytes(Vec<u8>),
+    /// A blob already stored, as by a chunked upload (#243).
+    Stored(ObjectId),
+}
+
 pub async fn write(state: &Arc<ServerState>, request: WorkspaceWrite) -> Outcome {
+    let edit = Edit {
+        change: request.change,
+        path: request.path,
+        content: request.data.map(|bytes| Content::Bytes(bytes.0)),
+    };
+    run(state, edit).await
+}
+
+pub async fn write_blob(state: &Arc<ServerState>, request: WorkspaceBlobWrite) -> Outcome {
+    let edit = Edit {
+        change: request.change,
+        path: request.path,
+        content: Some(Content::Stored(request.blob)),
+    };
+    run(state, edit).await
+}
+
+async fn run(state: &Arc<ServerState>, request: Edit) -> Outcome {
     let permit = match Arc::clone(&state.workspace_io).acquire_owned().await {
         Ok(permit) => permit,
         Err(_) => {
@@ -32,22 +67,18 @@ pub async fn write(state: &Arc<ServerState>, request: WorkspaceWrite) -> Outcome
     }
 }
 
-fn edit(
-    state: &ServerState,
-    req: WorkspaceWrite,
-) -> Result<rosen_protocol::SnapshotOutcome, ChangeError> {
+fn edit(state: &ServerState, req: Edit) -> Result<rosen_protocol::SnapshotOutcome, ChangeError> {
     let parts = validate_path(&req.path)?;
     let store = LooseObjectStore::open(state.config.objects_dir()).map_err(store_error)?;
     // The blob is the one large object, and hashing, compressing and syncing
     // it is the slow part. Store it before taking the registry lock, which
     // every change operation on the server waits on (#78). Objects are
     // immutable, so a blob stored for an edit that is then refused is harmless.
-    let blob = req
-        .data
-        .as_ref()
-        .map(|bytes| store.put_blob(&bytes.0))
-        .transpose()
-        .map_err(store_error)?;
+    let blob = match &req.content {
+        None => None,
+        Some(Content::Bytes(bytes)) => Some(store.put_blob(bytes).map_err(store_error)?),
+        Some(Content::Stored(id)) => Some(stored_blob(&store, *id)?),
+    };
     // Keep the connection through read, tree edit and snapshot: concurrent edits
     // must each start from the head left by the preceding edit.
     let answer = state.changes.with_conn(|conn| {
@@ -72,6 +103,22 @@ fn edit(
         snapshots::delivered(state);
     }
     Ok(answer)
+}
+
+/// Checks that a named blob is stored, whole, and is a blob: a tree entry
+/// for a file must not name a tree or a commit, or a damaged object. The
+/// check streams the body, so a large blob is never held whole.
+fn stored_blob(store: &LooseObjectStore, id: ObjectId) -> Result<ObjectId, ChangeError> {
+    match store.copy_raw_to(&id, &mut std::io::sink()) {
+        Ok(Some((ObjectKind::Blob, _))) => Ok(id),
+        Ok(Some((kind, _))) => Err(ChangeError::Refused(rosen_core::Error::InvalidPath(
+            format!("{id} is a {kind:?}, not a blob"),
+        ))),
+        Ok(None) => Err(ChangeError::NotFound(format!(
+            "the server does not hold blob {id}; upload it first"
+        ))),
+        Err(err) => Err(store_error(err)),
+    }
 }
 
 fn validate_path(path: &str) -> Result<Vec<&str>, ChangeError> {
