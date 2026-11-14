@@ -49,6 +49,61 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+  # SPEC.md R3's block clone path runs only on ReFS, and the Windows job's
+  # volumes are NTFS, so there every workspace falls back to a plain copy
+  # (issue #39). This job formats a Dev Drive (ReFS) on the runner, which is
+  # elevated, and points the temp directory at it, so every rosen-client test
+  # that materialises from a source workspace takes the clone path. The
+  # materialise test fails if it falls back.
+  windows-refs:
+    name: Windows ReFS (block clone tests)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect Cargo workspace
+        id: workspace
+        shell: bash
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No Cargo workspace::Cargo.toml not found; cargo checks skipped."
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.workspace.outputs.present == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.workspace.outputs.present == 'true'
+
+      # Only the temp directory goes on the Dev Drive; the build stays on C:.
+      - uses: samypr100/setup-dev-drive@v4
+        if: steps.workspace.outputs.present == 'true'
+        with:
+          drive-size: 4GB
+          drive-format: ReFS
+          env-mapping: |
+            TMP,{{ DEV_DRIVE }}/tmp
+            TEMP,{{ DEV_DRIVE }}/tmp
+
+      - name: Show the temp volume
+        if: steps.workspace.outputs.present == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:TMP | Out-Null
+          Get-Volume -DriveLetter $env:DEV_DRIVE[0] | Format-List DriveLetter, FileSystem, AllocationUnitSize, Size
+          # Diagnostic only: a plain ReFS volume (no native Dev Drive) still block clones.
+          fsutil devdrv query $env:DEV_DRIVE
+          exit 0
+
+      - name: cargo test -p rosen-client (temp on ReFS)
+        if: steps.workspace.outputs.present == 'true'
+        env:
+          ROSEN_REQUIRE_BLOCK_CLONE: "1"
+        run: cargo test -p rosen-client
+
   linux:
     name: Linux (build)
     runs-on: ubuntu-latest
