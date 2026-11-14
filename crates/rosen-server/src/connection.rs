@@ -199,15 +199,15 @@ impl Session {
             return false;
         }
         match decode_body::<ClientFrame>(body) {
-            // Only the server's own machine may stop it: a cache answers its
-            // clients' shutdown itself, so this only refuses a stray peer.
-            Ok(ClientFrame::Request {
-                id,
-                request: Request::Shutdown,
-            }) if self.access == Access::Network => {
+            // Only the server's own machine may stop it or use its warm pool
+            // (R3: each daemon's pool serves its own machine). A cache answers
+            // these for its clients itself, so this only refuses a stray peer.
+            Ok(ClientFrame::Request { id, request })
+                if self.access == Access::Network && machine_local(&request) =>
+            {
                 let refused = ErrorBody::new(
                     ErrorCode::Refused,
-                    "the server can only be stopped from its own machine",
+                    "only the server's own machine may stop it or use its warm pool",
                 );
                 let response = ServerFrame::Response {
                     id,
@@ -323,6 +323,16 @@ impl Session {
             subscription.abort();
         }
     }
+}
+
+/// Requests that act on the server's own machine rather than the project:
+/// stopping the process, and its warm pool, whose takes rename directories
+/// on the server's disk and whose size drives the server's disk use.
+fn machine_local(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Shutdown | Request::PoolSize { .. } | Request::PoolTake { .. }
+    )
 }
 
 /// Sends every event after the starting cursor that the subscriber should
