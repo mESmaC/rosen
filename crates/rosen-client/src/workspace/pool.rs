@@ -82,6 +82,15 @@ impl WarmPool {
     }
 
     pub async fn set_size(&self, size: usize) -> Outcome {
+        // The same limit the project configuration enforces, so a request
+        // cannot make the worker copy the base tree until the disk fills.
+        let limit = rosen_core::project_config::MAX_WARM_POOL_SIZE;
+        if size > limit as usize {
+            return Outcome::Error(ErrorBody::new(
+                ErrorCode::InvalidArgument,
+                format!("a warm pool size of {size} is over the limit of {limit}"),
+            ));
+        }
         let mut state = self.state.lock().await;
         state.size = size;
         state.requested = Some(size);
