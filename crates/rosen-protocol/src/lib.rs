@@ -45,7 +45,10 @@ pub use history::{
 };
 pub use land::{LandAnswer, LandStatus};
 pub use message::*;
-pub use objects::{EnsureObjects, ObjectBatch, ObjectQuery, ObjectsLocal, WireKind, WireObject};
+pub use objects::{
+    EnsureObjects, ObjectBatch, ObjectChunk, ObjectChunkQuery, ObjectQuery, ObjectsLocal, WireKind,
+    WireObject, OBJECT_CHUNK_BYTES,
+};
 pub use pool::{LandedProseQuery, PooledWorkspace};
 pub use post_land::{PostLandJob, PostLandWork};
 pub use receipt::{ReceiptRecord, SubmitReceipt};
@@ -54,6 +57,7 @@ pub use review::{
     ReviewThread, ThreadFilter,
 };
 pub use snapshot::{
-    ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest, UploadKind, UploadObject,
+    BlobChunk, BlobChunkStored, ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest,
+    UploadKind, UploadObject,
 };
 pub use transport::{connect, BoxStream, Endpoint, Listener};

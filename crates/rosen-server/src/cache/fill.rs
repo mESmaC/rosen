@@ -17,7 +17,8 @@ use super::session::LinkSlot;
 use super::upstream::UpstreamLink;
 use rosen_core::{FileMode, Object, ObjectId, ObjectKind};
 use rosen_protocol::{
-    ErrorBody, ErrorCode, ObjectBatch, ObjectQuery, Outcome, Request, Response, WireObject,
+    ErrorBody, ErrorCode, ObjectBatch, ObjectChunkQuery, ObjectQuery, Outcome, Request, Response,
+    WireObject, OBJECT_CHUNK_BYTES,
 };
 use rosen_store::{LooseObjectStore, ObjectStore, StoreError};
 use std::collections::{HashMap, HashSet};
@@ -88,6 +89,8 @@ pub async fn get_objects(
     .await?;
     local.objects.extend(remote.objects);
     local.missing = remote.missing;
+    // The client reads these in slices, which this daemon forwards.
+    local.large.extend(remote.large);
     Ok(local)
 }
 
@@ -425,17 +428,24 @@ async fn fetch_all(link: &UpstreamLink, ids: &[ObjectId]) -> Result<Vec<WireObje
                 let message = format!("the server does not hold {id}");
                 return Err(ErrorBody::new(ErrorCode::NotFound, message));
             }
-            if batch.objects.is_empty() {
+            let mut fetched = batch.objects;
+            for id in batch.large {
+                if !remaining.contains(&id) {
+                    return Err(protocol_error("the server listed an object not asked for"));
+                }
+                fetched.push(fetch_large(link, id).await?);
+            }
+            if fetched.is_empty() {
                 return Err(protocol_error("the server answered a fetch with nothing"));
             }
-            let got: HashSet<ObjectId> = batch.objects.iter().map(wire_id).collect();
+            let got: HashSet<ObjectId> = fetched.iter().map(wire_id).collect();
             if got.iter().any(|id| !remaining.contains(id)) {
                 return Err(protocol_error(
                     "the server sent an object that was not asked for",
                 ));
             }
             remaining.retain(|id| !got.contains(id));
-            objects.extend(batch.objects);
+            objects.extend(fetched);
         }
     }
     Ok(objects)
@@ -446,6 +456,36 @@ async fn fetch(link: &UpstreamLink, ids: Vec<ObjectId>) -> Result<ObjectBatch, E
         Outcome::Ok(Response::Objects(batch)) => Ok(batch),
         Outcome::Ok(other) => Err(protocol_error(&format!("unexpected answer {other:?}"))),
         Outcome::Error(error) => Err(error),
+    }
+}
+
+/// Reads an object too large for one frame slice by slice. The caller
+/// checks the assembled bytes against the asked ID, as for any object.
+async fn fetch_large(link: &UpstreamLink, id: ObjectId) -> Result<WireObject, ErrorBody> {
+    let mut data = Vec::new();
+    loop {
+        let query = ObjectChunkQuery {
+            id,
+            offset: data.len() as u64,
+            len: OBJECT_CHUNK_BYTES as u64,
+        };
+        let chunk = match link.request(Request::GetObjectChunk(query)).await {
+            Outcome::Ok(Response::ObjectChunk(chunk)) => chunk,
+            Outcome::Ok(other) => {
+                return Err(protocol_error(&format!("unexpected answer {other:?}")))
+            }
+            Outcome::Error(error) => return Err(error),
+        };
+        if chunk.data.is_empty() && (data.len() as u64) < chunk.total {
+            return Err(protocol_error("the server sent an empty slice mid-object"));
+        }
+        data.extend_from_slice(&chunk.data);
+        if data.len() as u64 >= chunk.total {
+            return Ok(WireObject {
+                kind: chunk.kind,
+                data,
+            });
+        }
     }
 }
 

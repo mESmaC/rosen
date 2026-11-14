@@ -97,6 +97,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         }
         Request::Overlaps(query) => crate::overlaps::handle(state, query).await,
         Request::PutObjects(upload) => crate::snapshots::put_objects(state, upload).await,
+        Request::PutBlobChunk(chunk) => crate::uploads::put_chunk(state, chunk).await,
         Request::Snapshot(request) => crate::snapshots::snapshot(state, request).await,
         Request::AckEvents { subscriber, seq } => {
             crate::events::acknowledge(state, subscriber, seq).await
@@ -120,6 +121,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::Land { change } => crate::landing::service::land(state, change).await,
         Request::ConflictResolve(req) => crate::conflict_resolve::handle(state, req).await,
         Request::GetObjects(query) => crate::objects::get(state, query).await,
+        Request::GetObjectChunk(query) => crate::objects::get_chunk(state, query).await,
         Request::EnsureObjects(ensure) => crate::objects::ensure(state, ensure).await,
         Request::Log(req) => crate::history::handle(state, HistoryCall::Log(req)).await,
         Request::Blame(req) => crate::history::handle(state, HistoryCall::Blame(req)).await,
