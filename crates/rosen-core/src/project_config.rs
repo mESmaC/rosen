@@ -154,9 +154,9 @@ pub struct Prepare {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Mirror {
-    /// The git remote the base is pushed to after each land (R1): a URL or
-    /// a path on the server. `None` keeps the remote `rosen import --mirror`
-    /// stored.
+    /// The git remote the base is pushed to after each land (R1): an
+    /// `https`, `ssh` or `git` URL with no credentials, or an scp-style ssh
+    /// address. `None` keeps the remote `rosen import --mirror` stored.
     pub remote: Option<String>,
 }
 
@@ -281,19 +281,208 @@ fn single_line(key: &str, line: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// The server runs `git push` against this text, and the text comes from
-/// repository content, so transports that run a command are refused.
+/// URL schemes a configured mirror remote may use. Each one reaches another
+/// machine through a transport built into git. Any other scheme runs a
+/// `git-remote-<scheme>` helper from the server's PATH, and `file://` writes
+/// into a repository on the server itself.
+const MIRROR_SCHEMES: [&str; 3] = ["https", "ssh", "git"];
+
+/// The server runs `git push` against this text after a land, and the text
+/// comes from repository content that any approved change can edit. So only
+/// a network remote is accepted: a URL in [`MIRROR_SCHEMES`] or an scp-style
+/// `[user@]host:path` ssh address. A local path, a remote helper (`ext::`,
+/// `fd::`, any `<helper>::`) and a URL carrying credentials are refused.
+/// Only `rosen import --mirror`, run by the operator on the server, can name
+/// a local path (issue #69).
 fn mirror_remote(remote: &str) -> Result<(), ConfigError> {
-    let refuse = |why: &str| Err(ConfigError(format!("mirror.remote {remote:?} {why}")));
+    let refuse = |why: &str| {
+        let shown = without_userinfo(remote);
+        Err(ConfigError(format!("mirror.remote {shown:?} {why}")))
+    };
     if remote.trim().is_empty() {
         return refuse("is empty");
     }
-    if remote.chars().any(char::is_control) {
-        return refuse("contains a control character");
+    if remote.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return refuse("contains a space or a control character");
     }
-    let lower = remote.to_ascii_lowercase();
-    if lower.starts_with("ext::") || lower.starts_with("fd::") {
-        return refuse("uses a transport that runs a command");
+    let checked = match remote.split_once("://") {
+        Some((scheme, rest)) => url_remote(scheme, rest),
+        None => scp_remote(remote),
+    };
+    checked.or_else(|why| refuse(&why))
+}
+
+/// `<scheme>://[user@]host[:port]/path` with a scheme in [`MIRROR_SCHEMES`].
+fn url_remote(scheme: &str, rest: &str) -> Result<(), String> {
+    if !MIRROR_SCHEMES.contains(&scheme) {
+        return Err(format!(
+            "must use one of the schemes {MIRROR_SCHEMES:?}; only `rosen import --mirror` can name another"
+        ));
+    }
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if path.is_empty() {
+        return Err("names no repository path".to_owned());
+    }
+    let (user, host_port) = match authority.rsplit_once('@') {
+        Some((user, host_port)) => (Some(user), host_port),
+        None => (None, authority),
+    };
+    if let Some(user) = user {
+        // GitHub and GitLab take an access token as the https user name, so
+        // any https user is treated as a credential, and a password always is.
+        if scheme == "https" || user.contains(':') {
+            return Err(
+                "carries credentials; give them to git's credential helper on the server"
+                    .to_owned(),
+            );
+        }
+        user_name(user)?;
+    }
+    let (host, port) = split_port(host_port);
+    if !port.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("has a port {port:?} that is not a number"));
+    }
+    host_name(host)
+}
+
+/// `[user@]host:path`, which git reads as ssh. Anything git would read as a
+/// local path or a remote helper is refused instead.
+fn scp_remote(remote: &str) -> Result<(), String> {
+    let not_network = || {
+        Err(format!(
+            "is not a network remote: use a {MIRROR_SCHEMES:?} URL or `user@host:path`; only `rosen import --mirror` can name a local path"
+        ))
+    };
+    // A bracketed IPv6 host (`git@[2001:db8::1]:repo`) has colons of its
+    // own, so the separator is the one after `]`. `host_name` then checks
+    // the brackets enclose only an address.
+    let split = match remote.find("]:") {
+        Some(end) => Some((&remote[..=end], &remote[end + 2..])),
+        None => remote.split_once(':'),
+    };
+    let Some((authority, path)) = split else {
+        return not_network();
+    };
+    // A separator before the colon makes git read a local path; `x::` is a
+    // remote helper; a one-letter host is a Windows drive such as `C:`.
+    if authority.contains(['/', '\\']) || path.is_empty() || path.starts_with(':') {
+        return not_network();
+    }
+    let (user, host) = match authority.rsplit_once('@') {
+        Some((user, host)) => (Some(user), host),
+        None => (None, authority),
+    };
+    if host.chars().count() < 2 {
+        return not_network();
+    }
+    if let Some(user) = user {
+        user_name(user)?;
+    }
+    host_name(host)
+}
+
+/// A user name git passes to ssh; one starting with `-` would be an option.
+/// No `:` either: git reads `<scheme>::` at the start of a remote as a
+/// helper before it looks for a user, as in `ext::x@[::1]:repo`.
+fn user_name(user: &str) -> Result<(), String> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '~');
+    if user.is_empty() || user.starts_with('-') || !user.chars().all(allowed) {
+        return Err(format!("has an invalid user name {user:?}"));
     }
     Ok(())
+}
+
+/// A DNS name, an IPv4 address or a bracketed IPv6 address. A host starting
+/// with `-` would reach ssh as an option such as `-oProxyCommand`.
+fn host_name(host: &str) -> Result<(), String> {
+    let bracketed = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .is_some_and(|inner| {
+            !inner.is_empty()
+                && inner
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        });
+    let named = !host.is_empty()
+        && !host.starts_with('-')
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if bracketed || named {
+        Ok(())
+    } else {
+        Err(format!("has an invalid host {host:?}"))
+    }
+}
+
+/// Splits `host:port` at the port's colon, leaving a bracketed IPv6 host
+/// whole. The port is empty when there is none.
+fn split_port(host_port: &str) -> (&str, &str) {
+    let after_brackets = host_port.rfind(']').map_or(0, |end| end + 1);
+    match host_port[after_brackets..].rfind(':') {
+        Some(colon) => {
+            let colon = after_brackets + colon;
+            (&host_port[..colon], &host_port[colon + 1..])
+        }
+        None => (host_port, ""),
+    }
+}
+
+/// The remote with any URL user information blanked, so a refusal that
+/// `rosen config show` prints never repeats a token.
+fn without_userinfo(remote: &str) -> String {
+    let Some((scheme, rest)) = remote.split_once("://") else {
+        return remote.to_owned();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..authority_end].rfind('@') {
+        Some(at) => format!("{scheme}://***@{}", &rest[at + 1..]),
+        None => remote.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Risk (SPEC R1, issue #69): `mirror.remote` is repository content that
+    /// the server hands to `git push`. Accepting a local path or a helper
+    /// would let any approved change push into, or run, things on the server.
+    #[test]
+    fn mirror_remote_accepts_only_network_remotes() {
+        let parsed =
+            |remote: &str| ProjectConfig::parse(&format!("[mirror]\nremote = {remote:?}\n"));
+        for good in [
+            "https://github.com/you/repo.git",
+            "ssh://git@github.com:22/you/repo.git",
+            "git://example.com/repo.git",
+            "git@github.com:you/repo.git",
+            "ssh://[::1]/repo.git",
+            "git@[2001:db8::1]:team/repo.git",
+        ] {
+            assert!(parsed(good).is_ok(), "refused {good}");
+        }
+        for bad in [
+            "/srv/git/other.git",
+            r"C:\repos\other.git",
+            "C:/repos/other.git",
+            "../other.git",
+            "file:///srv/git/other.git",
+            "ext::sh -c calc",
+            "fd::3",
+            "custom::anything",
+            "ext::calc@[::1]:repo.git",
+            "http://example.com/repo.git",
+            "https://ghp_token@github.com/you/repo.git",
+            "ssh://user:secret@example.com/repo.git",
+            "ssh://-oProxyCommand=calc/repo.git",
+            "-oProxyCommand=calc:repo.git",
+            "https://github.com",
+        ] {
+            assert!(parsed(bad).is_err(), "accepted {bad}");
+        }
+        let refusal = parsed("https://ghp_token@github.com/r.git").unwrap_err();
+        assert!(!refusal.to_string().contains("ghp_token"), "{refusal}");
+    }
 }
