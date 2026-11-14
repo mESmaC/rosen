@@ -35,7 +35,10 @@ jobs:
 
       # A rust-toolchain.toml in the repository, if any, overrides this default.
       # The action is pinned to a commit on its `stable` branch, so the ref no
-      # longer names the toolchain; `toolchain` names it instead.
+      # longer names the toolchain; `toolchain` names it instead. Dependabot
+      # follows tags, not branches, so it skips this pin (see dependabot.yml).
+      # Bump all three uses by hand to the SHA printed by
+      # `gh api repos/dtolnay/rust-toolchain/commits/stable -q .sha`.
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable

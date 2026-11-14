@@ -12,3 +12,9 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    # Pinned to its `stable` branch head, which no version tag marks, so
+    # Dependabot cannot track it and could retarget it to the older `v1` tag
+    # (issue #238). ci.yml says how to bump it by hand. The toolchain itself
+    # stays current regardless: each use passes `toolchain: stable`.
+    ignore:
+      - dependency-name: dtolnay/rust-toolchain
