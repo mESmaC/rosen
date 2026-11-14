@@ -43,7 +43,7 @@ impl Client {
         if !change.change.state.is_closed() {
             self.snapshot_workspace(&root, None).await?;
         }
-        let _original_lease = self.verify_workspace_durable(&root, false).await?;
+        let original_lease = self.verify_workspace_durable(&root, false).await?;
         // The original registration also identifies this deterministic
         // sibling, so a crash after rename can be recovered at daemon start.
         std::fs::rename(&root, &staged)?;
@@ -60,6 +60,10 @@ impl Client {
         }
         let mut staged_lease = staged_result?;
         staged_lease.remove_verified()?;
+        // Both directories are gone. Their lease files go while still held
+        // exclusive, so no writer is left locking a removed file.
+        staged_lease.close_deleted();
+        original_lease.close_deleted();
         self.unregister_workspace(&record).await?;
         Ok(())
     }
@@ -188,6 +192,7 @@ impl Client {
             self.check_workspace_boundary(&staged).await?;
             let mut staged_lease = self.verify_workspace_durable(&staged, true).await?;
             staged_lease.remove_verified()?;
+            staged_lease.close_deleted();
             self.unregister_workspace(record).await?;
         } else {
             verify_registration(&record.path, record)?;
