@@ -77,7 +77,8 @@ impl ReceiptService {
             return Err(ErrorBody::new(
                 ErrorCode::InvalidArgument,
                 format!(
-                    "receipt refused: submitter {} must be a nick without '@';                      the server records its machine",
+                    "receipt refused: submitter {} must be a nick without '@'; \
+                     the server records its machine",
                     request.submitter
                 ),
             ));
