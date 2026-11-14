@@ -36,6 +36,7 @@ pub const STATUS_SCHEMA: &str = "rosen.status/v1";
 pub const WAIT_SCHEMA: &str = "rosen.wait/v1";
 pub const WORKSPACE_DELETE_SCHEMA: &str = "rosen.workspace.delete/v1";
 pub const WORKSPACE_LIST_SCHEMA: &str = "rosen.workspace.list/v1";
+pub const WORKSPACE_LIMITS_SCHEMA: &str = "rosen.workspace.limits/v1";
 
 /// All failures share one envelope, including recoverable watcher failures.
 /// Keeping it typed prevents success payloads and errors sharing a schema ID.
