@@ -52,7 +52,7 @@ pub async fn abandon(state: &Arc<ServerState>, change: String) -> Outcome {
         // The abandon staged its `updated` event in its own transaction.
         let (record, _) = state.changes.abandon_releasing(&change)?;
         state.events.deliver_staged();
-        recover(&state)?;
+        delivery::deliver(&state);
         Ok(Response::Change(record))
     };
     finish(tokio::task::spawn_blocking(work).await)
@@ -65,7 +65,7 @@ pub fn release_landed(state: &ServerState, id: ChangeId) -> Result<ReleaseOutcom
     let released = state
         .changes
         .with_conn(|conn| store::release_all(conn, id))?;
-    recover(state)?;
+    delivery::deliver(state);
     Ok(released)
 }
 
@@ -99,7 +99,7 @@ fn run(state: &ServerState, call: ClaimCall) -> Result<Response, ChangeError> {
         }
         ClaimCall::Release(req) => {
             let released = changes.with_conn(|c| store::release(c, &req.change, &req.paths))?;
-            recover(state)?;
+            delivery::deliver(state);
             Response::Released(released)
         }
         ClaimCall::List(change) => {
