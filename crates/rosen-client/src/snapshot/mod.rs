@@ -91,6 +91,9 @@ pub struct SnapshotReport {
     /// stored content. Only a watcher's snapshots skip them.
     pub unreadable: Vec<String>,
     pub sent: Sent,
+    /// Offline journal records stored ahead of this snapshot, oldest first,
+    /// one report each.
+    pub replayed: Vec<SnapshotReport>,
 }
 
 /// A local workspace's snapshot state.
@@ -112,6 +115,10 @@ pub struct Snapshotter {
     defer_unreadable: bool,
     /// The files the last prepared snapshot skipped.
     unreadable: BTreeSet<String>,
+    /// Whether the last attempt's snapshot is durable: stored on the server
+    /// or in the journal. A failed attempt that was captured needs only a
+    /// replay on retry, not another scan of what it already read.
+    captured: bool,
 }
 
 /// A snapshot read from disk and ready to send.
@@ -157,6 +164,7 @@ impl Snapshotter {
             unconfirmed: BTreeSet::new(),
             defer_unreadable: false,
             unreadable: BTreeSet::new(),
+            captured: false,
         })
     }
 
@@ -250,16 +258,10 @@ impl Snapshotter {
     /// marker names its tree for the next watcher or `rosen commit`.
     fn confirm(&mut self, prepared: &Prepared) -> Result<(), SnapshotError> {
         self.known_trees.extend(prepared.all_trees.iter().copied());
-        self.unconfirmed.clear();
         self.marker.tree = prepared.root;
         self.marker
             .write(&self.root)
             .map_err(|err| SnapshotError::io(&WorkspaceMarker::path(&self.root), err))
-    }
-
-    fn fail(&mut self, prepared: &Prepared) {
-        let paths = prepared.blobs.iter().map(|blob| blob.path.clone());
-        self.unconfirmed.extend(paths);
     }
 
     /// Takes the writer lock, then prepares a snapshot. Blocking.
@@ -353,6 +355,7 @@ async fn capture(
     dirty: Dirty,
     message: Option<String>,
 ) -> (Snapshotter, Result<SnapshotReport, Error>) {
+    snapshotter.captured = false;
     let joined = tokio::task::spawn_blocking(move || {
         let prepared = snapshotter.lease_and_prepare(&dirty);
         (snapshotter, prepared)
@@ -376,41 +379,74 @@ async fn capture(
     (snapshotter, result)
 }
 
-/// Sends a snapshot straight to the server when nothing waits in the
-/// journal. The journal is written only when the server cannot be reached,
-/// or behind earlier records so the order holds (SPEC R2).
+/// Stores a prepared snapshot, then settles which read files must be sent
+/// again: none once the snapshot is captured, since its blobs are on the
+/// server or in the journal; otherwise every blob it read, as the index
+/// already holds their ids.
 async fn queue_and_replay(
     client: Option<&Client>,
     state: &mut Snapshotter,
     prepared: Prepared,
     message: Option<String>,
 ) -> Result<SnapshotReport, Error> {
-    state.fail(&prepared);
+    let read: Vec<String> = prepared.blobs.iter().map(|b| b.path.clone()).collect();
+    let result = store_or_queue(client, state, prepared, message).await;
+    if state.captured {
+        // Every unconfirmed path was read into this snapshot's blobs.
+        state.unconfirmed.clear();
+    } else {
+        state.unconfirmed.extend(read);
+    }
+    result
+}
+
+/// Sends a snapshot straight to the server when nothing waits in the
+/// journal. The journal is written only when the server cannot be reached,
+/// or behind earlier records so the order holds (SPEC R2).
+async fn store_or_queue(
+    client: Option<&Client>,
+    state: &mut Snapshotter,
+    prepared: Prepared,
+    message: Option<String>,
+) -> Result<SnapshotReport, Error> {
     let pending = state.journal.pending()?;
     if let (Some(client), true) = (client, pending.is_empty()) {
-        return match send(client, state, &prepared, message.clone()).await {
-            Err(err) if worth_journaling(&err) => {
-                state.journal_record(None, prepared, message)?;
-                Err(err)
+        let result = send(client, state, &prepared, message.clone()).await;
+        if let Err(err) = &result {
+            if !worth_journaling(err) {
+                return result;
             }
-            result => result,
-        };
+            state.journal_record(None, prepared, message)?;
+        }
+        state.captured = true;
+        return result;
     }
     let last = pending.last().copied();
     let previous = match last {
         Some(id) => state.journal.root_of(id)?,
         None => state.marker.tree,
     };
+    // An unchanged tree is already held by the last record, or the server.
     if prepared.root != previous || message.is_some() {
         state.journal_record(last, prepared, message)?;
     }
+    state.captured = true;
     replay(client.ok_or(Error::Disconnected)?, state).await
 }
 
-/// Uploads every journal record in order, removing each once stored.
+/// Uploads every journal record in order, removing each once stored. The
+/// last record's report carries the earlier ones.
 async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotReport, Error> {
     let trees = journal::cache(&state.root)?;
-    let mut report = SnapshotReport {
+    let mut reports = Vec::new();
+    for id in state.journal.pending()? {
+        let record = state.journal.load(id, &trees)?;
+        reports.push(send(client, state, &record.prepared, record.message).await?);
+        state.journal.remove(id)?;
+    }
+    // Drops the blob store once the last record is gone.
+    state.journal.pending()?;
+    let mut last = reports.pop().unwrap_or_else(|| SnapshotReport {
         change: state.change(),
         tree: state.marker.tree,
         commit: None,
@@ -419,15 +455,10 @@ async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotRepo
         removed: 0,
         unreadable: Vec::new(),
         sent: Sent::default(),
-    };
-    for id in state.journal.pending()? {
-        let record = state.journal.load(id, &trees)?;
-        report = send(client, state, &record.prepared, record.message).await?;
-        state.journal.remove(id)?;
-    }
-    // Drops the blob store once the last record is gone.
-    state.journal.pending()?;
-    Ok(report)
+        replayed: Vec::new(),
+    });
+    last.replayed = reports;
+    Ok(last)
 }
 
 /// Failures the server may not have seen, so the snapshot is kept for a
@@ -465,6 +496,7 @@ async fn send(
         removed: prepared.removed,
         unreadable: Vec::new(),
         sent: Sent::default(),
+        replayed: Vec::new(),
     };
     if unchanged && message.is_none() {
         return Ok(report);

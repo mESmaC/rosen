@@ -21,14 +21,19 @@ use tokio::time::{sleep_until, Instant};
 pub const QUIET: Duration = Duration::from_millis(250);
 /// The longest a write waits for a snapshot while writes keep coming.
 pub const MAX_WAIT: Duration = Duration::from_millis(1000);
-/// How long a failed snapshot waits before it is tried again.
+/// How long a failed snapshot waits before it is tried again, and how
+/// often a held file is read again.
 pub const RETRY: Duration = Duration::from_secs(1);
+/// The longest pause between retries while failures repeat, as while the
+/// server is unreachable. A new write is still captured at once.
+pub const MAX_RETRY: Duration = Duration::from_secs(16);
 
 /// What the watcher tells its caller after each attempt.
 #[derive(Debug)]
 pub enum WatchEvent {
     Snapshot(SnapshotReport),
-    /// The attempt failed; its paths are kept and retried after [`RETRY`].
+    /// The attempt failed; it is retried after [`RETRY`], doubling while
+    /// failures repeat up to [`MAX_RETRY`].
     Failed(Error),
 }
 
@@ -64,6 +69,7 @@ pub async fn watch(
         .map_err(watch_error)?;
     tokio::pin!(stop);
     let mut pending = Pending::new(Dirty::Full, Instant::now());
+    let mut failures = 0;
     loop {
         let wake = pending.as_ref().map(Pending::due);
         tokio::select! {
@@ -76,7 +82,14 @@ pub async fn watch(
                 let dirty = pending.take().expect("a wake time means a pending snapshot").dirty;
                 let (back, result) = link.snapshot(snapshotter, dirty.clone()).await;
                 snapshotter = back;
-                pending = after_attempt(result, dirty, &mut report)?;
+                // A captured snapshot is on the server or in the journal, so
+                // only the files it skipped need another read.
+                let left = if snapshotter.captured {
+                    Dirty::Paths(snapshotter.unreadable.clone())
+                } else {
+                    dirty
+                };
+                pending = after_attempt(result, left, &mut failures, &mut report)?;
             }
         }
     }
@@ -85,26 +98,41 @@ pub async fn watch(
 /// Reports one attempt and returns what is left to snapshot.
 fn after_attempt(
     result: Result<SnapshotReport, Error>,
-    dirty: Dirty,
+    left: Dirty,
+    failures: &mut u32,
     report: &mut impl FnMut(WatchEvent),
 ) -> Result<Option<Pending>, Error> {
     match result {
-        Ok(done) => {
+        Ok(mut done) => {
+            *failures = 0;
+            for earlier in std::mem::take(&mut done.replayed) {
+                report(WatchEvent::Snapshot(earlier));
+            }
+            report(WatchEvent::Snapshot(done));
             // A held file is read again once it may be free; the writes
             // stored meanwhile did not wait for it.
-            let retry = (!done.unreadable.is_empty())
-                .then(|| Pending::retry(Dirty::Paths(done.unreadable.iter().cloned().collect())))
-                .flatten();
-            report(WatchEvent::Snapshot(done));
-            Ok(retry)
+            Ok(match left {
+                Dirty::Paths(paths) if paths.is_empty() => None,
+                left => Pending::retry(left, RETRY),
+            })
         }
         // The change is closed or gone: no retry can store it.
         Err(err) if is_final(&err) => Err(err),
         Err(err) => {
+            *failures += 1;
             report(WatchEvent::Failed(err));
-            Ok(Pending::retry(dirty))
+            // A captured attempt leaves no paths, and its retry only
+            // replays the journal.
+            Ok(Pending::retry(left, backoff(*failures)))
         }
     }
+}
+
+/// The pause before retry number `failures`: [`RETRY`], doubled for each
+/// earlier failure in a row, at most [`MAX_RETRY`].
+fn backoff(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(8);
+    (RETRY * 2u32.pow(doublings)).min(MAX_RETRY)
 }
 
 /// The watcher's connection, made again after the server goes away.
@@ -158,15 +186,15 @@ impl Pending {
         })
     }
 
-    /// A failed snapshot's paths, tried again after [`RETRY`]. Events that
-    /// arrived meanwhile are still queued and join it as they are read.
-    fn retry(dirty: Dirty) -> Option<Self> {
+    /// Paths to try again after `wait`. Events that arrived meanwhile are
+    /// still queued and join it as they are read.
+    fn retry(dirty: Dirty, wait: Duration) -> Option<Self> {
         let now = Instant::now();
         Some(Self {
             dirty,
             first: now,
             last: now,
-            not_before: Some(now + RETRY),
+            not_before: Some(now + wait),
         })
     }
 
@@ -177,6 +205,9 @@ impl Pending {
 
     fn add(&mut self, more: &Dirty, at: Instant) {
         self.last = at;
+        // A new write is captured on the usual schedule, durably in the
+        // journal if the server is still away, whatever the retry pause.
+        self.not_before = None;
         match (&mut self.dirty, more) {
             (Dirty::Full, _) => {}
             (dirty, Dirty::Full) => *dirty = Dirty::Full,
