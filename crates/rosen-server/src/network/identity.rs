@@ -7,6 +7,7 @@
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
+use rosen_platform::owner_only;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
@@ -36,19 +37,15 @@ impl Identity {
         }
         fs::create_dir_all(path.parent().unwrap_or(data_dir))?;
         let created = Self::generate()?;
-        let file = atomicwrites::AtomicFile::new(&path, atomicwrites::DisallowOverwrite);
-        match file.write(|out| io::Write::write_all(out, &created.encode())) {
-            Ok(()) => {
-                restrict_to_owner(&path)?;
-                Ok(created)
-            }
+        // The file holds the TLS private key, so only this OS user may open
+        // it, even when the data directory grants other users access.
+        match owner_only::write(&path, &created.encode(), owner_only::Replace::Refuse) {
+            Ok(()) => Ok(created),
             // Another server won the race; use its identity.
-            Err(atomicwrites::Error::Internal(err))
-                if err.kind() == io::ErrorKind::AlreadyExists =>
-            {
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                 Self::decode(&fs::read(&path)?)
             }
-            Err(err) => Err(io::Error::other(err.to_string())),
+            Err(err) => Err(err),
         }
     }
 
@@ -124,18 +121,4 @@ pub fn parse_fingerprint(text: &str) -> Result<Fingerprint, String> {
         *byte = u8::from_str_radix(&digits[index * 2..index * 2 + 2], 16).map_err(|_| bad())?;
     }
     Ok(out)
-}
-
-/// The file holds the TLS private key. On Unix it is
-/// made readable by its owner only; on Windows it inherits the data
-/// directory's access list, which a user-profile directory already limits.
-#[cfg(unix)]
-fn restrict_to_owner(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn restrict_to_owner(_path: &Path) -> io::Result<()> {
-    Ok(())
 }
