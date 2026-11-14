@@ -1,9 +1,10 @@
 //! Unix-socket transport (best-effort platforms, SPEC D11). The socket lives in a
-//! directory only the current user can enter, which limits access to that user.
+//! directory only the current user can write, and the socket itself is mode
+//! 0600, which limits access to that user. Clients check the server's uid.
 
 use super::BoxStream;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -34,6 +35,7 @@ impl Listener {
                 .recursive(true)
                 .mode(0o700)
                 .create(dir)?;
+            require_private_dir(dir)?;
         }
         let inner = match UnixListener::bind(path) {
             Ok(listener) => listener,
@@ -63,6 +65,40 @@ fn rebind_if_stale(path: &Path) -> io::Result<UnixListener> {
     UnixListener::bind(path)
 }
 
+/// `create` succeeds on a directory that already exists, so a directory another
+/// user made first (in a shared `/tmp`) would be accepted and that user could
+/// replace the socket. Refuse unless we own it and nobody else can write to it.
+fn require_private_dir(dir: &Path) -> io::Result<()> {
+    let meta = std::fs::symlink_metadata(dir)?;
+    let foreign = meta.uid() != current_uid();
+    if !meta.is_dir() || foreign || meta.mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} must be a directory owned by the current user and writable only by them",
+                dir.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Connects and refuses a server running as another user, who could have
+/// bound the socket path first.
 pub(super) async fn connect(path: &str) -> io::Result<BoxStream> {
-    Ok(Box::new(UnixStream::connect(path).await?))
+    let stream = UnixStream::connect(path).await?;
+    let server = stream.peer_cred()?.uid();
+    if server != current_uid() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{path} is served by another user (uid {server}); refusing to connect"),
+        ));
+    }
+    Ok(Box::new(stream))
+}
+
+#[allow(unsafe_code)]
+fn current_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
 }
