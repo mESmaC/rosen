@@ -292,6 +292,7 @@ async fn receipt(
         base,
         check_set: "pre-land".into(),
         submitter,
+        signature: None,
     });
     call(client, request).await.context("receipt")?;
     Ok(())

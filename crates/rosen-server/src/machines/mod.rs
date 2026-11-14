@@ -2,6 +2,7 @@
 pub mod credentials;
 pub mod keys;
 pub mod manage;
+pub mod signing;
 use crate::ServerState;
 use rosen_protocol::{CreateJoinKey, ErrorBody, ErrorCode, Outcome, Response};
 use rusqlite::Connection;
@@ -18,6 +19,12 @@ pub fn now() -> u64 {
 }
 pub fn open(data_dir: &Path) -> rusqlite::Result<Connection> {
     let conn = crate::metadata::open(&data_dir.join("metadata.sqlite"))?;
+    ensure_schema(&conn)?;
+    Ok(conn)
+}
+/// The landing ledger reads machine status when it verifies a receipt, so
+/// it installs these tables in its own database too.
+pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS machines (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL,
@@ -26,8 +33,7 @@ pub fn open(data_dir: &Path) -> rusqlite::Result<Connection> {
         previous_hash TEXT NOT NULL DEFAULT '', previous_expires INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS join_keys (id TEXT PRIMARY KEY, secret_hash TEXT NOT NULL,
         expires_at INTEGER NOT NULL, remaining INTEGER NOT NULL, role TEXT NOT NULL);",
-    )?;
-    Ok(conn)
+    )
 }
 pub fn authenticate(dir: &Path, secret: &str) -> rusqlite::Result<bool> {
     let conn = open(dir)?;
@@ -36,6 +42,17 @@ pub fn authenticate(dir: &Path, secret: &str) -> rusqlite::Result<bool> {
         AND status='active' AND expires_at>?1",
         rusqlite::params![now(), keys::digest(secret)],
     )? == 1)
+}
+/// The active, unexpired machine a credential belongs to, if any.
+pub fn machine_of(dir: &Path, secret: &str) -> rusqlite::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    open(dir)?
+        .query_row(
+            "SELECT id FROM machines WHERE credential_hash=?1 AND status='active' AND expires_at>?2",
+            rusqlite::params![keys::digest(secret), now()],
+            |r| r.get(0),
+        )
+        .optional()
 }
 async fn run(
     state: &Arc<ServerState>,

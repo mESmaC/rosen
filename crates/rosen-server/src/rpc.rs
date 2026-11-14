@@ -10,7 +10,22 @@ use rosen_protocol::{
 };
 use std::sync::Arc;
 
-/// Runs one request to completion.
+/// Runs one request to completion for a peer that reached the server as
+/// `origin`. Only a receipt depends on who sent it: its machine signs it.
+pub async fn dispatch_from(
+    state: &Arc<ServerState>,
+    request: Request,
+    origin: crate::receipts::Origin,
+) -> Outcome {
+    match request {
+        Request::ReceiptSubmit(req) if !state.is_shutting_down() => {
+            crate::receipts::submit(state, req, origin).await
+        }
+        request => dispatch(state, request).await,
+    }
+}
+
+/// Runs one request to completion for a client on the server's own machine.
 pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
     if state.is_shutting_down() {
         return Outcome::Error(ErrorBody::new(
@@ -117,7 +132,9 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::ReviewList(filter) => {
             crate::reviews::handle(state, ReviewCall::List(filter)).await
         }
-        Request::ReceiptSubmit(req) => crate::receipts::submit(state, req).await,
+        Request::ReceiptSubmit(req) => {
+            crate::receipts::submit(state, req, crate::receipts::Origin::Local).await
+        }
         Request::Land { change } => crate::landing::service::land(state, change).await,
         Request::ConflictResolve(req) => crate::conflict_resolve::handle(state, req).await,
         Request::GetObjects(query) => crate::objects::get(state, query).await,
