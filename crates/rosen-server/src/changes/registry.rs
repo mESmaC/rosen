@@ -481,7 +481,11 @@ pub fn rebase_checked_storing(
         let key = expected.id.to_string();
         let mut set = crate::conflicts::load(&tx, &key).map_err(corrupt)?;
         for (path, regions) in conflicts {
-            set.record_merge(&path, regions);
+            // An open conflict from an earlier rebase still has its markers
+            // in the head being merged, so this rebase adds to it and never
+            // replaces it.
+            let kept: Vec<_> = set.open().filter(|c| c.path == path).cloned().collect();
+            set.record_merge(&path, kept.into_iter().chain(regions));
         }
         crate::conflicts::save(&tx, &key, &set).map_err(corrupt)?;
     }

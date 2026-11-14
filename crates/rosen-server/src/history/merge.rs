@@ -304,7 +304,8 @@ fn marked_entry(
         // A generated file never conflicts; it keeps the base's version.
         FileMerge::Regenerate => return Ok(onto),
     };
-    let mode = change.or(onto).map_or(FileMode::Regular, |e| e.mode);
+    // The merge's own mode rule, so a mode only the base changed survives.
+    let mode = merged_mode(sides);
     Ok(match shown {
         Some(data) => Some(Entry {
             mode,
