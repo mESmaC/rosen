@@ -178,7 +178,10 @@ fn apply_confirmed(state: &crate::ServerState, answer: &BisectState) -> Result<(
 }
 
 /// Confirmation commits before the inverse land. Replay covers that crash gap;
-/// the inverse land itself is idempotent by culprit commit.
+/// the inverse land itself is idempotent by culprit commit. A session whose
+/// inverse land fails, as when the revert conflicts or stays contended, is
+/// logged and left for the next restart or `bisect next`: it must not keep
+/// every later confirmed culprit in the base (issue #177).
 pub fn recover(state: &crate::ServerState) -> Result<()> {
     let conn = crate::metadata::open(&state.config.metadata_path()).map_err(internal)?;
     storage::ensure_schema(&conn).map_err(internal)?;
@@ -190,8 +193,17 @@ pub fn recover(state: &crate::ServerState) -> Result<()> {
         .map_err(internal)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(internal)?;
+    let mut failed = 0;
     for id in ids {
-        apply_confirmed(state, &next(&conn, id)?)?;
+        if let Err(err) = next(&conn, id).and_then(|answer| apply_confirmed(state, &answer)) {
+            eprintln!("rosen-server: bisection {id}: confirmed culprit not reverted: {err}");
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        return Err(internal(format!(
+            "{failed} confirmed bisection(s) still wait for their revert"
+        )));
     }
     Ok(())
 }
