@@ -89,6 +89,28 @@ pub fn clone_workspace(
     })
 }
 
+/// Refuses a clone in which a directory the source's tree tracks is not a
+/// real directory: an agent may have replaced it with a link or junction to
+/// somewhere outside its workspace, and the clone copies links as links.
+/// Every later step resolves tracked paths through it, so it would delete
+/// and write files outside `root`; and the files the source tracks under it
+/// were never cloned. The caller falls back to a plain copy (issue #245).
+pub fn check_tracked_dirs(root: &Path, before: &Layout) -> Result<(), MaterialiseError> {
+    // Parents come first, so a link is found before anything below it is
+    // read through it.
+    for dir in &before.dirs {
+        let path = disk_path(root, dir);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+            // Outside the sparse paths, or removed: nothing resolves through it.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(MaterialiseError::TrackedDirNotDir(path)),
+            Err(error) => return Err(MaterialiseError::io(&path, error)),
+        }
+    }
+    Ok(())
+}
+
 /// Clears whatever the clone in `root` holds where `after` puts a new
 /// directory or writes a changed file. The clone carries the source's
 /// untracked files too, and one can sit where the target tree tracks
@@ -104,9 +126,9 @@ pub fn clear_for_tree(
     before: &Layout,
     after: &Layout,
 ) -> Result<(), MaterialiseError> {
-    // Directories the source tracked are real directories Rosen made; only
-    // the new ones can be something else on disk. Parents come first, so a
-    // link removed here is never traversed below.
+    // [`check_tracked_dirs`] found the directories the source tracked to be
+    // real; only the new ones can be something else on disk. Parents come
+    // first, so a link removed here is never traversed below.
     let tracked_dirs: HashSet<&[u8]> = before.dirs.iter().map(Vec::as_slice).collect();
     for dir in after
         .dirs
