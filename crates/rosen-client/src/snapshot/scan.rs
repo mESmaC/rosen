@@ -106,6 +106,14 @@ pub fn scan_path(view: &mut View<'_>, rel: &str, out: &mut ScanOutcome) -> io::R
     }
 }
 
+/// Drops candidates the current ignore rules exclude. A batch can walk a
+/// directory under its cached rules before it reaches that directory's new
+/// `.gitignore`, so its candidates must be checked again once the rules are
+/// fresh, or an ignored file is uploaded and then stays tracked (SPEC R2).
+pub fn drop_ignored(ignore: &mut IgnoreRules, index: &Index, out: &mut ScanOutcome) {
+    out.candidates.retain(|rel| keeps_file(rel, ignore, index));
+}
+
 /// What a scan reads and updates.
 pub struct View<'a> {
     pub root: &'a Path,
