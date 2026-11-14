@@ -28,9 +28,10 @@ pub enum ReceiptLookup {
     /// Receipts exist for the change, but none for its head and check set
     /// that a trusted machine's key verifies.
     Invalid,
-    /// `base_seq` is the receipt base's position in the base history.
+    /// `base_seq` is the receipt base's position in the base history. The
+    /// receipt carries its signing machine, which the landed commit records.
     Valid {
-        receipt: Receipt,
+        receipt: SignedReceipt,
         base_seq: i64,
     },
     /// The newest receipt is bound to a base the ref reached after the
@@ -112,7 +113,8 @@ impl Ledger {
     /// same `(change, head, base, check set)` again keeps the first
     /// submitter, unless that stored receipt no longer verifies: then the
     /// new one replaces it, so a revoked machine's receipt can be redone.
-    pub fn put_receipt(&self, signed: &SignedReceipt) -> LandResult<Receipt> {
+    /// The stored receipt comes back with the machine that signed it.
+    pub fn put_receipt(&self, signed: &SignedReceipt) -> LandResult<SignedReceipt> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !verifies(&tx, &signed.receipt, &signed.machine, &signed.signature)? {
@@ -142,7 +144,11 @@ impl Ledger {
                 ..receipt.clone()
             };
             if verifies(&tx, &first, &machine, &signature)? {
-                return Ok(first);
+                return Ok(SignedReceipt {
+                    receipt: first,
+                    machine,
+                    signature,
+                });
             }
         }
         tx.execute(
@@ -160,7 +166,7 @@ impl Ledger {
             ],
         )?;
         tx.commit()?;
-        Ok(receipt.clone())
+        Ok(signed.clone())
     }
 
     /// Finds the verified receipt for `head` and `check_set` whose base is
@@ -191,6 +197,11 @@ impl Ledger {
             if base_seq > history_seq(&connection, ref_name, attempt_base)? {
                 return Ok(ReceiptLookup::Ahead);
             }
+            let receipt = SignedReceipt {
+                receipt,
+                machine,
+                signature,
+            };
             return Ok(ReceiptLookup::Valid { receipt, base_seq });
         }
         let any: i64 = connection.query_row(

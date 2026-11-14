@@ -70,6 +70,18 @@ impl ReceiptService {
         request: SubmitReceipt,
         origin: Origin,
     ) -> Result<ReceiptRecord, ErrorBody> {
+        // The request names only the nick; the server appends the machine
+        // as `<nick>@<machine>`. A nick holding `@` could read as a
+        // different machine in the landed commit's trailer.
+        if request.submitter.as_str().contains('@') {
+            return Err(ErrorBody::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "receipt refused: submitter {} must be a nick without '@';                      the server records its machine",
+                    request.submitter
+                ),
+            ));
+        }
         let record = state
             .changes
             .show(&request.change)
@@ -112,8 +124,9 @@ impl ReceiptService {
         let signed = self.signed(state, &ledger, receipt, origin, signature)?;
         let stored = ledger.put_receipt(&signed).map_err(land_body)?;
         Ok(ReceiptRecord {
-            base_current: stored.base == current,
-            receipt: stored,
+            base_current: stored.receipt.base == current,
+            receipt: stored.receipt,
+            machine: stored.machine,
             base_ref,
         })
     }

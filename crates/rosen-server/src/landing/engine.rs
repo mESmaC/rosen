@@ -17,7 +17,7 @@ use super::rules::{self, LandInput, ReceiptCheck, Refusal, Verdict};
 use super::{
     CasResult, ChangeBook, ChangeFacts, ChangeId, ChangeParent, CommitId, CommitWriter, EventSink,
     LandError, LandRecord, LandResult, LandedCommit, LandingEvent, Ledger, MergeOutcome, Merger,
-    Receipt, RestackReport, Routing, Tier, TreeId,
+    RestackReport, Routing, Tier, TreeId,
 };
 
 #[derive(Clone, Debug)]
@@ -103,7 +103,7 @@ enum Attempt {
 /// Decision inputs read for one attempt, with the receipt they rely on.
 struct Gathered {
     input: LandInput,
-    receipt: Option<Receipt>,
+    receipt: Option<SignedReceipt>,
 }
 
 /// What one [`Landing::recover`] pass did.
@@ -176,9 +176,9 @@ impl Landing {
     /// Stores a receipt after checking it is bound to the change's current
     /// head, the configured check set, and a commit the base has held, and
     /// that its machine's key verifies its signature. Returns the stored
-    /// receipt, which keeps the first submitter when the same receipt was
-    /// already stored.
-    pub fn submit_receipt(&self, signed: SignedReceipt) -> LandResult<Receipt> {
+    /// receipt and its machine, which keep the first submitter when the same
+    /// receipt was already stored.
+    pub fn submit_receipt(&self, signed: SignedReceipt) -> LandResult<SignedReceipt> {
         let receipt = &signed.receipt;
         let facts = self.facts(&receipt.change)?;
         let required = self.check_set_at(&self.current_base()?)?;
@@ -391,7 +391,7 @@ impl Landing {
             }
             ReceiptLookup::Valid { receipt, base_seq } => {
                 input.receipt = ReceiptCheck::Valid;
-                input.base_moved = receipt.base != *base;
+                input.base_moved = receipt.receipt.base != *base;
                 input.landed_since_all_independent =
                     self.independent_since(facts, base, base_seq)?;
                 Some(receipt)
@@ -434,10 +434,11 @@ impl Landing {
         facts: &ChangeFacts,
         base: CommitId,
         tree: TreeId,
-        receipt: Option<Receipt>,
+        receipt: Option<SignedReceipt>,
         attempts: u32,
     ) -> LandResult<Attempt> {
         let landed = landed_commit(facts, base, tree, receipt.as_ref())?;
+        let receipt = receipt.map(|signed| signed.receipt);
         // Written before the swap: if the swap loses, the object is an
         // unreferenced orphan, which is harmless because objects are immutable.
         let commit = self.deps.writer.write_landed(&landed)?;
@@ -556,7 +557,7 @@ fn landed_commit(
     facts: &ChangeFacts,
     base: CommitId,
     tree: TreeId,
-    receipt: Option<&Receipt>,
+    receipt: Option<&SignedReceipt>,
 ) -> LandResult<LandedCommit> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -565,7 +566,7 @@ fn landed_commit(
     // Submission already refuses a malformed check set; this keeps a stored
     // row that slipped past it from forging trailers (issue #18).
     let receipt = receipt
-        .map(|r| ReceiptTrailer::new(&r.check_set, r.head, r.base, r.submitter.clone()))
+        .map(receipt_trailer)
         .transpose()
         .map_err(|err| LandError::InvalidReceipt(err.to_string()))?;
     Ok(LandedCommit {
@@ -580,6 +581,14 @@ fn landed_commit(
             approvers: facts.approvers.clone(),
         },
     })
+}
+
+/// The `Rosen-Receipt` trailer, naming the submitter as nick plus the
+/// machine whose credential and key the receipt came under (R14).
+fn receipt_trailer(signed: &SignedReceipt) -> rosen_core::Result<ReceiptTrailer> {
+    let r = &signed.receipt;
+    let submitter = r.submitter.on_machine(&signed.machine)?;
+    ReceiptTrailer::new(&r.check_set, r.head, r.base, submitter)
 }
 
 fn refused(verdict: Verdict) -> LandOutcome {
