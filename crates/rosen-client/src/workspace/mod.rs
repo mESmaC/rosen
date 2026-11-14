@@ -158,18 +158,28 @@ pub fn materialise_with_budget(
     if let Some(budget) = budget {
         staging_sweep::sweep_abandoned(staging.parent(), budget);
     }
-    let _permit = reserve(budget, store, &target, options, dest, staging.path())?;
-    let mut fallback = None;
-    if let Some(source) = &options.source {
-        if !clone::may_block_clone(&source.dir, staging.parent()) {
-            fallback = Some("the source's volume does not block clone into the destination".into());
-        } else {
-            match from_source(store, &target, source, staging.path(), &options.sparse) {
-                Ok(report) => return staging.publish(dest).map(|()| report),
-                Err(error) => fallback = Some(error.to_string()),
-            }
-            staging.reset()?;
+    let (clonable, mut fallback) = clone_source(store, options, staging.parent());
+    let _permit = reserve(
+        budget,
+        store,
+        &target,
+        clonable.as_ref(),
+        dest,
+        staging.path(),
+    )?;
+    if let Some((source, before)) = &clonable {
+        match from_source(
+            store,
+            &target,
+            source,
+            before,
+            staging.path(),
+            &options.sparse,
+        ) {
+            Ok(report) => return staging.publish(dest).map(|()| report),
+            Err(error) => fallback = Some(error.to_string()),
         }
+        staging.reset()?;
     }
     let mut report = from_store(store, &target, staging.path())?;
     report.fallback = fallback;
@@ -177,31 +187,66 @@ pub fn materialise_with_budget(
     Ok(report)
 }
 
+/// The source to block clone from with its tree's layout, or else why a
+/// given source is not cloned from.
+fn clone_source<'a>(
+    store: &dyn ObjectStore,
+    options: &'a Options,
+    dest_parent: &Path,
+) -> (Option<(&'a SourceWorkspace, Layout)>, Option<String>) {
+    let Some(source) = &options.source else {
+        return (None, None);
+    };
+    if !clone::may_block_clone(&source.dir, dest_parent) {
+        let why = "the source's volume does not block clone into the destination";
+        return (None, Some(why.into()));
+    }
+    match Layout::of_tree(store, source.tree, &options.sparse) {
+        Ok(before) => (Some((source, before)), None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+/// Reserves the most logical bytes either way of building can leave in
+/// staging. A plain copy writes the target's files. A clone carries all of
+/// the source, then rewrites the target files its tree does not hold
+/// unchanged, each replacing the file it supersedes. Charging a clone the
+/// whole target on top of the source would count every unchanged tracked
+/// file twice, and charging the source when the volume cannot clone would
+/// count bytes no copy writes; either can hold a request past a cap it fits.
 fn reserve(
     budget: Option<&limits::Budget>,
     store: &dyn ObjectStore,
     target: &Layout,
-    options: &Options,
+    clonable: Option<&(&SourceWorkspace, Layout)>,
     dest: &Path,
     staging: &Path,
 ) -> Result<Option<limits::Permit>, MaterialiseError> {
     let Some(budget) = budget else {
         return Ok(None);
     };
+    let unchanged: HashMap<&[u8], &FileEntry> = clonable
+        .map(|(_, before)| {
+            let paths = before.files.iter();
+            paths.map(|entry| (entry.path.as_slice(), entry)).collect()
+        })
+        .unwrap_or_default();
     // Each header read waits mostly on opening a file (and, on Windows, on
     // the virus scanner), so threads overlap the waits as the copy does.
-    let total = AtomicU64::new(0);
+    let (total, rewritten) = (AtomicU64::new(0), AtomicU64::new(0));
     parallel::for_each::<_, MaterialiseError, _>(&target.files, |entry| {
         let size = store.object_size(&entry.blob)?;
         total.fetch_add(size, Ordering::Relaxed);
+        if unchanged.get(entry.path.as_slice()) != Some(&entry) {
+            rewritten.fetch_add(size, Ordering::Relaxed);
+        }
         Ok(())
     })?;
     let mut bytes = total.into_inner();
-    if let Some(source) = &options.source {
-        bytes = bytes.saturating_add(
-            limits::disk_bytes(&source.dir)
-                .map_err(|error| MaterialiseError::io(&source.dir, error))?,
-        );
+    if let Some((source, _)) = clonable {
+        let carried = limits::disk_bytes(&source.dir)
+            .map_err(|error| MaterialiseError::io(&source.dir, error))?;
+        bytes = bytes.max(carried.saturating_add(rewritten.into_inner()));
     }
     budget
         .acquire(dest, staging, bytes)
@@ -250,14 +295,14 @@ fn from_source(
     store: &dyn ObjectStore,
     target: &Layout,
     source: &SourceWorkspace,
+    before: &Layout,
     root: &Path,
     sparse: &Sparse,
 ) -> Result<Report, MaterialiseError> {
-    let before = Layout::of_tree(store, source.tree, sparse)?;
     let cloned =
         clone::clone_workspace(&source.dir, root, sparse, clone::pick_probe(&before.files))?;
-    clone::clear_for_tree(root, &before, target)?;
-    let changed = bring_to_tree(root, &before, target)?;
+    clone::clear_for_tree(root, before, target)?;
+    let changed = bring_to_tree(root, before, target)?;
     let bytes = write_all(store, root, &changed)?;
     Ok(Report {
         method: Method::BlockClone,
