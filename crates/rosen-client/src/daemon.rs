@@ -4,7 +4,6 @@
 use crate::{Client, Error};
 use rosen_protocol::Endpoint;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 /// The environment variable naming the `rosen-server` binary to launch.
@@ -23,8 +22,8 @@ pub async fn connect_or_start(endpoint: &Endpoint) -> Result<Client, Error> {
         Err(Error::NotRunning(_)) => {}
         connected => return connected,
     }
-    let mut child = spawn_daemon(endpoint)?;
-    wait_until_ready(endpoint, &mut child).await
+    let mut daemon = spawn_daemon(endpoint)?;
+    wait_until_ready(endpoint, &mut daemon).await
 }
 
 /// The `rosen-server` binary: `$ROSEN_SERVER`, else the one installed next to the
@@ -41,50 +40,74 @@ pub fn server_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(file_name))
 }
 
-fn spawn_daemon(endpoint: &Endpoint) -> Result<Child, Error> {
+/// The launched daemon, polled until it listens or exits.
+#[cfg(windows)]
+type Daemon = rosen_platform::process::DetachedProcess;
+#[cfg(not(windows))]
+type Daemon = std::process::Child;
+
+/// Starts the daemon detached from the launcher's console and job, so closing
+/// the terminal or the IDE that started it does not stop the machine's server.
+/// On Windows it inherits no handles: a daemon holding the pipe a shell gave the
+/// launcher as stdout would keep `rosen ... | cat` from ever finishing.
+/// Leaving the launcher's job fails when the job forbids it; the daemon is then
+/// started inside the job.
+#[cfg(windows)]
+fn spawn_daemon(endpoint: &Endpoint) -> Result<Daemon, Error> {
+    use rosen_platform::process::spawn_detached;
+    use std::ffi::OsStr;
+    let binary = resolve_on_path(server_binary());
+    let args = [OsStr::new("--endpoint"), OsStr::new(endpoint.as_str())];
+    spawn_detached(&binary, &args, true)
+        .or_else(|_| spawn_detached(&binary, &args, false))
+        .map_err(|err| Error::Start(format!("could not run {}: {err}", binary.display())))
+}
+
+/// A bare program name, as `server_binary` falls back to, found on the PATH the
+/// way `std::process::Command` finds it; CreateProcessW would also search the
+/// current directory.
+#[cfg(windows)]
+fn resolve_on_path(binary: PathBuf) -> PathBuf {
+    if binary.components().count() != 1 {
+        return binary;
+    }
+    std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .map(|dir| dir.join(&binary))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or(binary)
+}
+
+#[cfg(not(windows))]
+fn spawn_daemon(endpoint: &Endpoint) -> Result<Daemon, Error> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
     let binary = server_binary();
-    let mut command = Command::new(&binary);
-    command
+    Command::new(&binary)
         .arg("--endpoint")
         .arg(endpoint.as_str())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    detach(&mut command, true);
-    command
+        .stderr(Stdio::null())
+        // A new process group keeps the terminal's Ctrl-C away from the daemon.
+        .process_group(0)
         .spawn()
-        .or_else(|_| detach(&mut command, false).spawn())
         .map_err(|err| Error::Start(format!("could not run {}: {err}", binary.display())))
 }
 
-/// Detaches the daemon from the launcher's console and job, so closing the
-/// terminal or the IDE that started it does not stop the machine's server.
-/// `leave_job` also takes the daemon out of the launcher's job object; spawning
-/// fails when the job forbids that, and spawn_daemon then retries without it.
-#[cfg(windows)]
-fn detach(command: &mut Command, leave_job: bool) -> &mut Command {
-    use std::os::windows::process::CommandExt;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    let breakaway = if leave_job {
-        CREATE_BREAKAWAY_FROM_JOB
-    } else {
-        0
-    };
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | breakaway)
-}
-
-#[cfg(not(windows))]
-fn detach(command: &mut Command, _leave_job: bool) -> &mut Command {
-    use std::os::unix::process::CommandExt;
-    // A new process group keeps the terminal's Ctrl-C away from the daemon.
-    command.process_group(0)
+/// The daemon's exit code once it has exited; `Some(None)` when a signal ended it.
+fn exit_code(daemon: &mut Daemon) -> Option<Option<i32>> {
+    #[cfg(windows)]
+    let code = daemon.try_wait().ok()?.map(|code| Some(code as i32));
+    #[cfg(not(windows))]
+    let code = daemon.try_wait().ok()?.map(|status| status.code());
+    code
 }
 
 /// Retries the connection until the new daemon answers, it exits, or the
 /// start timeout passes.
-async fn wait_until_ready(endpoint: &Endpoint, child: &mut Child) -> Result<Client, Error> {
+async fn wait_until_ready(endpoint: &Endpoint, daemon: &mut Daemon) -> Result<Client, Error> {
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     let mut delay = Duration::from_millis(10);
     loop {
@@ -92,9 +115,10 @@ async fn wait_until_ready(endpoint: &Endpoint, child: &mut Child) -> Result<Clie
             Err(Error::NotRunning(_)) => {}
             connected => return connected,
         }
-        if let Ok(Some(status)) = child.try_wait() {
-            if status.code() != Some(EXIT_ALREADY_RUNNING) {
-                return Err(Error::Start(format!("rosen-server exited with {status}")));
+        if let Some(code) = exit_code(daemon) {
+            if code != Some(EXIT_ALREADY_RUNNING) {
+                let how = code.map_or("on a signal".to_owned(), |code| format!("with code {code}"));
+                return Err(Error::Start(format!("rosen-server exited {how}")));
             }
         }
         if tokio::time::Instant::now() >= deadline {
