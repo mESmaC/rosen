@@ -297,7 +297,10 @@ fn publish(source: &Path, dest: &Path, limits_root: &Path) -> std::io::Result<()
 }
 
 /// Rewrites only the tracked files that differ between the slot's tree and
-/// `tree`. Untracked files, such as prepared build output, are kept.
+/// `tree`. Untracked files, such as prepared build output, are kept, except
+/// where `tree` now tracks a path: a slot or template holds no agent's work,
+/// so output there is cleared rather than failing the refresh and losing
+/// the prepared state with it (issue #236).
 pub(super) fn refresh(
     store: &LooseObjectStore,
     slot: &mut Slot,
@@ -306,6 +309,7 @@ pub(super) fn refresh(
     // Only the differing subtrees: walking both whole trees for every slot
     // after every land kept the pool behind a steady stream of lands.
     let (before, after) = Layout::diff(store, slot.tree, tree)?;
+    super::clone::clear_for_tree(&slot.path, &before, &after)?;
     let changed = super::bring_to_tree(&slot.path, &before, &after)?;
     super::write_all(store, &slot.path, &changed)?;
     seed_slot(store, &slot.path, tree);
