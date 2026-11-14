@@ -31,6 +31,12 @@ impl Listener {
     pub(super) fn bind(path: &str) -> io::Result<Self> {
         let path = Path::new(path);
         if let Some(dir) = path.parent() {
+            // A bare file name has an empty parent: the working directory.
+            let dir = if dir.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                dir
+            };
             std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
