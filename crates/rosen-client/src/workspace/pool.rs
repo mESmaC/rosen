@@ -8,6 +8,9 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock};
 
 pub struct WarmPool {
+    /// The daemon's data directory: its object store and workspace budget.
+    /// The ready root may be elsewhere, on the volume workspaces live on.
+    data_dir: PathBuf,
     pub(super) state: Mutex<State>,
     /// The prepared template on a block-cloning volume. Its own lock lets a
     /// take clone from it while the worker refreshes ready slots; the worker
@@ -55,10 +58,20 @@ pub(super) enum Prep {
 }
 
 impl WarmPool {
+    /// A pool whose ready root is `<data_dir>/warm-pool`.
     pub fn new(data_dir: &Path) -> Arc<Self> {
+        Self::with_root(data_dir, &data_dir.join("warm-pool"))
+    }
+
+    /// A pool whose ready root is `root`. A take renames a ready workspace
+    /// into place, which works only on the root's volume, so the root
+    /// belongs on the volume agents' workspaces live on (#86). The daemon
+    /// removes `root` whole on start, so it must be the daemon's alone.
+    pub fn with_root(data_dir: &Path, root: &Path) -> Arc<Self> {
         Arc::new(Self {
+            data_dir: data_dir.to_path_buf(),
             state: Mutex::new(State {
-                root: data_dir.join("warm-pool"),
+                root: root.to_path_buf(),
                 // Until the worker first reads the base's configuration.
                 size: rosen_core::project_config::DEFAULT_WARM_POOL_SIZE as usize,
                 requested: None,
@@ -132,7 +145,7 @@ impl WarmPool {
             // Removing the slot under the same lock as refresh makes
             // ownership exclusive even when two clients ask together.
             let slot = state.ready.remove(index);
-            let result = publish_slot(&slot, dest.clone(), &root).await;
+            let result = publish_slot(&slot, dest.clone(), &self.data_dir).await;
             if result.is_err() && vanished(&slot) {
                 // Removed behind the daemon's back: re-queuing it would fail
                 // every later take that draws it (#82). The worker refills.
@@ -146,10 +159,11 @@ impl WarmPool {
             }
             drop(state);
             self.wake.notify_one();
-            return taken(result, files, prepared);
+            return taken(result, files, prepared, &root);
         }
         drop(state);
-        match super::template::take_clone(&self.template, &root, tree, dest.clone()).await {
+        let template = super::template::take_clone(&self.template, &self.data_dir, tree, &dest);
+        match template.await {
             Outcome::Ok(Response::PoolTaken(None)) => self.take_stale(&root, tree, dest).await,
             served => served,
         }
@@ -166,10 +180,10 @@ impl WarmPool {
         let slot = state.ready.remove(index);
         drop(state);
         self.wake.notify_one();
-        let Some(mut slot) = catch_up(root, slot, tree).await else {
+        let Some(mut slot) = catch_up(&self.data_dir, slot, tree).await else {
             return Outcome::Ok(Response::PoolTaken(None));
         };
-        let result = publish_slot(&slot, dest, root).await;
+        let result = publish_slot(&slot, dest, &self.data_dir).await;
         if result.is_err() && vanished(&slot) {
             // Dropped, as in `take`; the client materialises without the pool.
             return Outcome::Ok(Response::PoolTaken(None));
@@ -181,7 +195,7 @@ impl WarmPool {
             slot.prep = Prep::Needed;
             self.state.lock().await.ready.push(slot);
         }
-        taken(result, files, false)
+        taken(result, files, false, root)
     }
 }
 
@@ -192,15 +206,22 @@ fn vanished(slot: &Slot) -> bool {
         .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
-fn taken(result: std::io::Result<()>, files: u64, prepared: bool) -> Outcome {
+fn taken(result: std::io::Result<()>, files: u64, prepared: bool, root: &Path) -> Outcome {
     match result {
         Ok(()) => Outcome::Ok(Response::PoolTaken(Some(PooledWorkspace {
             files,
             prepared,
             from_template: false,
         }))),
+        // Said in the answer, not only logged: on this layout every take
+        // misses, and Velocity must see a pool that never serves (#86).
         Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-            Outcome::Ok(Response::PoolTaken(None))
+            Outcome::Ok(Response::PoolMissed(format!(
+                "the warm pool at {} is on another volume than the workspace; start \
+                 the daemon with --warm-pool-dir or ROSEN_WARM_POOL_DIR set to a \
+                 directory on the workspace's volume",
+                root.display()
+            )))
         }
         Err(error) => Outcome::Error(ErrorBody::new(
             ErrorCode::InvalidArgument,
@@ -234,11 +255,8 @@ fn pick_stale(ready: &[Slot]) -> Option<usize> {
 
 /// Brings a slot already removed from the ready list to `tree`. A slot
 /// whose catch-up fails is deleted, never handed to an agent half-written.
-async fn catch_up(pool_root: &Path, mut slot: Slot, tree: ObjectId) -> Option<Slot> {
-    let objects = pool_root
-        .parent()
-        .expect("pool data directory")
-        .join("objects");
+async fn catch_up(data_dir: &Path, mut slot: Slot, tree: ObjectId) -> Option<Slot> {
+    let objects = data_dir.join("objects");
     tokio::task::spawn_blocking(move || {
         let refreshed = LooseObjectStore::open(&objects)
             .map_err(MaterialiseError::Store)
@@ -257,12 +275,9 @@ async fn catch_up(pool_root: &Path, mut slot: Slot, tree: ObjectId) -> Option<Sl
     .flatten()
 }
 
-async fn publish_slot(slot: &Slot, dest: String, pool_root: &Path) -> std::io::Result<()> {
+async fn publish_slot(slot: &Slot, dest: String, data_dir: &Path) -> std::io::Result<()> {
     let source = slot.path.clone();
-    let limits_root = pool_root
-        .parent()
-        .expect("pool data directory")
-        .join("workspace-limits");
+    let limits_root = data_dir.join("workspace-limits");
     tokio::task::spawn_blocking(move || publish(&source, Path::new(&dest), &limits_root))
         .await
         .unwrap_or_else(|error| Err(std::io::Error::other(error.to_string())))

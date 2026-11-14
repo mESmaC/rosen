@@ -10,6 +10,7 @@ fn setup() -> (tempfile::TempDir, Arc<ServerState>) {
     let state = ServerState::new(ServerConfig {
         data_dir: temp.path().into(),
         endpoint: Endpoint::new("green-contract"),
+        warm_pool_dir: None,
     });
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let who = Signature::new("test", "test@test", 0);

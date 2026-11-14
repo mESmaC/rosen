@@ -36,6 +36,7 @@ fn setup() -> (tempfile::TempDir, Arc<ServerState>) {
     let state = ServerState::new(ServerConfig {
         data_dir: temp.path().into(),
         endpoint: rosen_protocol::Endpoint::new("overlap-contract"),
+        warm_pool_dir: None,
     });
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let blob = store.put_blob(&lines(&[])).unwrap();

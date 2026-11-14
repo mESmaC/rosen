@@ -21,6 +21,7 @@ fn start(data_dir: &std::path::Path) -> State {
     ServerState::new(ServerConfig {
         data_dir: data_dir.into(),
         endpoint,
+        warm_pool_dir: None,
     })
 }
 

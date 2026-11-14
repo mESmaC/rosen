@@ -33,6 +33,7 @@ impl Layout {
         ServerConfig {
             data_dir: self.server_dir(),
             endpoint: rosen_protocol::Endpoint::new(self.endpoint(0)),
+            warm_pool_dir: None,
         }
     }
 }

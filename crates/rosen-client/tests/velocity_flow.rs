@@ -181,6 +181,7 @@ fn start_server(data: &Path) -> Endpoint {
     let state = ServerState::new(ServerConfig {
         data_dir: data.to_path_buf(),
         endpoint: endpoint.clone(),
+        warm_pool_dir: None,
     });
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let blob = store.put_blob(b"fn main() {}\n").unwrap();

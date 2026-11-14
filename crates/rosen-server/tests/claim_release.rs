@@ -10,6 +10,7 @@ async fn setup() -> (tempfile::TempDir, Arc<ServerState>, ChangeId, ChangeId) {
     let state = ServerState::new(ServerConfig {
         data_dir: dir.path().into(),
         endpoint: Endpoint::new("release"),
+        warm_pool_dir: None,
     });
     let mut ids = Vec::new();
     for name in ["holder", "waiter"] {

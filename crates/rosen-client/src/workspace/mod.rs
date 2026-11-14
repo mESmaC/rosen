@@ -101,6 +101,9 @@ pub struct Report {
     pub bytes_written: u64,
     /// Why a source workspace was given but not cloned from, if it was not.
     pub fallback: Option<String>,
+    /// Why this machine's warm pool can never serve a take into this
+    /// destination, as when its ready workspaces are on another volume.
+    pub pool_missed: Option<String>,
     /// The project's prepare commands have run in it at its tree (R3), so
     /// an agent's first build compiles only what it changes.
     pub prepared: bool,
@@ -227,6 +230,7 @@ fn from_store(
         written: target.files.len() as u64,
         bytes_written: bytes,
         fallback: None,
+        pool_missed: None,
         prepared: false,
     })
 }
@@ -267,6 +271,7 @@ fn from_source(
         written: changed.len() as u64,
         bytes_written: bytes,
         fallback: None,
+        pool_missed: None,
         prepared: false,
     })
 }

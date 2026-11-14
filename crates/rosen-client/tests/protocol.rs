@@ -35,6 +35,7 @@ fn start_server() -> (Endpoint, Arc<ServerState>) {
     let state = ServerState::new(ServerConfig {
         data_dir: std::env::temp_dir(),
         endpoint: endpoint.clone(),
+        warm_pool_dir: None,
     });
     tokio::spawn(rosen_server::listener::serve(listener, Arc::clone(&state)));
     (endpoint, state)
