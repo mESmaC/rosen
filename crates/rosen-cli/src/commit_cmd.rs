@@ -22,6 +22,10 @@ pub async fn commit(
     let report = client
         .snapshot_workspace(&root, Some(message.to_owned()))
         .await?;
+    // Offline snapshots replayed ahead of this one get a line each.
+    for earlier in &report.replayed {
+        print_report(json, earlier);
+    }
     print_report(json, &report);
     Ok(true)
 }
