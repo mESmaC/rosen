@@ -935,6 +935,7 @@ dependencies = [
  "rosen-server",
  "rosen-store",
  "rustls",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",
