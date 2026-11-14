@@ -351,9 +351,13 @@ fn relevant_paths(
 
 fn is_final(err: &Error) -> bool {
     match err {
-        // The journal waits for the change to reopen; retrying on a timer
-        // would only ask the server the same question again.
-        Error::JournalHalted { .. } => true,
+        // A journal halted because the change closed waits for it to
+        // reopen. Any other halt is retried on the usual schedule: until
+        // the change moves, a retry only asks the server for the change and
+        // uploads nothing (#273), and later writes are still captured.
+        Error::JournalHalted { refusal, .. } => {
+            matches!(refusal.code, ErrorCode::Refused | ErrorCode::NotFound)
+        }
         Error::Server(body) => matches!(body.code, ErrorCode::Refused | ErrorCode::NotFound),
         _ => false,
     }

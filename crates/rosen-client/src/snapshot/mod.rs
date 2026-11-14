@@ -489,25 +489,48 @@ async fn store_or_queue(
     state.captured = true;
     let client = client.ok_or(Error::Disconnected)?;
     if let Some(halt) = state.journal.halted()? {
-        if !change_open(client, state.change()).await? {
+        if !may_resume(client, state.change(), halt.seen).await? {
             return Err(Error::JournalHalted {
                 record: halt.record,
                 refusal: halt.refusal,
             });
         }
-        // A post-land revert (R12) reopened the change: its records can
-        // be stored again.
+        // A post-land revert (R12) reopened the change, or a server rebase
+        // gave it a new head: its records may be stored now.
         state.journal.resume()?;
     }
     replay(client, state).await
 }
 
-/// Whether `change` takes snapshots. One small request, so a halted journal
-/// never uploads a record's blobs to a change that will refuse it.
-async fn change_open(client: &Client, change: ChangeId) -> Result<bool, Error> {
+/// Whether a halted journal may replay: the change is open and is not as it
+/// was when the server refused the record. One small request, so a halted
+/// journal never uploads a record's blobs only to have them refused again:
+/// an unchanged open change gives the same answer to the same request
+/// (#273), and each new snapshotter, such as each `rosen commit`, would
+/// upload them anew.
+async fn may_resume(
+    client: &Client,
+    change: ChangeId,
+    halted: Option<journal::ChangeSeen>,
+) -> Result<bool, Error> {
+    Ok(match change_seen(client, change).await? {
+        Some(now) => !now.state.is_closed() && halted != Some(now),
+        None => false,
+    })
+}
+
+/// The change's state and head now, or `None` when the server holds no such
+/// change.
+async fn change_seen(
+    client: &Client,
+    change: ChangeId,
+) -> Result<Option<journal::ChangeSeen>, Error> {
     match client.change_show(&change.to_string()).await {
-        Ok(record) => Ok(!record.change.state.is_closed()),
-        Err(Error::Server(body)) if body.code == rosen_protocol::ErrorCode::NotFound => Ok(false),
+        Ok(record) => Ok(Some(journal::ChangeSeen {
+            state: record.change.state,
+            head: record.change.head,
+        })),
+        Err(Error::Server(body)) if body.code == rosen_protocol::ErrorCode::NotFound => Ok(None),
         Err(err) => Err(err),
     }
 }
@@ -524,7 +547,9 @@ async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotRepo
         match replay_record(client, state, id, record).await {
             Ok(report) => reports.push(report),
             Err(Error::Server(refusal)) if !transient(refusal.code) => {
-                state.journal.halt(id, &refusal)?;
+                // Unread, the halt resumes whenever the change is open.
+                let seen = change_seen(client, state.change()).await.ok().flatten();
+                state.journal.halt(id, &refusal, seen)?;
                 return Err(Error::JournalHalted {
                     record: id,
                     refusal,
