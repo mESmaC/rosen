@@ -1,0 +1,14 @@
+# Workflows pin every action to a full commit SHA with a version comment
+# (issue #5), so a retargeted tag cannot run unreviewed code. Dependabot
+# keeps those pins current: each bump arrives as a PR that PR duty reviews
+# under the .github/workflows/ sensitive-path rules.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # One PR per week for all action bumps keeps review load low.
+    groups:
+      actions:
+        patterns: ["*"]

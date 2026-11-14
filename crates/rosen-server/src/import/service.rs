@@ -55,13 +55,17 @@ fn run(
     match outcome {
         InitBase::Created => {
             // Named only once this import owns the base, so a refused
-            // import never redirects an existing project's mirror. The
-            // first push follows the next land or server start (R1).
+            // import never redirects an existing project's mirror.
             if let Some(remote) = mirror {
                 MirrorStore::open(&state.config.metadata_path())
                     .and_then(|store| store.set_remote(remote))
                     .map_err(|error| ImportError::Store(error.to_string()))?;
             }
+            // Import publishes no `landed` event, so wake the mirror task
+            // directly: the imported history reaches the remote now, not at
+            // the first land (R1). This also covers a remote named only by
+            // the imported base's rosen.toml.
+            state.mirror_wake.notify_one();
             Ok(report)
         }
         InitBase::Exists { name, commit } => Err(ImportError::BaseAlreadySet {
