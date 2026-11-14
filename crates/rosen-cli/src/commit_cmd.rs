@@ -102,7 +102,7 @@ fn print_report(json: bool, report: &SnapshotReport) {
     );
     if !report.unreadable.is_empty() {
         println!(
-            "  held open by another process, kept at last stored content: {}",
+            "  held open or still being written, kept at last stored content: {}",
             report.unreadable.join(", ")
         );
     }
