@@ -1,6 +1,8 @@
 //! Event-driven refill; one worker per daemon serializes refresh work and
 //! runs at most one prepare at a time (SPEC R3).
-use super::pool::{refresh, seed_slot, Prep, Slot, WarmPool};
+use super::pool::{refresh, restore_tracked, seed_slot, Prep, Slot, WarmPool};
+use super::MaterialiseError;
+use rosen_store::LooseObjectStore;
 use super::{prepare, template, Method, Options};
 use crate::{Client, Error};
 use rosen_core::ObjectId;
@@ -564,12 +566,29 @@ async fn prepare_next(pool: &WarmPool, base: &Base) -> bool {
         slot.prep = Prep::Running;
         slot.path.clone()
     };
-    let prep = run_prepare(&path, &base.commands).await;
+    let prep = run_prepare(pool, &path, base).await;
     let mut state = pool.state.lock().await;
-    if let Some(slot) = state.ready.iter_mut().find(|slot| slot.path == path) {
-        slot.prep = prep;
+    let Some(index) = state.ready.iter().position(|slot| slot.path == path) else {
+        return true;
+    };
+    match prep {
+        Some(prep) => state.ready[index].prep = prep,
+        None => {
+            let slot = state.ready.remove(index);
+            drop(state);
+            drop_unsafe(&slot.path);
+        }
     }
     true
+}
+
+/// Removes a workspace whose tracked directory a prepare replaced with a
+/// link. `remove_dir_all` removes a link without following it, so nothing
+/// outside the workspace is touched; a failure only leaks the directory.
+fn drop_unsafe(path: &std::path::Path) {
+    if let Err(error) = std::fs::remove_dir_all(path) {
+        eprintln!("rosen warm pool: removing {}: {error}", path.display());
+    }
 }
 
 async fn prepare_template(pool: &WarmPool, base: &Base) -> bool {
@@ -583,20 +602,67 @@ async fn prepare_template(pool: &WarmPool, base: &Base) -> bool {
             _ => return false,
         }
     };
-    let prep = run_prepare(&path, &base.commands).await;
-    if let Some(slot) = pool.template.write().await.as_mut() {
-        slot.prep = prep;
+    let prep = run_prepare(pool, &path, base).await;
+    let mut template = pool.template.write().await;
+    match prep {
+        Some(prep) => {
+            if let Some(slot) = template.as_mut() {
+                slot.prep = prep;
+            }
+        }
+        // A later pass builds a new template.
+        None => {
+            if let Some(slot) = template.take() {
+                drop_unsafe(&slot.path);
+            }
+        }
     }
     true
 }
 
-async fn run_prepare(path: &std::path::Path, commands: &[String]) -> Prep {
-    match prepare::run(path, commands).await {
-        Ok(()) => Prep::Done,
-        Err(why) => {
-            eprintln!("rosen warm pool: {why}");
-            Prep::Failed
+/// Runs the prepare commands in `path`, which holds `base.tree`, then puts
+/// back any tracked file they changed, so the workspace an agent takes
+/// matches the base exactly (#168). `None` means the workspace must be
+/// dropped: a prepare left a link at a tracked directory, and a `Failed`
+/// slot would still be handed out.
+async fn run_prepare(pool: &WarmPool, path: &std::path::Path, base: &Base) -> Option<Prep> {
+    if let Err(why) = prepare::run(path, &base.commands).await {
+        eprintln!("rosen warm pool: {why}");
+        return Some(Prep::Failed);
+    }
+    let objects = pool.data_dir.join("objects");
+    let (root, tree) = (path.to_path_buf(), base.tree);
+    let restored = tokio::task::spawn_blocking(move || {
+        let store = LooseObjectStore::open(&objects).map_err(MaterialiseError::Store)?;
+        let changed = restore_tracked(&store, &root, tree)?;
+        if !changed.is_empty() {
+            // Rewritten files would otherwise be rehashed on the first take.
+            seed_slot(&store, &root, tree);
         }
+        Ok::<_, MaterialiseError>(changed)
+    })
+    .await;
+    let error = match restored {
+        Ok(Ok(changed)) => {
+            if !changed.is_empty() {
+                eprintln!(
+                    "rosen warm pool: prepare changed tracked files in {}; restored {}",
+                    path.display(),
+                    changed.join(", ")
+                );
+            }
+            return Some(Prep::Done);
+        }
+        Ok(Err(error)) => error,
+        Err(join) => {
+            eprintln!("rosen warm pool: restoring tracked files stopped: {join}");
+            return Some(Prep::Failed);
+        }
+    };
+    eprintln!("rosen warm pool: restoring tracked files in {}: {error}", path.display());
+    match error {
+        MaterialiseError::TrackedDirNotDir(_) => None,
+        _ => Some(Prep::Failed),
     }
 }
 

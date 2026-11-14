@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 pub struct WarmPool {
     /// The daemon's data directory: its object store and workspace budget.
     /// The ready root may be elsewhere, on the volume workspaces live on.
-    data_dir: PathBuf,
+    pub(super) data_dir: PathBuf,
     pub(super) state: Mutex<State>,
     /// The prepared template on a block-cloning volume. Its own lock lets a
     /// take clone from it while the worker refreshes ready slots; the worker
@@ -320,6 +320,64 @@ pub(super) fn refresh(
     slot.tree = tree;
     slot.files = (slot.files + after.files.len() as u64).saturating_sub(before.files.len() as u64);
     Ok(())
+}
+
+/// Rewrites from the store every tracked file under `root` whose content
+/// differs from `tree` or is missing, and returns their paths. A prepare
+/// command may write tracked files (codegen, a formatter, a lockfile
+/// update); left there, the edit would reach the agent that takes the slot
+/// and show up in its change as if it wrote it (issue #168). Build output,
+/// which is untracked, is kept.
+///
+/// A link or file left where a tracked directory was is refused with
+/// [`MaterialiseError::TrackedDirNotDir`] before anything is written, as
+/// `refresh` does (#312): writing through it would change files outside
+/// the slot. A tracked directory the prepare removed is made again (#322).
+pub(super) fn restore_tracked(
+    store: &LooseObjectStore,
+    root: &Path,
+    tree: ObjectId,
+) -> Result<Vec<String>, MaterialiseError> {
+    let layout = Layout::of_tree(store, tree, &super::Sparse::all())?;
+    super::clone::check_tracked_dirs(root, &layout)?;
+    // Parents come first, so each directory's parent already exists.
+    for dir in &layout.dirs {
+        let path = super::layout::disk_path(root, dir);
+        match std::fs::create_dir(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+                return Err(MaterialiseError::io(&path, error));
+            }
+            _ => {}
+        }
+    }
+    let changed = std::sync::Mutex::new(Vec::new());
+    super::parallel::for_each::<_, MaterialiseError, _>(&layout.files, |entry| {
+        if !matches_tree(root, entry) {
+            super::write::remove_file(root, &entry.path)?;
+            super::write::write_entry(store, root, entry)?;
+            let path = String::from_utf8_lossy(&entry.path).into_owned();
+            changed.lock().unwrap_or_else(|e| e.into_inner()).push(path);
+        }
+        Ok(())
+    })?;
+    let mut changed = changed.into_inner().unwrap_or_else(|e| e.into_inner());
+    changed.sort();
+    Ok(changed)
+}
+
+/// Whether the file on disk holds exactly the entry's blob. Unreadable or
+/// missing counts as different, so the entry is written again.
+fn matches_tree(root: &Path, entry: &super::layout::FileEntry) -> bool {
+    let path = super::layout::disk_path(root, &entry.path);
+    #[cfg(unix)]
+    if entry.kind == super::layout::FileKind::Symlink {
+        use std::os::unix::ffi::OsStrExt;
+        return std::fs::read_link(&path).is_ok_and(|target| {
+            ObjectId::hash_object("blob", target.as_os_str().as_bytes()) == entry.blob
+        });
+    }
+    // A symlink on Windows is written as a plain file holding its target.
+    std::fs::read(&path).is_ok_and(|data| ObjectId::hash_object("blob", &data) == entry.blob)
 }
 
 /// Fills a ready workspace's snapshot tree cache before any take, so the
