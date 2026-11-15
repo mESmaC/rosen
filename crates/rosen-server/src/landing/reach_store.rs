@@ -9,6 +9,11 @@ use rosen_store::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
+mod cargo_workspace;
+#[cfg(test)]
+mod input_fixtures;
+mod inputs;
+
 type Files = BTreeMap<String, (rosen_core::FileMode, ObjectId)>;
 type Units = BTreeMap<String, BuildUnit>;
 
@@ -72,9 +77,10 @@ pub fn reusable(
     cache: &UnitsCache,
     base: &CommitId,
     facts: &ChangeFacts,
+    merged: &ObjectId,
     lands: &[(CommitId, Tier)],
 ) -> LandResult<bool> {
-    match decide(store, cache, base, facts, lands) {
+    match decide(store, cache, base, facts, merged, lands) {
         Ok(reusable) => Ok(reusable),
         Err(Stop::Unreadable(why)) => {
             let change = facts.id;
@@ -90,6 +96,7 @@ fn decide(
     cache: &UnitsCache,
     base: &CommitId,
     facts: &ChangeFacts,
+    merged: &ObjectId,
     lands: &[(CommitId, Tier)],
 ) -> Checked<bool> {
     let config = crate::project_config::resolve(store, base)
@@ -104,10 +111,7 @@ fn decide(
         config.build_units.clone()
     };
     let graph = graph(units, &config);
-    let own = graph.reach(
-        &changed(store, &facts.merge_base, &facts.head)?,
-        facts.tier == Tier::ProseOnly,
-    );
+    let own = inputs::reach(store, &graph, base, merged, facts.tier == Tier::ProseOnly)?;
     for (commit, tier) in lands {
         if *tier == Tier::ProseOnly {
             continue;
@@ -116,8 +120,7 @@ fn decide(
         let Some(parent) = record.parents.first() else {
             return Ok(false);
         };
-        let paths = changed(store, parent, commit)?;
-        if !independent(&own, &graph.reach(&paths, false)) {
+        if !independent(&own, &inputs::reach(store, &graph, parent, commit, false)?) {
             return Ok(false);
         }
     }
@@ -237,12 +240,13 @@ fn cargo_units(store: &dyn ObjectStore, files: &Files) -> Checked<Units> {
         return Ok(BTreeMap::new());
     };
     let root = manifest(store, root)?;
+    let members = cargo_workspace::members(store, files, &root)?;
     let mut packages = BTreeMap::new();
     for (path, (_, id)) in files {
         if path != "Cargo.toml" && !path.ends_with("/Cargo.toml") {
             continue;
         }
-        if !member(&root, path) {
+        if !members.contains(path) {
             continue;
         }
         let value = manifest(store, id)?;
@@ -277,27 +281,6 @@ fn cargo_units(store: &dyn ObjectStore, files: &Files) -> Checked<Units> {
         );
     }
     Ok(units)
-}
-
-fn member(root: &toml::Value, path: &str) -> bool {
-    if path == "Cargo.toml" {
-        return true;
-    }
-    let Some(workspace) = root.get("workspace") else {
-        return false;
-    };
-    let dir = path.strip_suffix("/Cargo.toml").unwrap_or("");
-    let matches = |key: &str| {
-        workspace
-            .get(key)
-            .and_then(|v| v.as_array())
-            .is_some_and(|ps| {
-                ps.iter()
-                    .filter_map(|p| p.as_str())
-                    .any(|p| PathPattern::new(p).is_ok_and(|p| p.matches(dir)))
-            })
-    };
-    matches("members") && !matches("exclude")
 }
 
 fn dependencies(value: &toml::Value, root: &toml::Value) -> Vec<String> {
@@ -351,7 +334,11 @@ mod tests {
         store.put_tree(&Tree::new(entries).unwrap()).unwrap()
     }
 
-    fn commit(store: &dyn ObjectStore, tree: ObjectId, parents: Vec<ObjectId>) -> ObjectId {
+    pub(super) fn commit(
+        store: &dyn ObjectStore,
+        tree: ObjectId,
+        parents: Vec<ObjectId>,
+    ) -> ObjectId {
         let signature = Signature::new("test", "test@rosen", 0);
         store
             .put_commit(&Commit {
@@ -391,6 +378,7 @@ mod tests {
             &UnitsCache::default(),
             &landed,
             &facts,
+            &tree(&store, "new a", "new b", config),
             &[(landed, Tier::Normal)]
         )
         .unwrap());
@@ -402,6 +390,7 @@ mod tests {
             &UnitsCache::default(),
             &base,
             &facts,
+            &tree(&store, "new a", "b", &shared),
             &[(landed, Tier::Normal)]
         )
         .unwrap());
@@ -412,6 +401,7 @@ mod tests {
             &UnitsCache::default(),
             &reverted,
             &facts,
+            &facts.head,
             &[(changed_a, Tier::Normal), (reverted, Tier::Normal)]
         )
         .unwrap());
@@ -453,12 +443,13 @@ mod tests {
             &UnitsCache::default(),
             &landed,
             &facts,
+            &tree,
             &[(landed, Tier::Normal)]
         )
         .unwrap());
     }
 
-    fn nested(store: &dyn ObjectStore, files: &[(&str, &str)]) -> ObjectId {
+    pub(super) fn nested(store: &dyn ObjectStore, files: &[(&str, &str)]) -> ObjectId {
         let mut dirs: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
         let mut entries = vec![];
         for (path, text) in files {

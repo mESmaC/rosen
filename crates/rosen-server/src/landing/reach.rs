@@ -24,10 +24,22 @@ impl BuildGraph {
                 .filter(|(_, unit)| unit.paths.iter().any(|p| p.matches(path)))
                 .map(|(name, _)| name.clone())
                 .collect();
-            if holders.is_empty() || self.wide(path) || !self.valid() {
+            if self.wide(path) || !self.valid() {
+                return self.all();
+            }
+            // Mirror workflows affect builds only when a project names them
+            // as inputs or includes them in a build unit (#367).
+            if holders.is_empty() && !path.starts_with(".github/workflows/") {
                 return self.all();
             }
             reached.extend(holders);
+        }
+        self.expand(reached)
+    }
+
+    pub(super) fn expand(&self, mut reached: Reach) -> Reach {
+        if !self.valid() {
+            return self.all();
         }
         loop {
             let before = reached.len();
@@ -48,17 +60,13 @@ impl BuildGraph {
             .all(|u| u.dependencies.iter().all(|d| self.units.contains_key(d)))
     }
 
-    fn all(&self) -> Reach {
+    pub(super) fn all(&self) -> Reach {
         self.units.keys().cloned().chain([String::new()]).collect()
     }
 
-    fn wide(&self, path: &str) -> bool {
-        matches!(
-            path,
-            "rosen.toml" | "Cargo.toml" | "Cargo.lock" | "rust-toolchain" | "rust-toolchain.toml"
-        ) || path.ends_with("/Cargo.toml")
+    pub(super) fn wide(&self, path: &str) -> bool {
+        matches!(path, "rust-toolchain" | "rust-toolchain.toml")
             || path.starts_with(".cargo/")
-            || path.starts_with(".github/workflows/")
             || self.workspace_inputs.iter().any(|p| p.matches(path))
     }
 }

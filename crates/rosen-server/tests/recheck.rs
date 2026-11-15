@@ -15,11 +15,11 @@ fn interval_reuse_matches_proven_fixtures() {
     let mut checked = 0;
     for row in table.lines().skip(1) {
         let cells: Vec<_> = row.split('\t').collect();
-        assert_eq!(cells.len(), 4);
+        assert_eq!(cells.len(), 5);
         let ours = reach(cells[0]);
         let reuse = independent(&ours, &reach(cells[1])) && independent(&ours, &reach(cells[2]));
         assert_eq!(reuse, cells[3] == "1", "{row}");
         checked += 1;
     }
-    assert_eq!(checked, 216);
+    assert_eq!(checked, 236);
 }

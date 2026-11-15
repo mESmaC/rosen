@@ -3,6 +3,20 @@ of landed reaches, including lands subsequently reverted. Inputs are finite
 sets of unit IDs represented by lists; repeated IDs do not affect safety. -/
 namespace Recheck
 
+/-- SPEC §2: parsed config edits carry whether a build key changed; lock
+edits carry their resolved consumers. Unreadable inputs remain shared. -/
+inductive Input where
+  | config (buildChanged readable : Bool)
+  | lockfile (consumers : List Nat) (readable : Bool)
+  | ci
+  | shared
+
+def inputReach (all : List Nat) : Input → List Nat
+  | .config changed readable => if readable then (if changed then all else []) else all
+  | .lockfile consumers readable => if readable then consumers else all
+  | .ci => []
+  | .shared => all
+
 def reusable (ours : List Nat) (lands : List (List Nat)) : Bool :=
   lands.all fun theirs => !(ours.any fun u => theirs.contains u)
 
@@ -41,6 +55,7 @@ theorem optimal (policy : List Nat → List (List Nat) → Bool)
   · simp [hp]; split <;> omega
 
 #print axioms reusable
+#print axioms inputReach
 #print axioms probeCost
 #print axioms correct
 #print axioms cost_bound

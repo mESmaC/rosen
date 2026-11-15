@@ -477,7 +477,7 @@ impl Landing {
                 input.receipt = ReceiptCheck::Valid;
                 input.base_moved = r.base != *base;
                 input.landed_since_all_independent = policy.recheck == RecheckMode::Reach
-                    && self.reuse_independent(facts, base, r, base_seq, single_layer, checked)?;
+                    && self.reuse_independent(facts, base, r, base_seq, single_layer, (checked, tree))?;
                 if policy.recheck == RecheckMode::Merge
                     && !self.stack_receipt_matches(facts, base, r, single_layer, checked)?
                 {
@@ -510,7 +510,8 @@ impl Landing {
 
     /// A stacked head alone does not bind pending ancestor edits. Rebuild
     /// its old-base result before using reach, then include every layer's
-    /// paths in that reach. Exact-tree receipts never need this work.
+    /// paths in that reach. Reach compares the current base with the actual
+    /// merged stack result. Exact-tree receipts never need this work.
     fn reuse_independent(
         &self,
         facts: &ChangeFacts,
@@ -518,10 +519,10 @@ impl Landing {
         receipt: &Receipt,
         seq: i64,
         single_layer: bool,
-        checked: Option<TreeId>,
+        (checked, merged): (Option<TreeId>, TreeId),
     ) -> LandResult<bool> {
         if single_layer {
-            return self.independent_since(facts, base, seq);
+            return self.independent_since(facts, base, &merged, seq);
         }
         let Some(tree) = checked else {
             return Ok(false);
@@ -532,7 +533,7 @@ impl Landing {
         let mut combined = facts.clone();
         combined.merge_base = receipt.base;
         combined.head = tree;
-        self.independent_since(&combined, base, seq)
+        self.independent_since(&combined, base, &merged, seq)
     }
 
     /// Resolve against the attempt's immutable base. A cached engine can
@@ -566,6 +567,7 @@ impl Landing {
         &self,
         facts: &ChangeFacts,
         base: &CommitId,
+        merged: &TreeId,
         seq: i64,
     ) -> LandResult<bool> {
         let lands = self
@@ -575,9 +577,14 @@ impl Landing {
             return Ok(true);
         }
         match &self.recheck_store {
-            Some(store) => {
-                super::reach_store::reusable(store.as_ref(), &self.units_cache, base, facts, &lands)
-            }
+            Some(store) => super::reach_store::reusable(
+                store.as_ref(),
+                &self.units_cache,
+                base,
+                facts,
+                merged,
+                &lands,
+            ),
             None => Ok(false),
         }
     }
