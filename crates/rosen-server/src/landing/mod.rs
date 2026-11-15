@@ -110,7 +110,25 @@ pub struct ChangeFacts {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MergeOutcome {
     Clean(TreeId),
+    /// The tree keeps base artifacts until the owner regenerates them (R5).
+    Regenerate {
+        tree: TreeId,
+        paths: Vec<String>,
+    },
     Conflicted(Vec<String>),
+}
+
+impl From<crate::history::merge::TreeMerge> for MergeOutcome {
+    fn from(merged: crate::history::merge::TreeMerge) -> Self {
+        match merged.tree {
+            Some(tree) if merged.regenerate.is_empty() => Self::Clean(tree),
+            Some(tree) => Self::Regenerate {
+                tree,
+                paths: merged.regenerate,
+            },
+            None => Self::Conflicted(merged.conflicts),
+        }
+    }
 }
 
 /// Whether [`ChangeBook::record_conflicts_at`] attached the conflicts.
@@ -161,6 +179,10 @@ pub enum LandError {
     UnknownChange(ChangeId),
     NoBase(String),
     InvalidReceipt(String),
+    RegenerationRequired {
+        change: ChangeId,
+        paths: Vec<String>,
+    },
     ConflictMarkers(Vec<String>),
     RevertConflict {
         base: ObjectId,
@@ -184,6 +206,13 @@ impl fmt::Display for LandError {
             LandError::UnknownChange(id) => write!(f, "unknown change {id}"),
             LandError::NoBase(name) => write!(f, "base ref {name} is not initialised"),
             LandError::InvalidReceipt(why) => write!(f, "invalid receipt: {why}"),
+            LandError::RegenerationRequired { change, paths } => write!(
+                f,
+                "change {change} requires regeneration of {}; its owner must apply \
+                 `rosen rebase` (landing its ancestors first if stacked), regenerate these files, \
+                 and name the repaired head before retrying",
+                paths.join(", ")
+            ),
             LandError::ConflictMarkers(paths) => {
                 write!(
                     f,

@@ -122,6 +122,8 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 | `rosen-client` | The public library API Velocity links: daemon discovery and start, joining a project, workspace materialisation, the file watcher and snapshotting, applying server rebases, and the offline journal. Its session runs every step of an agent's flow under the agent's identity, and its channel membership runs every AIRC tool under the member ID and nick Velocity gave it (§5). |
 | `rosen-cli` | The `rosen` binary, a thin layer over `rosen-client`. |
 
+- **Generated merge artifacts.** R5/R8 preserve regeneration paths through landing; a land that needs regeneration is refused with the owning change and paths, in either review mode (#389).
+  Merge-result trees awaiting regeneration cannot bind receipts; the owner rebases, regenerates and snapshots the repaired artifacts before retrying.
 - **Text merge line endings.** R5 compares LF and CRLF lines equally and writes merged text in the base file's newline convention, so an editor rewrite does not displace concurrent additions (#391).
 - **Client–server asymmetry.** The server does every merge, rebase, landed commit and history query. The client materialises files, watches them, and uploads snapshots. Clients never run merge logic.
 - **Topology.** One authoritative server per project. On every other enrolled machine, the daemon serves its clients over the local transport, answers object reads from its own cache, and forwards every other request to the server. Refs, claims, the channel and every other piece of mutable state are read and written only on the server, so no machine can fall behind or move ahead of it.

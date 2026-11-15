@@ -4,6 +4,8 @@
   Merged text uses the base's first terminated line's newline convention; if the base has none, it uses ours' first terminated line, then theirs', otherwise LF.
   Bare CR bytes and missing final newlines remain content; generated and binary files retain their existing byte-preserving rules.
 - Generated files listed in project configuration are regenerated, never merged.
+  When both sides change a generated path differently, the provisional merge keeps the target base's copy and reports the path for the owner to regenerate; Rosen runs no generators (D9).
+  Server rebases preserve these paths in the owner's rebase notice, including restacks after a parent lands.
   Registration lists keep both sides' additions.
 - A region that does not merge automatically becomes a stored conflict on the change, which records base, ours and theirs.
   A local workspace shows conflict markers once the rebase is applied (R2).

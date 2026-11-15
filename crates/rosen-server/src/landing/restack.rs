@@ -169,7 +169,9 @@ impl Restacker<'_> {
             return Ok(true);
         }
         match self.merger.merge(&facts.merge_base, onto, &facts.head)? {
-            MergeOutcome::Clean(tree) => {
+            // Reparent uses the live stack rebase, which stages regeneration
+            // notices with the installed head before notifying its owner.
+            MergeOutcome::Clean(tree) | MergeOutcome::Regenerate { tree, .. } => {
                 match self.book.reparent(change, onto, &facts.head, Some(&tree))? {
                     Reparent::Moved => {}
                     // A replay or a later land's run already moved it.

@@ -38,7 +38,7 @@ impl Landing {
                 .merge_layer(&facts.merge_base, &onto, &facts.head, base)?
             {
                 MergeOutcome::Clean(tree) => onto = tree,
-                conflict => return Ok(conflict),
+                pending => return Ok(pending),
             }
         }
         Ok(MergeOutcome::Clean(onto))
@@ -175,26 +175,46 @@ impl Landing {
                     trees.push(tree);
                     onto = tree;
                 }
-                MergeOutcome::Conflicted(paths) => {
-                    let routing = self.deps.book.record_conflicts_at(
-                        &facts.id,
-                        &facts.merge_base,
-                        &onto,
-                        &facts.head,
-                        &paths,
-                    )?;
-                    if routing == Routing::ChangeMoved {
+                MergeOutcome::Regenerate { paths, .. } => {
+                    if self.current_base()? != base {
                         return Ok(None);
                     }
-                    self.deps.events.emit(LandingEvent::Conflict {
+                    return Err(LandError::RegenerationRequired {
                         change: facts.id,
                         paths,
                     });
+                }
+                MergeOutcome::Conflicted(paths) => {
+                    if self.route_layer_conflicts(facts, &onto, paths)? == Routing::ChangeMoved {
+                        return Ok(None);
+                    }
                     break;
                 }
             }
         }
         Ok(Some(trees))
+    }
+
+    fn route_layer_conflicts(
+        &self,
+        facts: &ChangeFacts,
+        onto: &CommitId,
+        paths: Vec<String>,
+    ) -> LandResult<Routing> {
+        let routing = self.deps.book.record_conflicts_at(
+            &facts.id,
+            &facts.merge_base,
+            onto,
+            &facts.head,
+            &paths,
+        )?;
+        if routing == Routing::Stored {
+            self.deps.events.emit(LandingEvent::Conflict {
+                change: facts.id,
+                paths,
+            });
+        }
+        Ok(routing)
     }
 
     fn commit_stack(

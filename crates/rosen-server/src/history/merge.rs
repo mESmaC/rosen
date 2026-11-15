@@ -85,7 +85,9 @@ pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer>
     }
     let base = base_commit(ctx)?;
     let merged = merge_stack_onto(ctx, &change, &base)?;
-    if let Some(tree) = merged.tree {
+    // A generator run changes the tree. Only the owner's repaired head can
+    // be certified; this provisional base artifact must not bind a receipt.
+    if let Some(tree) = merged.tree.filter(|_| merged.regenerate.is_empty()) {
         crate::landing::Ledger::open(&ctx.state.config.metadata_path())
             .and_then(|ledger| ledger.remember_merge_result(&change.id, &change.head, &base, &tree))
             .map_err(|e| HistoryError::Refused(e.to_string()))?;

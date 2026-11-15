@@ -13,7 +13,7 @@ fn setup(path: &std::path::Path) -> Arc<ServerState> {
         warm_pool_dir: None,
     });
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
-    let config = b"review = \"after-land\"\n[checks.pre_land]\ncommands = [\"build\"]\n[checks.post_land]\ncommands = [\"test\"]\n";
+    let config = b"review = \"after-land\"\ngenerated = [\"artifact.lock\"]\n[checks.pre_land]\ncommands = [\"build\"]\n[checks.post_land]\ncommands = [\"test\"]\n";
     let blob = store.put_blob(config).unwrap();
     let tree = store
         .put_tree(
@@ -509,4 +509,96 @@ async fn assert_refusal_deduplicated(state: &Arc<ServerState>, session: i64) {
             .count(),
         1
     );
+}
+
+// Risk (R5/R8, #389): a generated merge must not publish or certify the
+// target base's artifact while losing the owner's regeneration requirement.
+#[tokio::test]
+async fn generated_merge_refuses_until_owner_rebases_and_regenerates() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = setup(temp.path());
+    let Response::Change(record) = call(
+        &state,
+        Request::ChangeNew(NewChange {
+            owner: AgentId::new("owner").unwrap(),
+            on: None,
+        }),
+    )
+    .await
+    else {
+        panic!()
+    };
+    let id = record.change.id.to_string();
+    write_artifact(&state, &id, b"owner artifact").await;
+    let (_, _, base) = land_bytes(&state, "artifact.lock", b"base artifact").await;
+    let Response::MergeResult(preview) =
+        call(&state, Request::MergeResult { change: id.clone() }).await
+    else {
+        panic!()
+    };
+    assert_eq!(preview.regenerate, vec!["artifact.lock"]);
+    assert!(preview.tree.is_some());
+    let receipt = rosen_core::Receipt {
+        change: preview.change,
+        head: preview.head,
+        base: preview.base,
+        check_set: "pre-land".into(),
+        submitter: AgentId::new("checker").unwrap(),
+    };
+    let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
+    assert!(ledger.checked_merge_result(&receipt).unwrap().is_none());
+    let Response::Land(answer) = call(&state, Request::Land { change: id.clone() }).await else {
+        panic!()
+    };
+    let LandStatus::Refused {
+        reason,
+        paths,
+        message,
+    } = answer.outcome
+    else {
+        panic!()
+    };
+    assert_eq!(reason, "regeneration_required");
+    assert_eq!(paths, vec!["artifact.lock"]);
+    assert!(message.contains(&id) && message.contains("rosen rebase"));
+    assert_eq!(ledger.base("main").unwrap(), Some(base));
+    assert!(state.changes.show(&id).unwrap().change.conflicts.is_empty());
+    assert_generated_repair(&state, &id).await;
+}
+
+async fn assert_generated_repair(state: &Arc<ServerState>, id: &str) {
+    call(state, Request::ChangeRebase { change: id.into() }).await;
+    write_artifact(state, id, b"regenerated from merged inputs").await;
+    let Response::Land(answer) = call(state, Request::Land { change: id.into() }).await else {
+        panic!()
+    };
+    let LandStatus::Landed { commit, .. } = answer.outcome else {
+        panic!()
+    };
+    state.landing.settle();
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let tree = store
+        .read_tree(&store.read_commit(&commit).unwrap().tree)
+        .unwrap();
+    let artifact = tree
+        .entries()
+        .iter()
+        .find(|e| e.name == b"artifact.lock")
+        .unwrap();
+    assert_eq!(
+        store.read_blob(&artifact.id).unwrap().data,
+        b"regenerated from merged inputs"
+    );
+}
+
+async fn write_artifact(state: &Arc<ServerState>, id: &str, data: &[u8]) {
+    call(
+        state,
+        Request::WorkspaceWrite(WorkspaceWrite {
+            change: id.into(),
+            path: "artifact.lock".into(),
+            data: Some(WorkspaceBytes(data.into())),
+        }),
+    )
+    .await;
 }

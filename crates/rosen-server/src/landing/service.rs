@@ -231,6 +231,9 @@ impl LandingService {
     fn decide(&self, engine: &Arc<Landing>, id: &ChangeId) -> Result<Decided, ErrorBody> {
         let mut timing = super::timing::Timing::new(id, "decision");
         let decision = match engine.decide(id) {
+            Err(LandError::RegenerationRequired { change, paths }) => {
+                return Ok(Ok(regeneration_status(change, paths)))
+            }
             Err(LandError::OversizeFiles { limit, files }) => {
                 return Ok(Ok(super::size_limit::status(limit, files)))
             }
@@ -410,6 +413,19 @@ impl LandingService {
         let engine = Arc::new(engine);
         *slot = Some(Arc::clone(&engine));
         Ok(engine)
+    }
+}
+
+fn regeneration_status(change: ChangeId, paths: Vec<String>) -> LandStatus {
+    let message = LandError::RegenerationRequired {
+        change,
+        paths: paths.clone(),
+    }
+    .to_string();
+    LandStatus::Refused {
+        reason: "regeneration_required".into(),
+        message,
+        paths,
     }
 }
 
@@ -624,10 +640,7 @@ impl Merger for Adapters {
                 current().map_err(|error| crate::history::HistoryError::Refused(error.to_string()))
             })
             .map_err(|error| LandError::Backend(error.to_string()))?;
-        Ok(merged.map(|merged| match merged.tree {
-            Some(tree) => MergeOutcome::Clean(tree),
-            None => MergeOutcome::Conflicted(merged.conflicts),
-        }))
+        Ok(merged.map(MergeOutcome::from))
     }
 
     fn merge(
@@ -639,10 +652,7 @@ impl Merger for Adapters {
         let state = self.state()?;
         let merged = crate::history::merge_for_land(&state, merge_base, onto, head)
             .map_err(|err| LandError::Backend(err.to_string()))?;
-        Ok(match merged.tree {
-            Some(tree) => MergeOutcome::Clean(tree),
-            None => MergeOutcome::Conflicted(merged.conflicts),
-        })
+        Ok(merged.into())
     }
     fn merge_layer(
         &self,
@@ -659,10 +669,7 @@ impl Merger for Adapters {
             policy_base,
         )
         .map_err(|err| LandError::Backend(err.to_string()))?;
-        Ok(match merged.tree {
-            Some(tree) => MergeOutcome::Clean(tree),
-            None => MergeOutcome::Conflicted(merged.conflicts),
-        })
+        Ok(merged.into())
     }
 }
 
@@ -729,6 +736,7 @@ fn land_body(err: LandError) -> ErrorBody {
         | LandError::Contended { .. }
         | LandError::RevertConflict { .. }
         | LandError::ConflictMarkers(_)
+        | LandError::RegenerationRequired { .. }
         | LandError::OversizeFiles { .. } => ErrorCode::Refused,
         LandError::Store(_) | LandError::Backend(_) => ErrorCode::Internal,
     };

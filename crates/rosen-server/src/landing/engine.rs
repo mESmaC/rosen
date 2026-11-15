@@ -238,6 +238,12 @@ impl Landing {
         };
         let tree = match outcome {
             MergeOutcome::Clean(tree) => Some(tree),
+            MergeOutcome::Regenerate { paths, .. } => {
+                return Err(LandError::RegenerationRequired {
+                    change: facts.id,
+                    paths,
+                });
+            }
             MergeOutcome::Conflicted(_) => None,
         };
         self.ledger.put_checked_receipt(&signed, tree)

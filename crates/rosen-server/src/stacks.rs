@@ -474,8 +474,9 @@ pub(crate) fn land_rebase(
                 .map_err(failure)?;
         let installed = state
             .changes
-            .with_conn(|conn| install(conn, &child, onto, merged.tree))?;
+            .with_conn(|conn| install(conn, &child, onto, merged))?;
         if let Some(outcome) = installed {
+            deliver(state)?;
             return Ok(outcome);
         }
     }
@@ -531,7 +532,7 @@ fn install(
     conn: &mut Connection,
     child: &LandChild,
     onto: ObjectId,
-    tree: Option<ObjectId>,
+    merged: history::merge::TreeMerge,
 ) -> Result<Option<LandRebase>, ChangeError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let id = child.current.id;
@@ -540,7 +541,7 @@ fn install(
     if !stands {
         return Ok(None);
     }
-    let Some(tree) = tree else {
+    let Some(tree) = merged.tree else {
         return Ok(Some(LandRebase::Conflicted));
     };
     changes::update_in(&tx, id, |c| {
@@ -550,6 +551,18 @@ fn install(
         "DELETE FROM stack_bases WHERE change_id = ?1",
         [id.to_string()],
     )?;
+    if !merged.regenerate.is_empty() {
+        // A crash after installing the head must not lose the owner's repair
+        // notice: its base artifacts have not been regenerated yet (R5).
+        crate::events::stage(
+            &tx,
+            &Staged::about(
+                EventKind::Rebased,
+                id,
+                serde_json::json!({"onto":onto,"tree":tree,"regenerate":merged.regenerate}),
+            ),
+        )?;
+    }
     tx.commit()?;
     Ok(Some(LandRebase::Moved))
 }
