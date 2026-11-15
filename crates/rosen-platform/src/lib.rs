@@ -1,6 +1,9 @@
 //! Small operating-system primitives with safe, owned-handle interfaces.
 #![deny(unsafe_code)]
 
+mod rename;
+pub use rename::rename_noreplace;
+
 /// Marks the exact held file for deletion when its handles close.
 ///
 /// Callers can open the file denying write/delete sharing before hashing it,

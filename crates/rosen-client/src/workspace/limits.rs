@@ -538,12 +538,13 @@ const RENAME_RETRY: Duration = Duration::from_secs(2);
 /// registry lock, so it can hold one briefly during a take; each handle
 /// lives for one metadata or directory read, so a short retry gets past it.
 /// The walk never waits on the registry lock this caller holds, so the
-/// retry cannot deadlock.
+/// retry cannot deadlock. Each attempt refuses to replace a destination
+/// created while a pool take or staging sweep was preparing the move.
 fn rename_while_walked(from: &Path, to: &Path) -> io::Result<()> {
     let started = Instant::now();
     let mut delay = Duration::from_millis(2);
     loop {
-        match fs::rename(from, to) {
+        match rosen_platform::rename_noreplace(from, to) {
             Err(error)
                 if error.kind() == io::ErrorKind::PermissionDenied
                     && started.elapsed() < RENAME_RETRY =>

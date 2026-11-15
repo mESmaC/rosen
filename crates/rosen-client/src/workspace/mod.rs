@@ -470,13 +470,13 @@ impl Staging {
         fs::create_dir(&self.path).map_err(io)
     }
 
-    /// Renames the finished workspace to `dest`. On Windows a virus scanner
+    /// Publishes only if `dest` is still absent. On Windows a virus scanner
     /// or indexer can briefly hold a just-written file open, which blocks
     /// renaming its directory, so the rename is retried for a moment.
     fn publish(mut self, dest: &Path) -> Result<(), MaterialiseError> {
         let mut delay = Duration::from_millis(5);
         loop {
-            match fs::rename(&self.path, dest) {
+            match rosen_platform::rename_noreplace(&self.path, dest) {
                 Ok(()) => {
                     self.published = true;
                     staging_sweep::unmark(&self.path);
@@ -507,6 +507,56 @@ impl Drop for Staging {
             staging_sweep::remove_marked(&self.path);
         }
     }
+}
+
+// R3, #374: replacing a competing entry can lose another creator's data;
+// an empty staging directory must refuse publication too.
+#[test]
+fn publication_preserves_entries_created_after_staging() {
+    for directory in [false, true] {
+        for populated in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let dest = root.path().join("workspace");
+            let staging = Staging::create(&dest).unwrap();
+            let from = staging.path().to_path_buf();
+            if populated {
+                fs::write(from.join("staged"), b"our workspace").unwrap();
+            }
+            if directory {
+                fs::create_dir(&dest).unwrap();
+            } else {
+                fs::write(&dest, b"another creator").unwrap();
+            }
+            assert!(matches!(
+                staging.publish(&dest),
+                Err(MaterialiseError::Publish { .. })
+            ));
+            if directory {
+                assert!(fs::symlink_metadata(&dest).unwrap().is_dir());
+                assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+            } else {
+                assert_eq!(fs::read(&dest).unwrap(), b"another creator");
+            }
+            assert!(fs::symlink_metadata(&from).is_err());
+        }
+    }
+}
+
+// R3: a dangling symlink still occupies the destination and must survive.
+#[cfg(unix)]
+#[test]
+fn publication_preserves_a_competing_dangling_symlink() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = root.path().join("workspace");
+    let staging = Staging::create(&dest).unwrap();
+    let from = staging.path().to_path_buf();
+    std::os::unix::fs::symlink("missing", &dest).unwrap();
+    assert!(matches!(
+        staging.publish(&dest),
+        Err(MaterialiseError::Publish { .. })
+    ));
+    assert_eq!(fs::read_link(&dest).unwrap(), Path::new("missing"));
+    assert!(fs::symlink_metadata(&from).is_err());
 }
 
 // SPEC R3, #161: a failed rename must distinguish publication from admission.
