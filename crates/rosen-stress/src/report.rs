@@ -25,6 +25,9 @@ pub struct Report {
     /// Times the `agents` process started again after being killed.
     pub restarts: u32,
     pub workspace_starts: Vec<StartSample>,
+    /// Last write to an acknowledged automatic snapshot (R2), in milliseconds.
+    #[serde(default)]
+    pub snapshot_ms: Vec<f64>,
     pub lands: Vec<LandSample>,
     /// Every receipt the machine's checker submitted (R8 step 1).
     pub receipts: Vec<ReceiptSample>,
@@ -114,6 +117,9 @@ pub enum Record {
     },
     Began(Began),
     Start(StartSample),
+    Snapshot {
+        ms: f64,
+    },
     Land(LandSample),
     Receipt(ReceiptSample),
     Outcome(ChangeOutcome),
@@ -145,6 +151,7 @@ impl Report {
             }
             Record::Began(_) => {}
             Record::Start(sample) => self.workspace_starts.push(sample.clone()),
+            Record::Snapshot { ms } => self.snapshot_ms.push(*ms),
             Record::Land(sample) => self.lands.push(sample.clone()),
             Record::Receipt(sample) => self.receipts.push(sample.clone()),
             Record::Outcome(outcome) => self.changes.push(outcome.clone()),

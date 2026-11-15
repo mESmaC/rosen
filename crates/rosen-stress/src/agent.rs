@@ -191,7 +191,9 @@ impl Agent {
     async fn start_change(&mut self, n: usize, on: Option<ChangeId>) -> Result<Work> {
         let (change, root) = self.create_workspace(n, on).await?;
         let plan = self.shared.plan.clone();
+        let mut watch = crate::snapshots::start(&self.session, &root).await?;
         let expected = crate::edit::write_edits(&plan, self.index, n, &root)?;
+        let written = Instant::now();
         let began = Began {
             index: self.index,
             n,
@@ -201,6 +203,10 @@ impl Agent {
             expected,
         };
         self.shared.record(Record::Began(began.clone()));
+        let measured =
+            crate::snapshots::measure(&self.session, &mut watch, &began.expected, written).await;
+        watch.stop().await?;
+        self.shared.record(Record::Snapshot { ms: measured? });
         self.claim(n, change, true).await?;
         self.snapshot(&began).await?;
         Ok(Work::from(&began))
@@ -628,7 +634,7 @@ fn fresh_root(agent_dir: &std::path::Path, n: usize, tries: u32) -> PathBuf {
 
 /// Errors a lost connection or a restarting daemon causes, as opposed to
 /// a refusal that repeating would only repeat.
-fn is_transient(err: &Error) -> bool {
+pub(crate) fn is_transient(err: &Error) -> bool {
     use std::io::ErrorKind;
     match err {
         Error::Disconnected | Error::NotRunning(_) => true,

@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// §5's latency targets.
 const START_P95_MS: f64 = 2000.0;
 const LAND_P95_MS: f64 = 200.0;
+const SNAPSHOT_BUDGET_MS: f64 = 2000.0;
 
 /// Log entries asked for per page while walking the base.
 const LOG_PAGE: u32 = 500;
@@ -335,8 +336,27 @@ pub fn summary(reports: &[Report]) -> String {
         .map(|l| l.ms)
         .collect();
     out.push_str(&line("land (ms)", &lands));
+    out.push_str(&snapshot_summary(reports));
     out.push_str(&counters(reports));
     out
+}
+
+/// R2 latency is measured separately from correctness and merge gates (#371).
+fn snapshot_summary(reports: &[Report]) -> String {
+    let samples: Vec<f64> = reports
+        .iter()
+        .flat_map(|r| &r.snapshot_ms)
+        .copied()
+        .collect();
+    let over = samples
+        .iter()
+        .filter(|ms| **ms > SNAPSHOT_BUDGET_MS)
+        .count();
+    format!(
+        "{}snapshot budget {SNAPSHOT_BUDGET_MS:.0} ms: {over}/{} over budget\n",
+        line("automatic snapshot (ms)", &samples),
+        samples.len()
+    )
 }
 
 /// Contention and failure counts: how hard the run pushed, and what it hit.
@@ -397,4 +417,47 @@ fn line(label: &str, samples: &[f64]) -> String {
         p(0.95),
         p(1.0)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Risk (#371, R2): making the snapshot budget a correctness gate again
+    // sends loaded post-land runs into bisections that have no culprit.
+    #[test]
+    fn slow_snapshots_are_reported_separately_from_correctness() {
+        let reports = [Report {
+            snapshot_ms: vec![250.0, 2000.0, 2500.0],
+            ..Report::default()
+        }];
+        let run = Run {
+            plan: Plan {
+                run: "snapshot-budget".into(),
+                agents: 0,
+                lands_per_agent: 0,
+                units: 1,
+                stack_every: 0,
+                hot_every: 0,
+                inject_failure: false,
+            },
+            reports: &reports,
+            history: Vec::new(),
+            tip: ObjectId::hash_object("commit", b"base"),
+            culprit: None,
+        };
+        let mut failures = Vec::new();
+        check_measurements(
+            &run,
+            &Targets {
+                latency: true,
+                checker: None,
+            },
+            &mut failures,
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+        let output = summary(&reports);
+        assert!(output.contains("automatic snapshot (ms): n=3 p50=2000.0 p95=2500.0 max=2500.0"));
+        assert!(output.contains("snapshot budget 2000 ms: 1/3 over budget"));
+    }
 }

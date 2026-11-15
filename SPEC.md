@@ -153,6 +153,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
   - If the files on disk differ from that snapshot, it refuses and leaves the workspace unchanged, and the owner asks again after the next snapshot.
   - A server rebase never writes into a local workspace by itself. A server-side workspace (R3) takes the rebased tree directly.
 - **Accept when:** a change's commits survive any number of rebases unchanged; a write is on the server within 2 s while the server is reachable; and applying a rebase never overwrites a write that is not in a stored snapshot.
+  - Correctness tests wait for the snapshot with a generous hang timeout and verify its stored bytes and ignored paths. The 2 s write-through budget is measured by the stress benchmark, not asserted against wall-clock time in unit or integration tests running under build load (#371).
 
 ### R3 · Workspaces
 - **Local workspaces** are materialised from the local store:
@@ -352,6 +353,7 @@ Machines join a project with no login, monitor or remote desktop on the joining 
   - 100 concurrent agents spread across the machines, each creating a change (some stacked), editing, claiming, submitting receipts and landing, over at least 1000 lands;
   - a new workspace is ready in under 2 s (p95) with the warm pool filled;
   - a land with a valid receipt commits in under 200 ms (p95);
+  - automatic snapshot latency is reported as samples, p50, p95, maximum and the count over R2's 2 s budget, separately from pass/fail checks; each new stress change starts its watcher and waits for its initial scan before editing, then verifies the acknowledged snapshot's immutable commit contains every expected edit;
   - no edit is lost, no land is applied twice, and the base never moves without a matching receipt and approval (or as a server revert);
   - an injected failing commit is bisected and reverted, and its change reopens with its work intact;
   - no two agents ever hold the same piece or path claim, on any machine;

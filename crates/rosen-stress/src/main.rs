@@ -38,6 +38,7 @@ mod plan;
 mod report;
 mod revert;
 mod seed;
+mod snapshots;
 mod verify;
 
 use anyhow::{Context, Result};

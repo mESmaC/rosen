@@ -1,5 +1,6 @@
-//! SPEC.md R2: a write to a watched workspace is on the server within 2 s,
-//! and a path the workspace's .gitignore ignores is never uploaded.
+//! SPEC.md R2: a watched write reaches the server, and a path the workspace's
+//! .gitignore ignores is never uploaded. The two-second budget is measured
+//! by `rosen-stress`, separately from this correctness check (#371).
 //!
 //! Risk: write-through snapshots are what make an agent's work durable
 //! (D17). A watcher that misses or delays a write leaves edits only on the
@@ -16,7 +17,7 @@ use rosen_server::{ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 struct FixedBase(BaseTip);
 
@@ -27,7 +28,7 @@ impl BaseSource for FixedBase {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_write_is_stored_within_two_seconds_and_ignored_files_never_are() {
+async fn a_write_is_stored_and_ignored_files_never_are() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     let store = LooseObjectStore::open(data.join("objects")).unwrap();
@@ -44,38 +45,16 @@ async fn a_write_is_stored_within_two_seconds_and_ignored_files_never_are() {
         .await
         .unwrap();
     let mut events = client.subscribe(None).await.unwrap();
-    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let (snapshotted, mut snapshots) = tokio::sync::mpsc::unbounded_channel();
-    let watcher = tokio::spawn({
-        let (endpoint, workspace) = (endpoint.clone(), workspace.clone());
-        async move {
-            let stopped = async {
-                let _ = stopped.await;
-            };
-            let report = |event| {
-                assert!(!matches!(event, WatchEvent::Failed(_)), "{event:?}");
-                let _ = snapshotted.send(());
-            };
-            watch(&endpoint, &workspace, stopped, report).await
-        }
-    });
-    // The 2 s bound runs from a write to a running watcher. Its start-up
-    // scan is not part of it, and on a loaded machine (issue #330) it can
-    // take longer than any fixed pause, so wait for its first snapshot.
-    tokio::time::timeout(Duration::from_secs(60), snapshots.recv())
-        .await
-        .expect("the watcher's first snapshot within 60 s")
-        .unwrap();
+    let (stop, watcher) = start_watcher(&endpoint, &workspace).await;
 
     std::fs::create_dir(workspace.join("build")).unwrap();
     std::fs::write(workspace.join("build/out.bin"), b"build output").unwrap();
     std::fs::write(workspace.join("main.rs"), b"fn main() { edited() }\n").unwrap();
-    let written = Instant::now();
-    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+    // Only a hang guard: loaded post-land runs must not enforce latency (#371).
+    let event = tokio::time::timeout(Duration::from_secs(60), events.recv())
         .await
-        .expect("no snapshot within 2 s of the write")
+        .expect("watcher did not store the write within 60 s")
         .unwrap();
-    assert!(written.elapsed() < Duration::from_secs(2));
     assert_eq!(event.kind, EventKind::Snapshot);
 
     let tree: ObjectId = event.detail["tree"].as_str().unwrap().parse().unwrap();
@@ -92,6 +71,34 @@ async fn a_write_is_stored_within_two_seconds_and_ignored_files_never_are() {
     );
     stop.send(()).unwrap();
     watcher.await.unwrap().unwrap();
+}
+
+async fn start_watcher(
+    endpoint: &Endpoint,
+    workspace: &Path,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), rosen_client::Error>>,
+) {
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let (snapshotted, mut snapshots) = tokio::sync::mpsc::unbounded_channel();
+    let (endpoint, workspace) = (endpoint.clone(), workspace.to_path_buf());
+    let watcher = tokio::spawn(async move {
+        let stopped = async {
+            let _ = stopped.await;
+        };
+        let report = |event| {
+            assert!(!matches!(event, WatchEvent::Failed(_)), "{event:?}");
+            let _ = snapshotted.send(());
+        };
+        watch(&endpoint, &workspace, stopped, report).await
+    });
+    // Startup can outlast a fixed pause on a loaded machine (#330).
+    tokio::time::timeout(Duration::from_secs(60), snapshots.recv())
+        .await
+        .expect("the watcher's first snapshot within 60 s")
+        .unwrap();
+    (stop, watcher)
 }
 
 /// An in-process server whose base holds `main.rs` and a `.gitignore`
