@@ -77,9 +77,11 @@ def patterns : List String :=
 
 def bit (b : Bool) : String := if b then "1" else "0"
 
-/-- Change 1 holds `held`; change 2 asks for `requested`. -/
+/-- Overlapping notices from changes 1 and 3 precede change 2's request.
+The decision bits equal the original single-exclusive-holder rows: every
+live claim blocks exclusive requests and waits, regardless of its mode. -/
 def fixtureRow (held requested : String) : String :=
-  let s : State String := ⟨[⟨1, held⟩], []⟩
+  let s : State String := ⟨[⟨1, held, false⟩, ⟨3, held, false⟩], []⟩
   "\t".intercalate [held, requested, bit (overlap held requested),
     bit (grants overlap s 2 [requested]), bit ((notice s 2 [requested]).isSome)]
 

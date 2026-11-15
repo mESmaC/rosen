@@ -190,37 +190,42 @@ async fn notices_include_shares_and_edits_and_exclusive_rejects_shared_files() {
 
 #[tokio::test]
 async fn claims_match_the_lean_table() {
-    let (_dir, state, [a, b, _]) = setup("");
+    let (_dir, state, [a, b, c]) = setup("");
     for row in include_str!("../../../proofs/fixtures/claims.tsv")
         .lines()
         .skip(1)
     {
         let cells: Vec<_> = row.split('\t').collect();
         assert_eq!(cells.len(), 5, "{row}");
-        for (exclusive, expected) in [(true, cells[3]), (false, cells[4])] {
-            assert!(matches!(
-                claim(&state, a, cells[0], true).await,
-                ClaimOutcome::Granted { .. }
-            ));
-            let answer = claim(&state, b, cells[1], exclusive).await;
-            assert_eq!(
-                matches!(answer, ClaimOutcome::Granted { .. }),
-                expected == "1",
-                "{row}: exclusive={exclusive}"
-            );
-            if let ClaimOutcome::Granted { overlaps, .. } = answer {
-                assert_eq!(!overlaps.is_empty(), cells[2] == "1", "{row}");
-            }
-            for id in [a, b] {
-                let release = ClaimRequest {
-                    change: id.to_string(),
-                    paths: vec![],
-                    exclusive: false,
-                };
-                assert!(matches!(
-                    dispatch(&state, Request::ReleasePaths(release)).await,
-                    Outcome::Ok(_)
-                ));
+        // R6 risk: overlapping notices must block exclusives just like locks do.
+        for (held_exclusive, holders) in [(true, vec![a]), (false, vec![a, c])] {
+            for (exclusive, expected) in [(true, cells[3]), (false, cells[4])] {
+                for &holder in &holders {
+                    assert!(matches!(
+                        claim(&state, holder, cells[0], held_exclusive).await,
+                        ClaimOutcome::Granted { .. }
+                    ));
+                }
+                let answer = claim(&state, b, cells[1], exclusive).await;
+                assert_eq!(
+                    matches!(answer, ClaimOutcome::Granted { .. }),
+                    expected == "1",
+                    "{row}: exclusive={exclusive}"
+                );
+                if let ClaimOutcome::Granted { overlaps, .. } = answer {
+                    assert_eq!(!overlaps.is_empty(), cells[2] == "1", "{row}");
+                }
+                for id in [a, b, c] {
+                    let release = ClaimRequest {
+                        change: id.to_string(),
+                        paths: vec![],
+                        exclusive: false,
+                    };
+                    assert!(matches!(
+                        dispatch(&state, Request::ReleasePaths(release)).await,
+                        Outcome::Ok(_)
+                    ));
+                }
             }
         }
     }
