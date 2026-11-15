@@ -41,7 +41,7 @@ fn turn(class: RunClass, note: &str) -> Option<Turn> {
             Err(_) => return None,
         }
         if said.is_none_or(|said| said.elapsed() >= SAY_EVERY) && started.elapsed() >= POLL * 20 {
-            say_waiting(&waiter, started.elapsed());
+            say_waiting(&waiter, class, started.elapsed());
             said = Some(Instant::now());
         }
         std::thread::sleep(POLL);
@@ -49,7 +49,7 @@ fn turn(class: RunClass, note: &str) -> Option<Turn> {
 }
 
 /// On standard error, so a waiting run's output stays the command's own.
-fn say_waiting(waiter: &Waiter, waited: Duration) {
+fn say_waiting(waiter: &Waiter, class: RunClass, waited: Duration) {
     let ahead = waiter.ahead().unwrap_or_default();
     let running: Vec<String> = ahead
         .iter()
@@ -58,8 +58,10 @@ fn say_waiting(waiter: &Waiter, waited: Duration) {
         .collect();
     let waiting = ahead.iter().filter(|entry| !entry.running).count();
     eprintln!(
-        "rosen run: waited {}s for a turn; running now: {}; {waiting} ahead in line",
+        "rosen run: waited {}s for a turn ({}; {}); running now: {}; {waiting} ahead in line",
         waited.as_secs(),
+        class.name(),
+        resources(class),
         if running.is_empty() {
             "nothing".to_owned()
         } else {
@@ -86,7 +88,14 @@ fn spawn(
     holding: RunClass,
 ) -> io::Result<std::process::Child> {
     let start = |name: &str| {
-        Command::new(name)
+        let mut child = prioritized_command(name, holding);
+        let threads = thread_budget().to_string();
+        for variable in THREAD_VARIABLES {
+            if std::env::var_os(variable).is_none() {
+                child.env(variable, &threads);
+            }
+        }
+        child
             .args(arguments)
             .env(HELD_ENV, holding.name())
             .stdin(Stdio::inherit())
@@ -102,8 +111,83 @@ fn spawn(
     }
 }
 
+const THREAD_VARIABLES: [&str; 3] = ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "LEAN_NUM_THREADS"];
+
+fn thread_budget() -> usize {
+    // Aging lets builds overlap landing checks, so both classes share cores.
+    let queue = RunQueue::machine().ok();
+    let slots = |class: RunClass| {
+        queue
+            .as_ref()
+            .map_or_else(|| class.default_slots(), |q| q.slots(class))
+    };
+    let heavy_slots = u64::from(slots(RunClass::Landing)) + u64::from(slots(RunClass::Build));
+    let heavy_slots = usize::try_from(heavy_slots).unwrap_or(usize::MAX).max(1);
+    let cores = std::thread::available_parallelism().map_or(1, |cores| cores.get());
+    (cores / heavy_slots).max(2)
+}
+
+fn resources(class: RunClass) -> String {
+    let threads = thread_budget().to_string();
+    let variables = THREAD_VARIABLES.map(|variable| {
+        let value = std::env::var_os(variable).unwrap_or_else(|| threads.clone().into());
+        format!("{variable}={}", value.to_string_lossy())
+    });
+    format!("{}; priority {}", variables.join(" "), priority(class))
+}
+
+#[cfg(windows)]
+fn priority(class: RunClass) -> &'static str {
+    match class {
+        RunClass::Landing => "NORMAL_PRIORITY_CLASS",
+        RunClass::Build => "BELOW_NORMAL_PRIORITY_CLASS",
+        RunClass::Verify | RunClass::Prepare => "IDLE_PRIORITY_CLASS",
+    }
+}
+
+#[cfg(windows)]
+fn prioritized_command(program: &str, class: RunClass) -> Command {
+    use std::os::windows::process::CommandExt;
+    // Set the class at creation so descendants inherit it, without a race
+    // where a build starts at normal priority before it can be lowered.
+    let flags = match class {
+        RunClass::Landing => 0x0000_0020, // NORMAL_PRIORITY_CLASS
+        RunClass::Build => 0x0000_4000,   // BELOW_NORMAL_PRIORITY_CLASS
+        RunClass::Verify | RunClass::Prepare => 0x0000_0040, // IDLE_PRIORITY_CLASS
+    };
+    let mut command = Command::new(program);
+    command.creation_flags(flags);
+    command
+}
+
+#[cfg(not(windows))]
+fn priority(class: RunClass) -> &'static str {
+    match class {
+        RunClass::Landing => "nice -n 0",
+        RunClass::Build => "nice -n 5",
+        RunClass::Verify | RunClass::Prepare => "nice -n 10",
+    }
+}
+
+#[cfg(not(windows))]
+fn prioritized_command(program: &str, class: RunClass) -> Command {
+    // nice adds to inherited niceness. A nested run already has its turn's
+    // priority, so applying it again would penalize every nested step.
+    if run_queue::held().is_some() {
+        return Command::new(program);
+    }
+    let increment = match class {
+        RunClass::Landing => "0",
+        RunClass::Build => "5",
+        RunClass::Verify | RunClass::Prepare => "10",
+    };
+    let mut command = Command::new("nice");
+    command.args(["-n", increment, "--", program]);
+    command
+}
+
 /// `rosen run --slots`: applies each `CLASS=N` (or `CLASS=default`) to this
-/// machine's queue, then prints every class's slot count.
+/// machine's queue, then prints each class's slots, thread settings and priority.
 pub fn slots(settings: &[String]) -> io::Result<()> {
     let queue = RunQueue::machine()?;
     for setting in settings {
@@ -117,7 +201,11 @@ pub fn slots(settings: &[String]) -> io::Result<()> {
         } else {
             format!("set on this machine; default {default}")
         };
-        println!("{:<8} {slots} ({source})", class.name());
+        println!(
+            "{:<8} {slots} ({source}); {}",
+            class.name(),
+            resources(class)
+        );
     }
     Ok(())
 }
