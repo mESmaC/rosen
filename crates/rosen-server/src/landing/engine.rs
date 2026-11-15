@@ -7,7 +7,7 @@ mod stack;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -150,7 +150,9 @@ pub struct Landing {
     /// land's own request, or two passes, never run it at once, so one land
     /// never releases, rebases or announces twice in parallel. Shared with
     /// the engine that replaces this one ([`Landing::taking_over`]).
-    post_landing: Arc<Mutex<HashSet<CommitId>>>,
+    post_landing: Arc<(Mutex<HashSet<CommitId>>, Condvar)>,
+    /// Parent answers wait only for recovery's stack phase, not its overlap tail.
+    stacking: Arc<(Mutex<HashSet<CommitId>>, Condvar)>,
     /// Build units of the last base re-checked, carried to the engine that
     /// replaces this one so a config reload does not cost a full tree walk.
     units_cache: Arc<super::reach_store::UnitsCache>,
@@ -163,7 +165,8 @@ impl Landing {
             deps,
             config,
             recheck_store: None,
-            post_landing: Arc::new(Mutex::new(HashSet::new())),
+            post_landing: Arc::default(),
+            stacking: Arc::default(),
             units_cache: Arc::default(),
         }
     }
@@ -172,6 +175,7 @@ impl Landing {
     /// on the engine this one replaces keeps excluding runs of the same land.
     pub fn taking_over(mut self, old: &Landing) -> Self {
         self.post_landing = Arc::clone(&old.post_landing);
+        self.stacking = Arc::clone(&old.stacking);
         self.units_cache = Arc::clone(&old.units_cache);
         self
     }
@@ -295,42 +299,48 @@ impl Landing {
     /// stacked child's merge result reads its parent link, recorded parent
     /// tree and head separately, so the child must not move under a checker
     /// that asks for it right after hearing that its parent landed.
-    /// Does nothing when a recovery pass is running the land's work now, or
-    /// has already finished it.
+    /// Waits for recovery's stack phase if it is running, then retries the
+    /// phase if it failed. Deferred overlap work never holds up the answer.
     pub fn restack_stacked(&self, land: &CommittedLand) -> Result<RestackReport, String> {
         let mut report = RestackReport::default();
         for record in land.ancestors.iter().chain(std::iter::once(&land.record)) {
-            let step = self.restack_record(record)?;
+            let step = self.restack_record(record).map_err(|error| error.to_string())?;
             report.rebased.extend(step.rebased);
             report.conflicted.extend(step.conflicted);
         }
         Ok(report)
     }
 
-    fn restack_record(&self, record: &LandRecord) -> Result<RestackReport, String> {
-        let Some(_running) = PostLandRun::start(&self.post_landing, record.commit) else {
-            return Ok(RestackReport::default());
-        };
-        // A finished run announced the land; announcing it here would repeat it.
-        match self
-            .ledger
-            .post_land_pending(&record.ref_name, &record.commit)
-        {
-            Ok(true) => {}
-            Ok(false) => return Ok(RestackReport::default()),
-            Err(error) => return Err(error.to_string()),
+    /// A retry finishes every pending layer in the same atomic land, including
+    /// ancestors whose surviving children the original request has not moved.
+    pub fn restack_landed(&self, commit: &CommitId) -> Result<RestackReport, String> {
+        let tip = self.ledger.stack_tip(commit).map_err(|error| error.to_string())?;
+        let pending = self.ledger.pending_post_land(&self.config.base_ref)
+            .map_err(|error| error.to_string())?;
+        let mut report = RestackReport::default();
+        for record in pending {
+            if self.ledger.stack_tip(&record.commit).map_err(|error| error.to_string())? != tip {
+                continue;
+            }
+            let step = self.restack_record(&record).map_err(|error| error.to_string())?;
+            report.rebased.extend(step.rebased);
+            report.conflicted.extend(step.conflicted);
         }
-        self.deps.events.emit(LandingEvent::Landed {
+        Ok(report)
+    }
+
+    fn restack_record(&self, record: &LandRecord) -> LandResult<RestackReport> {
+        let _running = PostLandRun::wait(&self.stacking, record.commit);
+        if !self.ledger.post_land_pending(&record.ref_name, &record.commit)? {
+            return Ok(RestackReport::default());
+        }
+        // Recovery may have announced this layer before failing its stack phase.
+        self.deps.events.emit_once(LandingEvent::Landed {
             change: record.change,
             commit: record.commit,
         });
-        let onto = self
-            .ledger
-            .stack_tip(&record.commit)
-            .map_err(|e| e.to_string())?;
-        self.restacker(false)
-            .rebase_stacked(&record.change, &onto)
-            .map_err(|error| error.to_string())
+        let onto = self.ledger.stack_tip(&record.commit)?;
+        self.restacker(true).rebase_stacked(&record.change, &onto)
     }
 
     /// Runs the rest of a land's post-land work after
@@ -548,10 +558,8 @@ impl Landing {
     }
 
     /// Runs a land's post-land work (R8 step 4), or returns `None` when
-    /// another thread is running it now. A `replay` may follow a run that
-    /// announced the land before it crashed or failed, so it announces only
-    /// what the event log does not hold yet; a land's first run cannot have
-    /// announced anything, and skips that lookup.
+    /// another thread is running it now. The stack phase announces each layer
+    /// idempotently; `replay` also deduplicates the deferred release event.
     fn post_land(&self, record: &LandRecord, replay: bool) -> LandResult<Option<RestackReport>> {
         let Some(_running) = PostLandRun::start(&self.post_landing, record.commit) else {
             return Ok(None);
@@ -564,23 +572,26 @@ impl Landing {
         {
             return Ok(Some(RestackReport::default()));
         }
-        let landed = LandingEvent::Landed {
-            change: record.change,
-            commit: record.commit,
-        };
-        if replay {
-            self.deps.events.emit_once(landed);
-        } else {
-            self.deps.events.emit(landed);
-        }
+        // Release the stack-phase guard before capturing or probing overlaps.
+        let mut report = self.restack_record(record)?;
         let onto = self.ledger.stack_tip(&record.commit)?;
-        let report = if onto == record.commit {
+        let deferred = if onto == record.commit {
             self.restacker(replay)
                 .after_land(&record.change, &record.commit)?
         } else {
             self.restacker(replay)
                 .after_land_onto(&record.change, &record.commit, &onto)?
         };
+        for (known, more) in [
+            (&mut report.rebased, deferred.rebased),
+            (&mut report.conflicted, deferred.conflicted),
+        ] {
+            for change in more {
+                if !known.contains(&change) {
+                    known.push(change);
+                }
+            }
+        }
         self.ledger
             .mark_post_land_done(&record.ref_name, &record.commit)?;
         Ok(Some(report))
@@ -613,24 +624,41 @@ impl Landing {
 /// the work fails or panics. Keyed by the landed commit, so a change that
 /// lands again after a revert (R12) runs its second land's work separately.
 struct PostLandRun<'a> {
-    running: &'a Mutex<HashSet<CommitId>>,
+    running: &'a (Mutex<HashSet<CommitId>>, Condvar),
     commit: CommitId,
 }
 
 impl<'a> PostLandRun<'a> {
-    fn start(running: &'a Mutex<HashSet<CommitId>>, commit: CommitId) -> Option<Self> {
-        let mut set = running.lock().unwrap_or_else(PoisonError::into_inner);
+    fn start(running: &'a (Mutex<HashSet<CommitId>>, Condvar), commit: CommitId) -> Option<Self> {
+        let mut set = running.0.lock().unwrap_or_else(PoisonError::into_inner);
         // Lazily: a guard built for a run already in the set would drop
         // here, relocking `running` while it is held and removing the other
         // run's entry.
         set.insert(commit).then(|| PostLandRun { running, commit })
     }
+
+    fn wait(running: &'a (Mutex<HashSet<CommitId>>, Condvar), commit: CommitId) -> Self {
+        // A busy run is not a completed stack phase: answering now lets a
+        // checker receipt the child's head while recovery is still moving it.
+        let set = running.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut set = running
+            .1
+            .wait_while(set, |set| set.contains(&commit))
+            .unwrap_or_else(PoisonError::into_inner);
+        set.insert(commit);
+        PostLandRun { running, commit }
+    }
 }
 
 impl Drop for PostLandRun<'_> {
     fn drop(&mut self) {
-        let mut set = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut set = self
+            .running
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         set.remove(&self.commit);
+        self.running.1.notify_all();
     }
 }
 

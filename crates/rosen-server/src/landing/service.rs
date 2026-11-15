@@ -228,6 +228,10 @@ impl LandingService {
                 commit, attempts, ..
             }) => (Ok(LandStatus::Landed { commit, attempts }), None),
             Decision::Decided(LandOutcome::AlreadyLanded { commit }) => {
+                if let Err(why) = engine.restack_landed(&commit) {
+                    eprintln!("rosen-server: stack rebase after {id} landed failed: {why}");
+                    self.retry.notify_one();
+                }
                 (Ok(LandStatus::AlreadyLanded { commit }), None)
             }
             Decision::Decided(LandOutcome::Refused(refusal)) => (Err(refusal), None),

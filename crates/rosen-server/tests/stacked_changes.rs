@@ -66,7 +66,7 @@ async fn write(state: &Arc<ServerState>, id: &str, path: &str, data: &str) {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn parent_updates_flow_through_stack_and_parent_lands_first() {
     let (_temp, state) = setup();
     let parent = create(&state, None).await;
@@ -105,8 +105,9 @@ async fn parent_updates_flow_through_stack_and_parent_lands_first() {
     // survive both the child's restack and the child's eventual land.
     let unrelated = create(&state, None).await;
     write(&state, &unrelated, "unrelated", "keep\n").await;
-    land_parent(&state, &unrelated).await;
-    land_parent(&state, &parent).await;
+    // Risk (#209, R8): the parent's answer must stabilize the child's first receipt.
+    land_now(&state, &unrelated).await;
+    land_now(&state, &parent).await;
     assert!(matches!(
         state.changes.show(&child).unwrap().change.parent,
         ChangeParent::Base(_)
@@ -115,8 +116,9 @@ async fn parent_updates_flow_through_stack_and_parent_lands_first() {
         state.changes.show(&grandchild).unwrap().change.snapshots,
         before.snapshots
     );
-    land_parent(&state, &child).await;
+    land_now(&state, &child).await;
     assert_base_keeps_unrelated(&state, &store);
+    state.landing.settle();
 }
 
 fn assert_base_keeps_unrelated(state: &ServerState, store: &dyn ObjectStore) {
@@ -126,11 +128,22 @@ fn assert_base_keeps_unrelated(state: &ServerState, store: &dyn ObjectStore) {
         .unwrap()
         .unwrap();
     let landed = store.read_commit(&base).unwrap();
-    assert!(store
-        .read_tree(&landed.tree)
-        .unwrap()
-        .get(b"unrelated")
-        .is_some());
+    let tree = store.read_tree(&landed.tree).unwrap();
+    let expected = include_str!("../../../proofs/fixtures/land-handoff.tsv")
+        .lines()
+        .nth(1)
+        .unwrap();
+    let actual = ["parent", "child", "unrelated"]
+        .iter()
+        .enumerate()
+        .fold(0, |bits, (i, path)| {
+            bits | if tree.get(path.as_bytes()).is_some() {
+                1 << i
+            } else {
+                0
+            }
+        });
+    assert_eq!(format!("4\t{actual}"), expected);
 }
 
 #[tokio::test]
@@ -449,6 +462,11 @@ fn assert_recorded_basis_count(state: &ServerState, child: &str, expected: usize
 }
 
 async fn land_parent(state: &Arc<ServerState>, parent: &str) {
+    land_now(state, parent).await;
+    state.landing.settle();
+}
+
+async fn land_now(state: &Arc<ServerState>, parent: &str) {
     let head = state.changes.show(parent).unwrap().change.head;
     let base = Ledger::open(&state.config.metadata_path())
         .unwrap()
@@ -486,8 +504,6 @@ async fn land_parent(state: &Arc<ServerState>, parent: &str) {
     else {
         panic!()
     };
-    // A land answers before its post-land work runs (issue #190).
-    state.landing.settle();
     assert!(matches!(
         answer.outcome,
         rosen_protocol::LandStatus::Landed { .. }

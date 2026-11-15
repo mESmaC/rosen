@@ -98,7 +98,7 @@ root = "PieceClaims.Export"
 
 [[lean_lib]]
 name = "StackedChanges"
-globs = ["StackedChanges.Design", "StackedChanges.Export"]
+globs = ["StackedChanges.Design", "StackedChanges.Export", "StackedChanges.Handoff"]
 
 [[lean_exe]]
 name = "stacked-changes-fixtures"
