@@ -69,3 +69,41 @@ fn only_a_trusted_machines_signature_counts() {
         .unwrap();
     assert_eq!(best().unwrap(), ReceiptLookup::Invalid);
 }
+
+/// Risk: a credential stolen before the machine's first receipt binds the
+/// thief's key (SPEC.md R8 step 1, R14). Enrollment binds the daemon's key
+/// with the credential, so no later submitter can bind another.
+#[test]
+fn enrollment_binds_the_receipt_key() {
+    use rosen_server::machines::{credentials, keys};
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open(&dir.path().join("metadata.sqlite")).unwrap();
+    let db = rosen_server::machines::open(dir.path()).unwrap();
+    db.execute(
+        "INSERT INTO join_keys(id,secret_hash,expires_at,remaining,role)
+         VALUES ('k','',9999999999,1,'checker')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE join_keys SET secret_hash=?1",
+        [keys::digest("join-secret")],
+    )
+    .unwrap();
+    let (key, thief) = (MachineKey::generate(), MachineKey::generate());
+    let machine = credentials::enroll(dir.path(), "join-secret", "m", Some(&key.public_key()))
+        .unwrap()
+        .machine_id;
+    assert_eq!(
+        ledger
+            .bind_signing_key(&machine, &thief.public_key())
+            .unwrap(),
+        KeyBinding::Conflict
+    );
+    assert_eq!(
+        ledger
+            .bind_signing_key(&machine, &key.public_key())
+            .unwrap(),
+        KeyBinding::Bound
+    );
+}

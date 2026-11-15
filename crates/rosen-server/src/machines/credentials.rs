@@ -1,6 +1,6 @@
-use super::{keys, now, open};
+use super::{keys, now, open, signing};
 use rosen_protocol::MachineCredential;
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::Path;
 pub const LIFETIME: u64 = 30 * 24 * 3600;
 fn fresh(id: String) -> Result<MachineCredential, String> {
@@ -10,10 +10,41 @@ fn fresh(id: String) -> Result<MachineCredential, String> {
         expires_at: now() + LIFETIME,
     })
 }
-pub fn enroll(dir: &Path, key: &str, name: &str) -> Result<MachineCredential, String> {
+/// Refuses a bad name or a malformed receipt key before anything is written.
+fn check_request(name: &str, receipt_key: Option<&str>) -> Result<(), String> {
     if name.is_empty() || name.len() > 256 {
         return Err("machine name must contain 1..256 bytes".into());
     }
+    if receipt_key.is_some_and(|key| !signing::is_public_key(key)) {
+        return Err("receipt key must be an Ed25519 public key in lowercase hex".into());
+    }
+    Ok(())
+}
+/// Binds the daemon's receipt key with the credential it is issued, so no
+/// one holding that credential later can bind another (R8 step 1, R14). A
+/// request without one leaves the machine to first-use binding.
+fn bind_receipt_key(
+    conn: &Connection,
+    machine: &str,
+    receipt_key: Option<&str>,
+) -> Result<(), String> {
+    let Some(public_key) = receipt_key else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT INTO machine_signing_keys (machine, public_key) VALUES (?1, ?2)",
+        params![machine, public_key],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+pub fn enroll(
+    dir: &Path,
+    key: &str,
+    name: &str,
+    receipt_key: Option<&str>,
+) -> Result<MachineCredential, String> {
+    check_request(name, receipt_key)?;
     let mut conn = open(dir).map_err(|e| e.to_string())?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -35,6 +66,7 @@ pub fn enroll(dir: &Path, key: &str, name: &str) -> Result<MachineCredential, St
     )
     .map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO machines(id,name,role,status,last_contact,credential_hash,expires_at) VALUES (?1,?2,?3,'active',?4,?5,?6)", params![credential.machine_id,name,role,now(),keys::digest(&credential.secret),credential.expires_at]).map_err(|e|e.to_string())?;
+    bind_receipt_key(&tx, &credential.machine_id, receipt_key)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(credential)
 }
@@ -66,10 +98,9 @@ pub fn pending(
     name: &str,
     role: rosen_protocol::MachineRole,
     source: &str,
+    receipt_key: Option<&str>,
 ) -> Result<MachineCredential, String> {
-    if name.is_empty() || name.len() > 256 {
-        return Err("machine name must contain 1..256 bytes".into());
-    }
+    check_request(name, receipt_key)?;
     let mut conn = open(dir).map_err(|e| e.to_string())?;
     // Immediate, so the cap check and the insert see no concurrent insert.
     let tx = conn
@@ -82,6 +113,7 @@ pub fn pending(
         rosen_protocol::MachineRole::Checker => "checker",
     };
     tx.execute("INSERT INTO machines(id,name,role,status,last_contact,credential_hash,expires_at,source) VALUES (?1,?2,?3,'pending',?4,?5,?6,?7)",params![credential.machine_id,name,role,now(),keys::digest(&credential.secret),credential.expires_at,source]).map_err(|e|e.to_string())?;
+    bind_receipt_key(&tx, &credential.machine_id, receipt_key)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(credential)
 }

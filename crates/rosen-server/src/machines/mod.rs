@@ -34,7 +34,11 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         credential_hash TEXT NOT NULL, expires_at INTEGER NOT NULL,
         previous_hash TEXT NOT NULL DEFAULT '', previous_expires INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS join_keys (id TEXT PRIMARY KEY, secret_hash TEXT NOT NULL,
-        expires_at INTEGER NOT NULL, remaining INTEGER NOT NULL, role TEXT NOT NULL);",
+        expires_at INTEGER NOT NULL, remaining INTEGER NOT NULL, role TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS machine_signing_keys (
+            machine    TEXT PRIMARY KEY,
+            public_key TEXT NOT NULL
+        );",
     )
 }
 /// How stale a machine's recorded last contact may get, in seconds. Every
@@ -99,9 +103,15 @@ pub async fn create(state: &Arc<ServerState>, req: CreateJoinKey) -> Outcome {
     })
     .await
 }
-pub async fn enroll(state: &Arc<ServerState>, key: String, name: String) -> Outcome {
+pub async fn enroll(
+    state: &Arc<ServerState>,
+    key: String,
+    name: String,
+    receipt_key: Option<String>,
+) -> Outcome {
     run(state, move |state| {
-        credentials::enroll(&state.config.data_dir, &key, &name).map(Response::MachineCredential)
+        credentials::enroll(&state.config.data_dir, &key, &name, receipt_key.as_deref())
+            .map(Response::MachineCredential)
     })
     .await
 }
@@ -117,10 +127,17 @@ pub async fn pending(
     name: String,
     role: rosen_protocol::MachineRole,
     source: String,
+    receipt_key: Option<String>,
 ) -> Outcome {
     run(state, move |state| {
-        credentials::pending(&state.config.data_dir, &name, role, &source)
-            .map(Response::MachineCredential)
+        credentials::pending(
+            &state.config.data_dir,
+            &name,
+            role,
+            &source,
+            receipt_key.as_deref(),
+        )
+        .map(Response::MachineCredential)
     })
     .await
 }

@@ -132,6 +132,11 @@ pub enum Request {
     MachineEnroll {
         key: String,
         name: String,
+        /// The joining daemon's receipt public key (hex), bound to the new
+        /// machine in the enrollment transaction (R8 step 1, R14). Absent
+        /// from older clients, whose key is bound on first use instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_key: Option<String>,
     },
     MachineRotate {
         credential: String,
@@ -139,6 +144,9 @@ pub enum Request {
     MachinePending {
         name: String,
         role: crate::MachineRole,
+        /// As for [`Request::MachineEnroll`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_key: Option<String>,
     },
     /// Offers the newest untested landed commit to an external checker (R12).
     PostLandNext,

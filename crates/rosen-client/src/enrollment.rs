@@ -61,12 +61,14 @@ pub async fn join(dir: &Path, encoded: &str, name: &str) -> io::Result<MachineCr
     key.address = reachable(&key.address, key.fingerprint).await?;
     std::fs::create_dir_all(dir)?;
     let target = target(dir)?;
+    let receipt_key = receipt_key(dir)?;
     let response = exchange(
         &key.address,
         key.fingerprint,
         Request::MachineEnroll {
             key: key.secret,
             name: name.into(),
+            receipt_key: Some(receipt_key),
         },
     )
     .await?;
@@ -90,12 +92,14 @@ pub async fn pending(
 ) -> io::Result<MachineCredential> {
     let address = reachable(address, pin).await?;
     std::fs::create_dir_all(dir)?;
+    let receipt_key = receipt_key(dir)?;
     let response = exchange(
         &address,
         pin,
         Request::MachinePending {
             name: name.into(),
             role,
+            receipt_key: Some(receipt_key),
         },
     )
     .await?;
@@ -109,6 +113,12 @@ pub async fn pending(
         },
     )?;
     Ok(response)
+}
+/// The public half of the receipt key the daemon in `dir` will sign with,
+/// created now if needed, so the server binds it at enrollment rather than
+/// to whoever first submits a receipt over the credential (R8 step 1, R14).
+fn receipt_key(dir: &Path) -> io::Result<String> {
+    Ok(crate::receipt_key::MachineKey::load_or_create(dir)?.public_key())
 }
 fn save(dir: &Path, target: &str, value: Enrollment) -> io::Result<()> {
     store(target, &value)?;

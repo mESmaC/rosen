@@ -929,6 +929,7 @@ dependencies = [
  "mdns-sd",
  "notify",
  "reflink-copy",
+ "ring",
  "rosen-core",
  "rosen-platform",
  "rosen-protocol",

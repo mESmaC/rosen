@@ -115,10 +115,18 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
             .await
         }
         Request::JoinKeyCreate(req) => crate::machines::create(state, req).await,
-        Request::MachineEnroll { key, name } => crate::machines::enroll(state, key, name).await,
-        Request::MachinePending { name, role } => {
+        Request::MachineEnroll {
+            key,
+            name,
+            receipt_key,
+        } => crate::machines::enroll(state, key, name, receipt_key).await,
+        Request::MachinePending {
+            name,
+            role,
+            receipt_key,
+        } => {
             let source = crate::machines::pending::LOCAL_SOURCE.into();
-            crate::machines::pending(state, name, role, source).await
+            crate::machines::pending(state, name, role, source, receipt_key).await
         }
         Request::MachineRotate { credential } => crate::machines::rotate(state, credential).await,
         Request::PostLandNext => crate::post_land::handle(state, None).await,

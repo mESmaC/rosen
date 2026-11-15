@@ -372,8 +372,12 @@ async fn route(
         return rpc::dispatch_from(state, request, crate::receipts::Origin::Local).await;
     }
     match request {
-        Request::MachinePending { name, role } if !state.is_shutting_down() => {
-            crate::machines::pending(state, name, role, pending_source).await
+        Request::MachinePending {
+            name,
+            role,
+            receipt_key,
+        } if !state.is_shutting_down() => {
+            crate::machines::pending(state, name, role, pending_source, receipt_key).await
         }
         // A network peer is never the server's own machine, even without a
         // credential: then its machine is unknown.

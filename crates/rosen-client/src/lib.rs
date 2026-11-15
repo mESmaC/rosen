@@ -42,6 +42,7 @@ pub mod machines;
 mod pinned_tls;
 pub mod post_land;
 pub mod project_config;
+pub mod receipt_key;
 pub mod receipts;
 pub mod reviews;
 pub mod run_queue;

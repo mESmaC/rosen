@@ -77,6 +77,7 @@ async fn one_address_cannot_flood_pending_admission() {
     let pending = || Request::MachinePending {
         name: "flood".into(),
         role: MachineRole::Agent,
+        receipt_key: None,
     };
     for _ in 0..machines::pending::MAX_WAITING_PER_SOURCE {
         assert!(matches!(
@@ -126,6 +127,7 @@ async fn approve_pending(state: &Arc<ServerState>, anonymous: &mut BoxStream) ->
         Request::MachinePending {
             name: "headless".into(),
             role: MachineRole::Checker,
+            receipt_key: None,
         },
     )
     .await

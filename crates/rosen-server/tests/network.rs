@@ -62,9 +62,10 @@ async fn only_the_pinned_server_and_a_credentialed_peer_get_through() {
             .unwrap(),
     )
     .unwrap();
-    let credential = rosen_server::machines::credentials::enroll(dir.path(), &key.secret, "test")
-        .unwrap()
-        .secret;
+    let credential =
+        rosen_server::machines::credentials::enroll(dir.path(), &key.secret, "test", None)
+            .unwrap()
+            .secret;
     tokio::spawn(network::serve(tcp, acceptor, Arc::clone(&state)));
     let address = address.to_string();
 

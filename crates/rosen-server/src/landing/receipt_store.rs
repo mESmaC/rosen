@@ -64,20 +64,16 @@ pub(super) fn ensure_schema(connection: &Connection) -> rusqlite::Result<()> {
             ))?;
         }
     }
-    connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS machine_signing_keys (
-            machine    TEXT PRIMARY KEY,
-            public_key TEXT NOT NULL
-        );",
-    )?;
-    // Verification reads machine status, so its table must be here too.
+    // Verification reads machine status and enrollment binds receipt keys,
+    // so the machine tables, `machine_signing_keys` among them, live there.
     crate::machines::ensure_schema(connection)
 }
 
 impl Ledger {
-    /// Binds `machine` to `public_key` the first time it signs, and reports
-    /// whether it signs with this key. A bound key is never replaced, so a
-    /// stolen credential cannot swap in a key of its own.
+    /// Binds `machine` to `public_key` the first time it signs, unless
+    /// enrollment already bound its key, and reports whether it signs with
+    /// this key. A bound key is never replaced, so a stolen credential
+    /// cannot swap in a key of its own.
     pub fn bind_signing_key(&self, machine: &str, public_key: &str) -> LandResult<KeyBinding> {
         let connection = self.lock()?;
         connection.execute(
