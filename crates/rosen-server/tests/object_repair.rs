@@ -4,7 +4,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rosen_client::snapshot::{take_snapshot, Dirty};
 use rosen_client::{workspace::Options, Client, Endpoint};
 use rosen_core::{AgentId, FileMode, ObjectId, Tree, TreeEntry};
-use rosen_protocol::{Listener, NewChange, ObjectQuery, Request};
+use rosen_protocol::{Listener, NewChange, ObjectChunkQuery, ObjectQuery, Request, Response};
 use rosen_server::{
     changes::{BaseSource, BaseTip},
     network, ServerConfig, ServerState,
@@ -218,7 +218,7 @@ async fn connect(endpoint: &Endpoint) -> Client {
 #[tokio::test(flavor = "multi_thread")]
 async fn complete_cache_descendants_and_read_through_are_repaired() {
     let temp = tempfile::tempdir().unwrap();
-    let (state, _, root, blob) = project(&temp.path().join("server"), b"held bytes");
+    let (state, authority, root, blob) = project(&temp.path().join("server"), b"held bytes");
     let upstream = upstream(&state).await;
     let config = config(&temp.path().join("cache"));
     let endpoint = config.endpoint.clone();
@@ -244,6 +244,44 @@ async fn complete_cache_descendants_and_read_through_are_repaired() {
         .await
         .unwrap();
     assert!(store.read_tree(&root).is_ok());
+    chunk_reads_repair_cached_objects(&client, &authority, &store).await;
     client.request(Request::Shutdown).await.unwrap();
     state.request_shutdown();
+}
+
+async fn chunk_reads_repair_cached_objects(
+    client: &Client,
+    authority: &LooseObjectStore,
+    cache: &LooseObjectStore,
+) {
+    // D8 risk: forwarding chunk reads returns good bytes but leaves the
+    // damaged loose copy that workspace materialisation reads unrepaired.
+    for bytes in [
+        b"small chunk".to_vec(),
+        vec![b'x'; rosen_protocol::OBJECT_CHUNK_BYTES + 1],
+    ] {
+        let id = authority.put_blob(&bytes).unwrap();
+        client.ensure_local(id).await.unwrap();
+        let path = cache.object_path(&id);
+        let mut compressed = std::fs::read(&path).unwrap();
+        // Keep the header readable: large reads discover body corruption
+        // only when streaming their first checked slice copy.
+        compressed.truncate(compressed.len() - 4);
+        std::fs::write(path, compressed).unwrap();
+        let query = ObjectChunkQuery {
+            id,
+            offset: 1,
+            len: 3,
+        };
+        let response = client
+            .request(Request::GetObjectChunk(query))
+            .await
+            .unwrap();
+        let Response::ObjectChunk(chunk) = response else {
+            panic!("expected an object chunk");
+        };
+        assert_eq!(chunk.total, bytes.len() as u64);
+        assert_eq!(chunk.data, bytes[1..4]);
+        assert!(cache.contains_valid(&id).unwrap());
+    }
 }

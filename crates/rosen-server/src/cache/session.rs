@@ -8,6 +8,7 @@
 
 use super::fill;
 use super::partial::CompleteView;
+use super::read;
 use super::upstream::{self, error_response, Relay, UpstreamLink};
 use super::CacheState;
 use crate::connection::handshake;
@@ -190,6 +191,11 @@ impl Session {
                 fill::get_objects(&state.store, &state.partial, &links, query)
                     .await
                     .map(Response::Objects)
+            }),
+            Request::GetObjectChunk(query) => self.spawn(id, move |state, links| async move {
+                read::get_chunk(&state, &links, query)
+                    .await
+                    .map(Response::ObjectChunk)
             }),
             Request::EnsureObjects(ensure) => self.spawn(id, move |state, links| async move {
                 fill::ensure(

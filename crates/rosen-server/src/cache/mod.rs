@@ -10,6 +10,7 @@
 
 mod fill;
 mod partial;
+mod read;
 mod session;
 mod upstream;
 
@@ -109,6 +110,9 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
     });
     let _renewal = RenewalTask(renewal);
     let mut listener = Listener::bind(&config.endpoint)?;
+    // A crash may tear unsynced slice copies; clear them only after winning
+    // the endpoint so a losing daemon cannot remove the winner's copies.
+    crate::object_slices::clear(&config.slices_dir());
     let store = LooseObjectStore::open(config.objects_dir())
         .map_err(|err| io::Error::other(err.to_string()))?;
     let partial = Arc::new(partial::PartialObjects::open(&config.data_dir)?);
