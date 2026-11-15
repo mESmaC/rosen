@@ -63,7 +63,7 @@ fn disk_admission_queues_and_resumes_without_touching_existing_workspaces() {
 // Risk: a handler that bypasses admission can exhaust server resources.
 #[tokio::test]
 async fn server_writes_wait_for_io_capacity_while_ping_still_answers() {
-    use rosen_client::protocol::{Endpoint, Outcome, Request, Response, WorkspaceWrite};
+    use rosen_client::protocol::{Endpoint, ErrorCode, Outcome, Request, Response, WorkspaceWrite};
     use rosen_server::{rpc::dispatch, ServerConfig, ServerState};
     use std::{num::NonZeroUsize, sync::Arc};
     let root = tempfile::tempdir().unwrap();
@@ -75,6 +75,18 @@ async fn server_writes_wait_for_io_capacity_while_ping_still_answers() {
         },
         NonZeroUsize::new(1).unwrap(),
     );
+    // Open the metadata first, outside workspace I/O admission. Its first
+    // open creates the database and installs the schema with fsync'd
+    // commits, which took over 5 s on a cold Windows runner and timed out
+    // the admitted write below (#285). The bound must measure admission only.
+    let warm = dispatch(
+        &state,
+        Request::ChangeShow {
+            change: "zzzz".into(),
+        },
+    )
+    .await;
+    assert!(matches!(warm, Outcome::Error(ref body) if body.code == ErrorCode::NotFound));
     let held = Arc::clone(&state.workspace_io)
         .acquire_owned()
         .await
