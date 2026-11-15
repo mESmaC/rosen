@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security_Credentials", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_SystemInformation"] }
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security_Credentials", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_ProcessStatus"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -20,7 +20,8 @@ tempfile.workspace = true
 # Unsafe code is confined to the audited OS ABI boundary: file disposition,
 # Credential Manager, process creation and liveness, account identity and
 # owner-only descriptors for files and the local pipe, owner-only file
-# creation, the installed memory (with sysconf on Unix), and pointing
+# creation, installed and available memory (including system commit on
+# Windows), and pointing
 # standard error at a log file (with dup2 on Unix), Unix directory-relative
 # removal, and signal-zero process liveness. All consumers continue to
 # inherit the workspace's unsafe_code = forbid policy.

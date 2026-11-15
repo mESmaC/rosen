@@ -14,15 +14,18 @@
 //!   run is going, and nothing sorts ahead of it in line: every more
 //!   important waiter, and earlier waiters of its own class, which take the
 //!   free slots first.
+//! - Every new turn also needs free memory above the machine's reserve.
+//!   Priority aging never bypasses this gate; running turns are not stopped.
 //! - A less important run that is already going is never stopped and never
-//!   holds a more important one back. So a landing check starts at once
+//!   holds a more important one back. With memory to spare a landing check starts
 //!   beside a prepare; the caller runs `verify` and `prepare` work at low
 //!   process priority, and the landing check gets the cores.
-//! - Nothing waits for ever: after its class's patience a waiter stops
+//! - Priority alone cannot hold a run forever: after its patience a waiter stops
 //!   yielding to more important classes and needs only a free slot of its
-//!   own class.
+//!   own class and sufficient memory.
 //!   A stuck landing check then cannot hold every agent's build, and steady
-//!   agent builds cannot keep the tests after a land from running.
+//!   agent builds cannot keep the tests after a land from running when memory
+//!   permits.
 //!
 //! The queue is files in one folder per machine and user, with operating
 //! system file locks, so it needs no daemon and survives any crash: a
@@ -165,6 +168,20 @@ pub struct Entry {
     /// What the run is, as its owner described it.
     pub note: String,
     pub running: bool,
+}
+
+/// A current sample of the memory gate, in bytes. Unknown readings leave the
+/// queue usable on systems that cannot report memory, as with slot sizing.
+#[derive(Clone, Copy, Debug)]
+pub struct MemoryHeadroom {
+    pub available: Option<u64>,
+    pub reserve: Option<u64>,
+}
+
+impl MemoryHeadroom {
+    pub fn is_low(self) -> bool {
+        matches!((self.available, self.reserve), (Some(free), Some(reserve)) if free <= reserve)
+    }
 }
 
 /// One machine's queue folder.
@@ -331,6 +348,45 @@ impl RunQueue {
             .map_or_else(|| class.default_slots(), |(_, slots)| slots)
     }
 
+    /// Free commit on Windows or available memory elsewhere, and the machine's
+    /// reserve. By default one fifth of RAM is kept for growing commands and
+    /// other applications, independently of the class's slot count.
+    pub fn memory_headroom(&self) -> MemoryHeadroom {
+        let reserve = std::fs::read_to_string(self.dir.join(RESERVE_FILE))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .filter(|bytes| *bytes > 0)
+            .or_else(|| rosen_platform::memory::physical_memory().map(|bytes| bytes / 5));
+        MemoryHeadroom {
+            available: rosen_platform::memory::available_memory(),
+            reserve,
+        }
+    }
+
+    /// Sets the machine's reserve in bytes, or restores the RAM-based default.
+    /// All classes and projects see the change on their next admission poll.
+    pub fn set_memory_reserve(&self, bytes: Option<u64>) -> io::Result<()> {
+        if bytes == Some(0) {
+            return Err(io::Error::other("the memory reserve must be positive"));
+        }
+        std::fs::create_dir_all(&self.dir)?;
+        let path = self.dir.join(RESERVE_FILE);
+        let Some(bytes) = bytes else {
+            return match std::fs::remove_file(path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                result => result,
+            };
+        };
+        // Never let a poll see a partial setting and silently use the default.
+        let staged = self.dir.join(format!(
+            "{RESERVE_FILE}.{}-{}.new",
+            std::process::id(),
+            TICKETS.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&staged, bytes.to_string())?;
+        std::fs::rename(staged, path)
+    }
+
     /// Sets the machine's own slot count for `class`, or with `None` goes
     /// back to the default. Runs waiting now see it on their next look; a
     /// lowered count stops no run already going.
@@ -384,6 +440,8 @@ impl RunQueue {
 
 /// The file in the queue folder holding the machine's own slot counts.
 const SLOTS_FILE: &str = "slots";
+/// The machine-wide override, in bytes; kept separate from class slot counts.
+const RESERVE_FILE: &str = "memory-reserve";
 
 fn slot_stem(class: RunClass, slot: u32) -> String {
     match slot {
@@ -438,6 +496,12 @@ impl Waiter {
                 Ok(()) => {}
                 Err(std::fs::TryLockError::WouldBlock) => continue,
                 Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            }
+            // Sample after taking the slot, as close as possible to starting
+            // its command. Low memory is a busy slot, not a queue error that
+            // callers would handle by running without a turn.
+            if self.queue.memory_headroom().is_low() {
+                return Ok(None);
             }
             let _ = std::fs::write(self.queue.note_path(self.class, slot), &self.note);
             return Ok(Some(Turn { _lock: lock }));

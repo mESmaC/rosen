@@ -68,6 +68,9 @@ fn say_waiting(waiter: &Waiter, class: RunClass, waited: Duration) {
             running.join(", ")
         }
     );
+    if let Ok(queue) = RunQueue::machine() {
+        eprintln!("rosen run: {}", memory_resources(&queue));
+    }
 }
 
 fn describe(entry: &Entry) -> String {
@@ -187,10 +190,14 @@ fn prioritized_command(program: &str, class: RunClass) -> Command {
 }
 
 /// `rosen run --slots`: applies each `CLASS=N` (or `CLASS=default`) to this
-/// machine's queue, then prints each class's slots, thread settings and priority.
+/// machine's queue, then prints slots, thread settings, priority and memory.
 pub fn slots(settings: &[String]) -> io::Result<()> {
     let queue = RunQueue::machine()?;
     for setting in settings {
+        if let Some(value) = setting.strip_prefix("reserve-gib=") {
+            queue.set_memory_reserve(parse_memory_reserve(value)?)?;
+            continue;
+        }
         let (class, slots) = parse_slot_setting(setting)?;
         queue.set_slots(class, slots)?;
     }
@@ -207,7 +214,49 @@ pub fn slots(settings: &[String]) -> io::Result<()> {
             resources(class)
         );
     }
+    println!("{}", memory_resources(&queue));
     Ok(())
+}
+
+fn parse_memory_reserve(value: &str) -> io::Result<Option<u64>> {
+    if value.trim() == "default" {
+        return Ok(None);
+    }
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|gib| *gib > 0)
+        .and_then(|gib| gib.checked_mul(1 << 30))
+        .map(Some)
+        .ok_or_else(|| {
+            io::Error::other("use reserve-gib=N (positive whole GiB) or reserve-gib=default")
+        })
+}
+
+fn memory_resources(queue: &RunQueue) -> String {
+    let memory = queue.memory_headroom();
+    let format_bytes = |bytes: Option<u64>| {
+        bytes.map_or_else(
+            || "unavailable".to_owned(),
+            |bytes| format!("{:.2} GiB", bytes as f64 / (1_u64 << 30) as f64),
+        )
+    };
+    let kind = if cfg!(windows) {
+        "free commit"
+    } else {
+        "available memory"
+    };
+    let state = if memory.is_low() {
+        "; waiting for memory"
+    } else {
+        ""
+    };
+    format!(
+        "memory: {} {kind}; reserve {}{state}",
+        format_bytes(memory.available),
+        format_bytes(memory.reserve)
+    )
 }
 
 /// `CLASS=N` sets a count, `CLASS=default` clears it.

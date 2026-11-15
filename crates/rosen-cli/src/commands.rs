@@ -326,7 +326,9 @@ pub struct RunArgs {
     pub class: String,
     /// Show how many runs of each class go at once on this machine, and with
     /// `CLASS=N` (comma separated, or repeated) set this machine's own count;
-    /// `CLASS=default` goes back to the default. Runs no command.
+    /// `CLASS=default` goes back to the default. Also shows current free memory
+    /// and its reserve; `reserve-gib=N` sets a positive whole-GiB reserve and
+    /// `reserve-gib=default` restores 20% of RAM. Runs no command.
     #[arg(long, num_args = 0.., value_delimiter = ',', value_name = "CLASS=N")]
     pub slots: Option<Vec<String>>,
     /// The command and its arguments, after `--`.
