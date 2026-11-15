@@ -22,6 +22,7 @@ struct World {
     conflicting: Mutex<HashSet<CommitId>>,
     /// Changes that get one snapshot between their merge and conflict routing.
     racing: Mutex<HashSet<ChangeId>>,
+    overlaps: Mutex<HashMap<ChangeId, Vec<ChangeId>>>,
 }
 
 struct Shared(Arc<World>);
@@ -35,8 +36,15 @@ impl ChangeBook for Shared {
         let on = |f: &&ChangeFacts| f.parent == ChangeParent::Change(*id);
         Ok(changes.values().filter(on).map(|f| f.id).collect())
     }
-    fn overlapping(&self, _: &ChangeId) -> LandResult<Vec<ChangeId>> {
-        Ok(Vec::new())
+    fn overlapping(&self, id: &ChangeId) -> LandResult<Vec<ChangeId>> {
+        Ok(self
+            .0
+            .overlaps
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
     }
     fn mark_landed(&self, id: &ChangeId, _: &CommitId) -> LandResult<()> {
         self.0.changes.lock().unwrap().get_mut(id).unwrap().state = ChangeState::Landed;
@@ -69,10 +77,12 @@ impl ChangeBook for Shared {
         id: &ChangeId,
         onto: &CommitId,
         _: &CommitId,
-        _: Option<&TreeId>,
+        merged: Option<&TreeId>,
     ) -> LandResult<Reparent> {
         let mut changes = self.0.changes.lock().unwrap();
-        changes.get_mut(id).unwrap().parent = ChangeParent::Base(*onto);
+        if merged.is_some() {
+            changes.get_mut(id).unwrap().parent = ChangeParent::Base(*onto);
+        }
         Ok(Reparent::Moved)
     }
     fn release_claims(&self, _: &ChangeId) -> LandResult<()> {
@@ -324,4 +334,41 @@ fn snapshot_racing_conflict_routing_is_decided_on_its_new_head() {
     assert!(!events
         .iter()
         .any(|e| matches!(e, LandingEvent::Conflict { .. })));
+}
+
+// Risk (R8 step 4): clean overlap probes must preserve checked heads/parents.
+#[test]
+fn overlap_probe_matches_proved_fixture() {
+    let f: Vec<_> = include_str!("../../../proofs/fixtures/targeted-rebase.tsv")
+        .lines()
+        .find(|row| row.starts_with("probe\t"))
+        .unwrap()
+        .split('\t')
+        .collect();
+    let last = f[1].parse::<u8>().unwrap() + 2;
+    let (world, landing) = setup(
+        (1..=last)
+            .map(|n| change(n, Tier::ProseOnly, ChangeParent::Base(root())))
+            .collect(),
+    );
+    let targets: Vec<_> = (2..=last).map(cid).collect();
+    assert_eq!(targets.len().to_string(), f[3]);
+    world
+        .overlaps
+        .lock()
+        .unwrap()
+        .insert(cid(1), targets.clone());
+    world.conflicting.lock().unwrap().insert(oid(HEAD, last));
+    let LandOutcome::Landed { restack, .. } = landing.land(&cid(1)).unwrap() else {
+        panic!("the clean incoming change lands")
+    };
+    let report = restack.unwrap();
+    assert!(report.rebased.is_empty());
+    assert_eq!(report.conflicted.len().to_string(), f[2]);
+    let changes = world.changes.lock().unwrap();
+    let unchanged = (2..=last).all(|n| {
+        let target = &changes[&cid(n)];
+        target.head == oid(HEAD, n) && target.parent == ChangeParent::Base(root())
+    });
+    assert_eq!(if unchanged { "1" } else { "0" }, f[4]);
 }

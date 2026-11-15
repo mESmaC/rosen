@@ -1,6 +1,6 @@
 //! Post-land work (SPEC R8 step 4, D19): release claims, then rebase the
-//! changes stacked on the landed change and the changes that overlap it onto
-//! the new base. Every other change rebases only when it lands itself.
+//! changes stacked on the landed change onto the new base. Probe overlapping
+//! edits for conflicts, leaving clean changes on their existing parents.
 //!
 //! Every step is idempotent, so the engine can replay it after a crash.
 
@@ -32,7 +32,10 @@ pub(crate) struct Restacker<'a> {
 impl Restacker<'_> {
     pub fn after_land(&self, landed: &ChangeId, commit: &CommitId) -> LandResult<RestackReport> {
         // Capture durably before closing the subject or deleting its claims.
-        let targets = self.targets(landed)?;
+        let stacked = self.book.stacked_on(landed)?;
+        let mut probes = self.book.overlapping(landed)?;
+        probes.sort();
+        probes.dedup();
         self.book.mark_landed(landed, commit)?;
         self.book.release_claims(landed)?;
         let released = LandingEvent::Released {
@@ -45,8 +48,13 @@ impl Restacker<'_> {
             self.events.emit(released);
         }
         let mut report = RestackReport::default();
-        for target in targets {
-            self.rebase_one(&target, commit, &mut report)?;
+        for target in &stacked {
+            self.rebase_one(target, commit, &mut report)?;
+        }
+        for target in probes {
+            if target != *landed && !stacked.contains(&target) {
+                self.probe_one(&target, commit, &mut report)?;
+            }
         }
         Ok(report)
     }
@@ -66,18 +74,57 @@ impl Restacker<'_> {
         Ok(report)
     }
 
-    /// Stacked changes first, in stack order, then overlapping changes in ID
-    /// order. Order is only set between changes that are stacked or overlap.
-    fn targets(&self, landed: &ChangeId) -> LandResult<Vec<ChangeId>> {
-        let mut targets = self.book.stacked_on(landed)?;
-        let mut overlapping = self.book.overlapping(landed)?;
-        overlapping.sort();
-        for change in overlapping {
-            if change != *landed && !targets.contains(&change) {
-                targets.push(change);
+    /// A clean probe never installs a tree or emits `rebased`: moving another
+    /// owner's head would discard its receipt and require workspace application.
+    fn probe_one(
+        &self,
+        change: &ChangeId,
+        onto: &CommitId,
+        report: &mut RestackReport,
+    ) -> LandResult<()> {
+        for _ in 0..ROUTING_ROUNDS {
+            let Some(facts) = self.book.facts(change)? else {
+                return Ok(());
+            };
+            if facts.state.is_closed() {
+                return Ok(());
             }
+            // None only checks whether this result would be stale. It never
+            // moves the change, including one already on a newer base.
+            match self.book.reparent(change, onto, &facts.head, None)? {
+                Reparent::AlreadyPast => return Ok(()),
+                Reparent::HeadMoved => continue,
+                Reparent::Moved => {}
+            }
+            if let MergeOutcome::Conflicted(paths) =
+                self.merger.merge(&facts.merge_base, onto, &facts.head)?
+            {
+                match self.book.reparent(change, onto, &facts.head, None)? {
+                    Reparent::AlreadyPast => return Ok(()),
+                    Reparent::HeadMoved => continue,
+                    Reparent::Moved => {}
+                }
+                if self.book.record_conflicts_at(
+                    change,
+                    &facts.merge_base,
+                    onto,
+                    &facts.head,
+                    &paths,
+                )? == Routing::ChangeMoved
+                {
+                    continue;
+                }
+                self.events.emit(LandingEvent::Conflict {
+                    change: *change,
+                    paths,
+                });
+                report.conflicted.push(*change);
+            }
+            return Ok(());
         }
-        Ok(targets)
+        Err(LandError::Backend(format!(
+            "change {change} kept moving during its conflict probe; recovery retries it"
+        )))
     }
 
     fn rebase_one(

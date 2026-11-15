@@ -184,44 +184,37 @@ fn narrow(found: &mut Vec<Overlap>, patterns: &[PathPattern]) {
 /// Every open or ready change other than the subject that overlaps it, in ID
 /// order, under the configuration in force at the base.
 pub fn find(state: &ServerState, subject: &Subject) -> Result<Vec<Overlap>, OverlapError> {
+    find_with_claims(state, subject, true)
+}
+
+/// Post-land conflict probes use edit regions only; claims still receive the
+/// landed event through the ordinary overlap audience (R6, R8 step 4).
+pub(crate) fn find_edits(
+    state: &ServerState,
+    change: ChangeId,
+) -> Result<Vec<Overlap>, OverlapError> {
+    find_with_claims(state, &Subject::Change(change.to_string()), false)
+}
+
+fn find_with_claims(
+    state: &ServerState,
+    subject: &Subject,
+    include_claims: bool,
+) -> Result<Vec<Overlap>, OverlapError> {
     let config = match state.project_config.at_base() {
         Ok(Some((_, resolved))) => resolved.config,
         Ok(None) => Default::default(),
         Err(why) => return Err(OverlapError::Config(why)),
     };
     let store = LooseObjectStore::open(state.config.objects_dir())?;
-    let (own_id, records, heads, claims) = state.changes.with_conn(|conn| {
-        let own_id = match subject {
-            Subject::Change(text) => Some(changes::resolve(conn, text)?),
-            Subject::Paths(_) => None,
-        };
-        let mut records = live_changes(conn)?;
-        // The subject may be closed, as a change that just landed is when
-        // landing asks which changes to rebase.
-        if let Some(id) = own_id.filter(|id| !records.iter().any(|r| r.change.id == *id)) {
-            records.push(changes::get(conn, id)?);
-        }
-        let heads = parent_heads(conn, &records)?;
-        let mut claims = crate::claims::live_records(conn)?;
-        // CAS closes the subject before post-land work. Its retained claims
-        // still select rebase targets until release, even though they no
-        // longer block new claimants.
-        if let Some(id) = own_id {
-            let retained = crate::claims::records_for(conn, id)?;
-            for claim in retained {
-                if !claims.contains(&claim) {
-                    claims.push(claim);
-                }
-            }
-        }
-        Ok((own_id, records, heads, claims))
-    })?;
-    let mut claimed: HashMap<ChangeId, Vec<PathPattern>> = HashMap::new();
-    for record in claims.into_iter().filter(|r| r.kind != ClaimKind::Wait) {
-        let pattern = PathPattern::new(&record.path)
-            .map_err(|_| ChangeError::Corrupt(format!("path claim {:?}", record.path)))?;
-        claimed.entry(record.change).or_default().push(pattern);
-    }
+    let OverlapView {
+        own_id,
+        records,
+        heads,
+        claimed,
+    } = state
+        .changes
+        .with_conn(|conn| capture_view(conn, subject, include_claims))?;
     let finder = Finder {
         store: &store,
         config: &config,
@@ -238,6 +231,59 @@ pub fn find(state: &ServerState, subject: &Subject) -> Result<Vec<Overlap>, Over
         (None, Subject::Change(text)) => return Err(ChangeError::NotFound(text.clone()).into()),
     };
     finder.find(own_id, &ours, &records, &claimed)
+}
+
+struct OverlapView {
+    own_id: Option<ChangeId>,
+    records: Vec<ChangeRecord>,
+    heads: HashMap<ChangeId, ObjectId>,
+    claimed: HashMap<ChangeId, Vec<PathPattern>>,
+}
+
+fn capture_view(
+    conn: &mut Connection,
+    subject: &Subject,
+    include_claims: bool,
+) -> Result<OverlapView, ChangeError> {
+    let own_id = match subject {
+        Subject::Change(text) => Some(changes::resolve(conn, text)?),
+        Subject::Paths(_) => None,
+    };
+    let mut records = live_changes(conn)?;
+    // The subject may be closed, as a change that just landed is when
+    // landing asks which edits to probe.
+    if let Some(id) = own_id.filter(|id| !records.iter().any(|r| r.change.id == *id)) {
+        records.push(changes::get(conn, id)?);
+    }
+    let heads = parent_heads(conn, &records)?;
+    let mut claims = if include_claims {
+        crate::claims::live_records(conn)?
+    } else {
+        Vec::new()
+    };
+    // CAS closes the subject before post-land work. Its retained claims
+    // still determine the event audience until release, even though they no
+    // longer block new claimants.
+    if let Some(id) = own_id.filter(|_| include_claims) {
+        let retained = crate::claims::records_for(conn, id)?;
+        for claim in retained {
+            if !claims.contains(&claim) {
+                claims.push(claim);
+            }
+        }
+    }
+    let mut claimed: HashMap<ChangeId, Vec<PathPattern>> = HashMap::new();
+    for record in claims.into_iter().filter(|r| r.kind != ClaimKind::Wait) {
+        let pattern = PathPattern::new(&record.path)
+            .map_err(|_| ChangeError::Corrupt(format!("path claim {:?}", record.path)))?;
+        claimed.entry(record.change).or_default().push(pattern);
+    }
+    Ok(OverlapView {
+        own_id,
+        records,
+        heads,
+        claimed,
+    })
 }
 
 fn live_changes(conn: &mut Connection) -> Result<Vec<ChangeRecord>, ChangeError> {

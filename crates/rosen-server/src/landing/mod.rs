@@ -5,7 +5,7 @@
 //! [`rules`], writes the single landed commit, and then moves the base by a
 //! compare-and-swap in one SQLite transaction ([`Ledger`]). A lost race is
 //! retried with backoff while no new receipt is needed. After a land the
-//! server rebases stacked and overlapping changes ([`restack`]).
+//! server restacks children and probes overlapping edits for conflicts ([`restack`]).
 //!
 //! The change model, merge, object store and event bus are separate pieces
 //! of the server. Landing reaches them only through the traits below, so each
@@ -205,7 +205,7 @@ pub trait ChangeBook: Send + Sync {
     }
     /// Changes whose parent is `id`, bottom of each stack first.
     fn stacked_on(&self, id: &ChangeId) -> LandResult<Vec<ChangeId>>;
-    /// Unlanded changes that overlap `id` (SPEC §2 "Overlap").
+    /// Unlanded changes whose edit regions overlap `id` (R8 step 4).
     fn overlapping(&self, id: &ChangeId) -> LandResult<Vec<ChangeId>>;
     fn mark_landed(&self, id: &ChangeId, commit: &CommitId) -> LandResult<()>;
     fn record_conflicts(&self, id: &ChangeId, paths: &[String]) -> LandResult<()>;

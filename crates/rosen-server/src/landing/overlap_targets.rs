@@ -3,7 +3,7 @@
 
 use super::{ChangeId, LandError, LandResult};
 use crate::changes::ChangeError;
-use crate::overlaps::{self, Subject};
+use crate::overlaps;
 use crate::ServerState;
 use rusqlite::{params, Connection, TransactionBehavior};
 
@@ -58,21 +58,21 @@ pub(super) fn load_or_capture(state: &ServerState, landed: ChangeId) -> LandResu
 
 /// The changes the landed change overlaps, for the selection to save.
 fn select(state: &ServerState, landed: ChangeId) -> LandResult<Vec<overlaps::Overlap>> {
-    // Overlap rebases only bring conflicts forward; each target still rebases
+    // Overlap probes only bring conflicts forward; each target still rebases
     // when it lands. Claim release and marking the change landed wait on this
     // capture, and a failure that persists (such as an unreadable project
     // config at base) would fail every replay, so it saves an empty selection.
     // A busy database or an I/O error may pass, and saving it would drop the
-    // overlapping changes' rebases for good, so it fails this run instead and
+    // overlapping changes' probes for good, so it fails this run instead and
     // the replay selects again while the claims are still held (issue #284).
-    match overlaps::find(state, &Subject::Change(landed.to_string())) {
+    match overlaps::find_edits(state, landed) {
         Ok(targets) => Ok(targets),
         Err(err) if err.may_pass() => Err(LandError::Backend(format!(
             "selecting overlaps after landing {landed}: {err}"
         ))),
         Err(err) => {
             eprintln!(
-                "rosen-server: no overlap rebases after landing {landed}: \
+                "rosen-server: no overlap probes after landing {landed}: \
                  selecting overlaps failed: {err}"
             );
             Ok(Vec::new())
@@ -162,6 +162,9 @@ mod tests {
         let id = |n| ChangeId::from_bytes([n; 16]);
         for row in include_str!("../../../../proofs/fixtures/targeted-rebase.tsv").lines() {
             let cols: Vec<_> = row.split('\t').collect();
+            if cols[0] == "probe" {
+                continue;
+            }
             let mut conn = Connection::open_in_memory().unwrap();
             ensure_schema(&conn).unwrap();
             // The design's rows: a marker for an empty selection, else one

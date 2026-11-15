@@ -3,11 +3,11 @@
 
 Models `load_or_capture` in `crates/rosen-server/src/landing/overlap_targets.rs`
 and the post-land order in `landing/service.rs`: capture the overlap targets,
-release the landed change's claims, then rebase each target. A crash can stop
+release the landed change's claims, then probe each target and route conflicts. A crash can stop
 the run after any step; recovery replays the whole run. The stored rows for
 one land are a marker for an empty selection, or one row per target. No rows
-means no selection yet. The overlap query (R6) is any function of the live
-claims, so the result holds for every overlap rule.
+means no selection yet. The selection abstracts the edit-region query (R6): claim-only overlaps
+are excluded. The result holds for every such selector and merge outcome.
 -/
 namespace TargetedRebase
 
@@ -24,11 +24,14 @@ def encode (targets : List Nat) : List Row :=
   if targets = [] then [none] else targets.map some
 
 /-- Post-land state of one land: the live claims as (change, path) pairs,
-the stored rows, and every rebase performed so far, in order. -/
+the stored rows, and every probe performed so far, in order. -/
 structure State where
   claims : List (Nat × Nat)
   rows : List Row
-  rebased : List Nat
+  probed : List Nat
+  routed : List Nat := []
+  conflicting : List Nat := []
+  heads : List Nat := []
 
 /-- Selects with the overlap query only when nothing is stored; a replay and
 a concurrent recovery that captured first both reuse the stored set. -/
@@ -38,12 +41,17 @@ def capture (overlaps : List (Nat × Nat) → List Nat) (s : State) : State :=
 def release (landed : Nat) (s : State) : State :=
   { s with claims := s.claims.filter (·.1 != landed) }
 
-def rebase (s : State) : State :=
-  { s with rebased := s.rebased ++ (decode s.rows).getD [] }
+/-- Probes have no head-install action. Only targets whose merge conflicts
+are routed; clean results are discarded (R8 step 4). -/
+def probe (s : State) : State :=
+  let targets := (decode s.rows).getD []
+  { s with
+    probed := s.probed ++ targets
+    routed := s.routed ++ targets.filter s.conflicting.contains }
 
 /-- The post-land steps in order. A crash runs a prefix of them. -/
 def steps (overlaps : List (Nat × Nat) → List Nat) (landed : Nat) : List (State → State) :=
-  [capture overlaps, release landed, rebase]
+  [capture overlaps, release landed, probe]
 
 def runPrefix (overlaps : List (Nat × Nat) → List Nat) (landed : Nat) (k : Nat)
     (s : State) : State :=
@@ -87,7 +95,7 @@ private theorem saved_prefix (overlaps : List (Nat × Nat) → List Nat) (landed
   | 0 => simpa [runPrefix] using h
   | 1 => exact Or.inr (by simpa [runPrefix, steps] using capture_saved h)
   | 2 => exact Or.inr (by simpa [runPrefix, steps, release] using capture_saved h)
-  | _ + 3 => exact Or.inr (by simpa [runPrefix, steps, release, rebase] using capture_saved h)
+  | _ + 3 => exact Or.inr (by simpa [runPrefix, steps, release, probe] using capture_saved h)
 
 private theorem saved_crashes (overlaps : List (Nat × Nat) → List Nat) (landed : Nat)
     (claims : List (Nat × Nat)) :
@@ -96,33 +104,67 @@ private theorem saved_crashes (overlaps : List (Nat × Nat) → List Nat) (lande
   | [], _, h => h
   | k :: ks, s, h => saved_crashes overlaps landed claims ks _ (saved_prefix _ _ _ k s h)
 
+private theorem unchanged_prefix (overlaps : List (Nat × Nat) → List Nat)
+    (landed k : Nat) (s : State) :
+    (runPrefix overlaps landed k s).heads = s.heads ∧
+    (runPrefix overlaps landed k s).conflicting = s.conflicting := by
+  match k with
+  | 0 | 1 | 2 | _ + 3 =>
+    by_cases h : decode s.rows = none <;>
+      simp [runPrefix, steps, capture, release, probe, h]
+
+private theorem unchanged_crashes (overlaps : List (Nat × Nat) → List Nat)
+    (landed : Nat) (crashes : List Nat) (s : State) :
+    (crashes.foldl (fun s k => runPrefix overlaps landed k s) s).heads = s.heads ∧
+    (crashes.foldl (fun s k => runPrefix overlaps landed k s) s).conflicting = s.conflicting := by
+  induction crashes generalizing s with
+  | nil => exact ⟨rfl, rfl⟩
+  | cons k ks ih =>
+    obtain ⟨hh, hc⟩ := unchanged_prefix overlaps landed k s
+    simpa [List.foldl_cons, hh, hc] using ih (runPrefix overlaps landed k s)
+
 /-- **correct** (SPEC.md R8 step 4): however many times post-land work
 crashes after any step, the completed run stores exactly the overlap set of
 the claims as they stood before release, keeps that set across replays,
 including an empty selection, releases the landed change's claims, and
-rebases exactly that set in its final pass. -/
+probes exactly that set in its final pass, routes exactly its conflicting
+targets, and leaves every head unchanged. -/
 -- SPEC.md §R8
 theorem correct (overlaps : List (Nat × Nat) → List Nat) (landed : Nat)
-    (crashes : List Nat) (claims : List (Nat × Nat)) (done : List Nat) :
-    let t := recover overlaps landed crashes ⟨claims, [], done⟩
+    (crashes : List Nat) (claims : List (Nat × Nat)) (done heads conflicting : List Nat) :
+    let t := recover overlaps landed crashes ⟨claims, [], done, [], conflicting, heads⟩
     decode t.rows = some (overlaps claims) ∧
     (∀ c ∈ t.claims, c.1 ≠ landed) ∧
-    ∃ before, t.rebased = before ++ overlaps claims := by
+    t.heads = heads ∧
+    (∃ before, t.probed = before ++ overlaps claims) ∧
+    (∃ before, t.routed = before ++ (overlaps claims).filter conflicting.contains) := by
   intro t
-  have ht : t = rebase (release landed (capture overlaps
-      (crashes.foldl (fun s k => runPrefix overlaps landed k s) ⟨claims, [], done⟩))) := rfl
-  have hc := capture_saved (saved_crashes overlaps landed claims crashes ⟨claims, [], done⟩
+  have ht : t = probe (release landed (capture overlaps
+      (crashes.foldl (fun s k => runPrefix overlaps landed k s)
+        ⟨claims, [], done, [], conflicting, heads⟩))) := rfl
+  have hc := capture_saved (saved_crashes overlaps landed claims crashes
+    ⟨claims, [], done, [], conflicting, heads⟩
     (Or.inl ⟨by simp [decode], rfl⟩))
-  generalize crashes.foldl (fun s k => runPrefix overlaps landed k s) ⟨claims, [], done⟩ = s
-    at hc ht
-  refine ⟨by rw [ht]; simpa [rebase, release] using hc, ?_, ?_⟩
+  have hu := unchanged_crashes overlaps landed crashes
+    (⟨claims, [], done, [], conflicting, heads⟩ : State)
+  generalize crashes.foldl (fun s k => runPrefix overlaps landed k s)
+    ⟨claims, [], done, [], conflicting, heads⟩ = s
+    at hc ht hu
+  refine ⟨by rw [ht]; simpa [probe, release] using hc, ?_, ?_, ?_, ?_⟩
   · intro c hc'
     rw [ht] at hc'
-    simp only [rebase, release, List.mem_filter, bne_iff_ne, ne_eq] at hc'
+    simp only [probe, release, List.mem_filter, bne_iff_ne, ne_eq] at hc'
     exact hc'.2
-  · refine ⟨(capture overlaps s).rebased, ?_⟩
+  · rw [ht]
+    exact (unchanged_prefix overlaps landed 3 s).1.trans hu.1
+  · refine ⟨(capture overlaps s).probed, ?_⟩
     rw [ht]
-    simp [rebase, release, hc]
+    simp [probe, release, hc]
+  · refine ⟨(capture overlaps s).routed, ?_⟩
+    have hconf : (capture overlaps s).conflicting = conflicting :=
+      (unchanged_prefix overlaps landed 1 s).2.trans hu.2
+    rw [ht]
+    simp [probe, release, hc, hconf]
 
 /-- Rows the capture transaction writes: the encoded selection on the first
 capture, nothing on a replay. -/
@@ -177,12 +219,14 @@ theorem optimal (enc : List Nat → List Row) (dec : List Row → Option (List N
 #print axioms encode
 #print axioms capture
 #print axioms release
-#print axioms rebase
+#print axioms probe
 #print axioms steps
 #print axioms runPrefix
 #print axioms recover
 #print axioms Saved
 #print axioms writes
+#print axioms unchanged_prefix
+#print axioms unchanged_crashes
 #print axioms correct
 #print axioms cost_bound
 #print axioms optimal

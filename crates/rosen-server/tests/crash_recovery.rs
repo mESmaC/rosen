@@ -88,11 +88,11 @@ async fn ready(state: &State, db: &Connection, change: String) {
     ok(state, ReceiptSubmit(receipt)).await;
 }
 
-/// The land whose commit the overlapping change `x` sits on: base history
-/// positions 2, 3 and 4 are lands `a`, `b` and `c`.
+/// Claim-only overlap probes keep the target on its original root.
 fn target(db: &Connection, x: &str) -> String {
     let seq = read(db, &format!("SELECT h.seq FROM changes c JOIN base_history h ON h.commit_id = c.parent_base WHERE c.id = '{x}'"));
-    ["a", "b", "c"][seq.parse::<usize>().unwrap() - 2].into()
+    assert_eq!(seq, "1");
+    "root".into()
 }
 
 /// Crash 0 dies inside `c`'s land transaction. Crash 1 dies right after it
@@ -150,7 +150,7 @@ async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
     let first = start(temp.path());
     root(&first);
     let db = Connection::open(first.config.metadata_path()).unwrap();
-    // X claims every file a, b and c write, so each land overlaps it.
+    // X claims every file a, b and c write; notice it without rebasing it.
     let x = change(&first, "x").await;
     let paths = vec!["s/**".into()];
     ok(

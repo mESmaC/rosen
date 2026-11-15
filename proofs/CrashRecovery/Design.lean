@@ -1,10 +1,10 @@
 /-! SPEC.md R8 (step 2, step 4 and "Accept when"): a server crash at any point of a
 land loses no land and applies none twice, and recovery finishes every interrupted
-post-land run without moving a change behind a base it already reached.
+post-land run without changing an overlapping change's head or parent.
 
 SQLite transactions are atomic and durable (AtomicTransactions proves the land
-transaction). One land's post-land work is a forward-only rebase of one overlapping
-change, `target`, then clearing the land's pending flag. Positions are places in the
+transaction). One land's post-land work probes an overlapping change,
+`target`, without moving it, then clears the land's pending flag. Positions are places in the
 base history: the n-th land sits at position n. -/
 namespace CrashRecovery
 
@@ -23,9 +23,9 @@ structure World where
 
 def landed (w : World) (c : Nat) : Bool := w.history.any (·.change == c)
 
-/-- The rebase moves the target only forward; the land stops being pending. -/
+/-- A conflict probe never moves the target; the land stops being pending. -/
 def postLand (w : World) (l : Land) : World :=
-  { w with target := max w.target l.pos, pending := w.pending.erase l }
+  { w with pending := w.pending.erase l }
 
 def recover (w : World) (order : List Land) : World := order.foldl postLand w
 
@@ -35,14 +35,14 @@ def committed (w : World) (c : Nat) : World :=
   { w with history := next w c :: w.history, pending := next w c :: w.pending }
 
 /-- What is durable when the server dies landing `c`: `0` before the land
-transaction commits, `1` after it commits, `2` after the post-land rebase but before
+transaction commits, `1` after it commits, `2` after the post-land probe but before
 the land is marked finished, larger: no crash. A landed change never lands again. -/
 def crashAt (w : World) (c crash : Nat) : World :=
   if landed w c then w
   else match crash with
     | 0 => w
     | 1 => committed w c
-    | 2 => { committed w c with target := max w.target (next w c).pos }
+    | 2 => committed w c
     | _ => postLand (committed w c) (next w c)
 
 /-- A land request that does not crash. -/
@@ -54,11 +54,9 @@ def restart (w : World) (c crash : Nat) : World :=
   let v := crashAt w c crash
   land (recover v v.pending) c
 
-def raise (t : Nat) (l : Land) : Nat := max t l.pos
-
 theorem recover_fields (w : World) (o : List Land) :
     (recover w o).history = w.history ∧ (recover w o).pending = o.foldl List.erase w.pending ∧
-    (recover w o).target = o.foldl raise w.target := by
+    (recover w o).target = w.target := by
   induction o generalizing w with
   | nil => simp [recover]
   | cons a o ih => exact ih (postLand w a)
@@ -68,18 +66,10 @@ theorem erase_self (p : List Land) : p.foldl List.erase p = [] := by
   | nil => rfl
   | cons a p ih => simpa [List.erase_cons_head] using ih
 
-theorem raise_swap (p : List Land) (t n : Nat) :
-    p.foldl raise (max t n) = max (p.foldl raise t) n := by
-  induction p generalizing t with
-  | nil => rfl
-  | cons a p ih =>
-    simp only [List.foldl_cons, raise, ← ih]
-    congr 1; omega
-
 /-- Once the land has committed, recovery finishes it and the repeated ask
 changes nothing. -/
 theorem finish (v : World) (c : Nat) (done : landed v c = true) :
-    land (recover v v.pending) c = ⟨v.history, [], v.pending.foldl raise v.target⟩ := by
+    land (recover v v.pending) c = ⟨v.history, [], v.target⟩ := by
   obtain ⟨hh, hp, ht⟩ := recover_fields v v.pending
   have again : landed (recover v v.pending) c = true := by simpa [landed, hh] using done
   simp only [land, crashAt, again, ↓reduceIte]
@@ -90,10 +80,10 @@ theorem finish (v : World) (c : Nat) (done : landed v c = true) :
 /-- SPEC.md R8 "Accept when" and steps 2 and 4: whatever point the server dies at,
 the restart ends in the world a land that never crashed reaches: the change is in
 the base history exactly once, no post-land work is left, and the overlapping change
-sits on the newest base any land moved it to, never behind it. -/
+keeps its original head and parent throughout every replay. -/
 theorem correct (w : World) (c crash : Nat) (fresh : landed w c = false) :
     restart w c crash =
-      ⟨next w c :: w.history, [], max (w.pending.foldl raise w.target) (next w c).pos⟩ := by
+      ⟨next w c :: w.history, [], w.target⟩ := by
   have once : ∀ p t, landed ⟨next w c :: w.history, p, t⟩ c = true := by
     simp [landed, next]
   match crash with
@@ -106,7 +96,6 @@ theorem correct (w : World) (c crash : Nat) (fresh : landed w c = false) :
     simp only [restart, crashAt, fresh, committed, postLand, Bool.false_eq_true, ↓reduceIte,
       List.erase_cons_head]
     rw [finish _ c (once _ _)]
-    simp [raise, raise_swap, Nat.max_assoc]
 
 /-- Cost model: post-land runs after the restart, counting each replay and the run
 of a land the repeated ask makes; merges and SQLite I/O inside a run are excluded.
@@ -148,7 +137,6 @@ theorem optimal (w : World) (alt : List Land) (finishes : (recover w alt).pendin
 
 #print axioms recover_fields
 #print axioms erase_self
-#print axioms raise_swap
 #print axioms finish
 #print axioms correct
 #print axioms cost_bound
