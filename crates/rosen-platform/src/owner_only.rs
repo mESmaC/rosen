@@ -6,7 +6,7 @@
 //! list. A handle's rights are checked only when it opens, so restricting the
 //! file afterwards would not shut out a handle opened in that window.
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -16,6 +16,35 @@ pub enum Replace {
     Allow,
     /// The write fails with `AlreadyExists` and leaves the existing file.
     Refuse,
+}
+
+/// Protects an existing file before reading it, including files written by
+/// older versions with inherited permissions. Failure to protect it is an
+/// error; callers must not use an unprotected identity or upstream config.
+/// This cannot undo disclosure through access granted before the repair.
+pub fn read(path: &Path) -> io::Result<Vec<u8>> {
+    let mut file = open_protected(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn open_protected(path: &Path) -> io::Result<File> {
+    windows::open_protected(path)
+}
+
+#[cfg(unix)]
+fn open_protected(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::PermissionsExt;
+    let file = File::open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_protected(_path: &Path) -> io::Result<File> {
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 /// Atomically writes `bytes` to `path` as a file only the current user (and,
@@ -116,13 +145,64 @@ mod windows {
     use std::fs::File;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::FromRawHandle;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::path::Path;
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, MoveFileExW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, MOVEFILE_REPLACE_EXISTING,
-        MOVEFILE_WRITE_THROUGH,
+    use windows_sys::Win32::Security::Authorization::{SetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
     };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, MoveFileExW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, WRITE_DAC,
+    };
+
+    pub(super) fn open_protected(path: &Path) -> io::Result<File> {
+        let file = std::fs::OpenOptions::new()
+            .access_mode(GENERIC_READ | WRITE_DAC)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+            .open(path)?;
+        let descriptor = OwnerOnlyDescriptor::for_current_user(Rights::FileAll)?;
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl = std::ptr::null_mut();
+        // SAFETY: the descriptor is live and all output pointers are valid.
+        let ok = unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor.attributes().lpSecurityDescriptor,
+                &mut present,
+                &mut dacl,
+                &mut defaulted,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // A null DACL would grant everyone access; never apply one.
+        if present == 0 || dacl.is_null() {
+            return Err(io::Error::other("owner-only descriptor has no DACL"));
+        }
+        // SAFETY: the owned handle and descriptor remain live for the call.
+        // Protect and read the same object, so a pathname replacement cannot
+        // substitute unprotected bytes. Atomic enrollment saves may still
+        // replace the path; writes to the held file remain excluded.
+        let error = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null(),
+            )
+        };
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+        Ok(file)
+    }
 
     fn wide(path: &Path) -> io::Result<Vec<u16>> {
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();

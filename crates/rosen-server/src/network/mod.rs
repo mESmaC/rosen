@@ -55,7 +55,7 @@ impl UpstreamConfig {
     /// Reads `upstream.json`: `{"address", "fingerprint", "credential"}`.
     /// `None` when the file does not exist: the daemon is the server.
     pub fn load(data_dir: &Path) -> io::Result<Option<Self>> {
-        let bytes = match std::fs::read(Self::path(data_dir)) {
+        let bytes = match rosen_platform::owner_only::read(&Self::path(data_dir)) {
             Ok(bytes) => bytes,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err),

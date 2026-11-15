@@ -30,7 +30,7 @@ impl Identity {
     /// Two servers starting at once agree: only one file is ever written.
     pub fn load_or_create(data_dir: &Path) -> io::Result<Self> {
         let path = identity_path(data_dir);
-        match fs::read(&path) {
+        match owner_only::read(&path) {
             Ok(bytes) => return Self::decode(&bytes),
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(err),
@@ -43,7 +43,7 @@ impl Identity {
             Ok(()) => Ok(created),
             // Another server won the race; use its identity.
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                Self::decode(&fs::read(&path)?)
+                Self::decode(&owner_only::read(&path)?)
             }
             Err(err) => Err(err),
         }
