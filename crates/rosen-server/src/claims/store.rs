@@ -46,21 +46,24 @@ const SELECT: &str =
      FROM path_claims pc JOIN changes c ON c.id = pc.change_id";
 const LIVE: &str = "c.state IN ('open', 'ready')";
 
-/// Grants every path to the change, or none of them and names the holders.
-pub fn claim(
+/// Grants every path or refuses with holders; None requests diff loading and retry.
+pub(super) fn claim(
     conn: &mut Connection,
     change: &str,
     req: &rosen_protocol::ClaimRequest,
-    store: &dyn rosen_store::ObjectStore,
-) -> Result<ClaimOutcome, ChangeError> {
+    edits: &mut super::notices::Edits,
+) -> Result<Option<ClaimOutcome>, ChangeError> {
     let patterns = parse(&req.paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let id = open_change(&tx, change)?;
     let holders = holders(&tx, id, &patterns)?;
     if req.exclusive && !holders.is_empty() {
-        return Ok(ClaimOutcome::Refused { holders });
+        return Ok(Some(ClaimOutcome::Refused { holders }));
     }
-    let overlaps = super::notices::find(&tx, store, id, &patterns)?;
+    let Some(overlaps) = super::notices::find(&tx, edits, id, &patterns)? else {
+        // Roll back before the caller reads any objects or computes diffs.
+        return Ok(None);
+    };
     let now = now_millis();
     for pattern in &patterns {
         insert(&tx, id, pattern, ClaimKind::Claim, now)?;
@@ -74,11 +77,11 @@ pub fn claim(
     }
     announce(&tx, id, &patterns, req.exclusive, &overlaps)?;
     tx.commit()?;
-    Ok(ClaimOutcome::Granted {
+    Ok(Some(ClaimOutcome::Granted {
         change: id,
         paths: texts(&patterns),
         overlaps,
-    })
+    }))
 }
 
 /// Records shares. A share never blocks and is never refused.
@@ -397,11 +400,14 @@ fn now_millis() -> i64 {
 }
 
 /// Claims and shares for the same transactional snapshot as the new notice.
-pub(super) fn records(conn: &Connection) -> Result<Vec<PathClaim>, ChangeError> {
+pub(super) fn records(
+    conn: &Connection,
+    claimant: ChangeId,
+) -> Result<Vec<PathClaim>, ChangeError> {
     rows(
         conn,
-        &format!("{SELECT} WHERE {LIVE} ORDER BY pc.change_id, pc.pattern"),
-        [],
+        &format!("{SELECT} WHERE {LIVE} AND pc.change_id <> ?1 AND pc.kind <> 'wait' ORDER BY pc.change_id, pc.pattern"),
+        [claimant.to_string()],
     )
 }
 

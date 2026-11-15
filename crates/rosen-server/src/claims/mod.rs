@@ -147,7 +147,14 @@ fn claim(state: &ServerState, req: &ClaimRequest) -> Result<ClaimOutcome, Change
     }
     let objects = rosen_store::LooseObjectStore::open(state.config.objects_dir())
         .map_err(|err| ChangeError::Base(err.to_string()))?;
-    state
-        .changes
-        .with_conn(|conn| store::claim(conn, &req.change, req, &objects))
+    let mut edits = notices::Edits::default();
+    loop {
+        let outcome = state
+            .changes
+            .with_conn(|conn| store::claim(conn, &req.change, req, &mut edits))?;
+        if let Some(outcome) = outcome {
+            return Ok(outcome);
+        }
+        edits.load(&objects)?;
+    }
 }
