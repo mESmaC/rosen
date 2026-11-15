@@ -29,15 +29,12 @@ pub struct LandedTrailers {
 
 impl LandedTrailers {
     fn render(&self) -> String {
-        let mut out = format!("{CHANGE_TRAILER}: {}
-", self.change);
+        let mut out = format!("{CHANGE_TRAILER}: {}\n", self.change);
         if let Some(receipt) = &self.receipt {
-            out.push_str(&format!("{RECEIPT_TRAILER}: {receipt}
-"));
+            out.push_str(&format!("{RECEIPT_TRAILER}: {receipt}\n"));
         }
         for approver in &self.approvers {
-            out.push_str(&format!("{APPROVAL_TRAILER}: {approver}
-"));
+            out.push_str(&format!("{APPROVAL_TRAILER}: {approver}\n"));
         }
         out
     }
@@ -48,9 +45,7 @@ impl LandedTrailers {
     /// receipt rather than hiding the change the commit landed.
     pub fn parse(message: &[u8]) -> Option<Self> {
         let text = String::from_utf8_lossy(message);
-        let last_paragraph = text.trim_end().rsplit("
-
-").next()?;
+        let last_paragraph = text.trim_end().rsplit("\n\n").next()?;
         let mut change = None;
         let mut receipt = None;
         let mut approvers = Vec::new();
