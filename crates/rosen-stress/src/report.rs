@@ -4,7 +4,7 @@
 
 use crate::plan::Plan;
 use anyhow::{Context, Result};
-use rosen_client::{ChangeId, ObjectId};
+use rosen_client::{AgentId, ChangeId, ObjectId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -77,6 +77,13 @@ pub struct ReceiptSample {
     pub change: ChangeId,
     pub head: ObjectId,
     pub base: ObjectId,
+    /// The immutable merge result checked, including any stack parents.
+    /// Older journals deserialize but cannot establish this binding.
+    #[serde(default)]
+    pub tree: Option<ObjectId>,
+    /// The stored checker identity, qualified with its enrolled machine.
+    #[serde(default)]
+    pub submitter: Option<AgentId>,
 }
 
 /// What became of one change, and the lines that must be in the final

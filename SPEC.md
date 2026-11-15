@@ -54,6 +54,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
   - On Windows, an access-denied server-user check refuses the connection and names elevation or another user as possible causes; it suggests stopping one's own daemon and restarting it from a non-elevated shell.
 - **Events.** The server pushes events to subscribed clients. Clients never poll.
 - **Garbage collection.** v1 never deletes objects from the store.
+- **Stress verification.** The §5 harness matches landed receipt and approval trailers to the run's checked trees and reviewer identities, preserving valid server-rebase and independent-unit receipt reuse (#173).
 
 ---
 ## 2. Concepts

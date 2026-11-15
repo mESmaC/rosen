@@ -503,7 +503,7 @@ impl Agent {
         approved: &mut Option<ObjectId>,
     ) -> Result<bool> {
         let id = change.to_string();
-        let mut result = self.receipt(change, merge.head, merge.base).await;
+        let mut result = self.receipt(change, merge).await;
         if result.is_ok() && *approved != Some(merge.head) {
             result = self.approve(&id, merge.head).await;
             if result.is_ok() {
@@ -523,16 +523,22 @@ impl Agent {
 
     /// The checker's part (D9): it would build and lint the merge result;
     /// the harness measures Rosen, not a build, so it receipts at once.
-    async fn receipt(&mut self, change: ChangeId, head: ObjectId, base: ObjectId) -> Result<()> {
+    async fn receipt(&mut self, change: ChangeId, merge: &MergeResultAnswer) -> Result<()> {
         let id = change.to_string();
         let checker = self.session.as_agent(self.shared.checker.clone());
-        retrying!(self, "receipt", |_s| checker.submit_receipt(
+        let stored = retrying!(self, "receipt", |_s| checker.submit_receipt(
             &id,
-            head,
-            base,
+            merge.head,
+            merge.base,
             PRE_LAND_CHECK_SET
         ))?;
-        let sample = ReceiptSample { change, head, base };
+        let sample = ReceiptSample {
+            change,
+            head: merge.head,
+            base: merge.base,
+            tree: merge.tree,
+            submitter: Some(stored.receipt.submitter.on_machine(&stored.machine)?),
+        };
         self.shared.record(Record::Receipt(sample));
         Ok(())
     }

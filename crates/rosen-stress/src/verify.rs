@@ -10,6 +10,8 @@ use rosen_client::protocol::{LogEntry, LogRequest, ReadAnswer, ReadRequest};
 use rosen_client::{ChangeId, Client, ObjectId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+mod gates;
+
 /// §5's latency targets.
 const START_P95_MS: f64 = 2000.0;
 const LAND_P95_MS: f64 = 200.0;
@@ -67,7 +69,7 @@ pub async fn verify(
     };
     check_history(&run, &mut failures);
     check_lost_work(client, &run, &mut failures).await?;
-    check_gates(client, &run, &mut failures).await?;
+    gates::check(client, &run, &mut failures).await?;
     crate::revert::check_revert(client, &run.revert_view(), targets.checker, &mut failures).await?;
     check_measurements(&run, targets, &mut failures);
     Ok(failures)
@@ -221,52 +223,6 @@ pub async fn read_at(client: &Client, at: &str, path: &str) -> Result<Option<Str
         Err(rosen_client::Error::Server(_)) => Ok(None),
         Err(err) => Err(err).context(format!("reading {path}")),
     }
-}
-
-/// The base moved only with a matching receipt and approval (§5): each
-/// agent land's receipt trailer is one the run's checker gave for that
-/// change's head and base, and a run reviewer approved that same head.
-async fn check_gates(client: &Client, run: &Run<'_>, failures: &mut Failures) -> Result<()> {
-    let reviewers: HashSet<String> = run
-        .reports
-        .iter()
-        .map(|r| run.plan.reviewer_name(&r.machine))
-        .collect();
-    let receipts: HashSet<(ChangeId, Option<ObjectId>, ObjectId)> = run
-        .reports
-        .iter()
-        .flat_map(|r| &r.receipts)
-        .map(|r| (r.change, Some(r.head), r.base))
-        .collect();
-    for entry in run.history.iter().filter(|entry| !is_server_revert(entry)) {
-        let (Some(change), Some(receipt)) = (entry.change, &entry.receipt) else {
-            failures.push(format!(
-                "base commit {} landed with no receipt",
-                entry.commit
-            ));
-            continue;
-        };
-        if !receipts.contains(&(change, receipt.head, receipt.base)) {
-            failures.push(format!(
-                "{change} landed as {} on a receipt the run never gave",
-                entry.commit
-            ));
-        }
-        let approvals = client
-            .review_approvals(&change.to_string())
-            .await
-            .context("reading approvals")?;
-        let approved = approvals
-            .iter()
-            .any(|a| Some(a.head) == receipt.head && reviewers.contains(a.reviewer.as_str()));
-        if !approved {
-            failures.push(format!(
-                "{change} landed as {} with no run approval of its receipted head",
-                entry.commit
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn check_measurements(run: &Run, targets: &Targets, failures: &mut Failures) {
