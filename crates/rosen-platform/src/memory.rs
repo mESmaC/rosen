@@ -84,6 +84,9 @@ pub fn available_memory() -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
+// libc deprecates its Mach bindings in favour of the mach2 crate. The call is the same;
+// moving one function to a new dependency is not worth it while libc still provides it.
+#[allow(deprecated)]
 pub fn available_memory() -> Option<u64> {
     // Keep one host send right for this process's lifetime, rather than leak
     // another right on every queue poll.
