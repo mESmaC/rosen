@@ -2532,7 +2532,6 @@
       },
       "required": [
         "check_set",
-        "head",
         "base",
         "submitter"
       ],

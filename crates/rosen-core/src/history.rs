@@ -29,22 +29,15 @@ pub struct LandedTrailers {
 
 impl LandedTrailers {
     fn render(&self) -> String {
-        let mut out = format!(
-            "{CHANGE_TRAILER}: {}
-",
-            self.change
-        );
+        let mut out = format!("{CHANGE_TRAILER}: {}
+", self.change);
         if let Some(receipt) = &self.receipt {
-            out.push_str(&format!(
-                "{RECEIPT_TRAILER}: {receipt}
-"
-            ));
+            out.push_str(&format!("{RECEIPT_TRAILER}: {receipt}
+"));
         }
         for approver in &self.approvers {
-            out.push_str(&format!(
-                "{APPROVAL_TRAILER}: {approver}
-"
-            ));
+            out.push_str(&format!("{APPROVAL_TRAILER}: {approver}
+"));
         }
         out
     }
@@ -55,14 +48,9 @@ impl LandedTrailers {
     /// receipt rather than hiding the change the commit landed.
     pub fn parse(message: &[u8]) -> Option<Self> {
         let text = String::from_utf8_lossy(message);
-        let last_paragraph = text
-            .trim_end()
-            .rsplit(
-                "
+        let last_paragraph = text.trim_end().rsplit("
 
-",
-            )
-            .next()?;
+").next()?;
         let mut change = None;
         let mut receipt = None;
         let mut approvers = Vec::new();
@@ -91,6 +79,10 @@ impl LandedTrailers {
 /// checked; when the base moved and the receipt was reused, `base` is older
 /// than the commit's parent.
 ///
+/// Lands before #139 wrote the 3-field form `<check set> <base>
+/// <submitter>`. Commit messages are immutable, so that form still parses,
+/// with `head` unknown, and renders back unchanged (issue #147).
+///
 /// Every field is a single token, so the value can never break onto a new
 /// line and forge another trailer (issue #18): the check set is validated
 /// here, and the other fields are typed.
@@ -98,7 +90,9 @@ impl LandedTrailers {
 #[serde(try_from = "ReceiptTrailerFields")]
 pub struct ReceiptTrailer {
     check_set: String,
-    pub head: ObjectId,
+    /// `None` only for a receipt written in the pre-#139 3-field form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<ObjectId>,
     pub base: ObjectId,
     pub submitter: AgentId,
 }
@@ -108,7 +102,8 @@ pub struct ReceiptTrailer {
 #[derive(Deserialize)]
 struct ReceiptTrailerFields {
     check_set: String,
-    head: ObjectId,
+    #[serde(default)]
+    head: Option<ObjectId>,
     base: ObjectId,
     submitter: AgentId,
 }
@@ -116,7 +111,7 @@ struct ReceiptTrailerFields {
 impl TryFrom<ReceiptTrailerFields> for ReceiptTrailer {
     type Error = Error;
     fn try_from(fields: ReceiptTrailerFields) -> Result<Self> {
-        ReceiptTrailer::new(fields.check_set, fields.head, fields.base, fields.submitter)
+        ReceiptTrailer::validated(fields.check_set, fields.head, fields.base, fields.submitter)
     }
 }
 
@@ -124,6 +119,15 @@ impl ReceiptTrailer {
     pub fn new(
         check_set: impl Into<String>,
         head: ObjectId,
+        base: ObjectId,
+        submitter: AgentId,
+    ) -> Result<Self> {
+        Self::validated(check_set, Some(head), base, submitter)
+    }
+
+    fn validated(
+        check_set: impl Into<String>,
+        head: Option<ObjectId>,
         base: ObjectId,
         submitter: AgentId,
     ) -> Result<Self> {
@@ -150,11 +154,11 @@ impl ReceiptTrailer {
 
 impl fmt::Display for ReceiptTrailer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {} {} {}",
-            self.check_set, self.head, self.base, self.submitter
-        )
+        write!(f, "{} ", self.check_set)?;
+        if let Some(head) = &self.head {
+            write!(f, "{head} ")?;
+        }
+        write!(f, "{} {}", self.base, self.submitter)
     }
 }
 
@@ -163,12 +167,16 @@ impl FromStr for ReceiptTrailer {
     fn from_str(value: &str) -> Result<Self> {
         let malformed = || Error::InvalidCheckSet(value.to_owned());
         let fields: Vec<&str> = value.split_whitespace().collect();
-        let [check_set, head, base, submitter] = fields[..] else {
-            return Err(malformed());
+        let (check_set, head, base, submitter) = match fields[..] {
+            [check_set, head, base, submitter] => {
+                (check_set, Some(ObjectId::from_hex(head)?), base, submitter)
+            }
+            [check_set, base, submitter] => (check_set, None, base, submitter),
+            _ => return Err(malformed()),
         };
-        ReceiptTrailer::new(
+        ReceiptTrailer::validated(
             check_set,
-            ObjectId::from_hex(head)?,
+            head,
             ObjectId::from_hex(base)?,
             AgentId::new(submitter)?,
         )

@@ -231,11 +231,11 @@ async fn check_gates(client: &Client, run: &Run<'_>, failures: &mut Failures) ->
         .iter()
         .map(|r| run.plan.reviewer_name(&r.machine))
         .collect();
-    let receipts: HashSet<(ChangeId, ObjectId, ObjectId)> = run
+    let receipts: HashSet<(ChangeId, Option<ObjectId>, ObjectId)> = run
         .reports
         .iter()
         .flat_map(|r| &r.receipts)
-        .map(|r| (r.change, r.head, r.base))
+        .map(|r| (r.change, Some(r.head), r.base))
         .collect();
     for entry in run.history.iter().filter(|entry| !is_server_revert(entry)) {
         let (Some(change), Some(receipt)) = (entry.change, &entry.receipt) else {
@@ -257,7 +257,7 @@ async fn check_gates(client: &Client, run: &Run<'_>, failures: &mut Failures) ->
             .context("reading approvals")?;
         let approved = approvals
             .iter()
-            .any(|a| a.head == receipt.head && reviewers.contains(a.reviewer.as_str()));
+            .any(|a| Some(a.head) == receipt.head && reviewers.contains(a.reviewer.as_str()));
         if !approved {
             failures.push(format!(
                 "{change} landed as {} with no run approval of its receipted head",
