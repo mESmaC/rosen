@@ -1,4 +1,11 @@
 ### R9 · Events
+- File-backed event-stream reads use pooled read-only WAL snapshots, so subscriber page scans do not hold the event writer needed to announce a land.
+  Each page is read consistently; publication, sequence ordering and cursor writes still use the single writer.
+- Staged-event drains take turns separately from the event writer, avoiding duplicate audience computation while other publishers and readers continue.
+  Each caller still drains after its transaction commits, including after an earlier drain failed.
+- Audience selection reuses bounded, in-memory tree and line diffs keyed by exact parent and head objects.
+  Literal path comparisons avoid glob construction.
+  Claims, live states and overlap policy are read again for each selection; object reads never hold the cache lock.
 - A `rebased` event reports an installed rebase, including a stack restack or an owner-requested rebase.
   A clean overlap probe emits none.
   Claim-only overlaps receive the `landed` notice.

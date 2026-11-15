@@ -19,6 +19,7 @@ pub(crate) use ledger::ensure_schema;
 mod overlap_targets;
 pub mod reach;
 mod reach_store;
+mod readers;
 mod receipt_store;
 mod restack;
 pub mod revert;
@@ -28,6 +29,7 @@ mod review_gate;
 pub mod rules;
 pub mod service;
 mod size_limit;
+mod timing;
 
 use std::fmt;
 
@@ -282,6 +284,18 @@ pub trait Merger: Send + Sync {
         _policy_base: &CommitId,
     ) -> LandResult<MergeOutcome> {
         self.merge(merge_base, onto, head)
+    }
+
+    /// Live attempts can discard scratch objects when their base moves.
+    /// Historical previews continue to use `merge_layer` without cancellation.
+    fn merge_layer_live(
+        &self,
+        inputs: [&ObjectId; 4],
+        current: &dyn Fn() -> LandResult<bool>,
+    ) -> LandResult<Option<MergeOutcome>> {
+        let [merge_base, onto, head, policy_base] = inputs;
+        let result = self.merge_layer(merge_base, onto, head, policy_base)?;
+        Ok(current()?.then_some(result))
     }
 }
 

@@ -217,6 +217,7 @@ fn find_with_claims(
         .with_conn(|conn| capture_view(conn, subject, include_claims))?;
     let finder = Finder {
         store: &store,
+        edits: &state.overlap_edits,
         config: &config,
         uncounted: config.uncounted_patterns(),
         heads,
@@ -321,6 +322,7 @@ fn parent_heads(
 /// Overlap checks against one snapshot of the store and the changes.
 struct Finder<'a> {
     store: &'a dyn ObjectStore,
+    edits: &'a edits::Cache,
     config: &'a ProjectConfig,
     /// Generated files and registration lists: two claims meeting only on
     /// these paths do not overlap.
@@ -376,7 +378,7 @@ impl Finder<'_> {
         record: &ChangeRecord,
         claimed: &HashMap<ChangeId, Vec<PathPattern>>,
     ) -> Result<Footprint, OverlapError> {
-        let mut edits = edits::changed_files(self.store, &self.heads, &record.change)?;
+        let mut edits = self.edits.files(self.store, &self.heads, &record.change)?;
         edits.retain(|path, _| self.config.counts_for_overlap(path));
         // Claims are kept whole: a claim's uncounted paths are set aside where
         // it is compared, since a glob can cover counted paths too.

@@ -61,6 +61,14 @@ impl PathPattern {
 
     /// Whether some path matches both patterns.
     pub fn overlaps(&self, other: &PathPattern) -> bool {
+        // Most claims name files. Building two automata for each pair makes
+        // event audience selection quadratic in allocations at agent scale.
+        if self.is_literal() {
+            return other.matches(&self.0);
+        }
+        if other.is_literal() {
+            return self.matches(&other.0);
+        }
         Matcher::new(&self.0).intersects(&Matcher::new(&other.0))
     }
 
@@ -76,14 +84,27 @@ impl PathPattern {
         if excluded.is_empty() {
             return true;
         }
+        if self.is_literal() {
+            return !excluded.iter().any(|pattern| pattern.matches(&self.0));
+        }
+        if other.is_literal() {
+            return !excluded.iter().any(|pattern| pattern.matches(&other.0));
+        }
         let excluded: Vec<Matcher> = excluded.iter().map(|p| Matcher::new(&p.0)).collect();
         ExcludingSearch::new(Matcher::new(&self.0), Matcher::new(&other.0), excluded).run()
     }
 
     /// Whether `path` (a plain path, not a glob) matches this pattern.
     pub fn matches(&self, path: &str) -> bool {
+        if self.is_literal() {
+            return self.0 == path;
+        }
         let literal = Matcher::literal(path);
         Matcher::new(&self.0).intersects(&literal)
+    }
+
+    fn is_literal(&self) -> bool {
+        !self.0.contains(['*', '?'])
     }
 }
 

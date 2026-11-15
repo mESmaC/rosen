@@ -18,7 +18,58 @@ use rosen_core::{
 use rosen_merge::{merge_file, FileMerge, MarkerLabels, MergePolicy};
 use rosen_protocol::MergeResultAnswer;
 use rosen_store::ObjectStore;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Mutex, PoisonError};
+
+mod staging;
+
+/// Only immutable inputs belong in this cache; no receipt or gate decision does.
+#[derive(Default)]
+pub(crate) struct MergeCache(Mutex<HashMap<[ObjectId; 4], TreeMerge>>);
+
+impl MergeCache {
+    fn get(&self, key: &[ObjectId; 4]) -> Option<TreeMerge> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    }
+
+    fn remember(&self, key: [ObjectId; 4], result: &TreeMerge) {
+        // Conflict paths can be large. Cache clean results only, with at most
+        // 8 KiB of regeneration paths per entry and 2048 entries per server.
+        let bytes: usize = result
+            .regenerate
+            .iter()
+            .map(|path| path.capacity() + 24)
+            .sum();
+        if result.tree.is_none() || bytes > 8192 {
+            return;
+        }
+        let mut cache = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.len() >= 2048 {
+            cache.clear();
+        }
+        cache.insert(key, result.clone());
+    }
+}
+
+fn cached_merge(
+    ctx: &Ctx,
+    sides: [ObjectId; 3],
+    policy_base: ObjectId,
+    policy: &dyn Fn(&str) -> MergePolicy,
+) -> HistoryResult<TreeMerge> {
+    let key = [sides[0], sides[1], sides[2], policy_base];
+    if let Some(result) = ctx.state.merge_results.get(&key) {
+        return Ok(result);
+    }
+    // Store reads, merging and durable writes never hold the cache mutex.
+    let result = merge_trees(ctx, sides, policy)?;
+    ctx.state.merge_results.remember(key, &result);
+    Ok(result)
+}
 
 pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer> {
     let Revision::Change(change) = Revision::resolve(ctx, Some(change))? else {
@@ -69,7 +120,7 @@ pub(crate) fn merge_stack_onto(
         .unwrap_or(stack.len());
     let config = ctx.state.project_config.at_commit(onto)?.config;
     let policy = |path: &str| policy_for(&config, path);
-    let mut tree = ctx.index.commit(&ctx.store, onto)?.tree;
+    let mut tree = ctx.store.read_commit(onto)?.tree;
     let mut regenerate = Vec::new();
     for change in stack[..unlanded].iter().rev() {
         let measured_from = built_on(ctx, change)?;
@@ -80,7 +131,7 @@ pub(crate) fn merge_stack_onto(
                 ..TreeMerge::default()
             }
         } else {
-            merge_trees(ctx, [measured_from, tree, change.head], &policy)?
+            cached_merge(ctx, [measured_from, tree, change.head], *onto, &policy)?
         };
         let Some(merged) = step.tree else {
             // A change below conflicts: the stack has no buildable result.
@@ -101,7 +152,7 @@ pub(crate) fn merge_stack_onto(
 /// The tree a change's edits are measured from, as the land measures them.
 fn built_on(ctx: &Ctx, change: &StackedChange) -> HistoryResult<ObjectId> {
     match change.parent {
-        ChangeParent::Base(commit) => Ok(ctx.index.commit(&ctx.store, &commit)?.tree),
+        ChangeParent::Base(commit) => Ok(ctx.store.read_commit(&commit)?.tree),
         ChangeParent::Change(parent) => Ok(ctx
             .state
             .changes
@@ -139,14 +190,47 @@ pub(crate) fn merge_for_land_at(
         });
     }
     let config = ctx.state.project_config.at_commit(policy_base)?.config;
-    merge_trees(&ctx, [basis, onto_tree, *head], &|path| {
+    cached_merge(&ctx, [basis, onto_tree, *head], *policy_base, &|path| {
         policy_for(&config, path)
     })
 }
 
+/// Compute speculatively, then flush only while the live attempt still stands.
+pub(crate) fn merge_for_land_attempt(
+    state: &ServerState,
+    [merge_base, onto, head, policy_base]: [&ObjectId; 4],
+    current: &dyn Fn() -> HistoryResult<bool>,
+) -> HistoryResult<Option<TreeMerge>> {
+    let ctx = super::open(state)?;
+    let sides = [tree_of(&ctx, merge_base)?, tree_of(&ctx, onto)?, *head];
+    if !current()? {
+        return Ok(None);
+    }
+    if sides[0] == sides[1] {
+        return Ok(Some(TreeMerge {
+            tree: Some(*head),
+            ..TreeMerge::default()
+        }));
+    }
+    let key = [sides[0], sides[1], sides[2], *policy_base];
+    if let Some(result) = state.merge_results.get(&key) {
+        return Ok(Some(result));
+    }
+    let config = state.project_config.at_commit(policy_base)?.config;
+    let scratch = staging::Scratch::new(&ctx.store);
+    let result = merge_with_store(&scratch, sides, &|path| policy_for(&config, path))?;
+    if !current()? || (result.tree.is_some() && !scratch.persist(current)?) {
+        return Ok(None);
+    }
+    state.merge_results.remember(key, &result);
+    Ok(Some(result))
+}
+
 fn tree_of(ctx: &Ctx, id: &ObjectId) -> HistoryResult<ObjectId> {
+    // Merge preparation needs only immutable bytes. Deriving a history row
+    // here makes concurrent attempts on each new base race for a SQLite write.
     match ctx.store.get_raw(id)?.map(|raw| raw.kind) {
-        Some(ObjectKind::Commit) => Ok(ctx.index.commit(&ctx.store, id)?.tree),
+        Some(ObjectKind::Commit) => Ok(ctx.store.read_commit(id)?.tree),
         Some(ObjectKind::Tree) => Ok(*id),
         _ => Err(HistoryError::NotFound(format!(
             "{id} is not a stored commit or tree"
@@ -166,7 +250,7 @@ fn policy_for(config: &ProjectConfig, path: &str) -> MergePolicy {
 }
 
 /// The result of merging two trees.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct TreeMerge {
     /// The stored merged tree; `None` when any path conflicts.
     pub tree: Option<ObjectId>,
@@ -191,14 +275,22 @@ pub(crate) fn merge_trees(
     sides: [ObjectId; 3],
     policy: &dyn Fn(&str) -> MergePolicy,
 ) -> HistoryResult<TreeMerge> {
-    let (edits, mut merge) = merge_paths(ctx, sides, policy, false)?;
-    let tree = apply(&ctx.store, Some(sides[1]), &edits, &mut merge.conflicts)?;
+    merge_with_store(&ctx.store, sides, policy)
+}
+
+fn merge_with_store(
+    store: &dyn ObjectStore,
+    sides: [ObjectId; 3],
+    policy: &dyn Fn(&str) -> MergePolicy,
+) -> HistoryResult<TreeMerge> {
+    let (edits, mut merge) = merge_paths(store, sides, policy, false)?;
+    let tree = apply(store, Some(sides[1]), &edits, &mut merge.conflicts)?;
     if !merge.conflicts.is_empty() {
         merge.conflicts.sort();
         merge.conflicts.dedup();
         return Ok(merge);
     }
-    merge.tree = Some(tree_or_empty(ctx, tree)?);
+    merge.tree = Some(tree_or_empty(store, tree)?);
     Ok(merge)
 }
 
@@ -234,11 +326,11 @@ pub(crate) fn merge_trees_marked(
     sides: [ObjectId; 3],
     policy: &dyn Fn(&str) -> MergePolicy,
 ) -> HistoryResult<TreeMerge> {
-    let (edits, mut merge) = merge_paths(ctx, sides, policy, true)?;
+    let (edits, mut merge) = merge_paths(&ctx.store, sides, policy, true)?;
     let mut collisions = Vec::new();
     let tree = apply(&ctx.store, Some(sides[1]), &edits, &mut collisions)?;
     if collisions.is_empty() {
-        merge.tree = Some(tree_or_empty(ctx, tree)?);
+        merge.tree = Some(tree_or_empty(&ctx.store, tree)?);
     }
     merge.conflicts.extend(collisions);
     merge.conflicts.sort();
@@ -246,10 +338,10 @@ pub(crate) fn merge_trees_marked(
     Ok(merge)
 }
 
-fn tree_or_empty(ctx: &Ctx, tree: Option<ObjectId>) -> HistoryResult<ObjectId> {
+fn tree_or_empty(store: &dyn ObjectStore, tree: Option<ObjectId>) -> HistoryResult<ObjectId> {
     Ok(match tree {
         Some(tree) => tree,
-        None => ctx.store.put_tree(&Tree::default())?,
+        None => store.put_tree(&Tree::default())?,
     })
 }
 
@@ -258,19 +350,30 @@ type PathEdits = BTreeMap<String, Option<Entry>>;
 /// Merges every path both sides changed. With `mark`, a conflicting path is
 /// still edited, to the content [`marked_entry`] gives it.
 fn merge_paths(
-    ctx: &Ctx,
+    store: &dyn ObjectStore,
     [base, ours, theirs]: [ObjectId; 3],
     policy: &dyn Fn(&str) -> MergePolicy,
     mark: bool,
 ) -> HistoryResult<(PathEdits, TreeMerge)> {
+    let theirs_changes = changed_files(store, Some(base), Some(theirs), &[])?;
+    if theirs_changes.is_empty() {
+        return Ok((BTreeMap::new(), TreeMerge::default()));
+    }
+    // Only paths edited by the candidate can need a three-way file merge.
+    // Walking every intervening base edit makes CAS retries grow with all
+    // agents' work, even when they edit unrelated directories.
+    let paths: Vec<String> = theirs_changes
+        .iter()
+        .map(|change| change.path.clone())
+        .collect();
     let ours_changes: BTreeMap<String, Change> =
-        changed_files(&ctx.store, Some(base), Some(ours), &[])?
+        changed_files(store, Some(base), Some(ours), &paths)?
             .into_iter()
             .map(|c| (c.path.clone(), c))
             .collect();
     let mut edits = BTreeMap::new();
     let mut merge = TreeMerge::default();
-    for change in changed_files(&ctx.store, Some(base), Some(theirs), &[])? {
+    for change in theirs_changes {
         let Some(ours) = ours_changes.get(&change.path) else {
             edits.insert(change.path, change.new);
             continue;
@@ -280,13 +383,13 @@ fn merge_paths(
         }
         let sides = [change.old, ours.new, change.new];
         let policy = policy(&change.path);
-        match merge_one(ctx, sides, policy)? {
+        match merge_one(store, sides, policy)? {
             FileOutcome::Merged(file) => {
                 edits.insert(change.path, file);
             }
             FileOutcome::Conflict => {
                 if mark {
-                    edits.insert(change.path.clone(), marked_entry(ctx, sides, policy)?);
+                    edits.insert(change.path.clone(), marked_entry(store, sides, policy)?);
                 }
                 merge.conflicts.push(change.path)
             }
@@ -301,7 +404,7 @@ fn merge_paths(
 /// as stored conflicts name it, and diff3 markers around each conflicting
 /// region. A gitlink has no lines, so the change's own commit is kept.
 fn marked_entry(
-    ctx: &Ctx,
+    store: &dyn ObjectStore,
     sides: [Option<Entry>; 3],
     policy: MergePolicy,
 ) -> HistoryResult<Option<Entry>> {
@@ -309,7 +412,7 @@ fn marked_entry(
     if sides.iter().flatten().any(|e| !e.is_blob()) {
         return Ok(change);
     }
-    let [base, onto_text, change_text] = sides.map(|e| content(&ctx.store, e));
+    let [base, onto_text, change_text] = sides.map(|e| content(store, e));
     let (base, onto_text, change_text) = (base?, onto_text?, change_text?);
     let shown = match merge_file(
         base.as_deref(),
@@ -327,7 +430,7 @@ fn marked_entry(
     Ok(match shown {
         Some(data) => Some(Entry {
             mode,
-            id: ctx.store.put_blob(&data)?,
+            id: store.put_blob(&data)?,
         }),
         None => None,
     })
@@ -335,7 +438,7 @@ fn marked_entry(
 
 /// Merges one file both sides changed, given as `[base, ours, theirs]`.
 fn merge_one(
-    ctx: &Ctx,
+    store: &dyn ObjectStore,
     sides: [Option<Entry>; 3],
     policy: MergePolicy,
 ) -> HistoryResult<FileOutcome> {
@@ -343,14 +446,14 @@ fn merge_one(
     if sides.iter().flatten().any(|e| !e.is_blob()) {
         return Ok(FileOutcome::Conflict);
     }
-    let [base, ours, theirs] = sides.map(|e| content(&ctx.store, e));
+    let [base, ours, theirs] = sides.map(|e| content(store, e));
     let (base, ours, theirs) = (base?, ours?, theirs?);
     let merged = merge_file(base.as_deref(), ours.as_deref(), theirs.as_deref(), policy);
     Ok(match merged {
         FileMerge::Resolved(None) => FileOutcome::Merged(None),
         FileMerge::Resolved(Some(data)) => FileOutcome::Merged(Some(Entry {
             mode: merged_mode(sides),
-            id: ctx.store.put_blob(&data)?,
+            id: store.put_blob(&data)?,
         })),
         FileMerge::Conflicted(_) => FileOutcome::Conflict,
         FileMerge::Regenerate => FileOutcome::Regenerate,

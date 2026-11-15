@@ -99,11 +99,17 @@ pub enum InitBase {
 
 pub struct Ledger {
     connection: Mutex<Connection>,
+    readers: super::readers::Readers,
 }
 
 impl Ledger {
     pub fn open(path: &Path) -> LandResult<Ledger> {
-        Self::prepare(crate::metadata::open(path)?)
+        let mut ledger = Self::prepare(crate::metadata::open(path)?)?;
+        // SQLite also accepts these reserved names through the path API.
+        if !path.as_os_str().is_empty() && path != Path::new(":memory:") {
+            ledger.readers = super::readers::Readers::new(Some(path.to_path_buf()));
+        }
+        Ok(ledger)
     }
 
     pub fn open_in_memory() -> LandResult<Ledger> {
@@ -120,13 +126,19 @@ impl Ledger {
         conflicts::ensure_schema(&connection)?;
         Ok(Ledger {
             connection: Mutex::new(connection),
+            readers: super::readers::Readers::new(None),
         })
     }
 
+    /// Mutations and atomic gate checks stay on this writer connection.
     pub(super) fn lock(&self) -> LandResult<MutexGuard<'_, Connection>> {
         self.connection
             .lock()
             .map_err(|_| LandError::Store("ledger mutex poisoned".into()))
+    }
+
+    pub(super) fn read(&self) -> LandResult<super::readers::ReadGuard<'_>> {
+        self.readers.get(&self.connection)
     }
 
     /// Creates the project's base ref at its first commit (import, R1).
@@ -159,7 +171,7 @@ impl Ledger {
     /// The project's one base ref (SPEC.md §2), as name and commit, if
     /// import has created it.
     pub fn project_base(&self) -> LandResult<Option<(String, CommitId)>> {
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let row: Option<(String, String)> = connection
             .query_row("SELECT name, target FROM base_refs LIMIT 1", [], |row| {
                 Ok((row.get(0)?, row.get(1)?))
@@ -170,7 +182,7 @@ impl Ledger {
     }
 
     pub fn base(&self, ref_name: &str) -> LandResult<Option<CommitId>> {
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let target = connection
             .query_row(
                 "SELECT target FROM base_refs WHERE name = ?1",
@@ -183,7 +195,7 @@ impl Ledger {
 
     /// Position of `commit` in the ref's history, if the ref ever held it.
     pub fn base_seq(&self, ref_name: &str, commit: &CommitId) -> LandResult<Option<i64>> {
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let seq = connection
             .query_row(
                 "SELECT seq FROM base_history WHERE ref_name = ?1 AND commit_id = ?2",
@@ -196,7 +208,7 @@ impl Ledger {
 
     /// True when every land after history position `seq` is prose-only.
     pub fn landed_since_all_prose(&self, ref_name: &str, seq: i64) -> LandResult<bool> {
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let non_prose: i64 = connection.query_row(
             "SELECT COUNT(*) FROM base_history
              WHERE ref_name = ?1 AND seq > ?2 AND tier != ?3",
@@ -214,7 +226,7 @@ impl Ledger {
         after: i64,
         through: &CommitId,
     ) -> LandResult<Vec<(CommitId, Tier)>> {
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let end: i64 = connection.query_row(
             "SELECT seq FROM base_history WHERE ref_name=?1 AND commit_id=?2",
             params![ref_name, through.to_string()],
@@ -240,7 +252,7 @@ impl Ledger {
     }
 
     pub fn landing_of(&self, change: &ChangeId) -> LandResult<Option<CommitId>> {
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let commit = connection
             .query_row(
                 "SELECT commit_id FROM base_history WHERE change_id = ?1 AND NOT EXISTS (SELECT 1 FROM auto_reverts WHERE culprit=base_history.commit_id)",
@@ -314,6 +326,17 @@ impl Ledger {
         receipt: Option<&SignedReceipt>,
         review: ReviewMode,
     ) -> LandResult<CasResult> {
+        let top = records
+            .last()
+            .ok_or_else(|| LandError::Store("empty stack".into()))?;
+        // Commit-object writes can outlive a winning land. Do not join the
+        // SQLite writer wait for a CAS already known to have lost.
+        if let Some(current) = self
+            .base(&top.ref_name)?
+            .filter(|current| current != expected)
+        {
+            return Ok(CasResult::BaseMoved { current });
+        }
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (record, facts) in records.iter().zip(facts) {
@@ -329,9 +352,6 @@ impl Ledger {
                 return Ok(CasResult::ReceiptUntrusted);
             }
         }
-        let top = records
-            .last()
-            .ok_or_else(|| LandError::Store("empty stack".into()))?;
         let changed = tx.execute(
             "UPDATE base_refs SET target = ?1 WHERE name = ?2 AND target = ?3",
             params![top.commit.to_string(), top.ref_name, expected.to_string()],
@@ -355,7 +375,7 @@ impl Ledger {
     /// Recovery retains the request's final base for every layer's rebase.
     pub(super) fn stack_tip(&self, commit: &CommitId) -> LandResult<CommitId> {
         let tip: Option<String> = self
-            .lock()?
+            .read()?
             .query_row(
                 "SELECT tip FROM stack_lands WHERE commit_id=?1",
                 [commit.to_string()],
@@ -370,7 +390,7 @@ impl Ledger {
     /// Lands whose post-land work (R8 step 4) has not finished, oldest first.
     /// After a crash the server replays them; post-land work is idempotent.
     pub fn pending_post_land(&self, ref_name: &str) -> LandResult<Vec<LandRecord>> {
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let mut statement = connection.prepare(
             "SELECT change_id, head, commit_id, tier FROM base_history
              WHERE ref_name = ?1 AND change_id IS NOT NULL AND post_land_done = 0
@@ -404,7 +424,7 @@ impl Ledger {
     /// work. Keyed by the landed commit, not the change: a reverted change
     /// can land again (R12), and each land finishes on its own.
     pub fn post_land_pending(&self, ref_name: &str, commit: &CommitId) -> LandResult<bool> {
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let pending = connection
             .query_row(
                 "SELECT post_land_done = 0 FROM base_history

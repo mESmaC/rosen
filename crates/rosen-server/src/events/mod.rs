@@ -37,7 +37,7 @@ use rosen_protocol::{ErrorBody, ErrorCode, Event, EventCursor, EventKind, Outcom
 use rusqlite::{Connection, OpenFlags};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use tokio::sync::watch;
 
@@ -58,6 +58,7 @@ pub type OverlapOwners = dyn Fn(&str) -> Result<Vec<AgentId>, String> + Send + S
 pub struct EventLog {
     inner: Arc<Inner>,
     overlap_owners: OnceLock<Box<OverlapOwners>>,
+    staged_delivery: Mutex<()>,
 }
 
 /// The log's state, shared with the thread that retries failed writes.
@@ -65,6 +66,8 @@ pub(crate) struct Inner {
     /// `None` keeps the log in memory, for tests.
     db_path: Option<PathBuf>,
     slot: Mutex<Slot>,
+    readers: [Mutex<Option<Connection>>; 8],
+    next_reader: AtomicUsize,
     latest: watch::Sender<u64>,
     /// True while a retry thread owns the queue's unstored events.
     retrying: AtomicBool,
@@ -82,7 +85,10 @@ struct Slot {
 impl EventLog {
     /// A log stored in the metadata database at `db_path`.
     pub fn open(db_path: impl Into<PathBuf>) -> Self {
-        Self::with_path(Some(db_path.into()))
+        let path = db_path.into();
+        // SQLite's private databases cannot be shared with reader connections.
+        let file = !path.as_os_str().is_empty() && path != std::path::Path::new(":memory:");
+        Self::with_path(file.then_some(path))
     }
 
     /// A log that lives only as long as the server, for tests.
@@ -98,12 +104,15 @@ impl EventLog {
         let inner = Inner {
             db_path,
             slot: Mutex::new(slot),
+            readers: std::array::from_fn(|_| Mutex::new(None)),
+            next_reader: AtomicUsize::new(0),
             latest: watch::Sender::new(0),
             retrying: AtomicBool::new(false),
         };
         Self {
             inner: Arc::new(inner),
             overlap_owners: OnceLock::new(),
+            staged_delivery: Mutex::new(()),
         }
     }
 
@@ -144,6 +153,13 @@ impl EventLog {
     /// write that fails stays queued and retried; a stop before then leaves
     /// the event staged, and the next start delivers it.
     pub fn deliver_staged(&self) {
+        // Deduplication at append is too late to avoid recomputing the same
+        // event's audience in every concurrent snapshot or claim handler.
+        // Keep this separate from the writer: lands can still announce.
+        let _delivery = self
+            .staged_delivery
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let staged = match self.with_db(true, |conn| Ok(outbox::staged(conn)?)) {
             Ok(staged) => staged.unwrap_or_default(),
             Err(err) => {
@@ -279,7 +295,7 @@ impl EventLog {
         limit: u64,
     ) -> Result<Page, EventError> {
         let agent = subscriber.map(AgentId::as_str);
-        let page = self.with_db(false, |conn| Ok(store::page(conn, cursor, agent, limit)?))?;
+        let page = self.read_db(|conn| Ok(store::page(conn, cursor, agent, limit)?))?;
         Ok(page.unwrap_or(Page {
             scanned_to: cursor,
             ..Page::default()
@@ -289,7 +305,7 @@ impl EventLog {
     /// Where the subscriber resumes when it names no cursor: after the last
     /// event it acknowledged, if it ever did.
     pub fn cursor(&self, subscriber: &AgentId) -> Result<Option<u64>, EventError> {
-        let stored = self.with_db(false, |conn| Ok(store::cursor(conn, subscriber.as_str())?))?;
+        let stored = self.read_db(|conn| Ok(store::cursor(conn, subscriber.as_str())?))?;
         Ok(stored.flatten())
     }
 
@@ -305,9 +321,7 @@ impl EventLog {
     /// True when an event of `kind` is stored after `cursor`. Reads SQLite:
     /// call it on the blocking pool.
     pub fn holds_kind_after(&self, cursor: u64, kind: EventKind) -> Result<bool, EventError> {
-        let found = self.with_db(false, |conn| {
-            Ok(store::holds_kind_after(conn, cursor, kind)?)
-        })?;
+        let found = self.read_db(|conn| Ok(store::holds_kind_after(conn, cursor, kind)?))?;
         Ok(found.unwrap_or(false))
     }
 
@@ -324,7 +338,7 @@ impl EventLog {
     pub fn last_seq(&self) -> u64 {
         // Opening reads the stored sequence, so a restarted server reports
         // the log's real tip rather than 0.
-        if let Err(err) = self.with_db(false, |_| Ok(())) {
+        if let Err(err) = self.read_db(|_| Ok(())) {
             eprintln!("rosen-server: could not open the event log: {err}");
         }
         *self.inner.latest.borrow()
@@ -333,6 +347,44 @@ impl EventLog {
     /// A receiver that changes whenever a new event is stored.
     pub fn watch(&self) -> watch::Receiver<u64> {
         self.inner.latest.subscribe()
+    }
+
+    /// Subscriber scans must not hold the event writer a land announces through.
+    /// Each pooled reader takes a WAL snapshot, keeping a page's queries consistent
+    /// while publishers continue appending. Memory-only logs retain one connection.
+    fn read_db<T>(
+        &self,
+        work: impl FnOnce(&Connection) -> Result<T, EventError>,
+    ) -> Result<Option<T>, EventError> {
+        let inner = &self.inner;
+        let Some(path) = &inner.db_path else {
+            return self.with_db(false, |conn| work(conn));
+        };
+        let index = inner.next_reader.fetch_add(1, Ordering::Relaxed) % inner.readers.len();
+        let mut reader = inner.readers[index]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if reader.is_none() {
+            // The writer initializes tables and the announced sequence once.
+            // An absent log stays absent when a subscriber only tries to read.
+            let exists = inner.with_slot(|slot| {
+                inner
+                    .connection(&mut slot.conn, false)
+                    .map(|conn| conn.is_some())
+            })?;
+            if !exists {
+                return Ok(None);
+            }
+            let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+            let conn = Connection::open_with_flags(path, flags)?;
+            crate::metadata::configure(&conn)?;
+            *reader = Some(conn);
+        }
+        let tx = reader
+            .as_mut()
+            .expect("reader opened above")
+            .transaction()?;
+        work(&tx).map(Some)
     }
 
     /// Runs `work` on the log's connection. Returns `Ok(None)` without

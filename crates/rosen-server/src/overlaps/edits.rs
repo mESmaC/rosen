@@ -9,6 +9,75 @@ use rosen_merge::FileEdit;
 use rosen_store::ObjectStore;
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+type ChangedFiles = BTreeMap<String, ChangedFile>;
+type CacheKey = (ObjectId, ObjectId);
+const CACHED_LINE_BYTES: usize = 8192;
+const CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Default)]
+struct CachedFiles {
+    entries: HashMap<CacheKey, ChangedFiles>,
+    bytes: usize,
+}
+
+/// Event audiences repeatedly compare the same live heads. Keep only immutable
+/// tree diffs here; claims, states and overlap policy are read afresh per query.
+#[derive(Default)]
+pub(crate) struct Cache(Mutex<CachedFiles>);
+
+impl Cache {
+    pub(crate) fn files(
+        &self,
+        store: &dyn ObjectStore,
+        heads: &HashMap<ChangeId, ObjectId>,
+        change: &Change,
+    ) -> Result<ChangedFiles, OverlapError> {
+        let parent = match change.parent {
+            ChangeParent::Base(commit) => commit,
+            ChangeParent::Change(below) => *heads
+                .get(&below)
+                .ok_or(OverlapError::MissingParent(change.id, below))?,
+        };
+        let key = (parent, change.head);
+        if let Some(files) = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .get(&key)
+        {
+            return Ok(files.clone());
+        }
+        // Never hold the cache lock across object reads. A moved parent or
+        // child selects another key, including rebases that retain the head.
+        let files = changed_files(store, heads, change)?;
+        self.remember(key, &files);
+        Ok(files)
+    }
+
+    fn remember(&self, key: CacheKey, files: &ChangedFiles) {
+        // Reserve the lazy line result as well as each path and map entry.
+        let bytes = files
+            .keys()
+            .map(|path| path.len() + std::mem::size_of::<ChangedFile>() + CACHED_LINE_BYTES + 64)
+            .sum::<usize>();
+        if bytes > CACHE_BYTES {
+            return;
+        }
+        let mut cache = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.entries.contains_key(&key) {
+            return;
+        }
+        if cache.entries.len() >= 2048 || cache.bytes + bytes > CACHE_BYTES {
+            cache.entries.clear();
+            cache.bytes = 0;
+        }
+        cache.entries.insert(key, files.clone());
+        cache.bytes += bytes;
+    }
+}
 
 /// One file a change edited, with its line regions: what [`read`] reports.
 #[derive(Debug, Clone)]
@@ -28,7 +97,11 @@ pub struct EditedFile {
 pub struct ChangedFile {
     pub parent: Option<Entry>,
     pub head: Option<Entry>,
-    diff: OnceCell<LineDiff>,
+    // Query copies share this immutable result, so cached tree diffs also
+    // avoid rereading blobs and repeating line diffs across event audiences.
+    diff: Arc<OnceLock<LineDiff>>,
+    // Large blobs remain query-local instead of accumulating in the cache.
+    local_diff: OnceCell<LineDiff>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,12 +110,30 @@ struct LineDiff {
     parent_bytes: Option<Vec<u8>>,
 }
 
+impl LineDiff {
+    fn retained_bytes(&self) -> usize {
+        let spans = match &self.regions {
+            FileEdit::Whole => 0,
+            FileEdit::Lines(spans) => {
+                spans.capacity() * std::mem::size_of::<rosen_merge::LineSpan>()
+            }
+        };
+        spans + self.parent_bytes.as_ref().map_or(0, Vec::capacity)
+    }
+}
+
 impl ChangedFile {
     fn diff(&self, store: &dyn ObjectStore) -> Result<&LineDiff, OverlapError> {
         if let Some(diff) = self.diff.get() {
             return Ok(diff);
         }
+        if let Some(diff) = self.local_diff.get() {
+            return Ok(diff);
+        }
         let diff = file_edit(store, self.parent, self.head)?;
+        if diff.retained_bytes() > CACHED_LINE_BYTES {
+            return Ok(self.local_diff.get_or_init(|| diff));
+        }
         Ok(self.diff.get_or_init(|| diff))
     }
 }
@@ -111,7 +202,8 @@ pub fn changed_files(
             let edit = ChangedFile {
                 parent: file.old,
                 head: file.new,
-                diff: OnceCell::new(),
+                diff: Arc::default(),
+                local_diff: OnceCell::new(),
             };
             (file.path, edit)
         })

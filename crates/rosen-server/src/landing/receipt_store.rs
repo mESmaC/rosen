@@ -205,7 +205,7 @@ impl Ledger {
 
     pub fn checked_merge_result(&self, receipt: &Receipt) -> LandResult<Option<super::TreeId>> {
         let tree: Option<String> = self
-            .lock()?
+            .read()?
             .query_row(
                 "SELECT tree FROM checked_merge_results WHERE change_id=?1 AND head=?2 AND base=?3",
                 params![
@@ -232,7 +232,7 @@ impl Ledger {
     }
 
     pub fn receipt_tree(&self, receipt: &Receipt) -> LandResult<Option<super::TreeId>> {
-        let tree: Option<String> = self.lock()?.query_row(
+        let tree: Option<String> = self.read()?.query_row(
             "SELECT checked_tree FROM receipts WHERE change_id=?1 AND head=?2 AND base=?3 AND check_set=?4",
             params![receipt.change.to_string(), receipt.head.to_string(), receipt.base.to_string(), receipt.check_set],
             |r| r.get(0),
@@ -250,7 +250,7 @@ impl Ledger {
         check_set: &str,
         attempt_base: &CommitId,
     ) -> LandResult<ReceiptLookup> {
-        let conn = self.lock()?;
+        let conn = self.read()?;
         let mut query = conn.prepare(
             "SELECT r.head,r.base,r.submitter,r.machine,r.signature,h.seq FROM receipts r
              JOIN base_history h ON h.ref_name=?1 AND h.commit_id=r.base
@@ -310,7 +310,7 @@ impl Ledger {
         check_set: &str,
         attempt_base: &CommitId,
     ) -> LandResult<ReceiptLookup> {
-        let connection = self.lock()?;
+        let connection = self.read()?;
         let candidates = candidates(&connection, ref_name, change, head, check_set)?;
         for (base, submitter, machine, signature, base_seq) in candidates {
             let receipt = Receipt {

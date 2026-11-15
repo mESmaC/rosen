@@ -45,15 +45,19 @@ impl Landing {
     }
 
     pub(super) fn attempt_stack(&self, change: &ChangeId, attempts: u32) -> LandResult<Attempt> {
+        let mut timing = super::super::timing::Timing::new(change, "attempt");
         let base = self.current_base()?;
         let policy = self.policy_at(&base)?;
         let mut stack = self.stack_facts(change)?;
+        timing.phase("facts");
         if let Some(attempt) = self.check_layers(change, &base, policy.review, &mut stack)? {
             return Ok(attempt);
         }
+        timing.phase("tiers");
         let Some(trees) = self.merge_layers(&stack, base)? else {
             return Ok(Attempt::Retry);
         };
+        timing.phase("merge");
         if trees.len() != stack.len() {
             let reason = if trees.len() + 1 == stack.len() {
                 Refusal::MergeConflict
@@ -62,28 +66,51 @@ impl Landing {
             };
             return Ok(Attempt::Done(LandOutcome::Refused(reason)));
         }
-        self.check_file_sizes(&base, &trees)?;
-        let mut top = stack.last().expect("nonempty stack").clone();
-        // Code anywhere in the stack requires the top's receipt, even if
-        // the top layer itself only edits prose.
-        if stack.iter().any(|f| f.tier != Tier::ProseOnly) && top.tier == Tier::ProseOnly {
-            top.tier = Tier::Normal;
+        if self.current_base()? != base {
+            return Ok(Attempt::Retry);
         }
+        self.check_file_sizes(&base, &trees)?;
+        timing.phase("sizes");
         let tree = *trees.last().expect("one tree per layer");
-        let Some(gathered) = self.gather(&top, &base, &policy, tree, stack.len() == 1)? else {
+        let Some(gathered) = self.gather_stack(&stack, tree, &base, &policy)? else {
             return Ok(Attempt::Retry);
         };
+        timing.phase("receipt");
         if let Verdict::Refuse(reason) = rules::decide(&gathered.input) {
             return Ok(Attempt::Done(refused(Verdict::Refuse(reason))));
         }
-        self.commit_stack(
+        // Merges and receipt reach can outlive another land. Avoid scanning
+        // and durably writing a commit whose CAS is already certain to lose.
+        // The transaction still rechecks the ref and every mutable input.
+        if self.current_base()? != base {
+            return Ok(Attempt::Retry);
+        }
+        let result = self.commit_stack(
             &stack,
             &trees,
             base,
             gathered.receipt,
             policy.review,
             attempts,
-        )
+        );
+        timing.phase("write_and_cas");
+        result
+    }
+
+    fn gather_stack(
+        &self,
+        stack: &[ChangeFacts],
+        tree: TreeId,
+        base: &CommitId,
+        policy: &LandPolicy,
+    ) -> LandResult<Option<Gathered>> {
+        let mut top = stack.last().expect("nonempty stack").clone();
+        // Code anywhere in the stack requires the top's receipt, even if
+        // the top layer itself only edits prose.
+        if stack.iter().any(|f| f.tier != Tier::ProseOnly) && top.tier == Tier::ProseOnly {
+            top.tier = Tier::Normal;
+        }
+        self.gather(&top, base, policy, tree, stack.len() == 1)
     }
 
     fn check_layers(
@@ -129,11 +156,21 @@ impl Landing {
         let mut trees = Vec::new();
         let mut onto = base;
         for facts in stack {
-            match self
+            // A live attempt can discard stale work; historical receipt
+            // previews use `preview_stack` and keep their explicitly named base.
+            if self.current_base()? != base {
+                return Ok(None);
+            }
+            let Some(outcome) = self
                 .deps
                 .merger
-                .merge_layer(&facts.merge_base, &onto, &facts.head, &base)?
-            {
+                .merge_layer_live([&facts.merge_base, &onto, &facts.head, &base], &|| {
+                    self.current_base().map(|current| current == base)
+                })?
+            else {
+                return Ok(None);
+            };
+            match outcome {
                 MergeOutcome::Clean(tree) => {
                     trees.push(tree);
                     onto = tree;
@@ -169,6 +206,8 @@ impl Landing {
         review: ReviewMode,
         attempts: u32,
     ) -> LandResult<Attempt> {
+        let mut timing =
+            super::super::timing::Timing::new(stack.last().expect("nonempty stack").id, "commit");
         let mut records = Vec::new();
         let mut parent = base;
         for (facts, tree) in stack.iter().zip(trees) {
@@ -183,10 +222,12 @@ impl Landing {
             });
             parent = commit;
         }
-        match self
-            .ledger
-            .compare_stack(&base, &records, stack, receipt.as_ref(), review)?
-        {
+        timing.phase("write");
+        let swapped =
+            self.ledger
+                .compare_stack(&base, &records, stack, receipt.as_ref(), review)?;
+        timing.phase("cas");
+        match swapped {
             CasResult::Swapped { .. } => {
                 let record = records.pop().expect("nonempty stack");
                 Ok(Attempt::Committed(CommittedLand {

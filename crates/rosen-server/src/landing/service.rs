@@ -10,7 +10,7 @@
 use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock, Weak};
 use std::time::Duration;
 
-use rosen_core::{AgentId, Change, ChangeParent, ChangeState, SnapshotKind};
+use rosen_core::{AgentId, Change, ChangeParent, ChangeState, ObjectId, SnapshotKind};
 use rosen_protocol::{
     ErrorBody, ErrorCode, LandAnswer, LandStatus, LandedProseQuery, Outcome, Response,
 };
@@ -50,6 +50,8 @@ pub struct LandingService {
     /// How many land requests' after-answer work is still running.
     finishing: Mutex<usize>,
     finished: Condvar,
+    /// Deferred overlap scans must leave blocking workers and I/O for lands.
+    post_land_slots: Arc<tokio::sync::Semaphore>,
 }
 
 /// Counts one land request's after-answer work as running until dropped:
@@ -167,6 +169,7 @@ impl LandingService {
             retry: tokio::sync::Notify::new(),
             finishing: Mutex::new(0),
             finished: Condvar::new(),
+            post_land_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }
     }
 
@@ -185,6 +188,7 @@ impl LandingService {
     /// Lands `change`, a change ID or unique prefix. An open change is marked
     /// ready first: asking to land is what `ready` means (SPEC §2).
     pub fn land(&self, state: &ServerState, change: &str) -> Result<LandAnswer, ErrorBody> {
+        let mut timing = super::timing::Timing::new(change, "request");
         let record = state.changes.show(change).map_err(change_body)?;
         let id = record.change.id;
         if record.change.state == ChangeState::Open {
@@ -194,8 +198,11 @@ impl LandingService {
                 .with_conn(|conn| changes::update(conn, id, ready))
                 .map_err(change_body)?;
         }
+        timing.phase("registry");
         let engine = self.engine(state)?;
+        timing.phase("engine");
         let status = self.decide(&engine, &id)?;
+        timing.phase("decision_and_restack");
         let base_ref = engine.config().base_ref.clone();
         let base = engine
             .ledger()
@@ -206,6 +213,7 @@ impl LandingService {
             Ok(status) => status,
             Err(refusal) => refusal_status(state, &engine, &record.change, &base, refusal)?,
         };
+        timing.phase("answer");
         Ok(LandAnswer {
             change: id,
             base_ref,
@@ -221,12 +229,14 @@ impl LandingService {
     /// requester is answered before the overlap rebases run (R8 accept:
     /// 200 ms) and a crash leaves them to recovery.
     fn decide(&self, engine: &Arc<Landing>, id: &ChangeId) -> Result<Decided, ErrorBody> {
+        let mut timing = super::timing::Timing::new(id, "decision");
         let decision = match engine.decide(id) {
             Err(LandError::OversizeFiles { limit, files }) => {
                 return Ok(Ok(super::size_limit::status(limit, files)))
             }
             other => other.map_err(land_body)?,
         };
+        timing.phase("attempts");
         let (status, land) = match decision {
             Decision::Committed(land) => {
                 // A failure is retried by the post-land run handed off below.
@@ -251,7 +261,10 @@ impl LandingService {
             }
             Decision::Decided(LandOutcome::Refused(refusal)) => (Err(refusal), None),
         };
-        self.after_answer(Arc::clone(engine), land);
+        timing.phase("restack");
+        if status.is_ok() {
+            self.after_answer(Arc::clone(engine), land);
+        }
         Ok(status)
     }
 
@@ -270,8 +283,20 @@ impl LandingService {
             let state = &finishing.0;
             state.landing.finish(state, &engine, land);
         };
+        let slots = Arc::clone(&self.post_land_slots);
         match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => drop(runtime.spawn_blocking(work)),
+            Ok(runtime) => drop(runtime.spawn(async move {
+                // Wait asynchronously: queued post-land work must not occupy
+                // the blocking workers serving foreground requests.
+                let Ok(permit) = slots.acquire_owned().await else {
+                    return;
+                };
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    work();
+                })
+                .await;
+            })),
             Err(_) => work(),
         }
     }
@@ -568,8 +593,8 @@ impl ChangeBook for Adapters {
                 changes::AfterLand::HeadMoved => Reparent::HeadMoved,
             });
         };
-        // The stack-aware rebase merges again under the writer lock from the
-        // live head, so a snapshot stored since the restacker's merge is kept.
+        // The stack-aware rebase merges the live head outside the writer lock
+        // and installs only while its inputs still stand, keeping new snapshots.
         Ok(
             match crate::stacks::land_rebase(&state, *id, *onto).map_err(backend)? {
                 crate::stacks::LandRebase::Moved => Reparent::Moved,
@@ -589,6 +614,22 @@ impl ChangeBook for Adapters {
 }
 
 impl Merger for Adapters {
+    fn merge_layer_live(
+        &self,
+        inputs: [&ObjectId; 4],
+        current: &dyn Fn() -> LandResult<bool>,
+    ) -> LandResult<Option<MergeOutcome>> {
+        let merged =
+            crate::history::merge::merge_for_land_attempt(&*self.state()?, inputs, &|| {
+                current().map_err(|error| crate::history::HistoryError::Refused(error.to_string()))
+            })
+            .map_err(|error| LandError::Backend(error.to_string()))?;
+        Ok(merged.map(|merged| match merged.tree {
+            Some(tree) => MergeOutcome::Clean(tree),
+            None => MergeOutcome::Conflicted(merged.conflicts),
+        }))
+    }
+
     fn merge(
         &self,
         merge_base: &CommitId,
