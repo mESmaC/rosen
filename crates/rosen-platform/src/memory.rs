@@ -29,8 +29,12 @@ pub fn physical_memory() -> Option<u64> {
 #[allow(unsafe_code)]
 pub fn physical_memory() -> Option<u64> {
     // SAFETY: sysconf takes a plain integer name and touches no memory of ours.
-    let (pages, page_size) =
-        unsafe { (libc::sysconf(libc::_SC_PHYS_PAGES), libc::sysconf(libc::_SC_PAGESIZE)) };
+    let (pages, page_size) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
     let pages = u64::try_from(pages).ok()?;
     let page_size = u64::try_from(page_size).ok()?;
     pages.checked_mul(page_size)
@@ -58,7 +62,9 @@ pub fn available_memory() -> Option<u64> {
         return None;
     }
     let pages = status.CommitLimit.saturating_sub(status.CommitTotal);
-    u64::try_from(pages).ok()?.checked_mul(status.PageSize as u64)
+    u64::try_from(pages)
+        .ok()?
+        .checked_mul(status.PageSize as u64)
 }
 
 #[cfg(target_os = "linux")]

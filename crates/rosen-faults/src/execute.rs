@@ -45,7 +45,10 @@ pub async fn execute(plan: &Plan, faults: &mut impl Faults, start: Instant) -> V
     let mut log = Vec::new();
     for (at, action) in timeline(plan) {
         tokio::time::sleep_until(start + at).await;
-        let error = apply(faults, &action).await.err().map(|err| format!("{err:#}"));
+        let error = apply(faults, &action)
+            .await
+            .err()
+            .map(|err| format!("{err:#}"));
         log.push(Logged {
             at_ms: start.elapsed().as_millis(),
             action,

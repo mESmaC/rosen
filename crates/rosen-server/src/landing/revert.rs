@@ -84,6 +84,8 @@ fn prepare(state: &ServerState, culprit: ObjectId, base: ObjectId) -> LandResult
     let tree = merged
         .tree
         .ok_or_else(|| LandError::Backend(format!("revert conflicts: {:?}", merged.conflicts)))?;
+    let policy = crate::project_config::resolve(&store, &base).map_err(backend)?;
+    super::size_limit::check(&store, &[tree], policy.config.max_file_size)?;
     let subject = bad
         .message_text()
         .lines()

@@ -23,7 +23,12 @@ pub fn create(
     owner: &AgentId,
     parent: NewParent,
 ) -> Result<ChangeRecord, ChangeError> {
-    create_on(conn, owner, crate::machines::signing::SERVER_MACHINE, parent)
+    create_on(
+        conn,
+        owner,
+        crate::machines::signing::SERVER_MACHINE,
+        parent,
+    )
 }
 
 /// [`create`] for an owner working on `machine` (R14).

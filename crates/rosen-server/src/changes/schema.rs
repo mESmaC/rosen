@@ -56,7 +56,11 @@ pub(crate) fn ensure_change_schema(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// Adds a `TEXT NOT NULL DEFAULT ''` column unless `table` has it already.
-pub(crate) fn add_text_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+pub(crate) fn add_text_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<()> {
     let present: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
         [table, column],

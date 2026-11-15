@@ -48,19 +48,8 @@ impl Landing {
         let base = self.current_base()?;
         let policy = self.policy_at(&base)?;
         let mut stack = self.stack_facts(change)?;
-        for facts in &mut stack {
-            facts.tier = self.deps.book.tier_at(facts, &base)?;
-            if let Some(refusal) = layer_refusal(facts, policy.review) {
-                if self.current_base()? != base {
-                    return Ok(Attempt::Retry);
-                }
-                let reason = if facts.id == *change {
-                    refusal
-                } else {
-                    Refusal::ParentUnlanded
-                };
-                return Ok(Attempt::Done(LandOutcome::Refused(reason)));
-            }
+        if let Some(attempt) = self.check_layers(change, &base, policy.review, &mut stack)? {
+            return Ok(attempt);
         }
         let Some(trees) = self.merge_layers(&stack, base)? else {
             return Ok(Attempt::Retry);
@@ -73,6 +62,7 @@ impl Landing {
             };
             return Ok(Attempt::Done(LandOutcome::Refused(reason)));
         }
+        self.check_file_sizes(&base, &trees)?;
         let mut top = stack.last().expect("nonempty stack").clone();
         // Code anywhere in the stack requires the top's receipt, even if
         // the top layer itself only edits prose.
@@ -94,6 +84,39 @@ impl Landing {
             policy.review,
             attempts,
         )
+    }
+
+    fn check_layers(
+        &self,
+        change: &ChangeId,
+        base: &CommitId,
+        review: ReviewMode,
+        stack: &mut [ChangeFacts],
+    ) -> LandResult<Option<Attempt>> {
+        for facts in stack {
+            facts.tier = self.deps.book.tier_at(facts, base)?;
+            if let Some(refusal) = layer_refusal(facts, review) {
+                if self.current_base()? != *base {
+                    return Ok(Some(Attempt::Retry));
+                }
+                let reason = if facts.id == *change {
+                    refusal
+                } else {
+                    Refusal::ParentUnlanded
+                };
+                return Ok(Some(Attempt::Done(LandOutcome::Refused(reason))));
+            }
+        }
+        Ok(None)
+    }
+
+    fn check_file_sizes(&self, base: &CommitId, trees: &[TreeId]) -> LandResult<()> {
+        if let Some(store) = &self.recheck_store {
+            let policy = crate::project_config::resolve(store.as_ref(), base)
+                .map_err(|e| LandError::Backend(e.to_string()))?;
+            super::super::size_limit::check(store.as_ref(), trees, policy.config.max_file_size)?;
+        }
+        Ok(())
     }
 
     /// Route a conflict to the layer that produced it. Never land a prefix

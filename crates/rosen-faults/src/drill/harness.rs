@@ -44,7 +44,8 @@ impl Harness {
         let listen: SocketAddr = format!("127.0.0.1:{}", setup::free_port()?).parse()?;
         let logs = spec.layout.root.join("logs");
         std::fs::create_dir_all(&logs)?;
-        let mut server = Slot::new("server", server_recipe(spec, listen)).log_to(logs.join("server.log"));
+        let mut server =
+            Slot::new("server", server_recipe(spec, listen)).log_to(logs.join("server.log"));
         server.start()?;
         wait_ready(&spec.layout.endpoint(0)).await?;
         let mut proxies = Vec::new();
@@ -54,7 +55,13 @@ impl Harness {
             let dir = spec.layout.machine_dir(machine);
             let server = rosen_protocol::Endpoint::new(spec.layout.endpoint(0));
             let name = format!("daemon-{machine}");
-            enroll::enroll(&server, proxy.address(), &dir, &format!("{}-m{machine}", spec.layout.tag)).await?;
+            enroll::enroll(
+                &server,
+                proxy.address(),
+                &dir,
+                &format!("{}-m{machine}", spec.layout.tag),
+            )
+            .await?;
             let log = logs.join(format!("{name}.log"));
             let mut daemon = Slot::new(name, daemon_recipe(spec, machine)).log_to(log);
             daemon.start()?;
@@ -116,7 +123,10 @@ impl Harness {
                 break;
             }
             if tokio::time::Instant::now() >= give_up {
-                bail!("agents still running after {deadline:?}: {}", running.join(", "));
+                bail!(
+                    "agents still running after {deadline:?}: {}",
+                    running.join(", ")
+                );
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -170,9 +180,14 @@ impl Harness {
         let all = std::iter::once(&self.server)
             .chain(&self.daemons)
             .chain(self.agents.iter().flatten());
-        all.map(|slot| (slot.name.clone(), serde_json::json!({"starts": slot.starts, "kills": slot.kills})))
-            .collect::<serde_json::Map<_, _>>()
-            .into()
+        all.map(|slot| {
+            (
+                slot.name.clone(),
+                serde_json::json!({"starts": slot.starts, "kills": slot.kills}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
     }
 }
 
@@ -206,10 +221,12 @@ fn server_recipe(spec: &Spec, listen: SocketAddr) -> crate::process::Recipe {
     let endpoint = spec.layout.endpoint(0);
     Box::new(move || {
         let mut command = Command::new(&bin);
-        command
-            .arg("--data-dir")
-            .arg(&dir)
-            .args(["--endpoint", &endpoint, "--listen", &listen.to_string()]);
+        command.arg("--data-dir").arg(&dir).args([
+            "--endpoint",
+            &endpoint,
+            "--listen",
+            &listen.to_string(),
+        ]);
         command
     })
 }

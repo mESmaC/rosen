@@ -17,6 +17,14 @@ pub async fn dispatch_from(
     request: Request,
     origin: crate::receipts::Origin,
 ) -> Outcome {
+    if let Request::MirrorDropPaths { paths } = request {
+        return match origin {
+            crate::receipts::Origin::Local => crate::mirror::rewrite::handle(state, paths).await,
+            _ => Outcome::Error(ErrorBody::new(ErrorCode::Refused,
+                "history rewrite is an operator command; run it on the server machine using its local endpoint")),
+        };
+    }
+    let _running = state.maintenance.read().await;
     match request {
         Request::ReceiptSubmit(req) if !state.is_shutting_down() => {
             crate::receipts::submit(state, req, origin).await
@@ -40,7 +48,7 @@ pub async fn dispatch_from(
                 Err(refused) => Outcome::Error(refused),
             }
         }
-        request => dispatch(state, request).await,
+        request => dispatch_unpaused(state, request).await,
     }
 }
 
@@ -68,6 +76,10 @@ async fn origin_machine(
 
 /// Runs one request to completion for a client on the server's own machine.
 pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
+    dispatch_from(state, request, crate::receipts::Origin::Local).await
+}
+
+async fn dispatch_unpaused(state: &Arc<ServerState>, request: Request) -> Outcome {
     if state.is_shutting_down() {
         return Outcome::Error(ErrorBody::new(
             ErrorCode::ShuttingDown,

@@ -164,7 +164,8 @@ impl Snapshotter {
             std::io::ErrorKind::NotFound => SnapshotError::NoWorkspace(root.clone()),
             _ => SnapshotError::io(&WorkspaceMarker::path(&root), err),
         })?;
-        let (mut index, known_trees, captured_root) = open_index(store, &root, &journal, marker.tree)?;
+        let (mut index, known_trees, captured_root) =
+            open_index(store, &root, &journal, marker.tree)?;
         stat_cache::apply(&root, &mut index);
         drop(writer);
         let sparse = Sparse::paths(&marker.sparse).map_err(|err| {
@@ -337,9 +338,8 @@ impl Snapshotter {
         self.fallback.clear();
         self.replaced.clear();
         self.ignore = ignore::IgnoreRules::new(self.root.clone(), &marker.ignore);
-        self.sparse = Sparse::paths(&marker.sparse).map_err(|err| {
-            SnapshotError::io(&self.root, std::io::Error::other(err.to_string()))
-        })?;
+        self.sparse = Sparse::paths(&marker.sparse)
+            .map_err(|err| SnapshotError::io(&self.root, std::io::Error::other(err.to_string())))?;
         self.marker = marker;
         Ok(true)
     }

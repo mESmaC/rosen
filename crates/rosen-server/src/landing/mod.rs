@@ -26,6 +26,7 @@ mod revert_store;
 mod review_gate;
 pub mod rules;
 pub mod service;
+mod size_limit;
 
 use std::fmt;
 
@@ -158,6 +159,10 @@ pub enum LandError {
     NoBase(String),
     InvalidReceipt(String),
     ConflictMarkers(Vec<String>),
+    OversizeFiles {
+        limit: u64,
+        files: Vec<(String, u64)>,
+    },
     /// The compare-and-swap kept losing races for every allowed attempt.
     Contended {
         attempts: u32,
@@ -178,6 +183,9 @@ impl fmt::Display for LandError {
                     "conflict markers remain in {}; store a resolution before landing",
                     paths.join(", ")
                 )
+            }
+            LandError::OversizeFiles { limit, files } => {
+                f.write_str(&size_limit::message(*limit, files))
             }
             LandError::Contended { attempts } => {
                 write!(f, "base kept moving; gave up after {attempts} attempts")

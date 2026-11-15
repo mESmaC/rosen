@@ -128,6 +128,9 @@
     },
     {
       "$ref": "#/$defs/rosen.status~1v2"
+    },
+    {
+      "$ref": "#/$defs/rosen.mirror.rewrite~1v1"
     }
   ],
   "$defs": {
@@ -1100,6 +1103,11 @@
             "reach",
             "merge"
           ]
+        },
+        "max_file_size": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 104857600
         }
       },
       "required": [
@@ -3252,6 +3260,73 @@
       "additionalProperties": false,
       "x-commands": [
         "status"
+      ]
+    },
+    "HistoryRewrite": {
+      "type": "object",
+      "properties": {
+        "base_ref": {
+          "type": "string"
+        },
+        "old_base": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "new_base": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "mirror_boundary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rewritten_commits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated_changes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "base_ref",
+        "old_base",
+        "new_base",
+        "mirror_boundary",
+        "rewritten_commits",
+        "updated_changes",
+        "paths"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.mirror.rewrite/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.mirror.rewrite/v1"
+        },
+        "rewrite": {
+          "$ref": "#/$defs/HistoryRewrite"
+        }
+      },
+      "required": [
+        "schema",
+        "rewrite"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "mirror drop-paths"
       ]
     }
   }

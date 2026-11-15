@@ -96,8 +96,16 @@ async fn round(args: &AgentArgs, agent: &AgentId, endpoint: &Endpoint) -> anyhow
     // A server revert reopens the culprit and lowers the landed count, so
     // the count alone would inject the failure into a second change.
     if args.fail_at == Some(landed) && !failure_landed {
-        write(&client, &change, &failure_path(args), failing::contents(&change)).await?;
-        report(&Ack::Culprit { change: change.clone() });
+        write(
+            &client,
+            &change,
+            &failure_path(args),
+            failing::contents(&change),
+        )
+        .await?;
+        report(&Ack::Culprit {
+            change: change.clone(),
+        });
     }
     land(&client, agent, &change).await?;
     Ok(false)
@@ -154,7 +162,9 @@ async fn holds_failure(client: &Client, args: &AgentArgs, change: &str) -> anyho
     match timed(client.request(request)).await {
         Ok(_) => Ok(true),
         Err(err) => match err.downcast_ref::<rosen_client::Error>() {
-            Some(rosen_client::Error::Server(body)) if body.code == ErrorCode::NotFound => Ok(false),
+            Some(rosen_client::Error::Server(body)) if body.code == ErrorCode::NotFound => {
+                Ok(false)
+            }
             _ => Err(err),
         },
     }
@@ -174,7 +184,11 @@ where
     }
 }
 
-async fn mine(client: &Client, agent: &AgentId, state: ChangeState) -> anyhow::Result<Vec<ChangeRecord>> {
+async fn mine(
+    client: &Client,
+    agent: &AgentId,
+    state: ChangeState,
+) -> anyhow::Result<Vec<ChangeRecord>> {
     let filter = ChangeFilter {
         owner: Some(agent.clone()),
         state: Some(state),
@@ -266,7 +280,8 @@ async fn approve(
     head: rosen_core::ObjectId,
 ) -> anyhow::Result<()> {
     // The drill stands in for review: each agent has its own reviewer.
-    let reviewer = AgentId::new(format!("{agent}-reviewer")).map_err(|err| anyhow::anyhow!("{err}"))?;
+    let reviewer =
+        AgentId::new(format!("{agent}-reviewer")).map_err(|err| anyhow::anyhow!("{err}"))?;
     let request = Request::ReviewApprove(ApproveRequest {
         change: change.into(),
         reviewer,
@@ -285,7 +300,8 @@ async fn receipt(
 ) -> anyhow::Result<()> {
     // The drill stands in for the build queue: the checks always pass
     // before landing; the injected failure is one only post-land tests see.
-    let submitter = AgentId::new(format!("{agent}-checker")).map_err(|err| anyhow::anyhow!("{err}"))?;
+    let submitter =
+        AgentId::new(format!("{agent}-checker")).map_err(|err| anyhow::anyhow!("{err}"))?;
     let request = Request::ReceiptSubmit(SubmitReceipt {
         change: change.into(),
         head,

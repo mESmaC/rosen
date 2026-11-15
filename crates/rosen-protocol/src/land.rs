@@ -29,11 +29,12 @@ pub enum LandStatus {
     Refused {
         /// Stable code agents branch on: `already_landed`, `abandoned`,
         /// `parent_unlanded`, `conflicts`, `unapproved`, `no_receipt`,
-        /// `receipt_stale`, `merge_conflict` or `needs_recheck`.
+        /// `receipt_stale`, `merge_conflict`, `oversize_files` or `needs_recheck`.
         reason: String,
         /// What to do next, for a human or an agent reading `--help` output.
         message: String,
-        /// Files whose merge onto the base conflicted, for `merge_conflict`.
+        /// Files whose merge conflicted, or whose blobs exceed the land limit.
+        /// For `oversize_files`, the message also gives each size in bytes.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         paths: Vec<String>,
     },

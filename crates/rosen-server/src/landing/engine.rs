@@ -307,7 +307,9 @@ impl Landing {
     pub fn restack_stacked(&self, land: &CommittedLand) -> Result<RestackReport, String> {
         let mut report = RestackReport::default();
         for record in land.ancestors.iter().chain(std::iter::once(&land.record)) {
-            let step = self.restack_record(record).map_err(|error| error.to_string())?;
+            let step = self
+                .restack_record(record)
+                .map_err(|error| error.to_string())?;
             report.rebased.extend(step.rebased);
             report.conflicted.extend(step.conflicted);
         }
@@ -317,15 +319,27 @@ impl Landing {
     /// A retry finishes every pending layer in the same atomic land, including
     /// ancestors whose surviving children the original request has not moved.
     pub fn restack_landed(&self, commit: &CommitId) -> Result<RestackReport, String> {
-        let tip = self.ledger.stack_tip(commit).map_err(|error| error.to_string())?;
-        let pending = self.ledger.pending_post_land(&self.config.base_ref)
+        let tip = self
+            .ledger
+            .stack_tip(commit)
+            .map_err(|error| error.to_string())?;
+        let pending = self
+            .ledger
+            .pending_post_land(&self.config.base_ref)
             .map_err(|error| error.to_string())?;
         let mut report = RestackReport::default();
         for record in pending {
-            if self.ledger.stack_tip(&record.commit).map_err(|error| error.to_string())? != tip {
+            if self
+                .ledger
+                .stack_tip(&record.commit)
+                .map_err(|error| error.to_string())?
+                != tip
+            {
                 continue;
             }
-            let step = self.restack_record(&record).map_err(|error| error.to_string())?;
+            let step = self
+                .restack_record(&record)
+                .map_err(|error| error.to_string())?;
             report.rebased.extend(step.rebased);
             report.conflicted.extend(step.conflicted);
         }
@@ -334,7 +348,10 @@ impl Landing {
 
     fn restack_record(&self, record: &LandRecord) -> LandResult<RestackReport> {
         let _running = PostLandRun::wait(&self.stacking, record.commit);
-        if !self.ledger.post_land_pending(&record.ref_name, &record.commit)? {
+        if !self
+            .ledger
+            .post_land_pending(&record.ref_name, &record.commit)?
+        {
             return Ok(RestackReport::default());
         }
         // Recovery may have announced this layer before failing its stack phase.
@@ -477,7 +494,14 @@ impl Landing {
                 input.receipt = ReceiptCheck::Valid;
                 input.base_moved = r.base != *base;
                 input.landed_since_all_independent = policy.recheck == RecheckMode::Reach
-                    && self.reuse_independent(facts, base, r, base_seq, single_layer, (checked, tree))?;
+                    && self.reuse_independent(
+                        facts,
+                        base,
+                        r,
+                        base_seq,
+                        single_layer,
+                        (checked, tree),
+                    )?;
                 if policy.recheck == RecheckMode::Merge
                     && !self.stack_receipt_matches(facts, base, r, single_layer, checked)?
                 {

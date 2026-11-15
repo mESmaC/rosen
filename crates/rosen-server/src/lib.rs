@@ -71,6 +71,9 @@ pub struct ServerState {
     /// Wakes the mirror task when the base appears without a land, as an
     /// import does (SPEC R1). A wake during a push is kept for the next wait.
     pub mirror_wake: tokio::sync::Notify,
+    /// Shared requests and mirror/recovery work; an operator rewrite takes
+    /// exclusive access so no operation can retain an obsolete base view.
+    pub maintenance: tokio::sync::RwLock<()>,
     open_connections: AtomicU64,
     shutdown: watch::Sender<bool>,
 }
@@ -100,6 +103,7 @@ impl ServerState {
             started: Instant::now(),
             network: OnceLock::new(),
             mirror_wake: tokio::sync::Notify::new(),
+            maintenance: tokio::sync::RwLock::new(()),
             open_connections: AtomicU64::new(0),
             shutdown: watch::Sender::new(false),
         });
@@ -318,6 +322,7 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     let landing_recovery = tokio::spawn(async move {
         let first = Arc::clone(&recovering);
         let replayed = tokio::task::spawn_blocking(move || {
+            let _running = first.maintenance.blocking_read();
             if let Err(err) = bisect::recover(&first) {
                 eprintln!("rosen-server: confirmed bisection recovery failed: {err}");
             }

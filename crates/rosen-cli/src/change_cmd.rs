@@ -30,10 +30,9 @@ pub async fn run(
         ChangeCall::List(filter) => print_list(json, &client.change_list(filter).await?),
         ChangeCall::Show(change) => print_change(json, &client.change_show(&change).await?),
         ChangeCall::Abandon(change) => print_change(json, &client.change_abandon(&change).await?),
-        ChangeCall::RecoverBasis(change, basis) => print_change(
-            json,
-            &client.change_recover_basis(&change, basis).await?,
-        ),
+        ChangeCall::RecoverBasis(change, basis) => {
+            print_change(json, &client.change_recover_basis(&change, basis).await?)
+        }
     }
     Ok(true)
 }

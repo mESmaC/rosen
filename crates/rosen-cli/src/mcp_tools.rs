@@ -17,7 +17,7 @@ use crate::commands::Cli;
 ///   that takes.
 /// - `import` and `server start` are the operator's: the host that starts
 ///   this server has already started the project's server.
-const NOT_TOOLS: [&str; 7] = [
+const NOT_TOOLS: [&str; 8] = [
     "mcp",
     "wait",
     "events",
@@ -25,6 +25,7 @@ const NOT_TOOLS: [&str; 7] = [
     "run",
     "import",
     "server start",
+    "mirror drop-paths",
 ];
 
 /// Enrollment is the operator's too, and `machine key create` prints a

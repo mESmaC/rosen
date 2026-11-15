@@ -36,6 +36,7 @@ tokio-rustls.workspace = true
 atomicwrites.workspace = true
 # Whether the daemon still writes the file at its log path (daemon_log.rs).
 same-file.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

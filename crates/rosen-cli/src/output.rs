@@ -18,6 +18,7 @@ pub const DIFF_SCHEMA: &str = "rosen.diff/v1";
 pub const ERROR_SCHEMA: &str = "rosen.error/v1";
 pub const EVENT_SCHEMA: &str = "rosen.event/v1";
 pub const IMPORT_SCHEMA: &str = "rosen.import/v1";
+pub const MIRROR_REWRITE_SCHEMA: &str = "rosen.mirror.rewrite/v1";
 pub const LAND_SCHEMA: &str = "rosen.land/v1";
 pub const LOG_SCHEMA: &str = "rosen.log/v2";
 pub const OVERLAPS_SCHEMA: &str = "rosen.overlaps/v1";

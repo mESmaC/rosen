@@ -11,7 +11,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Enrolls `dir` as machine `name`. Afterwards a daemon started on `dir`
 /// with no network flags finds its server in `upstream.json`.
-pub async fn enroll(server: &Endpoint, proxy: SocketAddr, dir: &Path, name: &str) -> anyhow::Result<()> {
+pub async fn enroll(
+    server: &Endpoint,
+    proxy: SocketAddr,
+    dir: &Path,
+    name: &str,
+) -> anyhow::Result<()> {
     let client = rosen_client::Client::connect(server).await?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let key = client

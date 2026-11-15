@@ -25,7 +25,7 @@ pub const MAX_WARM_POOL_SIZE: u32 = 1000;
 
 /// One project's configuration. Every field is optional in the file; an
 /// absent file means [`ProjectConfig::default`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectConfig {
     /// Explicit build graph; empty discovers Cargo packages from the base.
@@ -56,6 +56,42 @@ pub struct ProjectConfig {
     pub warm_pool: WarmPool,
     pub prepare: Prepare,
     pub mirror: Mirror,
+    /// Maximum landed blob length in bytes, including intermediate stack
+    /// layers. Defaults to GitHub's 100 MiB limit even without a mirror.
+    #[serde(
+        default = "default_max_file_size",
+        skip_serializing_if = "is_default_max_file_size"
+    )]
+    pub max_file_size: u64,
+}
+
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+
+fn default_max_file_size() -> u64 {
+    DEFAULT_MAX_FILE_SIZE
+}
+fn is_default_max_file_size(size: &u64) -> bool {
+    *size == DEFAULT_MAX_FILE_SIZE
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            build_units: Default::default(),
+            workspace_inputs: Vec::new(),
+            generated: Vec::new(),
+            registration_lists: Vec::new(),
+            sensitive: Vec::new(),
+            ignore: Vec::new(),
+            review: Default::default(),
+            recheck: Default::default(),
+            checks: Default::default(),
+            warm_pool: Default::default(),
+            prepare: Default::default(),
+            mirror: Default::default(),
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+        }
+    }
 }
 
 /// When a receipt for the current head counts on a moved base (R8).

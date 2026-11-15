@@ -262,8 +262,7 @@ impl RunQueue {
         let mut line = Vec::new();
         for class in RunClass::ALL {
             for slot in self.running(class)? {
-                let note =
-                    std::fs::read_to_string(self.note_path(class, slot)).unwrap_or_default();
+                let note = std::fs::read_to_string(self.note_path(class, slot)).unwrap_or_default();
                 line.push(Entry {
                     class,
                     note,
@@ -400,8 +399,13 @@ impl RunQueue {
         overrides.extend(slots.map(|slots| (class, slots)));
         let text: String = overrides
             .iter()
-            .map(|(class, slots)| format!("{}={slots}
-", class.name()))
+            .map(|(class, slots)| {
+                format!(
+                    "{}={slots}
+",
+                    class.name()
+                )
+            })
             .collect();
         // Written aside and renamed over, so a waiter never reads half a file.
         let staged = self
@@ -419,7 +423,11 @@ impl RunQueue {
             .filter_map(|line| {
                 let (class, slots) = line.split_once('=')?;
                 let class = RunClass::parse(class.trim())?;
-                let slots = slots.trim().parse::<u32>().ok().filter(|slots| *slots > 0)?;
+                let slots = slots
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|slots| *slots > 0)?;
                 Some((class, slots))
             })
             .collect()

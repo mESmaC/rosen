@@ -88,7 +88,11 @@ fn load(config: &ServerConfig) -> anyhow::Result<World> {
         next = commit.parents.first().copied();
         if next.is_some() {
             let trailers = LandedTrailers::parse(&commit.message);
-            history.push(Landed { id, commit, trailers });
+            history.push(Landed {
+                id,
+                commit,
+                trailers,
+            });
         }
     }
     let changes = ChangeService::new(&config.data_dir);
@@ -129,11 +133,16 @@ fn gated(world: &World, failing: bool) -> anyhow::Result<Check> {
 
 /// A revert of the injected failure: it removes the failure file its first
 /// parent held. The oldest commit's parent is the root, which never holds it.
-fn is_revert(world: &World, landed: &Landed, parent_tree: Option<ObjectId>) -> anyhow::Result<bool> {
+fn is_revert(
+    world: &World,
+    landed: &Landed,
+    parent_tree: Option<ObjectId>,
+) -> anyhow::Result<bool> {
     let Some(parent_tree) = parent_tree else {
         return Ok(false);
     };
-    Ok(failing::fails(&world.store, &parent_tree)? && !failing::fails(&world.store, &landed.commit.tree)?)
+    Ok(failing::fails(&world.store, &parent_tree)?
+        && !failing::fails(&world.store, &landed.commit.tree)?)
 }
 
 /// No change's land is applied twice.
@@ -143,7 +152,11 @@ fn applied_once(world: &World) -> Check {
         let change = landed.trailers.as_ref().map(|t| t.change.to_string());
         *seen.entry(change.unwrap_or_default()).or_insert(0) += 1;
     }
-    let twice: Vec<_> = seen.iter().filter(|(_, n)| **n > 1).map(|(c, _)| c.clone()).collect();
+    let twice: Vec<_> = seen
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .map(|(c, _)| c.clone())
+        .collect();
     Check {
         name: "no_land_applied_twice",
         ok: twice.is_empty(),
@@ -182,7 +195,11 @@ fn acked_lands_kept(world: &World, acks: &[(String, Ack)]) -> Check {
 /// Every write the server acknowledged is still somewhere it belongs: on
 /// the base once its change landed, otherwise in its change's head. The
 /// reverted culprit's edits belong in its reopened change.
-fn acked_edits_kept(world: &World, acks: &[(String, Ack)], culprit: Option<&str>) -> anyhow::Result<Check> {
+fn acked_edits_kept(
+    world: &World,
+    acks: &[(String, Ack)],
+    culprit: Option<&str>,
+) -> anyhow::Result<Check> {
     let mut checked = 0;
     let mut lost = Vec::new();
     for (agent, ack) in acks {
@@ -190,7 +207,10 @@ fn acked_edits_kept(world: &World, acks: &[(String, Ack)], culprit: Option<&str>
             continue;
         };
         checked += 1;
-        let record = world.changes.show(change).map_err(|err| anyhow!("{change}: {err}"))?;
+        let record = world
+            .changes
+            .show(change)
+            .map_err(|err| anyhow!("{change}: {err}"))?;
         let tree = match record.change.state {
             ChangeState::Landed if Some(change.as_str()) != culprit => world.tip_tree,
             ChangeState::Abandoned => {
@@ -200,7 +220,10 @@ fn acked_edits_kept(world: &World, acks: &[(String, Ack)], culprit: Option<&str>
             _ => record.change.head,
         };
         if read_path(&world.store, tree, path)?.as_deref() != Some(data.as_bytes()) {
-            lost.push(format!("{agent} {change} {path} ({:?})", record.change.state));
+            lost.push(format!(
+                "{agent} {change} {path} ({:?})",
+                record.change.state
+            ));
         }
     }
     Ok(Check {
@@ -216,7 +239,11 @@ fn acked_edits_kept(world: &World, acks: &[(String, Ack)], culprit: Option<&str>
 
 /// The injected failure was bisected to its own land and reverted, and its
 /// change reopened with its work (SPEC.md §5, R12).
-fn culprit_reverted(world: &World, culprit: Option<&str>, checker: &CheckerReport) -> anyhow::Result<Check> {
+fn culprit_reverted(
+    world: &World,
+    culprit: Option<&str>,
+    checker: &CheckerReport,
+) -> anyhow::Result<Check> {
     let mut problems = Vec::new();
     let Some(culprit) = culprit else {
         return Ok(Check {
@@ -225,10 +252,12 @@ fn culprit_reverted(world: &World, culprit: Option<&str>, checker: &CheckerRepor
             detail: "the culprit agent never wrote the failing commit".into(),
         });
     };
-    let land = world
-        .history
-        .iter()
-        .find(|l| l.gated() && l.trailers.as_ref().is_some_and(|t| t.change.to_string() == culprit));
+    let land = world.history.iter().find(|l| {
+        l.gated()
+            && l.trailers
+                .as_ref()
+                .is_some_and(|t| t.change.to_string() == culprit)
+    });
     match land {
         None => problems.push("the culprit never landed".to_owned()),
         Some(land) => problems.extend(bisected_to(world, checker, land.id)),
@@ -236,9 +265,15 @@ fn culprit_reverted(world: &World, culprit: Option<&str>, checker: &CheckerRepor
     if failing::fails(&world.store, &world.tip_tree)? {
         problems.push("the base still fails its post-land check".to_owned());
     }
-    let record = world.changes.show(culprit).map_err(|err| anyhow!("{culprit}: {err}"))?;
+    let record = world
+        .changes
+        .show(culprit)
+        .map_err(|err| anyhow!("{culprit}: {err}"))?;
     if record.change.state != ChangeState::Open {
-        problems.push(format!("the culprit is {:?}, not reopened", record.change.state));
+        problems.push(format!(
+            "the culprit is {:?}, not reopened",
+            record.change.state
+        ));
     }
     if !failing::fails(&world.store, &record.change.head)? {
         problems.push("the reopened change lost its work".to_owned());
@@ -261,7 +296,8 @@ fn culprit_reverted(world: &World, culprit: Option<&str>, checker: &CheckerRepor
 fn bisected_to(world: &World, checker: &CheckerReport, land: ObjectId) -> Vec<String> {
     let mut problems = Vec::new();
     if !checker.caught_up {
-        problems.push("the checker did not test every landed commit before the deadline".to_owned());
+        problems
+            .push("the checker did not test every landed commit before the deadline".to_owned());
     }
     let reverted: Vec<&str> = world
         .history
@@ -288,7 +324,11 @@ fn bisected_to(world: &World, checker: &CheckerReport, land: ObjectId) -> Vec<St
 }
 
 /// The bytes at a slash-separated path in a tree, if it holds a file there.
-fn read_path(store: &LooseObjectStore, tree: ObjectId, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+fn read_path(
+    store: &LooseObjectStore,
+    tree: ObjectId,
+    path: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
     let mut current = tree;
     let mut parts = path.split('/').peekable();
     while let Some(part) = parts.next() {

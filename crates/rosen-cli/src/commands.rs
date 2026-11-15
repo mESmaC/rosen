@@ -86,6 +86,16 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Remove paths from landed history not yet published to the mirror.
+    ///
+    /// Operator command: run on the server machine with --endpoint selecting
+    /// its authoritative daemon. The server pauses requests, landing,
+    /// recovery and mirror pushes until the atomic rewrite ends. Paths are
+    /// literal repository-relative files or directories, with no globs.
+    /// Refuses published commits and paths absent from the rewritten range.
+    /// Stored objects and authored snapshots remain; this is not a purge.
+    #[command(name = "mirror", subcommand)]
+    Mirror(MirrorCommand),
     /// Import a git repository; its default branch becomes the base.
     ///
     /// Copies every commit, tree and blob reachable from the branch into the
@@ -747,11 +757,25 @@ pub struct ChangePaths {
     pub paths: Vec<PathBuf>,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum MirrorCommand {
+    /// Drop literal files or directories from all commits after the last
+    /// successful mirror push. Run locally on the authoritative server.
+    /// The server pauses landing and pushes, refuses already-published
+    /// history, and atomically updates the base and open changes. Apply
+    /// server rebases in workspaces afterwards. Never force-pushes.
+    DropPaths {
+        #[arg(required = true, num_args = 1.., value_name = "PATH")]
+        paths: Vec<String>,
+    },
+}
+
 impl Command {
     /// The command path as typed, for example `change new`, used to name the
     /// client operation and in error messages.
     pub fn path(&self) -> &'static str {
         match self {
+            Command::Mirror(MirrorCommand::DropPaths { .. }) => "mirror drop-paths",
             Command::Import { .. } => "import",
             Command::Change(sub) => sub.path(),
             Command::Commit { .. } => "commit",

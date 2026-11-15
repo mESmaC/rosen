@@ -11,6 +11,7 @@ mod land_cmd;
 mod machine_cmd;
 mod mcp;
 mod mcp_tools;
+mod mirror_cmd;
 mod output;
 mod overlaps_cmd;
 mod rebase_cmd;
@@ -104,6 +105,9 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
             events(json, &endpoint, *after, agent.as_deref(), *all)
         }
         Command::Config(config) => block_on(config_cmd::run(json, &endpoint, config)),
+        Command::Mirror(commands::MirrorCommand::DropPaths { paths }) => {
+            block_on(mirror_cmd::drop_paths(json, &endpoint, paths))
+        }
         Command::Machine(command) => block_on(machine_cmd::run(json, &endpoint, command)),
         Command::Mcp(args) => {
             mcp::serve(args, cli.endpoint.as_deref())?;

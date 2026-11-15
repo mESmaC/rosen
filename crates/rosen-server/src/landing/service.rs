@@ -121,6 +121,7 @@ pub async fn keep_recovering(state: Arc<ServerState>) {
     loop {
         let pass = Arc::clone(&state);
         let report = tokio::task::spawn_blocking(move || {
+            let _running = pass.maintenance.blocking_read();
             let report = pass.landing.recover(&pass);
             // Children of replayed lands follow them (R8 step 4, D19).
             crate::stacks::refresh(&pass);
@@ -212,7 +213,13 @@ impl LandingService {
     /// requester is answered before the overlap rebases run (R8 accept:
     /// 200 ms) and a crash leaves them to recovery.
     fn decide(&self, engine: &Arc<Landing>, id: &ChangeId) -> Result<Decided, ErrorBody> {
-        let (status, land) = match engine.decide(id).map_err(land_body)? {
+        let decision = match engine.decide(id) {
+            Err(LandError::OversizeFiles { limit, files }) => {
+                return Ok(Ok(super::size_limit::status(limit, files)))
+            }
+            other => other.map_err(land_body)?,
+        };
+        let (status, land) = match decision {
             Decision::Committed(land) => {
                 // A failure is retried by the post-land run handed off below.
                 if let Err(why) = engine.restack_stacked(&land) {
@@ -668,9 +675,10 @@ fn land_body(err: LandError) -> ErrorBody {
     let code = match &err {
         LandError::UnknownChange(_) => ErrorCode::NotFound,
         LandError::InvalidReceipt(_) => ErrorCode::InvalidArgument,
-        LandError::NoBase(_) | LandError::Contended { .. } | LandError::ConflictMarkers(_) => {
-            ErrorCode::Refused
-        }
+        LandError::NoBase(_)
+        | LandError::Contended { .. }
+        | LandError::ConflictMarkers(_)
+        | LandError::OversizeFiles { .. } => ErrorCode::Refused,
         LandError::Store(_) | LandError::Backend(_) => ErrorCode::Internal,
     };
     ErrorBody::new(code, err.to_string())

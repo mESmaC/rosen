@@ -101,7 +101,9 @@ pub async fn run(args: DrillArgs) -> anyhow::Result<bool> {
     let agents_done = Arc::new(AtomicBool::new(false));
     let checker = tokio::spawn(checker_task(&spec, &args, Arc::clone(&agents_done)));
     let log = execute(&plan, &mut harness, start).await;
-    let settled = harness.wait_for_agents(Duration::from_secs(args.settle)).await;
+    let settled = harness
+        .wait_for_agents(Duration::from_secs(args.settle))
+        .await;
     agents_done.store(true, Ordering::SeqCst);
     let checker = checker.await.context("the checker task panicked")?;
     let elapsed = start.elapsed();
@@ -137,11 +139,15 @@ pub async fn run(args: DrillArgs) -> anyhow::Result<bool> {
 /// server directly, as a checker machine's daemon would forward to it, so
 /// server kills interrupt it mid-check and mid-bisection. Its test fails
 /// any landed tree holding the culprit agent's injected file.
-fn checker_task(spec: &Spec, args: &DrillArgs, done: Arc<AtomicBool>) -> impl Future<Output = CheckerReport> {
+fn checker_task(
+    spec: &Spec,
+    args: &DrillArgs,
+    done: Arc<AtomicBool>,
+) -> impl Future<Output = CheckerReport> {
     let endpoint = rosen_protocol::Endpoint::new(spec.layout.endpoint(0));
-    let path = spec
-        .culprit
-        .map(|(machine, index, _)| format!("{}/{}", setup::unit(machine, index), failing::FILE_NAME));
+    let path = spec.culprit.map(|(machine, index, _)| {
+        format!("{}/{}", setup::unit(machine, index), failing::FILE_NAME)
+    });
     let settle = Duration::from_secs(args.settle);
     async move {
         let until = Until {

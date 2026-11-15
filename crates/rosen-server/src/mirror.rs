@@ -16,6 +16,7 @@
 //! import, which sets the base without a land.
 
 mod push;
+pub mod rewrite;
 mod state;
 
 use std::sync::Arc;
@@ -72,7 +73,11 @@ pub async fn run(state: Arc<ServerState>) {
         // Lands after this point wake the next sync, even if they arrive
         // while this one is pushing.
         let seen = state.events.announced_seq();
-        let keep_going = match sync_once(&state.config).await {
+        let synced = {
+            let _running = state.maintenance.read().await;
+            sync_once(&state.config).await
+        };
+        let keep_going = match synced {
             Ok(synced) => {
                 if failures > 0 {
                     report_recovered(&state, &synced, failures);
@@ -213,6 +218,7 @@ async fn landed_after(state: &Arc<ServerState>, seen: u64) -> Result<bool, Strin
 async fn sleep_unless_shutdown(state: &ServerState, delay: Duration) -> bool {
     tokio::select! {
         () = tokio::time::sleep(delay) => true,
+        () = state.mirror_wake.notified() => true,
         () = state.shutdown_requested() => false,
     }
 }

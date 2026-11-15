@@ -274,7 +274,11 @@ mod tests {
         assert!(create_marked(&staging(format!(".ws{STAGING_TAG}{own}-0"))).unwrap());
         fs::create_dir(staging(format!(".ws{STAGING_TAG}{dead}-4"))).unwrap();
         fs::create_dir(staging(format!(".ws{STAGING_TAG}{dead}-0x"))).unwrap();
-        fs::write(marker_of(&staging(format!(".ws{STAGING_TAG}{dead}-0x"))), b"").unwrap();
+        fs::write(
+            marker_of(&staging(format!(".ws{STAGING_TAG}{dead}-0x"))),
+            b"",
+        )
+        .unwrap();
         let not_marker = staging(format!(".ws{STAGING_TAG}{dead}-5"));
         fs::create_dir(&not_marker).unwrap();
         fs::write(marker_of(&not_marker), b"user data").unwrap();

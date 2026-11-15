@@ -39,6 +39,7 @@ pub mod identity;
 mod import;
 mod land;
 pub mod machines;
+mod mirror;
 mod pinned_tls;
 pub mod post_land;
 pub mod project_config;

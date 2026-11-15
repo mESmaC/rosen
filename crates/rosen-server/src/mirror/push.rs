@@ -86,7 +86,7 @@ pub async fn push(
 
 /// Creates the staging repository on first use, and points its alternates
 /// at the store on every push, so a moved data directory still works.
-async fn prepare_staging(staging: &Path, objects_dir: &Path) -> std::io::Result<()> {
+pub(super) async fn prepare_staging(staging: &Path, objects_dir: &Path) -> std::io::Result<()> {
     if !staging.join("HEAD").is_file() {
         let parent = staging.parent().unwrap_or(staging);
         std::fs::create_dir_all(parent)?;

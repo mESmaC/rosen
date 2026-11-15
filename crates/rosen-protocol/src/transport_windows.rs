@@ -126,7 +126,9 @@ fn verify_server_owner(name: &str, pipe: &NamedPipeClient) -> io::Result<()> {
     if owner != current_user_sid()? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("{name} is served by another user ({owner}, process {pid}); refusing to connect"),
+            format!(
+                "{name} is served by another user ({owner}, process {pid}); refusing to connect"
+            ),
         ));
     }
     Ok(())

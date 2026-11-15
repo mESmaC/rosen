@@ -107,10 +107,24 @@ impl Plan {
         for machine in 1..shape.machines {
             let lengths = shape.partition_length;
             let mut cut_rng = Rng::new(rng.next_u64());
-            faults.extend(series(&mut rng, shape, shape.partition_every, lengths, |length| {
-                let cut = if cut_rng.below(2) == 0 { Cut::Refuse } else { Cut::Silent };
-                Fault::Partition { machine, cut, length }
-            }));
+            faults.extend(series(
+                &mut rng,
+                shape,
+                shape.partition_every,
+                lengths,
+                |length| {
+                    let cut = if cut_rng.below(2) == 0 {
+                        Cut::Refuse
+                    } else {
+                        Cut::Silent
+                    };
+                    Fault::Partition {
+                        machine,
+                        cut,
+                        length,
+                    }
+                },
+            ));
         }
         faults.sort_by_key(|scheduled| scheduled.at);
         Self { seed, faults }
@@ -132,7 +146,8 @@ fn targets(shape: &Shape) -> Vec<Target> {
     let mut targets = vec![Target::Server];
     targets.extend((1..shape.machines).map(|machine| Target::Daemon { machine }));
     for machine in 0..shape.machines {
-        targets.extend((0..shape.clients_per_machine).map(|index| Target::Client { machine, index }));
+        targets
+            .extend((0..shape.clients_per_machine).map(|index| Target::Client { machine, index }));
     }
     targets
 }
@@ -153,7 +168,10 @@ fn series(
     let mut at = anywhere.min(rng.exponential(every));
     while at < shape.window {
         let length = rng.between(lengths.0, lengths.1);
-        out.push(Scheduled { at, fault: make(length) });
+        out.push(Scheduled {
+            at,
+            fault: make(length),
+        });
         at += length + rng.exponential(every);
     }
     out
