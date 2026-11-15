@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime};
 
 use rosen_core::{ObjectId, ObjectKind};
 use rosen_protocol::{BlobChunk, BlobChunkStored, ErrorBody, ErrorCode, Outcome, Response};
-use rosen_store::{LooseObjectStore, ObjectStore};
+use rosen_store::LooseObjectStore;
 
 use crate::ServerState;
 
@@ -50,8 +50,9 @@ pub fn store_chunk(
 ) -> Result<BlobChunkStored, ErrorBody> {
     let path = staging_path(staging, &chunk.upload)?;
     // Another client may have stored the same blob meanwhile; the rest of
-    // this upload would only repeat it.
-    if store.contains(&chunk.id).map_err(internal)? {
+    // this upload would only repeat it. A damaged copy does not count, so
+    // this upload goes on and its put repairs it (issue #230).
+    if store.contains_valid(&chunk.id).map_err(internal)? {
         let _ = fs::remove_file(&path);
         return Ok(BlobChunkStored {
             received: chunk.total,

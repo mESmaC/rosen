@@ -129,6 +129,16 @@ impl LooseObjectStore {
         }
     }
 
+    /// Whether the store holds a readable copy of `id`, verified against its
+    /// hash. Unlike [`ObjectStore::contains`], a damaged file counts as
+    /// absent, so a caller deciding whether to accept or fetch the object's
+    /// bytes takes them and the put repairs the file (issue #230). It reads
+    /// and hashes the whole object, so use it only where the alternative is
+    /// receiving those bytes anyway; a missing object costs one failed open.
+    pub fn contains_valid(&self, id: &ObjectId) -> Result<bool, StoreError> {
+        Ok(self.existing_state(id, &self.object_path(id))? == Existing::Valid)
+    }
+
     /// Checks the file already stored for `id`. A put must verify it rather
     /// than trust its existence: a truncated or damaged file would otherwise
     /// make the put report success while every read fails as corrupt.
@@ -320,7 +330,8 @@ mod tests {
 
     /// Risk (SPEC D5, authoritative store): a put that trusts a damaged file
     /// reports success while every read of that object fails for good, and
-    /// a crashed process's leftover temp name fails a later put.
+    /// a crashed process's leftover temp name fails a later put. Upload and
+    /// fill negotiation asks `contains_valid`, so it must see the damage.
     #[test]
     fn put_repairs_damaged_object_and_skips_stale_temp_names() {
         let dir = tempfile::tempdir().unwrap();
@@ -329,8 +340,10 @@ mod tests {
         let path = store.object_path(&id);
         fs::write(&path, b"").unwrap();
         assert!(store.get_raw(&id).is_err());
+        assert!(store.contains(&id).unwrap() && !store.contains_valid(&id).unwrap());
         assert_eq!(store.put_raw(ObjectKind::Blob, b"hello").unwrap(), id);
         assert_eq!(store.get_raw(&id).unwrap().unwrap().data, b"hello");
+        assert!(store.contains_valid(&id).unwrap());
 
         let next = TEMP_COUNTER.load(Ordering::Relaxed);
         let stale = path.with_file_name(format!("tmp_obj_{}_{next}", std::process::id()));

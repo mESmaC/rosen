@@ -224,7 +224,9 @@ impl Walk {
                 continue;
             } else if let Some(needs) = self.fetching.get_mut(&id) {
                 needs.push(need);
-            } else if !store.contains(&id)? {
+            } else if !store.contains_valid(&id)? {
+                // A damaged object is fetched again like a missing one, and
+                // storing it repairs the file (issue #230).
                 self.fetching.insert(id, vec![need]);
             } else if !self.partial.contains(&id) {
                 // Asked after the store: a record is made before its object
