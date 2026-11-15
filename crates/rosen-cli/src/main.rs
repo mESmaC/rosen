@@ -65,6 +65,15 @@ fn main() -> ExitCode {
 /// `rosen run`: exits with the command's own status, so a script sees the
 /// build's failure and not just "failed".
 fn run_in_turn(json: bool, args: &commands::RunArgs) -> ExitCode {
+    if let Some(settings) = &args.slots {
+        return match run_cmd::slots(settings) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                report_error(json, "run", &rosen_client::Error::Io(error));
+                ExitCode::FAILURE
+            }
+        };
+    }
     match run_cmd::run(&args.class, &args.command) {
         Ok(status) if status.success() => ExitCode::SUCCESS,
         Ok(status) => match status.code().map(u8::try_from) {

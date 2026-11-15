@@ -90,6 +90,8 @@ pub mod security;
 
 pub mod owner_only;
 
+pub mod memory;
+
 /// False only when no running process has id `pid`; any doubt answers true,
 /// so a caller that cleans up after dead processes never touches a live
 /// one's files. A reused id reads as running, which only delays cleanup.

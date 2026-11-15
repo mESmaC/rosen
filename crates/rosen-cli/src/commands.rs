@@ -320,8 +320,18 @@ pub struct RunArgs {
     /// important first. An agent's own builds and tests are `build`.
     #[arg(long, default_value = "build", value_name = "CLASS")]
     pub class: String,
+    /// Show how many runs of each class go at once on this machine, and with
+    /// `CLASS=N` (comma separated, or repeated) set this machine's own count;
+    /// `CLASS=default` goes back to the default. Runs no command.
+    #[arg(long, num_args = 0.., value_delimiter = ',', value_name = "CLASS=N")]
+    pub slots: Option<Vec<String>>,
     /// The command and its arguments, after `--`.
-    #[arg(last = true, required = true, value_name = "COMMAND")]
+    #[arg(
+        last = true,
+        required_unless_present = "slots",
+        conflicts_with = "slots",
+        value_name = "COMMAND"
+    )]
     pub command: Vec<String>,
 }
 

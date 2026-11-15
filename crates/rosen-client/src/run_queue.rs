@@ -7,23 +7,27 @@
 //! tests), `verify` (the full tests after a land, and bisection) and
 //! `prepare` (the warm pool's prepare commands), most important first.
 //!
-//! - One run of each class at a time.
-//! - A run starts when no run of its class or a more important one is
-//!   running, and nothing sorts ahead of it in line: every more important
-//!   waiter, and earlier waiters of its own class.
+//! - Each class has a number of slots: as many runs of it go at once.
+//!   `landing` and `build` get at least two, sized from the machine's cores
+//!   and memory; `verify` and `prepare` one. A machine can set its own.
+//! - A run starts when a slot of its class is free for it, no more important
+//!   run is going, and nothing sorts ahead of it in line: every more
+//!   important waiter, and earlier waiters of its own class, which take the
+//!   free slots first.
 //! - A less important run that is already going is never stopped and never
 //!   holds a more important one back. So a landing check starts at once
 //!   beside a prepare; the caller runs `verify` and `prepare` work at low
 //!   process priority, and the landing check gets the cores.
 //! - Nothing waits for ever: after its class's patience a waiter stops
-//!   yielding to more important classes and needs only its own class's turn.
+//!   yielding to more important classes and needs only a free slot of its
+//!   own class.
 //!   A stuck landing check then cannot hold every agent's build, and steady
 //!   agent builds cannot keep the tests after a land from running.
 //!
 //! The queue is files in one folder per machine and user, with operating
 //! system file locks, so it needs no daemon and survives any crash: a
-//! waiter holds its ticket file locked and a runner its class's lock file,
-//! and the system releases both when their process dies.
+//! waiter holds its ticket file locked and a runner one of its class's slot
+//! lock files, and the system releases both when their process dies.
 //!
 //! It only schedules. A caller that cannot use it (an unwritable folder)
 //! runs its command anyway.
@@ -113,6 +117,45 @@ impl RunClass {
             Self::Prepare => Duration::from_secs(10 * 60),
         }
     }
+
+    /// How many runs of this class go at once on this machine unless it sets
+    /// its own count. The tests after a land and the pool's prepares are
+    /// background work, kept to one so they never crowd out the rest.
+    pub fn default_slots(self) -> u32 {
+        match self {
+            // Asked of the system once: a waiter looks every poll.
+            Self::Landing | Self::Build => *MACHINE_SLOTS.get_or_init(|| {
+                let cores = std::thread::available_parallelism().map_or(1, |cores| cores.get());
+                sized_slots(cores, rosen_platform::memory::physical_memory())
+            }),
+            Self::Verify | Self::Prepare => 1,
+        }
+    }
+}
+
+static MACHINE_SLOTS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+/// Logical cores each concurrent heavy run is given. In the SPEC R3 ramp on
+/// 20 cores, clean builds of Rosen and Velocity still did more work per
+/// second at four at once than at three (3.0 and 1.65 times one alone), so
+/// four on that machine; the ramp went no further, so neither does this.
+const CORES_PER_SLOT: usize = 5;
+/// Memory each concurrent heavy run is given. In the ramp, free memory fell
+/// by under 2 GiB per added build; the rest is left for links, tests and
+/// the agents and tools beside them, so the runs stay out of the page file.
+const MEMORY_PER_SLOT: u64 = 8 << 30;
+/// Runs per class that every machine gets, however small: two runs side by
+/// side still beat one on any machine with more than one core.
+const MIN_SLOTS: u32 = 2;
+
+/// The slot count for `cores` logical cores and `memory` bytes of memory:
+/// whichever runs out first, and never under [`MIN_SLOTS`].
+pub fn sized_slots(cores: usize, memory: Option<u64>) -> u32 {
+    let by_cores = u32::try_from(cores / CORES_PER_SLOT).unwrap_or(u32::MAX);
+    let by_memory = memory.map_or(u32::MAX, |bytes| {
+        u32::try_from(bytes / MEMORY_PER_SLOT).unwrap_or(u32::MAX)
+    });
+    by_cores.min(by_memory).max(MIN_SLOTS)
 }
 
 /// A run in the queue, as [`RunQueue::line`] reports it.
@@ -201,8 +244,9 @@ impl RunQueue {
     pub fn line(&self) -> io::Result<Vec<Entry>> {
         let mut line = Vec::new();
         for class in RunClass::ALL {
-            if self.is_running(class)? {
-                let note = std::fs::read_to_string(self.note_path(class)).unwrap_or_default();
+            for slot in self.running(class)? {
+                let note =
+                    std::fs::read_to_string(self.note_path(class, slot)).unwrap_or_default();
                 line.push(Entry {
                     class,
                     note,
@@ -257,22 +301,106 @@ impl RunQueue {
         }
     }
 
-    fn is_running(&self, class: RunClass) -> io::Result<bool> {
-        match File::open(self.lock_path(class)) {
-            Ok(lock) => Ok(!unlocked(&lock)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error),
+    /// The slots of `class` whose runs are going now. A slot beyond the
+    /// class's count, left from before the machine lowered it, still counts
+    /// while its run goes.
+    fn running(&self, class: RunClass) -> io::Result<Vec<u32>> {
+        let mut slots = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let Some(slot) = lock_slot(&name, class) else {
+                continue;
+            };
+            match File::open(self.dir.join(&name)) {
+                Ok(lock) if !unlocked(&lock) => slots.push(slot),
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
+        slots.sort_unstable();
+        Ok(slots)
     }
 
-    fn lock_path(&self, class: RunClass) -> PathBuf {
-        self.dir.join(format!("run-{}.lock", class.name()))
+    /// How many runs of `class` go at once: the machine's own count, set with
+    /// [`RunQueue::set_slots`], or the class's default.
+    pub fn slots(&self, class: RunClass) -> u32 {
+        self.slot_overrides()
+            .into_iter()
+            .find(|(overridden, _)| *overridden == class)
+            .map_or_else(|| class.default_slots(), |(_, slots)| slots)
+    }
+
+    /// Sets the machine's own slot count for `class`, or with `None` goes
+    /// back to the default. Runs waiting now see it on their next look; a
+    /// lowered count stops no run already going.
+    pub fn set_slots(&self, class: RunClass, slots: Option<u32>) -> io::Result<()> {
+        if slots == Some(0) {
+            return Err(io::Error::other("a class needs at least one slot"));
+        }
+        std::fs::create_dir_all(&self.dir)?;
+        let mut overrides = self.slot_overrides();
+        overrides.retain(|(overridden, _)| *overridden != class);
+        overrides.extend(slots.map(|slots| (class, slots)));
+        let text: String = overrides
+            .iter()
+            .map(|(class, slots)| format!("{}={slots}
+", class.name()))
+            .collect();
+        // Written aside and renamed over, so a waiter never reads half a file.
+        let staged = self
+            .dir
+            .join(format!("{SLOTS_FILE}.{}.new", std::process::id()));
+        std::fs::write(&staged, text)?;
+        std::fs::rename(&staged, self.dir.join(SLOTS_FILE))
+    }
+
+    /// The machine's own slot counts, one line `class=count` each. A line
+    /// that doesn't parse is ignored, so a bad edit leaves the defaults.
+    fn slot_overrides(&self) -> Vec<(RunClass, u32)> {
+        let text = std::fs::read_to_string(self.dir.join(SLOTS_FILE)).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| {
+                let (class, slots) = line.split_once('=')?;
+                let class = RunClass::parse(class.trim())?;
+                let slots = slots.trim().parse::<u32>().ok().filter(|slots| *slots > 0)?;
+                Some((class, slots))
+            })
+            .collect()
+    }
+
+    /// Slot 0 keeps the name the queue used when each class had one slot, so
+    /// an older `rosen` on the machine still shares it.
+    fn lock_path(&self, class: RunClass, slot: u32) -> PathBuf {
+        self.dir.join(format!("{}.lock", slot_stem(class, slot)))
     }
 
     /// Beside the lock, not in it: a locked file's bytes can't be read by
     /// another process on Windows.
-    fn note_path(&self, class: RunClass) -> PathBuf {
-        self.dir.join(format!("run-{}.note", class.name()))
+    fn note_path(&self, class: RunClass, slot: u32) -> PathBuf {
+        self.dir.join(format!("{}.note", slot_stem(class, slot)))
+    }
+}
+
+/// The file in the queue folder holding the machine's own slot counts.
+const SLOTS_FILE: &str = "slots";
+
+fn slot_stem(class: RunClass, slot: u32) -> String {
+    match slot {
+        0 => format!("run-{}", class.name()),
+        slot => format!("run-{}-{slot}", class.name()),
+    }
+}
+
+/// The slot of `class` a lock file's name gives; `None` for any other file.
+fn lock_slot(name: &str, class: RunClass) -> Option<u32> {
+    let rest = name
+        .strip_suffix(".lock")?
+        .strip_prefix("run-")?
+        .strip_prefix(class.name())?;
+    match rest {
+        "" => Some(0),
+        rest => rest.strip_prefix('-')?.parse().ok(),
     }
 }
 
@@ -294,21 +422,27 @@ impl Waiter {
     /// Never blocks.
     pub fn try_start(&self) -> io::Result<Option<Turn>> {
         let yielding = self.since.elapsed() < self.class.patience();
-        if !self.is_next(yielding)? {
+        let slots = self.queue.slots(self.class);
+        if !self.is_next(yielding, slots)? {
             return Ok(None);
         }
-        let lock = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.queue.lock_path(self.class))?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
-            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        // Any free slot will do; trying each in turn takes the first one no
+        // other run holds, so two runs never share a slot.
+        for slot in 0..slots {
+            let lock = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(self.queue.lock_path(self.class, slot))?;
+            match lock.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => continue,
+                Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            }
+            let _ = std::fs::write(self.queue.note_path(self.class, slot), &self.note);
+            return Ok(Some(Turn { _lock: lock }));
         }
-        let _ = std::fs::write(self.queue.note_path(self.class), &self.note);
-        Ok(Some(Turn { _lock: lock }))
+        Ok(None)
     }
 
     /// Those this waiter is behind: runs of its class or a more important
@@ -328,21 +462,32 @@ impl Waiter {
             .collect())
     }
 
-    /// Whether no earlier waiter of this class is in line and, while this
-    /// waiter still yields, no more important run is waiting or going.
-    fn is_next(&self, yielding: bool) -> io::Result<bool> {
+    /// Whether this waiter's class has a free slot left after the earlier
+    /// waiters of its class take theirs and, while this waiter still yields,
+    /// no more important run is waiting or going.
+    fn is_next(&self, yielding: bool, slots: u32) -> io::Result<bool> {
         let mine = self.file_name();
+        let mut earlier_of_class = 0;
         for (name, class) in self.queue.waiting()? {
             if name >= mine {
                 break;
             }
-            if class == self.class || yielding {
+            if class == self.class {
+                earlier_of_class += 1;
+            } else if yielding {
                 return Ok(false);
             }
         }
+        let running = self.queue.running(self.class)?.len();
+        let free = usize::try_from(slots)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(running);
+        if earlier_of_class >= free {
+            return Ok(false);
+        }
         if yielding {
             for class in RunClass::ALL {
-                if class < self.class && self.queue.is_running(class)? {
+                if class < self.class && !self.queue.running(class)?.is_empty() {
                     return Ok(false);
                 }
             }
@@ -364,8 +509,8 @@ impl Drop for Waiter {
     }
 }
 
-/// A run's turn. The next run of its class may start when this is dropped,
-/// or when its process dies.
+/// A run's turn, holding one slot of its class. The next run of its class
+/// may take that slot when this is dropped, or when its process dies.
 #[derive(Debug)]
 pub struct Turn {
     _lock: File,

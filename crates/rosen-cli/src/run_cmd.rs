@@ -101,3 +101,42 @@ fn spawn(
         started => started,
     }
 }
+
+/// `rosen run --slots`: applies each `CLASS=N` (or `CLASS=default`) to this
+/// machine's queue, then prints every class's slot count.
+pub fn slots(settings: &[String]) -> io::Result<()> {
+    let queue = RunQueue::machine()?;
+    for setting in settings {
+        let (class, slots) = parse_slot_setting(setting)?;
+        queue.set_slots(class, slots)?;
+    }
+    for class in RunClass::ALL {
+        let (slots, default) = (queue.slots(class), class.default_slots());
+        let source = if slots == default {
+            "default".to_owned()
+        } else {
+            format!("set on this machine; default {default}")
+        };
+        println!("{:<8} {slots} ({source})", class.name());
+    }
+    Ok(())
+}
+
+/// `CLASS=N` sets a count, `CLASS=default` clears it.
+fn parse_slot_setting(setting: &str) -> io::Result<(RunClass, Option<u32>)> {
+    let invalid = || {
+        io::Error::other(format!(
+            "bad slot setting `{setting}`: use CLASS=N or CLASS=default, \
+             with CLASS one of landing, build, verify or prepare"
+        ))
+    };
+    let (class, slots) = setting.split_once('=').ok_or_else(invalid)?;
+    let class = RunClass::parse(class.trim()).ok_or_else(invalid)?;
+    match slots.trim() {
+        "default" => Ok((class, None)),
+        count => match count.parse::<u32>() {
+            Ok(count) if count > 0 => Ok((class, Some(count))),
+            _ => Err(invalid()),
+        },
+    }
+}
