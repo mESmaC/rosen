@@ -335,7 +335,10 @@ impl LandingService {
         let mut slot = self.engine.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(engine) = slot.as_ref() {
             let config = engine.config();
-            if config.base_ref == base_ref && config.pre_land_check_set == check_set {
+            if config.base_ref == base_ref
+                && config.pre_land_check_set == check_set
+                && config.review == in_force.config.review
+            {
                 return Ok(Arc::clone(engine));
             }
         }
@@ -350,6 +353,7 @@ impl LandingService {
         let config = LandingConfig {
             base_ref,
             pre_land_check_set: check_set,
+            review: in_force.config.review,
             ..LandingConfig::default()
         };
         let store = LooseObjectStore::open(state.config.objects_dir())

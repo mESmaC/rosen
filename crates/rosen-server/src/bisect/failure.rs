@@ -30,7 +30,7 @@ pub fn start(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(super::internal)?;
-    let green = match post_land::store::last_green(&tx, &name).map_err(super::internal)? {
+    let green = match post_land::last_green(&tx, &name, job.kind)? {
         Some(green) => green,
         None => {
             // No initial commit is assumed tested: confirmation will run the
@@ -46,7 +46,7 @@ pub fn start(
             ObjectId::from_hex(&initial).map_err(super::internal)?
         }
     };
-    let answer = super::begin_in(&tx, &name, green, job.commit, output)?;
+    let answer = super::begin_kind_in(&tx, &name, green, job.commit, output, job.kind)?;
     tx.commit().map_err(super::internal)?;
     Ok(answer)
 }

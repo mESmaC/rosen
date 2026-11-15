@@ -1,6 +1,6 @@
 //! Wire shapes for `rosen review comment|resolve|list` (SPEC R7, R10).
 
-use rosen_core::{AgentId, ChangeId, ObjectId, ThreadState};
+use rosen_core::{AgentId, ChangeId, ObjectId, ReviewedState, ThreadState};
 use serde::{Deserialize, Serialize};
 
 /// Parameters of [`crate::Request::ReviewComment`].
@@ -99,4 +99,40 @@ pub struct Approval {
     pub head: ObjectId,
     pub created_at: i64,
     pub valid: bool,
+}
+
+/// Parameters of [`crate::Request::ReviewMark`]: sets a landed change's
+/// reviewed state (R7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkReviewed {
+    /// A change ID or unique prefix of one. It must be landed.
+    pub change: String,
+    pub state: ReviewedState,
+    pub by: AgentId,
+}
+
+/// Parameters of [`crate::Request::ReviewLanded`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandedFilter {
+    /// Only landed changes in this reviewed state; `None` lists them all.
+    #[serde(default)]
+    pub state: Option<ReviewedState>,
+}
+
+/// A landed change and its reviewed state. A change reverted after its land
+/// (R12) is open again and not listed; a later land of it starts unreviewed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandedReview {
+    pub change: ChangeId,
+    /// The landed commit on the base.
+    pub commit: ObjectId,
+    /// The review tier the land recorded: `prose`, `normal` or `sensitive`.
+    pub tier: String,
+    pub state: ReviewedState,
+    /// Who set the state; absent while nobody has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<AgentId>,
+    /// Unix milliseconds of the last mark; absent while nobody has set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
 }

@@ -50,11 +50,11 @@ pub use objects::{
     WireObject, OBJECT_CHUNK_BYTES,
 };
 pub use pool::{LandedProseQuery, PooledWorkspace};
-pub use post_land::{PostLandJob, PostLandWork};
+pub use post_land::{CheckKind, PostLandFailure, PostLandJob, PostLandWork};
 pub use receipt::{ReceiptRecord, ReceiptSignature, SubmitReceipt};
 pub use review::{
-    Approval, ApproveRequest, CommentRequest, CommentTarget, ResolveRequest, ReviewComment,
-    ReviewThread, ThreadFilter,
+    Approval, ApproveRequest, CommentRequest, CommentTarget, LandedFilter, LandedReview,
+    MarkReviewed, ResolveRequest, ReviewComment, ReviewThread, ThreadFilter,
 };
 pub use snapshot::{
     BlobChunk, BlobChunkStored, ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest,

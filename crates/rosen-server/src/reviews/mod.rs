@@ -11,21 +11,23 @@ mod anchor;
 mod store;
 
 pub mod approvals;
+pub mod landed;
 pub mod tiers;
 
 pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     store::ensure_schema(conn)?;
-    approvals::ensure_schema(conn)
+    approvals::ensure_schema(conn)?;
+    landed::ensure_schema(conn)
 }
 
 use crate::changes::{self, ChangeError};
 use crate::events::Staged;
 use crate::ServerState;
 use rosen_core::review::{anchor_path, check_body};
-use rosen_core::{AgentId, ChangeId, ObjectId};
+use rosen_core::{AgentId, ChangeId, ChangeState, ObjectId, ReviewMode};
 use rosen_protocol::{
-    CommentRequest, CommentTarget, ErrorBody, ErrorCode, EventKind, Outcome, ResolveRequest,
-    Response, ReviewThread, ThreadFilter,
+    CommentRequest, CommentTarget, ErrorBody, ErrorCode, EventKind, LandedFilter, MarkReviewed,
+    Outcome, ResolveRequest, Response, ReviewThread, ThreadFilter,
 };
 use rosen_store::LooseObjectStore;
 use rusqlite::Connection;
@@ -74,6 +76,8 @@ pub enum ReviewCall {
     Approvals(String),
     Resolve(ResolveRequest),
     List(ThreadFilter),
+    Mark(MarkReviewed),
+    Landed(LandedFilter),
 }
 
 /// Runs a review operation on the blocking pool: SQLite and object store I/O
@@ -91,7 +95,8 @@ pub async fn handle(state: &Arc<ServerState>, call: ReviewCall) -> Outcome {
 fn run(state: &ServerState, call: ReviewCall) -> Result<Response, ReviewError> {
     match call {
         ReviewCall::Approve(req, machine) => {
-            let approval = on_conn(state, |c| approvals::approve_on(c, &req, &machine))?;
+            let review = review_mode(state)?;
+            let approval = on_conn(state, |c| approvals::approve_on(c, &req, &machine, review))?;
             state.events.deliver_staged();
             Ok(Response::Approval(approval))
         }
@@ -115,7 +120,23 @@ fn run(state: &ServerState, call: ReviewCall) -> Result<Response, ReviewError> {
             })?;
             Ok(Response::ReviewThreads(threads))
         }
+        ReviewCall::Mark(req) => {
+            let review = on_conn(state, |c| landed::mark(c, &req))?;
+            state.events.deliver_staged();
+            Ok(Response::LandedReview(review))
+        }
+        ReviewCall::Landed(filter) => {
+            let landed = on_conn(state, |c| landed::list(c, filter.state))?;
+            Ok(Response::LandedReviews(landed))
+        }
     }
+}
+
+/// The review setting at the current base (R7). Before the project has a
+/// base there are no landed changes, so the default decides nothing.
+fn review_mode(state: &ServerState) -> Result<ReviewMode, ReviewError> {
+    let in_force = state.project_config.at_base().map_err(ReviewError::Store)?;
+    Ok(in_force.map_or_else(ReviewMode::default, |(_, resolved)| resolved.config.review))
 }
 
 fn comment(state: &ServerState, req: CommentRequest) -> Result<ReviewThread, ReviewError> {
@@ -129,9 +150,16 @@ fn comment(state: &ServerState, req: CommentRequest) -> Result<ReviewThread, Rev
             Ok(thread)
         }
         CommentTarget::Thread { thread } => {
-            let (thread, _) = on_conn(state, |c| {
-                store::reply(c, id, req.head, thread, &req.author, &req.body)
-            })?;
+            let review = review_mode(state)?;
+            let reply = store::Reply {
+                change: id,
+                expected_head: req.head,
+                thread,
+                author: &req.author,
+                body: &req.body,
+                review,
+            };
+            let (thread, _) = on_conn(state, |c| store::reply(c, &reply))?;
             state.events.deliver_staged();
             Ok(thread)
         }
@@ -151,10 +179,11 @@ fn start_thread(
 ) -> Result<ReviewThread, ReviewError> {
     let objects = LooseObjectStore::open(state.config.objects_dir())
         .map_err(|err| ReviewError::Store(err.to_string()))?;
+    let review = review_mode(state)?;
     for _ in 0..HEAD_ATTEMPTS {
         let head = on_conn(state, |c| {
             let record = changes::get(c, change)?;
-            check_reviewable(&record)?;
+            check_reviewable(&record, review)?;
             Ok(record.change.head)
         })?;
         check_head(expected_head, head)?;
@@ -166,6 +195,7 @@ fn start_thread(
             line,
             author,
             body,
+            review,
         };
         if let Some(thread) = on_conn(state, |c| store::open_thread(c, &new))? {
             return Ok(thread);
@@ -176,13 +206,24 @@ fn start_thread(
     )))
 }
 
-/// Comments go on changes still under review. A landed or abandoned change
-/// will never land again from this head, so a new comment could not be acted on.
-fn check_reviewable(record: &rosen_protocol::ChangeRecord) -> Result<(), ReviewError> {
+/// Comments and approvals go on changes still under review. In a
+/// `before-land` project a landed change will never land again from this
+/// head, so a new comment could not be acted on. In an `after-land` project
+/// review happens after the land, so landed changes take them too (R7). An
+/// abandoned change never does.
+fn check_reviewable(
+    record: &rosen_protocol::ChangeRecord,
+    review: ReviewMode,
+) -> Result<(), ReviewError> {
     let change = &record.change;
-    if change.state.is_closed() {
+    let reviewed_after_land = change.state == ChangeState::Landed && !review.approval_gates_land();
+    if change.state.is_closed() && !reviewed_after_land {
+        let landed_too = match review {
+            ReviewMode::BeforeLand => "",
+            ReviewMode::AfterLand => ", and landed ones in an after-land project",
+        };
         return Err(ReviewError::Refused(format!(
-            "change {} is {}; only open and ready changes take review comments",
+            "change {} is {}; only open and ready changes take review comments{landed_too}",
             change.id, change.state
         )));
     }

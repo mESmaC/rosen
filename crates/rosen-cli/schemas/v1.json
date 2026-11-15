@@ -104,6 +104,15 @@
     },
     {
       "$ref": "#/$defs/rosen.change.workspace~1v2"
+    },
+    {
+      "$ref": "#/$defs/rosen.review.coverage~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.review.coverage.list~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.post-land-failures~1v1"
     }
   ],
   "$defs": {
@@ -174,7 +183,8 @@
         "green",
         "reverted",
         "mirror",
-        "channel"
+        "channel",
+        "post_land_failure"
       ]
     },
     "ChangeParent": {
@@ -1062,6 +1072,12 @@
         },
         "prepare": {
           "$ref": "#/$defs/Prepare"
+        },
+        "review": {
+          "enum": [
+            "before-land",
+            "after-land"
+          ]
         }
       },
       "required": [
@@ -2760,6 +2776,153 @@
       "additionalProperties": false,
       "x-commands": [
         "change new --workspace"
+      ]
+    },
+    "LandedReview": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "tier": {
+          "enum": [
+            "prose",
+            "normal",
+            "sensitive"
+          ]
+        },
+        "state": {
+          "enum": [
+            "unreviewed",
+            "reviewed",
+            "issues_filed"
+          ]
+        },
+        "by": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "updated_at": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "change",
+        "commit",
+        "tier",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "PostLandFailure": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "integer"
+        },
+        "change": {
+          "type": "string"
+        },
+        "commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "kind": {
+          "enum": [
+            "build",
+            "test"
+          ]
+        },
+        "output": {
+          "type": "string"
+        },
+        "revert": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requires_revert": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "session",
+        "change",
+        "commit",
+        "kind",
+        "output",
+        "revert",
+        "requires_revert"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.review.coverage/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.review.coverage/v1"
+        },
+        "review": {
+          "$ref": "#/$defs/LandedReview"
+        }
+      },
+      "required": [
+        "schema",
+        "review"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "review mark"
+      ]
+    },
+    "rosen.review.coverage.list/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.review.coverage.list/v1"
+        },
+        "reviews": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LandedReview"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "reviews"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "review landed"
+      ]
+    },
+    "rosen.post-land-failures/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.post-land-failures/v1"
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PostLandFailure"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "failures"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "review failures"
       ]
     }
   }

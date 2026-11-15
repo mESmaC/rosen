@@ -58,3 +58,7 @@ pub fn print_error(command: Option<&str>, error: &str) {
         serde_json::to_string(&body).expect("error strings serialize")
     );
 }
+
+pub const REVIEW_COVERAGE_SCHEMA: &str = "rosen.review.coverage/v1";
+pub const REVIEW_COVERAGE_LIST_SCHEMA: &str = "rosen.review.coverage.list/v1";
+pub const POST_LAND_FAILURES_SCHEMA: &str = "rosen.post-land-failures/v1";

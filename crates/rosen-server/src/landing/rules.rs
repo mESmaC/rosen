@@ -4,6 +4,8 @@
 //! table `proofs/fixtures/landing.tsv` is exported from that model and
 //! checked against [`decide`] by `tests/landing_fixtures.rs`.
 
+use rosen_core::ReviewMode;
+
 use super::{ChangeState, Tier};
 
 /// How the best stored receipt relates to the change being landed.
@@ -25,6 +27,9 @@ pub struct LandInput {
     pub has_conflicts: bool,
     /// An approval exists for the change's current head (R7).
     pub approved: bool,
+    /// The project's review setting at the attempt's base (R7): only
+    /// `before-land` makes `approved` gate the land.
+    pub review: ReviewMode,
     pub tier: Tier,
     pub receipt: ReceiptCheck,
     /// The base has moved since the receipt's base B.
@@ -95,9 +100,11 @@ pub fn decide(input: &LandInput) -> Verdict {
     if !input.merge_clean {
         return Verdict::Refuse(Refusal::MergeConflict);
     }
-    // A prose-only change needs no receipt, so no re-check either (R8 step 1).
-    let receipt_counts =
-        input.tier == Tier::ProseOnly || !input.base_moved || input.landed_since_all_independent;
+    // After-land and prose-only changes need no receipt or re-check (R8).
+    let receipt_counts = input.review == ReviewMode::AfterLand
+        || input.tier == Tier::ProseOnly
+        || !input.base_moved
+        || input.landed_since_all_independent;
     if receipt_counts {
         Verdict::Land
     } else {
@@ -118,10 +125,10 @@ fn gate_refusal(input: &LandInput) -> Option<Refusal> {
     if input.has_conflicts {
         return Some(Refusal::Conflicts);
     }
-    if !input.approved {
+    if input.review.approval_gates_land() && !input.approved {
         return Some(Refusal::Unapproved);
     }
-    if input.tier == Tier::ProseOnly {
+    if input.review == ReviewMode::AfterLand || input.tier == Tier::ProseOnly {
         return None;
     }
     match input.receipt {

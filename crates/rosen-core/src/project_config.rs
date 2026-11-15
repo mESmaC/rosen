@@ -44,10 +44,51 @@ pub struct ProjectConfig {
     /// to the repository root, such as `target/`. They rank below every
     /// `.gitignore` file, so a workspace's own `!` line can re-include one.
     pub ignore: Vec<String>,
+    /// Whether an approval gates a land (R7, R8). Left out of the printed
+    /// configuration when it is the default, so a `before-land` project's
+    /// `config show` output is what it was before the setting existed.
+    #[serde(skip_serializing_if = "ReviewMode::is_before_land")]
+    pub review: ReviewMode,
     pub checks: CheckSets,
     pub warm_pool: WarmPool,
     pub prepare: Prepare,
     pub mirror: Mirror,
+}
+
+/// When review happens relative to a land (R7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewMode {
+    /// A land needs an approval for the change's current head.
+    #[default]
+    BeforeLand,
+    /// A land needs neither approval nor receipt. Reviewers review landed changes and record
+    /// it as their reviewed state; post-land checks (R12) are the safety net.
+    AfterLand,
+}
+
+impl ReviewMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewMode::BeforeLand => "before-land",
+            ReviewMode::AfterLand => "after-land",
+        }
+    }
+
+    pub fn is_before_land(&self) -> bool {
+        *self == ReviewMode::BeforeLand
+    }
+
+    /// Whether a land needs an approval for the change's current head.
+    pub fn approval_gates_land(self) -> bool {
+        self.is_before_land()
+    }
+}
+
+impl fmt::Display for ReviewMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

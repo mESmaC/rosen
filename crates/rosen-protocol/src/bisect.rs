@@ -8,6 +8,8 @@ pub struct BisectJob {
     /// A result is accepted once, only for this exact persisted step.
     pub step: u64,
     pub commit: ObjectId,
+    #[serde(default)]
+    pub kind: crate::post_land::CheckKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +30,8 @@ pub struct BisectCulprit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BisectState {
     pub id: i64,
+    #[serde(default)]
+    pub kind: crate::post_land::CheckKind,
     pub job: Option<BisectJob>,
     /// Present only after two culprit failures and a fresh passing parent.
     pub culprit: Option<BisectCulprit>,

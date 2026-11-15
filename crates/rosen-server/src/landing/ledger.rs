@@ -8,6 +8,7 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use rosen_core::ReviewMode;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::conflicts::{self, ConflictStoreError};
@@ -256,21 +257,24 @@ impl Ledger {
         expected: &CommitId,
         record: &LandRecord,
     ) -> LandResult<CasResult> {
-        self.compare_and_swap_with(expected, record, None)
+        self.compare_and_swap_with(expected, record, None, ReviewMode::BeforeLand)
     }
 
     /// [`Ledger::compare_and_swap`] for a land decided on `receipt`, which
     /// must still verify inside the swap's transaction: a machine revoked
     /// after the land read its receipt then stops the base from moving.
+    /// `review` is the setting at `expected`, which the swap requires the
+    /// base to still be, so the approval check binds to that base (R7).
     pub fn compare_and_swap_with(
         &self,
         expected: &CommitId,
         record: &LandRecord,
         receipt: Option<&SignedReceipt>,
+        review: ReviewMode,
     ) -> LandResult<CasResult> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(result) = check_attempt(&tx, expected, record)? {
+        if let Some(result) = check_attempt(&tx, expected, record, review)? {
             return Ok(result);
         }
         if let Some(receipt) = receipt {
@@ -364,6 +368,7 @@ fn check_attempt(
     tx: &Connection,
     expected: &CommitId,
     record: &LandRecord,
+    review: ReviewMode,
 ) -> LandResult<Option<CasResult>> {
     let landed: Option<String> = tx
         .query_row(
@@ -377,7 +382,7 @@ fn check_attempt(
             commit: parse_commit(commit)?,
         }));
     }
-    if !change_unmoved(tx, record)? {
+    if !change_unmoved(tx, record, review)? {
         return Ok(Some(CasResult::ChangeMoved));
     }
     match conflicts::check_landable(tx, &record.change.to_string()) {
@@ -445,12 +450,12 @@ fn close_registered_change(tx: &Connection, record: &LandRecord) -> LandResult<(
 
 /// True while the change registry still holds the change at the head the
 /// land merged, in a state that may land, with an approval that still holds
-/// (R7). Read inside the land transaction: a snapshot stored between the
+/// when the project reviews before the land (R7). Read inside the land transaction: a snapshot stored between the
 /// land's read and its swap would otherwise be marked landed without ever
 /// reaching the base, and one that left the head where it was read would
 /// carry the approval it voided onto the base.
 /// A ledger used without the change registry has nothing to contradict.
-fn change_unmoved(tx: &Connection, record: &LandRecord) -> LandResult<bool> {
+fn change_unmoved(tx: &Connection, record: &LandRecord, review: ReviewMode) -> LandResult<bool> {
     if !has_registry(tx)? {
         return Ok(true);
     }
@@ -464,7 +469,10 @@ fn change_unmoved(tx: &Connection, record: &LandRecord) -> LandResult<bool> {
     let unmoved = row.is_some_and(|(state, head)| {
         matches!(state.as_str(), "open" | "ready") && head == record.head.to_hex()
     });
-    Ok(unmoved && approval_holds(tx, &record.change)?)
+    if !unmoved || !review.approval_gates_land() {
+        return Ok(unmoved);
+    }
+    approval_holds(tx, &record.change)
 }
 
 /// An author snapshot sets every approval it voids to invalid for good, so

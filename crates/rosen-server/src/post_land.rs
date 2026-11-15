@@ -1,16 +1,22 @@
-//! Batch full-test verification, separate from R8's post-land housekeeping.
+//! Typed batch verification, separate from R8's post-land housekeeping.
+mod builds;
+pub mod failures;
 pub mod store;
 
 use crate::{landing::Ledger, ServerState};
 use rosen_protocol::{
-    ErrorBody, ErrorCode, EventKind, Outcome, PostLandJob, PostLandWork, Response,
+    CheckKind, ErrorBody, ErrorCode, EventKind, Outcome, PostLandJob, PostLandWork, Response,
 };
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex, PoisonError};
 
-pub async fn handle(state: &Arc<ServerState>, passed: Option<PostLandJob>) -> Outcome {
+pub async fn handle(
+    state: &Arc<ServerState>,
+    passed: Option<PostLandJob>,
+    kind: CheckKind,
+) -> Outcome {
     let state = Arc::clone(state);
-    match tokio::task::spawn_blocking(move || run(&state, passed)).await {
+    match tokio::task::spawn_blocking(move || run(&state, passed, kind)).await {
         Ok(Ok(work)) => Outcome::Ok(Response::PostLand(work)),
         Ok(Err(err)) => Outcome::Error(err),
         Err(err) => Outcome::Error(internal(err)),
@@ -21,10 +27,16 @@ fn open(state: &ServerState) -> Result<Connection, ErrorBody> {
     std::fs::create_dir_all(&state.config.data_dir).map_err(internal)?;
     let conn = crate::metadata::open(&state.config.metadata_path()).map_err(internal)?;
     store::ensure_schema(&conn).map_err(internal)?;
+    builds::ensure_schema(&conn).map_err(internal)?;
+    failures::ensure_schema(&conn).map_err(internal)?;
     Ok(conn)
 }
 
-fn run(state: &ServerState, passed: Option<PostLandJob>) -> Result<PostLandWork, ErrorBody> {
+fn run(
+    state: &ServerState,
+    passed: Option<PostLandJob>,
+    kind: CheckKind,
+) -> Result<PostLandWork, ErrorBody> {
     let mut conn = open(state)?;
     let ledger = Ledger::open(&state.config.metadata_path()).map_err(internal)?;
     let Some((name, _)) = ledger.project_base().map_err(internal)? else {
@@ -35,7 +47,7 @@ fn run(state: &ServerState, passed: Option<PostLandJob>) -> Result<PostLandWork,
     };
     if let Some(job) = passed {
         validate(state, &ledger, &name, &job)?;
-        if !store::passed(&mut conn, &name, &job.commit).map_err(internal)? {
+        if !passed_job(&mut conn, &name, &job).map_err(internal)? {
             return Err(ErrorBody::new(
                 ErrorCode::InvalidArgument,
                 "commit is not a land",
@@ -43,21 +55,28 @@ fn run(state: &ServerState, passed: Option<PostLandJob>) -> Result<PostLandWork,
         }
     }
     deliver(state, &conn)?;
-    let job = store::newest(&conn, &name)
-        .map_err(internal)?
-        .map(|commit| job_at(state, commit))
+    let job = newest(&conn, &name, kind)?
+        .map(|commit| job_at(state, commit, kind))
         .transpose()?;
     Ok(PostLandWork {
         job,
-        last_green: store::last_green(&conn, &name).map_err(internal)?,
+        last_green: last_green(&conn, &name, kind)?,
     })
 }
 
-fn job_at(state: &ServerState, commit: rosen_core::ObjectId) -> Result<PostLandJob, ErrorBody> {
+fn job_at(
+    state: &ServerState,
+    commit: rosen_core::ObjectId,
+    kind: CheckKind,
+) -> Result<PostLandJob, ErrorBody> {
     let config = state.project_config.at_commit(&commit).map_err(internal)?;
     Ok(PostLandJob {
         commit,
-        check_set: config.config.checks.post_land.clone(),
+        kind,
+        check_set: match kind {
+            CheckKind::Test => config.config.checks.post_land.clone(),
+            CheckKind::Build => config.config.checks.pre_land.clone(),
+        },
     })
 }
 
@@ -78,7 +97,7 @@ pub fn validate(
             "commit was never on the base",
         ));
     }
-    if job_at(state, job.commit)? != *job {
+    if job_at(state, job.commit, job.kind)? != *job {
         return Err(ErrorBody::new(
             ErrorCode::InvalidArgument,
             "wrong post-land check set",
@@ -117,4 +136,38 @@ fn deliver(state: &ServerState, conn: &Connection) -> Result<(), ErrorBody> {
 
 fn internal(err: impl std::fmt::Display) -> ErrorBody {
     ErrorBody::new(ErrorCode::Internal, err.to_string())
+}
+
+fn passed_job(conn: &mut Connection, name: &str, job: &PostLandJob) -> rusqlite::Result<bool> {
+    match job.kind {
+        CheckKind::Test => store::passed(conn, name, &job.commit),
+        CheckKind::Build => builds::passed(conn, name, &job.commit),
+    }
+}
+
+pub fn last_green(
+    conn: &Connection,
+    name: &str,
+    kind: CheckKind,
+) -> Result<Option<rosen_core::ObjectId>, ErrorBody> {
+    match kind {
+        CheckKind::Test => store::last_green(conn, name),
+        CheckKind::Build => {
+            builds::ensure_schema(conn).map_err(internal)?;
+            builds::last_green(conn, name)
+        }
+    }
+    .map_err(internal)
+}
+
+fn newest(
+    conn: &Connection,
+    name: &str,
+    kind: CheckKind,
+) -> Result<Option<rosen_core::ObjectId>, ErrorBody> {
+    match kind {
+        CheckKind::Test => store::newest(conn, name),
+        CheckKind::Build => builds::newest(conn, name),
+    }
+    .map_err(internal)
 }

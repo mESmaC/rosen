@@ -7,6 +7,7 @@ pub use model::midpoint;
 use rosen_core::ObjectId;
 use rosen_protocol::{BisectCulprit, BisectResult, BisectState, ErrorBody, ErrorCode};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+pub(crate) use storage::ensure_schema;
 
 type Result<T> = std::result::Result<T, ErrorBody>;
 
@@ -40,11 +41,29 @@ pub fn begin_in(
     failed: ObjectId,
     output: &str,
 ) -> Result<BisectState> {
+    begin_kind_in(
+        conn,
+        name,
+        green,
+        failed,
+        output,
+        rosen_protocol::CheckKind::Test,
+    )
+}
+
+pub fn begin_kind_in(
+    conn: &Connection,
+    name: &str,
+    green: ObjectId,
+    failed: ObjectId,
+    output: &str,
+    kind: rosen_protocol::CheckKind,
+) -> Result<BisectState> {
     storage::ensure_schema(conn).map_err(internal)?;
     if let Some(id) = conn
         .query_row(
-            "SELECT id FROM bisections WHERE ref_name=?1 AND failed=?2",
-            params![name, failed.to_string()],
+            "SELECT id FROM bisections WHERE ref_name=?1 AND failed=?2 AND kind=?3",
+            params![name, failed.to_string(), kind.as_str()],
             |r| r.get(0),
         )
         .optional()
@@ -57,14 +76,15 @@ pub fn begin_in(
     let phase = if high == 1 { "confirm" } else { "search" };
     conn.execute(
         "INSERT INTO bisections
-        (ref_name,failed,commits,low,high,phase,step,output) VALUES (?1,?2,?3,0,?4,?5,0,?6)",
+        (ref_name,failed,commits,low,high,phase,step,output,kind) VALUES (?1,?2,?3,0,?4,?5,0,?6,?7)",
         params![
             name,
             failed.to_string(),
             serde_json::to_string(&commits).map_err(internal)?,
             high,
             phase,
-            output
+            output,
+            kind.as_str()
         ],
     )
     .map_err(internal)?;
@@ -172,7 +192,7 @@ pub async fn handle(
 
 fn apply_confirmed(state: &crate::ServerState, answer: &BisectState) -> Result<()> {
     if let Some(culprit) = &answer.culprit {
-        crate::landing::revert::revert(state, culprit.commit, &culprit.output).map_err(internal)?;
+        crate::post_land::failures::apply(state, answer.id, answer.kind, culprit)?;
     }
     Ok(())
 }

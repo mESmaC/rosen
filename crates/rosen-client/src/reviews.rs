@@ -8,6 +8,31 @@ use rosen_protocol::{
 };
 
 impl Client {
+    pub async fn review_mark(
+        &self,
+        request: rosen_protocol::MarkReviewed,
+    ) -> Result<rosen_protocol::LandedReview, Error> {
+        match self.request(Request::ReviewMark(request)).await? {
+            Response::LandedReview(review) => Ok(review),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    pub async fn review_landed(
+        &self,
+        state: Option<rosen_core::ReviewedState>,
+    ) -> Result<Vec<rosen_protocol::LandedReview>, Error> {
+        match self
+            .request(Request::ReviewLanded(rosen_protocol::LandedFilter {
+                state,
+            }))
+            .await?
+        {
+            Response::LandedReviews(reviews) => Ok(reviews),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Approve exactly the head read by the reviewer.
     pub async fn review_approve(
         &self,

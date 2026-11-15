@@ -57,7 +57,8 @@ Exit status:
 /// the base ref by compare-and-swap, with no queue or lock.
 ///
 /// Typical flow: `rosen change new`, edit files, `rosen claim <paths>`,
-/// get a review and a receipt, then `rosen land <change>`.
+/// name it with `rosen commit`, then `rosen land <change>`. Before-land
+/// projects also require approval and a receipt.
 #[derive(Debug, Parser)]
 #[command(
     name = "rosen",
@@ -194,9 +195,9 @@ pub enum Command {
     Receipt(ReceiptCommand),
     /// Land a change onto the base.
     ///
-    /// Needs no conflicts, an approval for the current head, and a receipt
-    /// for the merge result (except prose-only changes). A stack lands
-    /// bottom first.
+    /// Needs a clean merge and a compare-and-swap. Before-land projects also
+    /// need approval for the current head and a receipt (except prose-only
+    /// changes). After-land projects need neither. A stack lands bottom first.
     Land {
         /// Change to land.
         change: String,
@@ -488,13 +489,32 @@ pub enum ChangeCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ReviewCommand {
+    /// Set review coverage on a landed change; it never gates landing.
+    Mark {
+        change: String,
+        /// unreviewed, reviewed or issues-filed.
+        #[arg(value_parser = ["unreviewed", "reviewed", "issues-filed"])]
+        state: String,
+        #[arg(long)]
+        by: Option<String>,
+    },
+    /// List landed changes and their review coverage, oldest first.
+    Landed {
+        #[arg(long, value_parser = ["unreviewed", "reviewed", "issues-filed"])]
+        state: Option<String>,
+    },
+    /// List confirmed post-land failures, including those that did not revert.
+    Failures {
+        #[arg(long)]
+        change: Option<String>,
+    },
     /// Start a review thread on a line of a change, or reply in a thread.
     ///
     /// A new thread anchors to --path and --line at the change's current
     /// head, and the path must be a file there with that line. The anchor
     /// never moves, even when the author edits the file later. A reply
     /// (--thread) to a resolved thread reopens it. Prints the whole thread.
-    /// Only open and ready changes take comments.
+    /// After-land projects also accept comments on landed changes.
     Comment {
         /// Change to comment on: its ID or a unique prefix.
         change: String,
@@ -787,6 +807,9 @@ impl ChangeCommand {
 impl ReviewCommand {
     fn path(&self) -> &'static str {
         match self {
+            ReviewCommand::Mark { .. } => "review mark",
+            ReviewCommand::Landed { .. } => "review landed",
+            ReviewCommand::Failures { .. } => "review failures",
             ReviewCommand::Comment { .. } => "review comment",
             ReviewCommand::Approve { .. } => "review approve",
             ReviewCommand::Resolve { .. } => "review resolve",

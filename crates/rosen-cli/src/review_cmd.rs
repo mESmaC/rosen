@@ -17,6 +17,9 @@ use crate::output::REVIEW_THREAD_SCHEMA as THREAD_SCHEMA;
 /// A review command with its arguments checked, ready to send.
 enum ReviewCall {
     Comment(CommentRequest),
+    Mark(rosen_client::protocol::MarkReviewed),
+    Landed(Option<rosen_core::ReviewedState>),
+    Failures(Option<String>),
     Approve(ApproveRequest),
     Approvals(String),
     Resolve(ResolveRequest),
@@ -32,6 +35,24 @@ pub async fn run(
     let call = parse(command)?;
     let client = rosen_client::connect_or_start(endpoint).await?;
     match call {
+        ReviewCall::Mark(req) => print_record(
+            json,
+            crate::output::REVIEW_COVERAGE_SCHEMA,
+            "review",
+            &client.review_mark(req).await?,
+        ),
+        ReviewCall::Landed(state) => print_record(
+            json,
+            crate::output::REVIEW_COVERAGE_LIST_SCHEMA,
+            "reviews",
+            &client.review_landed(state).await?,
+        ),
+        ReviewCall::Failures(change) => print_record(
+            json,
+            crate::output::POST_LAND_FAILURES_SCHEMA,
+            "failures",
+            &client.post_land_failures(change).await?,
+        ),
         ReviewCall::Approve(req) => print_approval(json, &client.review_approve(req).await?),
         ReviewCall::Comment(req) => print_thread(json, &client.review_comment(req).await?),
         ReviewCall::Resolve(req) => print_thread(json, &client.review_resolve(req).await?),
@@ -45,6 +66,17 @@ pub async fn run(
 
 fn parse(command: &ReviewCommand) -> Result<ReviewCall, Error> {
     Ok(match command {
+        ReviewCommand::Mark { change, state, by } => {
+            ReviewCall::Mark(rosen_client::protocol::MarkReviewed {
+                change: change.clone(),
+                state: parse_reviewed(state)?,
+                by: resolve_owner(by.as_deref())?,
+            })
+        }
+        ReviewCommand::Landed { state } => {
+            ReviewCall::Landed(state.as_deref().map(parse_reviewed).transpose()?)
+        }
+        ReviewCommand::Failures { change } => ReviewCall::Failures(change.clone()),
         ReviewCommand::Comment {
             change,
             path,
@@ -200,5 +232,21 @@ fn print_approvals(json: bool, approvals: &[Approval]) {
                 approval.head
             );
         }
+    }
+}
+
+fn parse_reviewed(text: &str) -> Result<rosen_core::ReviewedState, Error> {
+    text.parse()
+        .map_err(|error: rosen_core::Error| Error::InvalidArgument(error.to_string()))
+}
+
+fn print_record(json_output: bool, schema: &str, field: &str, value: &impl serde::Serialize) {
+    if json_output {
+        println!("{}", json!({"schema":schema, field:value}));
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(value).expect("review output serializes")
+        );
     }
 }

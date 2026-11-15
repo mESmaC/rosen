@@ -2,7 +2,7 @@ use super::model::Session;
 use rosen_protocol::{ErrorBody, ErrorCode};
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub(super) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
+pub(crate) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS bisections (
         id INTEGER PRIMARY KEY, ref_name TEXT NOT NULL,
@@ -10,13 +10,14 @@ pub(super) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         low INTEGER NOT NULL, high INTEGER NOT NULL,
         phase TEXT NOT NULL, step INTEGER NOT NULL, output TEXT NOT NULL,
         UNIQUE(ref_name,failed));",
-    )
+    )?;
+    migrate_kind(conn)
 }
 
 pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {
     let row = conn
         .query_row(
-            "SELECT commits,low,high,phase,step,output FROM bisections WHERE id=?1",
+            "SELECT commits,low,high,phase,step,output,kind FROM bisections WHERE id=?1",
             [id],
             |r| {
                 Ok((
@@ -26,6 +27,7 @@ pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             },
         )
@@ -40,6 +42,11 @@ pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {
         phase: row.3,
         step: row.4,
         output: row.5,
+        kind: if row.6 == "build" {
+            rosen_protocol::CheckKind::Build
+        } else {
+            rosen_protocol::CheckKind::Test
+        },
     })
 }
 
@@ -57,4 +64,32 @@ pub(super) fn save(conn: &Connection, session: &Session) -> Result<(), ErrorBody
     )
     .map_err(super::internal)?;
     Ok(())
+}
+
+fn migrate_kind(conn: &Connection) -> rusqlite::Result<()> {
+    let present: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bisections') WHERE name='kind')",
+        [],
+        |r| r.get(0),
+    )?;
+    if present {
+        return Ok(());
+    }
+    if conn.is_autocommit() {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        migrate_kind(&tx)?;
+        return tx.commit();
+    }
+    conn.execute_batch(
+        "ALTER TABLE bisections RENAME TO bisections_legacy;
+        CREATE TABLE bisections (
+        id INTEGER PRIMARY KEY, ref_name TEXT NOT NULL,
+        failed TEXT NOT NULL, commits TEXT NOT NULL,
+        low INTEGER NOT NULL, high INTEGER NOT NULL,
+        phase TEXT NOT NULL, step INTEGER NOT NULL, output TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('build','test')), UNIQUE(ref_name,failed,kind));
+        INSERT INTO bisections SELECT *, 'test' FROM bisections_legacy;
+        DROP TABLE bisections_legacy;",
+    )
 }

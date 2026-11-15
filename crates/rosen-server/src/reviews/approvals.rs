@@ -3,7 +3,7 @@
 use super::ReviewError;
 use crate::changes;
 use crate::events::Staged;
-use rosen_core::{ChangeId, ObjectId};
+use rosen_core::{ChangeId, ObjectId, ReviewMode};
 use rosen_protocol::{Approval, ApproveRequest, EventKind};
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde_json::json;
@@ -24,18 +24,23 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     changes::schema::add_text_column(conn, "review_approvals", "machine")
 }
 
-/// Records an approval from a client on the server's own machine.
+/// Records an approval from a client on the server's own machine, in a
+/// `before-land` project.
 pub fn approve(conn: &mut Connection, req: &ApproveRequest) -> Result<Approval, ReviewError> {
-    approve_on(conn, req, crate::machines::signing::SERVER_MACHINE)
+    let machine = crate::machines::signing::SERVER_MACHINE;
+    approve_on(conn, req, machine, ReviewMode::BeforeLand)
 }
 
 /// Records an approval from a reviewer on `machine`, which the caller took
 /// from the connection (R14). A nick holding `@` could pass for another
 /// machine's reviewer in the landed commit's trailer, so it is refused.
+/// Under `review`'s `after-land` setting a landed change can be approved
+/// too: the approval records the review and gates nothing (R7).
 pub fn approve_on(
     conn: &mut Connection,
     req: &ApproveRequest,
     machine: &str,
+    review: ReviewMode,
 ) -> Result<Approval, ReviewError> {
     if req.reviewer.as_str().contains('@') {
         return Err(ReviewError::Invalid(format!(
@@ -46,7 +51,7 @@ pub fn approve_on(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let id = changes::resolve(&tx, &req.change)?;
     let record = changes::get(&tx, id)?;
-    super::check_reviewable(&record)?;
+    super::check_reviewable(&record, review)?;
     super::check_head(Some(req.head), record.change.head)?;
     let now = super::store::now_millis();
     tx.execute(

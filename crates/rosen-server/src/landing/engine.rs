@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rosen_core::history::{LandedTrailers, ReceiptTrailer};
-use rosen_core::{ReceiptRefusal, Signature, PRE_LAND_CHECK_SET};
+use rosen_core::{ReceiptRefusal, ReviewMode, Signature, PRE_LAND_CHECK_SET};
 
 use super::receipt_store::{ReceiptLookup, SignedReceipt};
 use super::restack::Restacker;
@@ -26,6 +26,9 @@ pub struct LandingConfig {
     pub base_ref: String,
     /// Name of the pre-land check set receipts must cover (D20).
     pub pre_land_check_set: String,
+    /// Whether an approval gates a land (R7), for an engine with no object
+    /// store to read each base's configuration from.
+    pub review: ReviewMode,
     pub max_attempts: u32,
     pub backoff_start: Duration,
     pub backoff_cap: Duration,
@@ -36,6 +39,7 @@ impl Default for LandingConfig {
         LandingConfig {
             base_ref: "main".into(),
             pre_land_check_set: PRE_LAND_CHECK_SET.into(),
+            review: ReviewMode::BeforeLand,
             // A land must commit in under 200 ms (R8); these bounds keep the
             // worst-case backoff total well inside that.
             max_attempts: 12,
@@ -104,6 +108,14 @@ enum Attempt {
 struct Gathered {
     input: LandInput,
     receipt: Option<SignedReceipt>,
+}
+
+/// The parts of the configuration at one base that a land attempt is bound
+/// to (R8 step 1): the check set its receipt must name, and whether an
+/// approval gates it (R7).
+struct LandPolicy {
+    check_set: String,
+    review: ReviewMode,
 }
 
 /// What one [`Landing::recover`] pass did.
@@ -328,9 +340,10 @@ impl Landing {
         let mut facts = self.facts(change)?;
         let base = self.current_base()?;
         facts.tier = self.deps.book.tier_at(&facts, &base)?;
+        let policy = self.policy_at(&base)?;
         // A receipt on a base newer than the one read means the base moved
         // mid-attempt; retrying reads that base instead of failing the land.
-        let Some(mut gathered) = self.gather(&facts, &base)? else {
+        let Some(mut gathered) = self.gather(&facts, &base, &policy)? else {
             return Ok(Attempt::Retry);
         };
         if !rules::needs_merge(&gathered.input) {
@@ -343,7 +356,8 @@ impl Landing {
         gathered.input.merge_clean = matches!(outcome, MergeOutcome::Clean(_));
         match (rules::decide(&gathered.input), outcome) {
             (Verdict::Land, MergeOutcome::Clean(tree)) => {
-                self.commit_land(&facts, base, tree, gathered.receipt, attempt)
+                let review = gathered.input.review;
+                self.commit_land(&facts, base, tree, gathered.receipt, review, attempt)
             }
             (Verdict::Refuse(Refusal::MergeConflict), MergeOutcome::Conflicted(paths)) => {
                 let routing = self.deps.book.record_conflicts_at(
@@ -370,7 +384,12 @@ impl Landing {
 
     /// Reads the decision inputs, or `None` when the change's newest receipt
     /// is bound to a base the ref reached after `base` was read.
-    fn gather(&self, facts: &ChangeFacts, base: &CommitId) -> LandResult<Option<Gathered>> {
+    fn gather(
+        &self,
+        facts: &ChangeFacts,
+        base: &CommitId,
+        policy: &LandPolicy,
+    ) -> LandResult<Option<Gathered>> {
         let parent_landed = match &facts.parent {
             ChangeParent::Base(_) => true,
             ChangeParent::Change(parent) => self.ledger.landing_of(parent)?.is_some(),
@@ -380,6 +399,7 @@ impl Landing {
             parent_landed,
             has_conflicts: facts.has_conflicts,
             approved: facts.approved_head == Some(facts.head),
+            review: policy.review,
             tier: facts.tier,
             receipt: ReceiptCheck::Missing,
             base_moved: false,
@@ -387,7 +407,7 @@ impl Landing {
             // Filled in once the merge has run.
             merge_clean: true,
         };
-        if facts.tier == Tier::ProseOnly {
+        if policy.review == ReviewMode::AfterLand || facts.tier == Tier::ProseOnly {
             return Ok(Some(Gathered {
                 input,
                 receipt: None,
@@ -397,7 +417,7 @@ impl Landing {
             &self.config.base_ref,
             &facts.id,
             &facts.head,
-            &self.check_set_at(base)?,
+            &policy.check_set,
             base,
         )?;
         let receipt = match lookup {
@@ -421,11 +441,25 @@ impl Landing {
     /// Resolve against the attempt's immutable base. A cached engine can
     /// outlive a config land, including when its own CAS loses that race.
     pub(crate) fn check_set_at(&self, base: &CommitId) -> LandResult<String> {
+        self.policy_at(base).map(|policy| policy.check_set)
+    }
+
+    /// The check set and review setting at `base`, read once per attempt so
+    /// both bind to the base its compare-and-swap requires. A change cannot
+    /// switch off its own approval requirement: the setting takes effect
+    /// only once it lands.
+    fn policy_at(&self, base: &CommitId) -> LandResult<LandPolicy> {
         match &self.recheck_store {
             Some(store) => crate::project_config::resolve(store.as_ref(), base)
-                .map(|resolved| resolved.config.checks.pre_land.name.clone())
+                .map(|resolved| LandPolicy {
+                    check_set: resolved.config.checks.pre_land.name.clone(),
+                    review: resolved.config.review,
+                })
                 .map_err(|error| LandError::Backend(error.to_string())),
-            None => Ok(self.config.pre_land_check_set.clone()),
+            None => Ok(LandPolicy {
+                check_set: self.config.pre_land_check_set.clone(),
+                review: self.config.review,
+            }),
         }
     }
 
@@ -455,6 +489,7 @@ impl Landing {
         base: CommitId,
         tree: TreeId,
         receipt: Option<SignedReceipt>,
+        review: ReviewMode,
         attempts: u32,
     ) -> LandResult<Attempt> {
         let landed = landed_commit(facts, base, tree, receipt.as_ref())?;
@@ -470,7 +505,7 @@ impl Landing {
         };
         let swap = self
             .ledger
-            .compare_and_swap_with(&base, &record, receipt.as_ref())?;
+            .compare_and_swap_with(&base, &record, receipt.as_ref(), review)?;
         match swap {
             CasResult::Swapped { .. } => Ok(Attempt::Committed(CommittedLand { record, attempts })),
             // A moved change is decided afresh, like a moved base: the retry

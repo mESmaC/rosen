@@ -63,9 +63,7 @@ async fn origin_machine(
         .map_err(|join| ErrorBody::new(ErrorCode::Internal, join.to_string()))?;
     found
         .map_err(|err| ErrorBody::new(ErrorCode::Internal, err.to_string()))?
-        .ok_or_else(|| {
-            ErrorBody::new(ErrorCode::Refused, "machine credential required or revoked")
-        })
+        .ok_or_else(|| ErrorBody::new(ErrorCode::Refused, "machine credential required or revoked"))
 }
 
 /// Runs one request to completion for a client on the server's own machine.
@@ -84,6 +82,24 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::PostLandFailed { job, output } => {
             crate::bisect::failure::handle(state, job, output).await
         }
+        Request::PostLandNext => {
+            crate::post_land::handle(state, None, rosen_protocol::CheckKind::Test).await
+        }
+        Request::PostLandBuildNext => {
+            crate::post_land::handle(state, None, rosen_protocol::CheckKind::Build).await
+        }
+        Request::PostLandFailures { change } => {
+            crate::post_land::failures::handle(state, change).await
+        }
+        Request::PostLandPassed(job) => {
+            crate::post_land::handle(state, Some(job.clone()), job.kind).await
+        }
+        request => dispatch_machine_management(state, request).await,
+    }
+}
+
+async fn dispatch_machine_management(state: &Arc<ServerState>, request: Request) -> Outcome {
+    match request {
         Request::MachineList => {
             crate::machines::manage::handle(state, |c| {
                 crate::machines::manage::list(c).map(Response::Machines)
@@ -114,6 +130,12 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
             })
             .await
         }
+        request => dispatch_enrollment(state, request).await,
+    }
+}
+
+async fn dispatch_enrollment(state: &Arc<ServerState>, request: Request) -> Outcome {
+    match request {
         Request::JoinKeyCreate(req) => crate::machines::create(state, req).await,
         Request::MachineEnroll {
             key,
@@ -129,8 +151,12 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
             crate::machines::pending(state, name, role, source, receipt_key).await
         }
         Request::MachineRotate { credential } => crate::machines::rotate(state, credential).await,
-        Request::PostLandNext => crate::post_land::handle(state, None).await,
-        Request::PostLandPassed(job) => crate::post_land::handle(state, Some(job)).await,
+        request => dispatch_project(state, request).await,
+    }
+}
+
+async fn dispatch_project(state: &Arc<ServerState>, request: Request) -> Outcome {
+    match request {
         Request::PoolSize { size } => state.pool.set_size(size).await,
         Request::PoolTake { tree, dest } => state.pool.take(tree, dest).await,
         Request::LandedProse(query) => crate::landing::service::landed_prose(state, query).await,
@@ -145,6 +171,12 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
             branch,
             mirror,
         } => crate::import::service::handle(state, source, branch, mirror).await,
+        request => dispatch_changes(state, request).await,
+    }
+}
+
+async fn dispatch_changes(state: &Arc<ServerState>, request: Request) -> Outcome {
+    match request {
         Request::ChangeNew(params) => {
             on_changes(state, move |c| c.create(&params).map(Response::Change)).await
         }
@@ -174,6 +206,12 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::AckEvents { subscriber, seq } => {
             crate::events::acknowledge(state, subscriber, seq).await
         }
+        request => dispatch_reviews(state, request).await,
+    }
+}
+
+async fn dispatch_reviews(state: &Arc<ServerState>, request: Request) -> Outcome {
+    match request {
         Request::ReviewApprove(req) => {
             let machine = crate::machines::signing::SERVER_MACHINE.to_owned();
             crate::reviews::handle(state, ReviewCall::Approve(req, machine)).await
@@ -187,6 +225,10 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::ReviewResolve(req) => {
             crate::reviews::handle(state, ReviewCall::Resolve(req)).await
         }
+        Request::ReviewMark(req) => crate::reviews::handle(state, ReviewCall::Mark(req)).await,
+        Request::ReviewLanded(filter) => {
+            crate::reviews::handle(state, ReviewCall::Landed(filter)).await
+        }
         Request::ReviewList(filter) => {
             crate::reviews::handle(state, ReviewCall::List(filter)).await
         }
@@ -195,6 +237,12 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         }
         Request::Land { change } => crate::landing::service::land(state, change).await,
         Request::ConflictResolve(req) => crate::conflict_resolve::handle(state, req).await,
+        request => dispatch_objects(state, request).await,
+    }
+}
+
+async fn dispatch_objects(state: &Arc<ServerState>, request: Request) -> Outcome {
+    match request {
         Request::GetObjects(query) => crate::objects::get(state, query).await,
         Request::GetObjectChunk(query) => crate::objects::get_chunk(state, query).await,
         Request::EnsureObjects(ensure) => crate::objects::ensure(state, ensure).await,
@@ -212,6 +260,7 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::WorkspaceWriteBlob(req) => crate::workspaces::write_blob(state, req).await,
         Request::ConfigShow(query) => crate::project_config::show(state, query).await,
         Request::Channel(call) => crate::channel::handle(state, call).await,
+        _ => unreachable!("request was handled by an earlier dispatch group"),
     }
 }
 

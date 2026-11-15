@@ -4,6 +4,25 @@ use crate::Error;
 use rosen_protocol::{PostLandJob, PostLandWork, Request, Response};
 
 impl Client {
+    /// Build/lint jobs after landing, independently of the test prefix.
+    pub async fn post_land_build_next(&self) -> Result<PostLandWork, Error> {
+        match self.request(Request::PostLandBuildNext).await? {
+            Response::PostLand(work) => Ok(work),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Durable confirmed failures, including test failures that did not revert.
+    pub async fn post_land_failures(
+        &self,
+        change: Option<String>,
+    ) -> Result<Vec<rosen_protocol::PostLandFailure>, Error> {
+        match self.request(Request::PostLandFailures { change }).await? {
+            Response::PostLandFailures(failures) => Ok(failures),
+            other => Err(unexpected(other)),
+        }
+    }
+
     pub async fn post_land_next(&self) -> Result<PostLandWork, Error> {
         match self.request(Request::PostLandNext).await? {
             Response::PostLand(work) => Ok(work),

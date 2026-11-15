@@ -3,6 +3,9 @@
 # takes effect only once it lands. Unknown keys are refused.
 # `rosen config show` prints the configuration in force.
 
+# Review and checks follow clean optimistic lands; only broken builds revert (#365).
+review = "after-land"
+
 # Untracked paths snapshots skip (R2), in .gitignore syntax. They rank below
 # the .gitignore files, which already cover build output. These keep
 # credentials a tool or a person leaves in a workspace out of every snapshot,
@@ -69,7 +72,7 @@ sensitive = [
 # unit, read from the manifests at the base, so a new crate or dependency
 # needs no edit here.
 
-# Build and lint on the exact merge result, before a land (R8). Each command
+# Build and lint after landing here; before-land projects use receipts (R8). Each command
 # is one line that runs the same from cmd, PowerShell and sh.
 [checks.pre_land]
 commands = [
@@ -77,8 +80,8 @@ commands = [
     "cargo clippy --workspace --all-targets --locked -- -D warnings",
 ]
 
-# The full tests, on landed commits in batches (R12). A commit that fails
-# them twice while its parent passes is reverted.
+# The full tests, on landed commits in batches (R12). Confirmed failures
+# are recorded for follow-up; only build/lint failures revert in after-land mode.
 [checks.post_land]
 commands = [
     "cargo test --workspace --locked",

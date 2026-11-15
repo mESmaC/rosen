@@ -5,7 +5,7 @@
 use super::ReviewError;
 use crate::changes;
 use crate::events::stage;
-use rosen_core::{AgentId, ChangeId, ObjectId, ThreadState};
+use rosen_core::{AgentId, ChangeId, ObjectId, ReviewMode, ThreadState};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -53,6 +53,20 @@ pub struct NewThread<'a> {
     pub line: u32,
     pub author: &'a AgentId,
     pub body: &'a str,
+    /// The review setting at the base, which decides whether a landed change
+    /// takes comments (R7).
+    pub review: ReviewMode,
+}
+
+/// A reply in a thread on `change`.
+pub struct Reply<'a> {
+    pub change: ChangeId,
+    /// The head the replier read; the reply is refused if the change moved.
+    pub expected_head: Option<ObjectId>,
+    pub thread: u64,
+    pub author: &'a AgentId,
+    pub body: &'a str,
+    pub review: ReviewMode,
 }
 
 /// Stores a new thread, unless the change's head moved after the anchor was
@@ -62,7 +76,7 @@ pub fn open_thread(
     new: &NewThread,
 ) -> Result<Option<ReviewThread>, ReviewError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if live_head(&tx, new.change)? != new.head {
+    if live_head(&tx, new.change, new.review)? != new.head {
         return Ok(None);
     }
     let now = now_millis();
@@ -90,14 +104,15 @@ pub fn open_thread(
 
 /// Appends a reply to a thread on `change`, reopening it if it was resolved.
 /// Returns the thread and whether the reply reopened it.
-pub fn reply(
-    conn: &mut Connection,
-    change: ChangeId,
-    expected_head: Option<ObjectId>,
-    thread: u64,
-    author: &AgentId,
-    body: &str,
-) -> Result<(ReviewThread, bool), ReviewError> {
+pub fn reply(conn: &mut Connection, reply: &Reply) -> Result<(ReviewThread, bool), ReviewError> {
+    let Reply {
+        change,
+        expected_head,
+        thread,
+        author,
+        body,
+        review,
+    } = *reply;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let before = load(&tx, thread)?;
     if before.change != change {
@@ -106,7 +121,7 @@ pub fn reply(
             before.change
         )));
     }
-    let head = live_head(&tx, change)?;
+    let head = live_head(&tx, change, review)?;
     super::check_head(expected_head, head)?;
     let now = now_millis();
     insert_comment(&tx, thread, author, body, head, now)?;
@@ -170,9 +185,13 @@ pub fn list(
 }
 
 /// The change's head, refusing a change that can no longer be reviewed.
-fn live_head(tx: &Transaction, change: ChangeId) -> Result<ObjectId, ReviewError> {
+fn live_head(
+    tx: &Transaction,
+    change: ChangeId,
+    review: ReviewMode,
+) -> Result<ObjectId, ReviewError> {
     let record = changes::get(tx, change)?;
-    super::check_reviewable(&record)?;
+    super::check_reviewable(&record, review)?;
     Ok(record.change.head)
 }
 

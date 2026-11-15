@@ -60,6 +60,48 @@ impl FromStr for ThreadState {
     }
 }
 
+/// Whether anyone has reviewed a landed change (R7). Reviewers set it after
+/// the land, so coverage is visible in a project where review does not gate
+/// landing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewedState {
+    Unreviewed,
+    Reviewed,
+    /// Reviewed, and the reviewer filed issues for what it found.
+    IssuesFiled,
+}
+
+impl ReviewedState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewedState::Unreviewed => "unreviewed",
+            ReviewedState::Reviewed => "reviewed",
+            ReviewedState::IssuesFiled => "issues_filed",
+        }
+    }
+}
+
+impl fmt::Display for ReviewedState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ReviewedState {
+    type Err = Error;
+    fn from_str(text: &str) -> Result<Self, Error> {
+        match text.replace('-', "_").as_str() {
+            "unreviewed" => Ok(ReviewedState::Unreviewed),
+            "reviewed" => Ok(ReviewedState::Reviewed),
+            "issues_filed" => Ok(ReviewedState::IssuesFiled),
+            _ => Err(Error::InvalidReview(format!(
+                "unknown reviewed state {text:?}; use unreviewed, reviewed or issues-filed"
+            ))),
+        }
+    }
+}
+
 /// Normalises the file a comment anchors to: a repository-relative path to
 /// one file, with `/` separators. Globs and directories name no single line,
 /// so they are refused.

@@ -1,6 +1,9 @@
 //! Risk: the Rust land decision drifting from the proven Lean model would let
-//! the server land unbuilt or unapproved code (SPEC R8). Every row of the
+//! the server bypass configured gates or revert an after-land test failure
+//! (SPEC R7, R8, R12). Every row of the
 //! table exported from `proofs/Landing/Design.lean` must match `decide`.
+
+use rosen_core::ReviewMode;
 
 use rosen_server::landing::rules::{decide, LandInput, ReceiptCheck};
 use rosen_server::landing::{ChangeState, Tier};
@@ -23,6 +26,14 @@ fn states(cell: &str) -> Vec<ChangeState> {
     }
 }
 
+fn review(cell: &str) -> ReviewMode {
+    match cell {
+        "before-land" => ReviewMode::BeforeLand,
+        "after-land" => ReviewMode::AfterLand,
+        other => panic!("bad review mode {other}"),
+    }
+}
+
 fn receipt(cell: &str) -> ReceiptCheck {
     match cell {
         "missing" => ReceiptCheck::Missing,
@@ -40,24 +51,40 @@ fn decide_matches_lean_fixture_table() {
     );
     let table = std::fs::read_to_string(path).expect("fixture table");
     let mut checked = 0;
+    let mut failures_checked = 0;
     for line in table.lines().skip(1) {
         let cells: Vec<&str> = line.split('\t').collect();
-        assert_eq!(cells.len(), 10, "row {line}");
+        if cells[0] == "failure" {
+            failures_checked += 1;
+            let kind = if bit(cells[2]) {
+                rosen_protocol::CheckKind::Build
+            } else {
+                rosen_protocol::CheckKind::Test
+            };
+            assert_eq!(
+                rosen_server::post_land::failures::failure_reverts(review(cells[1]), kind),
+                bit(cells[3])
+            );
+            continue;
+        }
+        assert_eq!(cells.len(), 11, "row {line}");
         for state in states(cells[0]) {
             let input = LandInput {
                 state,
                 parent_landed: bit(cells[1]),
                 has_conflicts: bit(cells[2]),
                 approved: bit(cells[3]),
-                tier: Tier::parse(cells[4]).expect("tier"),
-                receipt: receipt(cells[5]),
-                base_moved: bit(cells[6]),
-                landed_since_all_independent: bit(cells[7]),
-                merge_clean: bit(cells[8]),
+                review: review(cells[4]),
+                tier: Tier::parse(cells[5]).expect("tier"),
+                receipt: receipt(cells[6]),
+                base_moved: bit(cells[7]),
+                landed_since_all_independent: bit(cells[8]),
+                merge_clean: bit(cells[9]),
             };
-            assert_eq!(decide(&input).code(), cells[9], "row {line} as {state:?}");
+            assert_eq!(decide(&input).code(), cells[10], "row {line} as {state:?}");
             checked += 1;
         }
     }
+    assert_eq!(failures_checked, 4);
     assert!(checked > 1000, "fixture table too small: {checked}");
 }

@@ -19,10 +19,13 @@ use crate::history::{
     ReadAnswer, ReadRequest,
 };
 use crate::land::LandAnswer;
-use crate::objects::{EnsureObjects, ObjectBatch, ObjectChunk, ObjectChunkQuery, ObjectQuery, ObjectsLocal};
+use crate::objects::{
+    EnsureObjects, ObjectBatch, ObjectChunk, ObjectChunkQuery, ObjectQuery, ObjectsLocal,
+};
 use crate::receipt::{ReceiptRecord, SubmitReceipt};
 use crate::review::{
-    Approval, ApproveRequest, CommentRequest, ResolveRequest, ReviewThread, ThreadFilter,
+    Approval, ApproveRequest, CommentRequest, LandedFilter, LandedReview, MarkReviewed,
+    ResolveRequest, ReviewThread, ThreadFilter,
 };
 use crate::snapshot::{
     BlobChunk, BlobChunkStored, ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest,
@@ -124,10 +127,16 @@ pub enum Request {
     /// Submits one exact bisection job; stale results are refused.
     BisectSubmit(crate::BisectResult),
     MachineList,
-    MachineApprove { machine: String },
-    MachineRevoke { machine: String },
+    MachineApprove {
+        machine: String,
+    },
+    MachineRevoke {
+        machine: String,
+    },
     JoinKeyList,
-    JoinKeyRevoke { key: String },
+    JoinKeyRevoke {
+        key: String,
+    },
     JoinKeyCreate(crate::CreateJoinKey),
     MachineEnroll {
         key: String,
@@ -150,6 +159,12 @@ pub enum Request {
     },
     /// Offers the newest untested landed commit to an external checker (R12).
     PostLandNext,
+    /// Build/lint jobs use an independent verification prefix (R12).
+    PostLandBuildNext,
+    /// Confirmed failures, optionally belonging to one change.
+    PostLandFailures {
+        change: Option<String>,
+    },
     /// Starts bisection from the stored green boundary after a batch failure.
     PostLandFailed {
         job: crate::PostLandJob,
@@ -218,13 +233,19 @@ pub enum Request {
     ReviewResolve(ResolveRequest),
     /// Lists a change's review threads with their comments, oldest first.
     ReviewList(ThreadFilter),
+    /// Sets a landed change's reviewed state (R7). Answered with the
+    /// change's [`LandedReview`].
+    ReviewMark(MarkReviewed),
+    /// Lists landed changes with their reviewed state, oldest land first.
+    ReviewLanded(LandedFilter),
     /// Records that a check set passed on a change's merge result onto one
     /// base commit (R8 step 1). Refused unless it names the change's current
     /// head, the pre-land check set and a commit the base ref has held.
     ReceiptSubmit(SubmitReceipt),
     /// Lands a change onto the base (R8 step 2): one commit, moved onto the
-    /// base by compare-and-swap, only with no conflicts, an approval for the
-    /// current head and a receipt that counts on the current base. Marks an
+    /// base by compare-and-swap, only with no conflicts, a receipt that
+    /// counts on the current base and, in a `before-land` project, an
+    /// approval for the current head. Marks an
     /// open change ready first: asking to land is what `ready` means.
     Land {
         /// A change ID or unique prefix of one.
@@ -324,6 +345,7 @@ pub enum Response {
     },
     MachineCredential(crate::MachineCredential),
     PostLand(crate::post_land::PostLandWork),
+    PostLandFailures(Vec<crate::PostLandFailure>),
     Pong,
     PoolSized,
     /// The handed-over workspace, or None when the pool had none to give.
@@ -356,6 +378,8 @@ pub enum Response {
     ReviewThreads(Vec<ReviewThread>),
     Approval(Approval),
     Approvals(Vec<Approval>),
+    LandedReview(LandedReview),
+    LandedReviews(Vec<LandedReview>),
     Receipt(ReceiptRecord),
     Land(LandAnswer),
     ConflictsResolved(crate::ConflictsResolved),
@@ -498,6 +522,8 @@ pub enum EventKind {
     Green,
     /// The change was reverted after failing post-land checks (R12).
     Reverted,
+    /// A confirmed post-land failure, including its check kind and culprit.
+    PostLandFailure,
     /// A git mirror push failed or recovered (R1). Sent to every subscriber.
     Mirror,
     /// An AIRC channel line (R13), with its channel-specific payload in detail.
