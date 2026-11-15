@@ -12,7 +12,8 @@
   A record the server fails with an internal error, which may be a passing store or database failure, stays first in the journal and the watcher keeps retrying it on the same schedule; a retry of a tree whose objects the server already took sends only the snapshot request again.
   A workspace-local tree cache allows the watcher to start offline.
   A workspace-local stat cache keeps each tracked file's size and modification time with the blob it held, recorded when the workspace is materialised and after each full scan, and only for times at least 2 s old, as a later write in the same clock tick could leave a newer one unchanged.
-  A full scan by a new writer, such as `rosen commit` or a watcher start, rereads only files whose size or time differs from it, instead of every tracked file.
+  A full scan by a new writer, such as `rosen commit` or a watcher start, skips tracked files whose size and modification time match a trusted cached stat; it rereads new files and files with missing or differing stats.
+  A write that preserves size and restores the cached modification time can therefore be missed by a full scan. A watcher notification for a file forces that file to be reread regardless of its stats; workspace deletion (R4) always verifies content. See [Held files](held-files.md) for the full-read commit escape hatch.
   Snapshot writers take turns: a second writer, such as `rosen commit` while the watcher runs, waits for the first instead of failing.
   A writer that finds another writer's snapshot captured since its own scans every file, so it never stores an older version of a file the other stored.
   A named snapshot whose answer was lost is looked up before it is replayed, so its commit is recorded once.
