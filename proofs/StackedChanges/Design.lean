@@ -1,13 +1,10 @@
-/-! Design proof: stacked changes (SPEC.md R8 step 3). Models parent-update
-propagation through a stack (`stacks.rs` `reconcile`/`step`) and the land gate
-that makes a stack land bottom first. `eligible` is exported to
-`fixtures/stacked-changes.tsv`, checked by `stack_selection_matches_proved_fixture`. -/
+/-! SPEC.md R8 step 3: stack propagation, merge results and bottom-first lands.
+Fixtures check selection and server merge results in `stacked-changes.tsv`. -/
 namespace StackedChanges
 /-- The selection rule of `stacks::eligible` and the `step` query. -/
 def eligible (closed parentClosed conflicted sameBasis : Bool) : Bool :=
   !closed && !parentClosed && !conflicted && !sameBasis
-/-- One change in a stack: its ID and authored commits never change; `basis`
-is the parent tree the change was last merged onto (`stack_bases`). -/
+/-- IDs/commits stay fixed; `basis` is the recorded parent tree (`stack_bases`). -/
 structure Node where
   id : Nat
   commits : List Nat
@@ -29,23 +26,19 @@ def mergeNode (q c : Node) : Node :=
   | some tree => { c with head := tree, basis := q.head }
   | none => { c with conflicted := true }
 def settle (q c : Node) : Node := if pending q c then mergeNode merge q c else c
-/-- One `step`: the stack is listed bottom to top under its root `q`, and a
-parent is created before its children, so `ORDER BY created_at` takes the
-lowest pending edge. `none` when no edge is pending. -/
+/-- Bottom-to-top `ORDER BY created_at` takes the lowest pending edge. -/
 def step (q : Node) : List Node → Option (List Node)
   | [] => none
   | c :: cs => if pending q c then some (mergeNode merge q c :: cs)
       else (step c cs).map (c :: ·)
-/-- `reconcile` with `n` iterations of fuel: the stack, merges and
-selection queries run. Each iteration runs one selection query. -/
+/-- `reconcile`: fuel, resulting stack, merges and selection queries. -/
 def loop (q : Node) : Nat → List Node → List Node × Nat × Nat
   | 0, cs => (cs, 0, 0)
   | n + 1, cs =>
     match step merge q cs with
     | none => (cs, 0, 1)
     | some cs' => ((loop q n cs').1, (loop q n cs').2.1 + 1, (loop q n cs').2.2 + 1)
-/-- The stack after propagation: each child settles against its parent's
-final node. -/
+/-- Each child settles against its parent's final node. -/
 def pass (q : Node) : List Node → List Node
   | [] => []
   | c :: cs => settle merge q c :: pass (settle merge q c) cs
@@ -162,6 +155,12 @@ private theorem changedAt_iff : ∀ (cs : List Node) (q : Node) (off k : Nat),
         ite_true, ite_false, Bool.false_eq_true, List.mem_singleton, hne, false_or,
         List.not_mem_nil]
 end
+/-- `history::merge_stack_onto`: live nodes bottom first onto the current base.
+Use recorded bases even after propagation conflicts; stop on a lower conflict. -/
+def mergeResult (merge : Nat → Nat → Nat → Option Nat) (onto : Nat) : List Node → Option Nat
+  | [] => some onto
+  | c :: cs => (if c.basis == onto then some c.head else merge c.basis onto c.head).bind
+      (fun tree => mergeResult merge tree cs)
 /-- Landed positions of a stack, bottom at `0`. -/
 def Prefix (landed : Nat → Bool) : Prop := ∀ i j, i ≤ j → landed j = true → landed i = true
 def land (landed : Nat → Bool) (i : Nat) : Nat → Bool := fun j => if j = i then true else landed j
@@ -178,12 +177,10 @@ private theorem land_prefix (l : Nat → Bool) (i : Nat) (hp : Prefix l)
       · exact hp a (i - 1) (by omega) hg
     · simp only [hbi, ite_false] at hb
       exact hp a b hab hb
-/-- **correct** (SPEC.md R8 step 3: stack order, bottom-first landing): with more
-iterations than children, the loop ends in `pass` after `merges` merges and a
-final empty query, leaving no pending edge; each child settles against its
-parent's final node; changed children are distinct and number the merges; IDs
-and commits are kept; a conflict keeps the child's head, so propagation stops
-there; and landing only after the parent keeps the landed set a prefix. -/
+/-- **correct** (SPEC.md R8 step 3): propagation terminates, settles every edge,
+counts distinct changed children, keeps IDs/commits and stops at conflicts.
+Each preview merges from the child's recorded basis onto its parent's result,
+independently of the stack root. Bottom-first lands preserve a prefix. -/
 -- SPEC.md §R8
 theorem correct (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : List Node) :
     (∀ n, cs.length < n →
@@ -193,24 +190,25 @@ theorem correct (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : Li
     (changedAt merge q 0 cs).Nodup ∧ (changedAt merge q 0 cs).length = merges merge q cs ∧
     (pass merge q cs).map (fun c => (c.id, c.commits)) = cs.map (fun c => (c.id, c.commits)) ∧
     (∀ p c : Node, merge c.basis p.head c.head = none → (settle merge p c).head = c.head) ∧
+    (∀ onto c tail, mergeResult merge onto (c :: tail) =
+      (if c.basis == onto then some c.head else merge c.basis onto c.head).bind
+        (fun tree => mergeResult merge tree tail)) ∧
     (∀ (landed : Nat → Bool) (i : Nat), Prefix landed → (i = 0 ∨ landed (i - 1) = true) →
       Prefix (land landed i)) := by
   refine ⟨fun n hn => loop_pass merge cs q n hn, pass_settled merge cs q, pass_chain merge cs q,
     changedAt_nodup merge cs q 0, changedAt_length merge cs q 0, pass_ids merge cs q, ?_,
-    land_prefix⟩
-  intro p c hm
-  unfold settle mergeNode
-  split
-  · split <;> simp_all
-  · rfl
-/-- **cost_bound** (SPEC.md R8 step 3). Cost model: `loop`'s merges (one
-transaction each) and selection queries; merge CPU, objects and SQL row counts
-excluded. A clean merge writes a fixed set of rows (the change, `stack_bases`
-and one `stack_delivery` row). A conflicted merge writes one `stack_delivery`
-row plus one `conflicts` row per stored conflict that changed, so its row count
-grows with the conflicted paths and is not bounded here; `conflicts::save`
-keeps it minimal (`proofs/ConflictRouting`). A pass merges at most once per
-child and runs one query more than it merges. -/
+    ?_, land_prefix⟩
+  · intro p c hm
+    unfold settle mergeNode
+    split
+    · split <;> simp_all
+    · rfl
+  · intro onto c tail
+    rfl
+/-- **cost_bound** (R8 step 3): count `loop` merges (one transaction each)
+and selection queries, excluding merge CPU, objects and SQL rows. Conflict
+rows grow with changed paths (`ConflictRouting`). At most one merge per child
+and one final empty query. -/
 -- SPEC.md §R8
 theorem cost_bound (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : List Node)
     (n : Nat) (hn : cs.length < n) :
@@ -253,14 +251,10 @@ private theorem run_targets (t : Store) : ∀ (ks : List Nat) (s : Store) (k : N
     by_cases h1 : k ∈ ks
     · simp [h1]
     · by_cases h2 : k = k' <;> simp [h1, h2, put]
-/-- **optimal** (SPEC.md R8 step 3). Class of alternatives: any sequence of
-writes that each set one change's record (in any order, batched or not)
-and turn the stack's records into the propagated stack. Our writes are in
-the class and number exactly our merges; no write sequence in the class is
-shorter, because every merged child's record differs and needs a write.
-A write here is one abstract `Node` record (head, basis, conflicted), not a
-SQL row: the bound counts merged children, not the `conflicts` rows a
-conflicted child stores, whose minimum `proofs/ConflictRouting` proves. -/
+/-- **optimal** (R8 step 3): alternatives are sequences setting one `Node`
+record per write, in any order or batching, yielding the propagated stack.
+Every changed child needs a write; ours uses exactly that many. This counts
+abstract records, excluding conflict rows (see `ConflictRouting`). -/
 -- SPEC.md §R8
 theorem optimal (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : List Node) :
     runWrites (toStore cs) (oursWrites merge q cs) = toStore (pass merge q cs) ∧
@@ -295,6 +289,7 @@ theorem optimal (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : Li
 #print axioms changedAt
 #print axioms Prefix
 #print axioms land
+#print axioms mergeResult
 #print axioms put
 #print axioms runWrites
 #print axioms toStore

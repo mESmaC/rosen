@@ -1,6 +1,6 @@
 //! Risk (R8): updating or landing a parent must preserve every descendant's
 //! authored work and commits, while preventing a child from landing first.
-use rosen_core::{AgentId, ChangeParent, Commit, Signature, Tree};
+use rosen_core::{AgentId, ChangeParent, Commit, FileMode, ObjectId, Signature, Tree, TreeEntry};
 use rosen_protocol::{NewChange, Outcome, Request, Response, WorkspaceBytes, WorkspaceWrite};
 use rosen_server::{landing::Ledger, rpc::dispatch, ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
@@ -196,6 +196,117 @@ async fn stale_child_merge_result_never_reverts_landed_work() {
     };
     assert_eq!(answer.conflicts, ["shared"]);
     assert_eq!(answer.tree, None);
+}
+
+// Fixture codes match StackedChanges.Export's two whole-file tree model.
+fn fixture_tree(store: &dyn ObjectStore, code: u8) -> ObjectId {
+    let mut files = Vec::new();
+    let shared = ["", "original\n", "parent\n", "child\n"][usize::from(code % 4)];
+    if !shared.is_empty() {
+        files.push(("shared", shared));
+    }
+    if code / 4 == 1 {
+        files.push(("unrelated", "keep\n"));
+    }
+    let entries = files
+        .into_iter()
+        .map(|(path, data)| {
+            TreeEntry::new(
+                FileMode::Regular,
+                path,
+                store.put_blob(data.as_bytes()).unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    store.put_tree(&Tree::new(entries).unwrap()).unwrap()
+}
+
+async fn fixture_stack(state: &Arc<ServerState>, codes: &[u8]) -> String {
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let root = create(state, None).await;
+    state
+        .changes
+        .with_conn(|conn| {
+            rosen_server::changes::update(conn, root.parse().unwrap(), |c| {
+                c.head = fixture_tree(&store, codes[0]);
+                Ok(())
+            })
+        })
+        .unwrap();
+    land_parent(state, &root).await;
+    let base = Ledger::open(&state.config.metadata_path())
+        .unwrap()
+        .base("main")
+        .unwrap()
+        .unwrap();
+    let mut basis = store.read_commit(&base).unwrap();
+    basis.tree = fixture_tree(&store, codes[1]);
+    let basis = store.put_commit(&basis).unwrap();
+    let parent = create(state, None).await;
+    state
+        .changes
+        .with_conn(|conn| {
+            rosen_server::changes::update(conn, parent.parse().unwrap(), |c| {
+                c.parent = ChangeParent::Base(basis);
+                c.head = fixture_tree(&store, codes[2]);
+                Ok(())
+            })
+        })
+        .unwrap();
+    let child = create(state, Some(&parent)).await;
+    // Restore the saved inputs directly: a child can lag its parent after
+    // propagation conflicts (#146), or before restart recovery runs.
+    state
+        .changes
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE stack_bases SET tree = ?1 WHERE change_id = ?2",
+                [fixture_tree(&store, codes[3]).to_hex(), child.clone()],
+            )?;
+            rosen_server::changes::update(conn, child.parse().unwrap(), |c| {
+                c.head = fixture_tree(&store, codes[4]);
+                Ok(())
+            })
+        })
+        .unwrap();
+    child
+}
+
+#[tokio::test]
+async fn stack_merge_result_matches_proved_fixture() {
+    // Risk (R8): using the stack root as a stale child's basis can receipt a
+    // clean tree that silently deletes intervening lands (#146, #182).
+    let mut checked = 0;
+    for row in include_str!("../../../proofs/fixtures/stacked-changes.tsv")
+        .lines()
+        .filter(|row| row.starts_with("merge\t"))
+    {
+        let f: Vec<_> = row.split('\t').collect();
+        assert_eq!(f.len(), 8, "{row}");
+        let codes: Vec<u8> = f[2..7].iter().map(|s| s.parse().unwrap()).collect();
+        let (_temp, state) = setup();
+        let child = fixture_stack(&state, &codes).await;
+        let Response::MergeResult(answer) =
+            call(&state, Request::MergeResult { change: child }).await
+        else {
+            panic!("{row}")
+        };
+        if f[7] == "-" {
+            assert_eq!(answer.tree, None, "{row}");
+            assert_eq!(answer.conflicts, ["shared"], "{row}");
+        } else {
+            let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+            assert_eq!(
+                answer.tree,
+                Some(fixture_tree(&store, f[7].parse().unwrap())),
+                "{row}"
+            );
+            assert!(answer.conflicts.is_empty(), "{row}");
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 6);
 }
 
 #[tokio::test]
