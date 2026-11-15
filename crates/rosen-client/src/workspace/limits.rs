@@ -196,7 +196,8 @@ impl Budget {
                 "load caps must be positive",
             ));
         }
-        fs::create_dir_all(root)?;
+        fs::create_dir_all(root)
+            .map_err(|error| path_error(root, "creating budget directory", error))?;
         let budget = Self {
             root: root.to_path_buf(),
         };
@@ -215,7 +216,8 @@ impl Budget {
     /// Waits without changing any existing workspace when disk or slots are full.
     /// Says on stderr why once it has waited a few seconds (see `WaitReport`).
     pub fn acquire(&self, destination: &Path, staging: &Path, bytes: u64) -> io::Result<Permit> {
-        let destination = std::path::absolute(destination)?;
+        let destination = std::path::absolute(destination)
+            .map_err(|error| path_error(destination, "resolving destination", error))?;
         let mut report = WaitReport::new(&destination);
         loop {
             let lock = self.lock()?;
@@ -371,21 +373,25 @@ impl Budget {
     }
 
     fn lock(&self) -> io::Result<File> {
-        let file = open_lock(&self.root.join("registry.lock"))?;
-        file.lock()?;
+        let path = self.root.join("registry.lock");
+        let file = open_lock(&path)?;
+        file.lock()
+            .map_err(|error| path_error(&path, "locking registry", error))?;
         Ok(file)
     }
 
     /// Held by the one process scanning; the OS frees it if that process dies.
     fn scan_lease(&self) -> io::Result<Option<File>> {
-        let file = open_lock(&self.root.join("scan.lock"))?;
-        Ok(try_lock(&file)?.then_some(file))
+        let path = self.root.join("scan.lock");
+        let file = open_lock(&path)?;
+        Ok(try_lock(&file, &path)?.then_some(file))
     }
 
     fn read(&self) -> io::Result<Registry> {
-        let mut registry: Registry =
-            serde_json::from_slice(&fs::read(self.root.join("registry.json"))?)
-                .map_err(io::Error::other)?;
+        let path = self.root.join("registry.json");
+        let data = fs::read(&path).map_err(|error| path_error(&path, "reading registry", error))?;
+        let mut registry: Registry = serde_json::from_slice(&data)
+            .map_err(|error| path_error(&path, "decoding registry", io::Error::other(error)))?;
         // A client from before sequences existed rewrites the registry
         // without them. Number its records after every surviving one, so a
         // scan can still tell all records apart.
@@ -402,25 +408,24 @@ impl Budget {
 
     fn save(&self, registry: &Registry) -> io::Result<()> {
         let data = serde_json::to_vec(registry).map_err(io::Error::other)?;
-        atomicwrites::AtomicFile::new(
-            self.root.join("registry.json"),
-            atomicwrites::AllowOverwrite,
-        )
-        .write(|file| {
-            file.write_all(&data)?;
-            file.sync_all()
-        })
-        .map_err(io::Error::other)
+        let path = self.root.join("registry.json");
+        atomicwrites::AtomicFile::new(&path, atomicwrites::AllowOverwrite)
+            .write(|file| {
+                file.write_all(&data)?;
+                file.sync_all()
+            })
+            .map_err(|error| path_error(&path, "saving registry atomically", error.into()))
     }
 
-    fn slot(&self, slot: usize) -> io::Result<File> {
-        open_lock(&self.root.join(format!("slot-{slot}.lock")))
+    fn try_slot(&self, slot: usize) -> io::Result<Option<File>> {
+        let path = self.root.join(format!("slot-{slot}.lock"));
+        let file = open_lock(&path)?;
+        Ok(try_lock(&file, &path)?.then_some(file))
     }
 
     fn free_slot(&self, count: usize) -> io::Result<Option<(usize, File)>> {
         for slot in 0..count {
-            let file = self.slot(slot)?;
-            if try_lock(&file)? {
+            if let Some(file) = self.try_slot(slot)? {
                 return Ok(Some((slot, file)));
             }
         }
@@ -436,7 +441,7 @@ impl Budget {
         for entry in registry.workspaces.iter().rev() {
             if entry.slot != NO_SLOT
                 && slots.insert(entry.slot)
-                && !try_lock(&self.slot(entry.slot)?)?
+                && self.try_slot(entry.slot)?.is_none()
             {
                 active.insert(entry.sequence);
             }
@@ -751,14 +756,37 @@ fn open_lock(path: &Path) -> io::Result<File> {
         .create(true)
         .truncate(false)
         .open(path)
+        .map_err(|error| path_error(path, "opening lease", error))
 }
 
-fn try_lock(file: &File) -> io::Result<bool> {
+fn try_lock(file: &File, path: &Path) -> io::Result<bool> {
     match file.try_lock() {
         Ok(()) => Ok(true),
         Err(std::fs::TryLockError::WouldBlock) => Ok(false),
-        Err(std::fs::TryLockError::Error(error)) => Err(error),
+        Err(std::fs::TryLockError::Error(error)) => Err(path_error(path, "trying lease", error)),
     }
+}
+
+// Admission errors used to name only the requested workspace (#161), hiding
+// whether the failure came from a lease, the registry or the workspace itself.
+// Keep the OS error as a source and its kind so callers can still classify it.
+#[derive(Debug, thiserror::Error)]
+#[error("{operation} {}: {source}", path.display())]
+struct PathError {
+    operation: &'static str,
+    path: PathBuf,
+    source: io::Error,
+}
+
+fn path_error(path: &Path, operation: &'static str, source: io::Error) -> io::Error {
+    io::Error::new(
+        source.kind(),
+        PathError {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        },
+    )
 }
 
 /// Does not follow symlinks into another workspace or outside its root.

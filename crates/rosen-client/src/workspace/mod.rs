@@ -127,6 +127,12 @@ pub enum MaterialiseError {
     Store(#[from] StoreError),
     #[error("{}: {source}", path.display())]
     Io { path: PathBuf, source: io::Error },
+    #[error("publishing {} to {}: {source}", staging.display(), destination.display())]
+    Publish {
+        staging: PathBuf,
+        destination: PathBuf,
+        source: io::Error,
+    },
 }
 
 impl MaterialiseError {
@@ -483,7 +489,13 @@ impl Staging {
                     std::thread::sleep(delay);
                     delay *= 2;
                 }
-                Err(error) => return Err(MaterialiseError::io(dest, error)),
+                Err(source) => {
+                    return Err(MaterialiseError::Publish {
+                        staging: self.path.clone(),
+                        destination: dest.to_path_buf(),
+                        source,
+                    })
+                }
             }
         }
     }
@@ -495,4 +507,26 @@ impl Drop for Staging {
             staging_sweep::remove_marked(&self.path);
         }
     }
+}
+
+// SPEC R3, #161: a failed rename must distinguish publication from admission.
+#[test]
+fn publication_error_names_both_paths_and_keeps_the_os_error() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = root.path().join("workspace");
+    let staging = Staging::create(&dest).unwrap();
+    let from = staging.path().to_path_buf();
+    fs::create_dir(&dest).unwrap();
+    fs::write(dest.join("kept"), b"another creator").unwrap();
+    let error = staging.publish(&dest).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains(&from.display().to_string()), "{message}");
+    assert!(message.contains(&dest.display().to_string()), "{message}");
+    let MaterialiseError::Publish { source, .. } = error else {
+        panic!("{message}");
+    };
+    assert!(source.raw_os_error().is_some());
+    assert!(message.contains(&source.to_string()), "{message}");
+    assert_eq!(fs::read(dest.join("kept")).unwrap(), b"another creator");
+    assert!(!from.exists());
 }

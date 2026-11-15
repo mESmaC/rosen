@@ -6,6 +6,51 @@ use rosen_core::{FileMode, Tree, TreeEntry};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use std::{fs, sync::mpsc, time::Duration};
 
+// SPEC R3, #161: a failed admission must identify its real path, or a
+// machine-wide registry failure looks like a broken workspace destination.
+#[test]
+fn admission_errors_keep_the_failing_path_and_os_error() {
+    for (name, directory) in [
+        ("registry.lock", true),
+        ("scan.lock", true),
+        ("slot-0.lock", true),
+        ("registry.json", true),
+        ("registry.json", false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let store = LooseObjectStore::open(root.path().join("objects")).unwrap();
+        let tree = store.put_tree(&Tree::new(vec![]).unwrap()).unwrap();
+        let limits = root.path().join("limits");
+        let budget = Budget::open(&limits, Settings::default()).unwrap();
+        let failing = limits.join(name);
+        if failing.exists() {
+            fs::remove_file(&failing).unwrap();
+        }
+        if directory {
+            fs::create_dir(&failing).unwrap();
+        }
+        let dest = root.path().join("workspace");
+        let error =
+            materialise_with_budget(&store, tree, &dest, &Options::default(), Some(&budget))
+                .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(&dest.display().to_string()), "{message}");
+        assert!(
+            message.contains(&failing.display().to_string()),
+            "{message}"
+        );
+        let rosen_client::workspace::MaterialiseError::Io { source, .. } = error else {
+            panic!("{message}");
+        };
+        let os = source.get_ref().unwrap().source().unwrap();
+        let os = os.downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(source.kind(), os.kind());
+        assert!(os.raw_os_error().is_some(), "{os}");
+        assert!(message.contains(&os.to_string()), "{message}");
+        assert!(!dest.exists());
+    }
+}
+
 // SPEC R3: over-cap work must wait and preserve existing workspaces.
 // Risk: concurrent clients can otherwise exhaust the machine disk or corrupt a workspace.
 #[test]
