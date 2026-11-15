@@ -84,11 +84,18 @@ fn prepare(state: &ServerState, culprit: ObjectId, base: ObjectId) -> LandResult
     let tree = merged
         .tree
         .ok_or_else(|| LandError::Backend(format!("revert conflicts: {:?}", merged.conflicts)))?;
-    write_inverse(&store, culprit, base, tree, current.tree)
+    let subject = bad
+        .message_text()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    write_inverse(&store, culprit, &subject, base, tree, current.tree)
 }
 fn write_inverse(
     store: &LooseObjectStore,
     culprit: ObjectId,
+    subject: &str,
     base: ObjectId,
     tree: ObjectId,
     reopened_head: ObjectId,
@@ -96,7 +103,12 @@ fn write_inverse(
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).map_err(backend)?;
     let id = ChangeId::from_bytes(bytes);
-    let who = Signature::new("rosen-server", "server@rosen", 0);
+    // The time the revert is written, like every landed commit. A zero time dated reverts
+    // 1970 in every git host and history view.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    let who = Signature::new("rosen-server", "server@rosen", now);
     let commit = store
         .put_commit(
             &LandedCommit {
@@ -104,7 +116,9 @@ fn write_inverse(
                 tree,
                 author: who.clone(),
                 committer: who,
-                description: format!("Revert {culprit}"),
+                description: format!(
+                    "Revert {culprit}\n\nReverts \"{subject}\": its post-land checks failed."
+                ),
                 trailers: LandedTrailers {
                     change: id,
                     receipt: None,
