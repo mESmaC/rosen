@@ -31,6 +31,15 @@ pub(crate) struct Restacker<'a> {
 
 impl Restacker<'_> {
     pub fn after_land(&self, landed: &ChangeId, commit: &CommitId) -> LandResult<RestackReport> {
+        self.after_land_onto(landed, commit, commit)
+    }
+
+    pub fn after_land_onto(
+        &self,
+        landed: &ChangeId,
+        commit: &CommitId,
+        onto: &CommitId,
+    ) -> LandResult<RestackReport> {
         // Capture durably before closing the subject or deleting its claims.
         let stacked = self.book.stacked_on(landed)?;
         let mut probes = self.book.overlapping(landed)?;
@@ -49,11 +58,11 @@ impl Restacker<'_> {
         }
         let mut report = RestackReport::default();
         for target in &stacked {
-            self.rebase_one(target, commit, &mut report)?;
+            self.rebase_one(target, onto, &mut report)?;
         }
         for target in probes {
             if target != *landed && !stacked.contains(&target) {
-                self.probe_one(&target, commit, &mut report)?;
+                self.probe_one(&target, onto, &mut report)?;
             }
         }
         Ok(report)

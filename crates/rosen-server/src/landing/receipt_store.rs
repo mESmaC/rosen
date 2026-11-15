@@ -64,6 +64,19 @@ pub(super) fn ensure_schema(connection: &Connection) -> rusqlite::Result<()> {
             ))?;
         }
     }
+    let has_tree: bool = connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('receipts') WHERE name = 'checked_tree')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_tree {
+        connection.execute_batch("ALTER TABLE receipts ADD COLUMN checked_tree TEXT")?;
+    }
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS checked_merge_results (
+        change_id TEXT NOT NULL, head TEXT NOT NULL, base TEXT NOT NULL, tree TEXT NOT NULL,
+        PRIMARY KEY (change_id, head, base))",
+    )?;
     // Verification reads machine status and enrollment binds receipt keys,
     // so the machine tables, `machine_signing_keys` among them, live there.
     crate::machines::ensure_schema(connection)
@@ -111,6 +124,16 @@ impl Ledger {
     /// new one replaces it, so a revoked machine's receipt can be redone.
     /// The stored receipt comes back with the machine that signed it.
     pub fn put_receipt(&self, signed: &SignedReceipt) -> LandResult<SignedReceipt> {
+        self.put_checked_receipt(signed, None)
+    }
+
+    /// `tree` is computed by the server from the immutable merge inputs;
+    /// clients cannot assert an arbitrary checked tree.
+    pub fn put_checked_receipt(
+        &self,
+        signed: &SignedReceipt,
+        tree: Option<super::TreeId>,
+    ) -> LandResult<SignedReceipt> {
         let mut connection = self.lock()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !verifies(&tx, &signed.receipt, &signed.machine, &signed.signature)? {
@@ -126,31 +149,13 @@ impl Ledger {
             receipt.base.to_string(),
             receipt.check_set.clone(),
         ];
-        let stored: Option<(String, String, String)> = tx
-            .query_row(
-                "SELECT submitter, machine, signature FROM receipts
-                 WHERE change_id = ?1 AND head = ?2 AND base = ?3 AND check_set = ?4",
-                params![key[0], key[1], key[2], key[3]],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        if let Some((submitter, machine, signature)) = stored {
-            let first = Receipt {
-                submitter: AgentId::new(submitter)?,
-                ..receipt.clone()
-            };
-            if verifies(&tx, &first, &machine, &signature)? {
-                return Ok(SignedReceipt {
-                    receipt: first,
-                    machine,
-                    signature,
-                });
-            }
+        if let Some(first) = existing_receipt(&tx, receipt)? {
+            return Ok(first);
         }
         tx.execute(
             "INSERT OR REPLACE INTO receipts
-                 (change_id, head, base, check_set, submitter, machine, signature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (change_id, head, base, check_set, submitter, machine, signature, checked_tree)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 key[0],
                 key[1],
@@ -158,11 +163,139 @@ impl Ledger {
                 key[3],
                 receipt.submitter.as_str(),
                 signed.machine,
-                signed.signature
+                signed.signature,
+                tree.map(|tree| tree.to_string())
             ],
         )?;
         tx.commit()?;
         Ok(signed.clone())
+    }
+
+    /// Preserve what the checker was shown even if parent propagation
+    /// changes the meaning of the same head/base tuple before submission.
+    pub fn remember_merge_result(
+        &self,
+        change: &ChangeId,
+        head: &CommitId,
+        base: &CommitId,
+        tree: &super::TreeId,
+    ) -> LandResult<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT OR IGNORE INTO checked_merge_results VALUES (?1, ?2, ?3, ?4)",
+            params![
+                change.to_string(),
+                head.to_string(),
+                base.to_string(),
+                tree.to_string()
+            ],
+        )?;
+        let stored: String = connection.query_row(
+            "SELECT tree FROM checked_merge_results WHERE change_id=?1 AND head=?2 AND base=?3",
+            params![change.to_string(), head.to_string(), base.to_string()],
+            |row| row.get(0),
+        )?;
+        if stored != tree.to_string() {
+            return Err(LandError::InvalidReceipt(
+                "stack inputs changed without advancing the head; wait for parent propagation or rebase before checking again".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn checked_merge_result(&self, receipt: &Receipt) -> LandResult<Option<super::TreeId>> {
+        let tree: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT tree FROM checked_merge_results WHERE change_id=?1 AND head=?2 AND base=?3",
+                params![
+                    receipt.change.to_string(),
+                    receipt.head.to_string(),
+                    receipt.base.to_string()
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
+        tree.map(parse_commit).transpose()
+    }
+
+    /// A check can finish after a rebase. A recorded preview lets it keep
+    /// its original signed head; landing still validates the checked tree.
+    pub fn receipt_binding_head(
+        &self,
+        receipt: &Receipt,
+        current: CommitId,
+    ) -> LandResult<CommitId> {
+        Ok(self
+            .checked_merge_result(receipt)?
+            .map_or(current, |_| receipt.head))
+    }
+
+    pub fn receipt_tree(&self, receipt: &Receipt) -> LandResult<Option<super::TreeId>> {
+        let tree: Option<String> = self.lock()?.query_row(
+            "SELECT checked_tree FROM receipts WHERE change_id=?1 AND head=?2 AND base=?3 AND check_set=?4",
+            params![receipt.change.to_string(), receipt.head.to_string(), receipt.base.to_string(), receipt.check_set],
+            |r| r.get(0),
+        ).optional()?.flatten();
+        tree.map(parse_commit).transpose()
+    }
+
+    /// Tree equality needs no head binding or independence inference: every
+    /// byte the attempt will publish is exactly what this receipt checked.
+    pub fn receipt_for_tree(
+        &self,
+        ref_name: &str,
+        change: &ChangeId,
+        tree: &super::TreeId,
+        check_set: &str,
+        attempt_base: &CommitId,
+    ) -> LandResult<ReceiptLookup> {
+        let conn = self.lock()?;
+        let mut query = conn.prepare(
+            "SELECT r.head,r.base,r.submitter,r.machine,r.signature,h.seq FROM receipts r
+             JOIN base_history h ON h.ref_name=?1 AND h.commit_id=r.base
+             WHERE r.change_id=?2 AND r.checked_tree=?3 AND r.check_set=?4
+             ORDER BY h.seq DESC",
+        )?;
+        let rows = query.query_map(
+            params![ref_name, change.to_string(), tree.to_string(), check_set],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            },
+        )?;
+        let end = history_seq(&conn, ref_name, attempt_base)?;
+        for row in rows {
+            let (head, base, submitter, machine, signature, base_seq) = row?;
+            let receipt = Receipt {
+                change: *change,
+                head: parse_commit(head)?,
+                base: parse_commit(base)?,
+                check_set: check_set.into(),
+                submitter: AgentId::new(submitter)?,
+            };
+            if !verifies(&conn, &receipt, &machine, &signature)? {
+                continue;
+            }
+            if base_seq > end {
+                return Ok(ReceiptLookup::Ahead);
+            }
+            return Ok(ReceiptLookup::Valid {
+                receipt: SignedReceipt {
+                    receipt,
+                    machine,
+                    signature,
+                },
+                base_seq,
+            });
+        }
+        Ok(ReceiptLookup::Missing)
     }
 
     /// Finds the verified receipt for `head` and `check_set` whose base is
@@ -243,6 +376,36 @@ pub(super) fn stored_receipt_verifies(
         && machine == signed.machine
         && signature == signed.signature;
     Ok(unchanged && verifies(connection, receipt, &machine, &signature)?)
+}
+
+fn existing_receipt(conn: &Connection, receipt: &Receipt) -> LandResult<Option<SignedReceipt>> {
+    let stored: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT submitter,machine,signature FROM receipts
+         WHERE change_id=?1 AND head=?2 AND base=?3 AND check_set=?4",
+            params![
+                receipt.change.to_string(),
+                receipt.head.to_string(),
+                receipt.base.to_string(),
+                receipt.check_set
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((submitter, machine, signature)) = stored else {
+        return Ok(None);
+    };
+    let first = Receipt {
+        submitter: AgentId::new(submitter)?,
+        ..receipt.clone()
+    };
+    Ok(
+        verifies(conn, &first, &machine, &signature)?.then_some(SignedReceipt {
+            receipt: first,
+            machine,
+            signature,
+        }),
+    )
 }
 
 type Candidate = (String, String, String, String, i64);

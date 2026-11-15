@@ -19,9 +19,9 @@ inductive ReviewMode where
   | beforeLand | afterLand
   deriving DecidableEq, Repr
 inductive ReceiptCheck where
-  /-- `valid` binds the current head and the check-set name resolved at the
-  attempt's base; the tier below is also computed at that exact base (R8). -/
-  | missing | invalid | valid
+  /-- `valid` binds the current head and configured check set; `sameTree`
+  verifies a trusted receipt's checked tree equals the current result (R8). -/
+  | missing | invalid | valid | sameTree
   deriving DecidableEq, Repr
 structure Input where
   state : ChangeState
@@ -56,16 +56,17 @@ def gate (i : Input) : Option Refusal :=
     else match i.receipt with
       | .missing => some .noReceipt
       | .invalid => some .receiptStale
-      | .valid => none
+      | .valid | .sameTree => none
 def decideLand (i : Input) : Verdict :=
   match gate i with
   | some r => .refuse r
   | none =>
     if !i.mergeClean then .refuse .mergeConflict
-    else if i.review = .afterLand ∨ i.tier = .prose ∨ !i.baseMoved ∨ i.landedSinceAllIndependent then .land
+    else if i.review = .afterLand ∨ i.tier = .prose ∨ i.receipt = .sameTree ∨
+        !i.baseMoved ∨ i.landedSinceAllIndependent then .land
     else .refuse .needsRecheck
 /-- SPEC.md R8 step 2, with SPEC.md R7 review modes and SPEC.md R8 step 3
-stack order: the change is live, its parent has landed, it has no stored
+stack order: the change is live, its ancestors can join the request, it has no stored
 conflicts, its current head is approved unless the project reviews after the
 land, it merges cleanly onto the current base, and only before-land code
 needs a receipt that the re-check rules let count on this base. -/
@@ -73,6 +74,7 @@ def Authorized (i : Input) : Prop :=
   i.state = .active ∧ i.parentLanded = true ∧ i.hasConflicts = false ∧
   (i.review = .afterLand ∨ i.approved = true) ∧ i.mergeClean = true ∧
   (i.review = .afterLand ∨ i.tier = .prose ∨
+    i.receipt = .sameTree ∨
     (i.receipt = .valid ∧ (i.baseMoved = false ∨ i.landedSinceAllIndependent = true)))
 instance : DecidablePred Authorized := fun i => by
   unfold Authorized; infer_instance
@@ -93,6 +95,23 @@ def landStep (l : Ledger) (i : Input) (expected change commit : Nat) : Option Le
   match decideLand i with
   | .land => cas l expected change commit
   | .refuse _ => none
+/-- Bottom-first layers: every layer passes its gates, only the top carries
+the receipt, and IDs are distinct. One transaction publishes the whole chain. -/
+def stackReady (l : Ledger) (layers : List (Input × Nat × Nat)) : Prop :=
+  layers ≠ [] ∧ (layers.map (·.2.1)).Nodup ∧
+    (∀ x ∈ layers, x.1.state = .active ∧ x.1.hasConflicts = false ∧
+      (x.1.review = .afterLand ∨ x.1.approved = true) ∧ x.1.mergeClean = true ∧
+      l.hasLanded x.2.1 = false) ∧
+    ((layers.getLast?).any fun top => decide (Authorized top.1)) = true
+instance : Decidable (stackReady l layers) := by unfold stackReady; infer_instance
+def stackResult (l : Ledger) (layers : List (Input × Nat × Nat)) : Ledger :=
+  ⟨((layers.getLast?).map (·.2.2)).getD l.base, layers.reverse.map (·.2) ++ l.landed⟩
+def stackCas (l : Ledger) (expected : Nat) (layers : List (Input × Nat × Nat)) : Option Ledger :=
+  if l.base = expected ∧ stackReady l layers then some (stackResult l layers) else none
+private theorem stack_correct (l : Ledger) (expected : Nat) (layers : List (Input × Nat × Nat))
+    (result : Ledger) : stackCas l expected layers = some result ↔
+      expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers := by
+  unfold stackCas; split <;> simp_all [eq_comm]
 private theorem decideLand_eq_land (i : Input) : decideLand i = .land ↔ Authorized i := by
   obtain ⟨s, p, c, a, v, t, r, b, q, m⟩ := i
   cases s <;> cases p <;> cases c <;> cases a <;> cases v <;> cases t <;> cases r <;>
@@ -144,13 +163,15 @@ theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     (∀ s review build culprit out,
       (reportFailure s review build culprit out).2.ledger = s.ledger ∧
       (reportFailure s review build culprit out).2.failures = (culprit, build, out) :: s.failures ∧
-      ((reportFailure s review build culprit out).1 = true ↔ review = .beforeLand ∨ build = true)) := by
-  refine ⟨land_correct l i expected change commit, ?_⟩
+      ((reportFailure s review build culprit out).1 = true ↔ review = .beforeLand ∨ build = true)) ∧
+    (∀ expected layers result, stackCas l expected layers = some result ↔
+      expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers) := by
+  refine ⟨land_correct l i expected change commit, ?_, stack_correct l⟩
   intro s review build culprit out
   refine ⟨rfl, rfl, ?_⟩
   cases review <;> cases build <;> simp [reportFailure, failureReverts]
-/-- Cost model: one attempt costs one merge, one commit write and one
-compare-and-swap, and cost counts attempts. `races[j]` is true when a
+/-- Cost model: an attempt merges and writes each layer, and performs one
+compare-and-swap; `attempts` counts attempts. `races[j]` is true when a
 competing land moved the base during attempt `j`, so its swap lost and the
 loop retries; `cap` is `max_attempts`. -/
 def attempts : Nat → List Bool → Nat
@@ -187,10 +208,10 @@ a dependent land for a non-prose change that otherwise passes every check.
 Reusing it there can land code no check built (the struct literal case in R8). -/
 def SoundPolicy (policy : Input → Bool) : Prop :=
   ∀ i, gate i = none → i.mergeClean = true → i.review = .beforeLand → i.tier ≠ .prose →
-    i.baseMoved = true → i.landedSinceAllIndependent = false → policy i = true
+    i.baseMoved = true → i.landedSinceAllIndependent = false → i.receipt ≠ .sameTree → policy i = true
 private theorem oursRecheck_unsafe (i : Input) (h : oursRecheck i = true) :
     gate i = none ∧ i.mergeClean = true ∧ i.review = .beforeLand ∧ i.tier ≠ .prose ∧
-      i.baseMoved = true ∧ i.landedSinceAllIndependent = false := by
+      i.baseMoved = true ∧ i.landedSinceAllIndependent = false ∧ i.receipt ≠ .sameTree := by
   obtain ⟨s, p, c, a, v, t, r, b, q, m⟩ := i
   revert h
   cases s <;> cases p <;> cases c <;> cases a <;> cases v <;> cases t <;> cases r <;>
@@ -212,16 +233,16 @@ theorem optimal :
     ∀ policy, SoundPolicy policy → ∀ requests : List Input,
       recheckCost oursRecheck requests ≤ recheckCost policy requests := by
   constructor
-  · intro i hg hm hv ht hb hq
+  · intro i hg hm hv ht hb hq hr
     obtain ⟨s, p, c, a, v, t, r, b, q, m⟩ := i
-    simp only at hg hm hv ht hb hq
+    simp only at hg hm hv ht hb hq hr
     subst hv hm hb hq
-    simp [oursRecheck, decideLand, hg, ht]
+    simp [oursRecheck, decideLand, hg, ht, hr]
   · intro policy hp requests
     apply countP_le_of_imp
     intro i hi
-    obtain ⟨hg, hm, hv, ht, hb, hq⟩ := oursRecheck_unsafe i hi
-    exact hp i hg hm hv ht hb hq
+    obtain ⟨hg, hm, hv, ht, hb, hq, hr⟩ := oursRecheck_unsafe i hi
+    exact hp i hg hm hv ht hb hq hr
 /-! ## Fixture table -/
 def bit (b : Bool) : String := if b then "1" else "0"
 def ChangeState.code : ChangeState → String
@@ -231,7 +252,7 @@ def Tier.code : Tier → String
 def ReviewMode.code : ReviewMode → String
   | .beforeLand => "before-land" | .afterLand => "after-land"
 def ReceiptCheck.code : ReceiptCheck → String
-  | .missing => "missing" | .invalid => "invalid" | .valid => "valid"
+  | .missing => "missing" | .invalid => "invalid" | .valid => "valid" | .sameTree => "same_tree"
 def Verdict.code : Verdict → String
   | .land => "land"
   | .refuse .alreadyLanded => "already_landed"
@@ -252,7 +273,7 @@ def allInputs : List Input :=
   [false, true].flatMap fun a =>
   [ReviewMode.beforeLand, .afterLand].flatMap fun v =>
   [Tier.prose, .normal, .sensitive].flatMap fun t =>
-  [ReceiptCheck.missing, .invalid, .valid].flatMap fun r =>
+  [ReceiptCheck.missing, .invalid, .valid, .sameTree].flatMap fun r =>
   [(false, true), (true, false), (true, true)].flatMap fun (b, q) =>
   [false, true].map fun m => ⟨s, p, c, a, v, t, r, b, q, m⟩
 def fixtureRow (i : Input) : String :=
@@ -266,33 +287,8 @@ def fixtureTable : String :=
     String.join ([ReviewMode.beforeLand, .afterLand].flatMap fun review =>
       [false, true].map fun build =>
         "failure\t" ++ review.code ++ "\t" ++ bit build ++ "\t" ++ bit (failureReverts review build) ++ "\n")
-#print axioms land_correct
-#print axioms failureReverts
-#print axioms Verification
-#print axioms reportFailure
 #print axioms correct
 #print axioms cost_bound
 #print axioms optimal
-#print axioms gate
-#print axioms decideLand
-#print axioms Authorized
-#print axioms Ledger.hasLanded
-#print axioms cas
-#print axioms landStep
-#print axioms decideLand_eq_land
-#print axioms attempts
-#print axioms recheckCost
-#print axioms oursRecheck
-#print axioms SoundPolicy
-#print axioms oursRecheck_unsafe
-#print axioms countP_le_of_imp
-#print axioms bit
-#print axioms ChangeState.code
-#print axioms Tier.code
-#print axioms ReviewMode.code
-#print axioms ReceiptCheck.code
-#print axioms Verdict.code
-#print axioms allInputs
-#print axioms fixtureRow
-#print axioms fixtureTable
+#print axioms stack_correct
 end Landing

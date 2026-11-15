@@ -16,13 +16,17 @@ pub enum ReceiptCheck {
     /// is not a commit the base ref has ever held.
     Invalid,
     Valid,
+    /// A trusted receipt checked this exact merge-result tree, regardless
+    /// of the head or base it originally named (R8 step 2).
+    SameTree,
 }
 
 /// Everything the decision depends on, read in one attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LandInput {
     pub state: ChangeState,
-    /// The parent is a base commit, or a change that has already landed.
+    /// The parent is already landed, or every unlanded ancestor is
+    /// eligible to land in this same atomic request (R8 step 3).
     pub parent_landed: bool,
     pub has_conflicts: bool,
     /// An approval exists for the change's current head (R7).
@@ -45,7 +49,7 @@ pub struct LandInput {
 pub enum Refusal {
     AlreadyLanded,
     Abandoned,
-    /// A stack lands bottom first (R8 step 3).
+    /// A lower layer cannot land in the atomic stack request (R8 step 3).
     ParentUnlanded,
     Conflicts,
     Unapproved,
@@ -103,6 +107,7 @@ pub fn decide(input: &LandInput) -> Verdict {
     // After-land and prose-only changes need no receipt or re-check (R8).
     let receipt_counts = input.review == ReviewMode::AfterLand
         || input.tier == Tier::ProseOnly
+        || input.receipt == ReceiptCheck::SameTree
         || !input.base_moved
         || input.landed_since_all_independent;
     if receipt_counts {
@@ -134,7 +139,7 @@ fn gate_refusal(input: &LandInput) -> Option<Refusal> {
     match input.receipt {
         ReceiptCheck::Missing => Some(Refusal::NoReceipt),
         ReceiptCheck::Invalid => Some(Refusal::ReceiptStale),
-        ReceiptCheck::Valid => None,
+        ReceiptCheck::Valid | ReceiptCheck::SameTree => None,
     }
 }
 

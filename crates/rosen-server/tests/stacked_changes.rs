@@ -1,5 +1,5 @@
 //! Risk (R8): updating or landing a parent must preserve every descendant's
-//! authored work and commits, while preventing a child from landing first.
+//! authored work and commits, while keeping commits in bottom-first order.
 use rosen_core::{AgentId, ChangeParent, Commit, FileMode, ObjectId, Signature, Tree, TreeEntry};
 use rosen_protocol::{NewChange, Outcome, Request, Response, WorkspaceBytes, WorkspaceWrite};
 use rosen_server::{landing::Ledger, rpc::dispatch, ServerConfig, ServerState};

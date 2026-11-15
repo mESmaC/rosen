@@ -1,4 +1,5 @@
 import StackedChanges.Design
+import Landing.Design
 
 -- Trees encode shared's whole-file value (0 absent, 1 original, 2 parent,
 -- 3 child) plus 4 when the unrelated landed file is present. Whole-file
@@ -13,6 +14,19 @@ def mergeTree (base onto head : Nat) : Option Nat := do
   return shared + 4 * unrelated
 
 def node (basis head : Nat) : StackedChanges.Node := ⟨0, [], head, basis, false, false⟩
+
+/-- One receipt on the top; lower layers still require approval and clean merges. -/
+def stackFixture (depth : Nat) : String := Id.run do
+  let layers := (List.range depth).map fun n =>
+    let input : Landing.Input := ⟨.active, true, false, true, .beforeLand, .normal,
+      (if n + 1 = depth then .sameTree else .missing), true, false, true⟩
+    (input, n, n + 1)
+  match Landing.stackCas ⟨0, []⟩ 0 layers with
+  | none => return s!"stack_land\t{depth}\t0\t0\t0"
+  | some result =>
+    let isPrefix := (List.range depth).all (StackedChanges.land (fun _ => false) (depth - 1))
+    return s!"stack_land\t{depth}\t{result.landed.length}\t{result.base}\t{if isPrefix then 1 else 0}"
+
 
 /-- SPEC.md R8: recovery supplies a missing basis only for an edited legacy
 child. An unedited child's head already supplies its exact implicit basis. -/
@@ -39,6 +53,9 @@ def main : IO Unit := do
     let result := StackedChanges.mergeResult mergeTree root [node pb ph, child]
     let code := result.map toString |>.getD "-"
     IO.println s!"merge\t{name}\t{root}\t{pb}\t{ph}\t{cb}\t{ch}\t{code}"
+  for depth in [2, 3] do
+    IO.println (stackFixture depth)
+
 
   -- Includes #361: no snapshots and no recorded basis must refuse recovery.
   for edited in [false, true] do
@@ -51,3 +68,4 @@ def main : IO Unit := do
 #print axioms node
 #print axioms recoveryAllowed
 #print axioms main
+#print axioms stackFixture

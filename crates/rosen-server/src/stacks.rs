@@ -404,6 +404,9 @@ fn stack_selection_matches_proved_fixture() {
         .filter(|row| !row.starts_with("merge\t"))
         .filter(|row| !row.starts_with("recovery\t"))
     {
+        if row.starts_with("stack_land\t") {
+            continue;
+        }
         let f: Vec<_> = row.split('\t').collect();
         assert_eq!(
             eligible(f[0] == "1", f[1] == "1", f[2] == "1", f[3] == "1"),

@@ -25,3 +25,5 @@ recovery	0	0	0
 recovery	0	1	0
 recovery	1	0	1
 recovery	1	1	0
+stack_land	2	2	2	1
+stack_land	3	3	3	1

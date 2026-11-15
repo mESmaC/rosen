@@ -1,6 +1,9 @@
 //! The land loop of SPEC R8: gather, merge, decide, write, compare-and-swap,
 //! and retry with backoff when another land wins the race.
 
+#[path = "stack.rs"]
+mod stack;
+
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -17,7 +20,7 @@ use super::rules::{self, LandInput, ReceiptCheck, Refusal, Verdict};
 use super::{
     CasResult, ChangeBook, ChangeFacts, ChangeId, ChangeParent, CommitId, CommitWriter, EventSink,
     LandError, LandRecord, LandResult, LandedCommit, LandingEvent, Ledger, MergeOutcome, Merger,
-    RestackReport, Routing, Tier, TreeId,
+    Receipt, RestackReport, Routing, Tier, TreeId,
 };
 
 #[derive(Clone, Debug)]
@@ -85,6 +88,7 @@ pub struct MergePreview {
 #[derive(Debug)]
 pub struct CommittedLand {
     pub record: LandRecord,
+    pub ancestors: Vec<LandRecord>,
     pub attempts: u32,
 }
 
@@ -210,8 +214,9 @@ impl Landing {
             self.current_base()?
         };
         let required = self.check_set_at(&named_at)?;
+        let head = self.ledger.receipt_binding_head(receipt, facts.head)?;
         receipt
-            .check_binding(&facts.head, facts.state, &required)
+            .check_binding(&head, facts.state, &required)
             .map_err(|refusal| LandError::InvalidReceipt(refusal.to_string()))?;
         if !known_base {
             let refusal = ReceiptRefusal::UnknownBase {
@@ -220,16 +225,28 @@ impl Landing {
             };
             return Err(LandError::InvalidReceipt(refusal.to_string()));
         }
-        self.ledger.put_receipt(&signed)
+        let outcome = match self.ledger.checked_merge_result(receipt)? {
+            Some(tree) => MergeOutcome::Clean(tree),
+            None => self.preview_stack(&facts.id, &receipt.base)?,
+        };
+        let tree = match outcome {
+            MergeOutcome::Clean(tree) => Some(tree),
+            MergeOutcome::Conflicted(_) => None,
+        };
+        self.ledger.put_checked_receipt(&signed, tree)
     }
 
     pub fn merge_preview(&self, change: &ChangeId) -> LandResult<MergePreview> {
-        let facts = self.facts(change)?;
+        let head = self.facts(change)?.head;
         let base = self.current_base()?;
-        let outcome = self
-            .deps
-            .merger
-            .merge(&facts.merge_base, &base, &facts.head)?;
+        let outcome = self.preview_stack(change, &base)?;
+        if self.facts(change)?.head != head {
+            return Err(LandError::Contended { attempts: 1 });
+        }
+        if let MergeOutcome::Clean(tree) = outcome {
+            self.ledger
+                .remember_merge_result(change, &head, &base, &tree)?;
+        }
         Ok(MergePreview { base, outcome })
     }
 
@@ -245,10 +262,7 @@ impl Landing {
                 LandOutcome::Landed {
                     commit,
                     attempts,
-                    restack: self
-                        .post_land(&land.record, false)
-                        .map(Option::unwrap_or_default)
-                        .map_err(|error| error.to_string()),
+                    restack: self.finish_land(&land),
                 }
             }
             Decision::Decided(outcome) => outcome,
@@ -284,7 +298,16 @@ impl Landing {
     /// Does nothing when a recovery pass is running the land's work now, or
     /// has already finished it.
     pub fn restack_stacked(&self, land: &CommittedLand) -> Result<RestackReport, String> {
-        let record = &land.record;
+        let mut report = RestackReport::default();
+        for record in land.ancestors.iter().chain(std::iter::once(&land.record)) {
+            let step = self.restack_record(record)?;
+            report.rebased.extend(step.rebased);
+            report.conflicted.extend(step.conflicted);
+        }
+        Ok(report)
+    }
+
+    fn restack_record(&self, record: &LandRecord) -> Result<RestackReport, String> {
         let Some(_running) = PostLandRun::start(&self.post_landing, record.commit) else {
             return Ok(RestackReport::default());
         };
@@ -301,8 +324,12 @@ impl Landing {
             change: record.change,
             commit: record.commit,
         });
+        let onto = self
+            .ledger
+            .stack_tip(&record.commit)
+            .map_err(|e| e.to_string())?;
         self.restacker(false)
-            .rebase_stacked(&record.change, &record.commit)
+            .rebase_stacked(&record.change, &onto)
             .map_err(|error| error.to_string())
     }
 
@@ -311,9 +338,16 @@ impl Landing {
     /// the land only if the event log does not hold it yet. A failure never
     /// undoes the land; [`Landing::recover`] replays it.
     pub fn finish_land(&self, land: &CommittedLand) -> Result<RestackReport, String> {
-        self.post_land(&land.record, true)
-            .map(Option::unwrap_or_default)
-            .map_err(|error| error.to_string())
+        let mut report = RestackReport::default();
+        for record in land.ancestors.iter().chain(std::iter::once(&land.record)) {
+            let step = self
+                .post_land(record, true)
+                .map(Option::unwrap_or_default)
+                .map_err(|error| error.to_string())?;
+            report.rebased.extend(step.rebased);
+            report.conflicted.extend(step.conflicted);
+        }
+        Ok(report)
     }
 
     /// Replays post-land work that a crash or a failed step interrupted,
@@ -337,49 +371,7 @@ impl Landing {
         if let Some(commit) = self.ledger.landing_of(change)? {
             return Ok(Attempt::Done(LandOutcome::AlreadyLanded { commit }));
         }
-        let mut facts = self.facts(change)?;
-        let base = self.current_base()?;
-        facts.tier = self.deps.book.tier_at(&facts, &base)?;
-        let policy = self.policy_at(&base)?;
-        // A receipt on a base newer than the one read means the base moved
-        // mid-attempt; retrying reads that base instead of failing the land.
-        let Some(mut gathered) = self.gather(&facts, &base, &policy)? else {
-            return Ok(Attempt::Retry);
-        };
-        if !rules::needs_merge(&gathered.input) {
-            return Ok(Attempt::Done(refused(rules::decide(&gathered.input))));
-        }
-        let outcome = self
-            .deps
-            .merger
-            .merge(&facts.merge_base, &base, &facts.head)?;
-        gathered.input.merge_clean = matches!(outcome, MergeOutcome::Clean(_));
-        match (rules::decide(&gathered.input), outcome) {
-            (Verdict::Land, MergeOutcome::Clean(tree)) => {
-                let review = gathered.input.review;
-                self.commit_land(&facts, base, tree, gathered.receipt, review, attempt)
-            }
-            (Verdict::Refuse(Refusal::MergeConflict), MergeOutcome::Conflicted(paths)) => {
-                let routing = self.deps.book.record_conflicts_at(
-                    change,
-                    &facts.merge_base,
-                    &base,
-                    &facts.head,
-                    &paths,
-                )?;
-                if routing == Routing::ChangeMoved {
-                    // A snapshot raced the merge: its conflicts belong to an
-                    // older head. The retry reads the new head and state.
-                    return Ok(Attempt::Retry);
-                }
-                self.deps.events.emit(LandingEvent::Conflict {
-                    change: *change,
-                    paths,
-                });
-                Ok(Attempt::Done(LandOutcome::Refused(Refusal::MergeConflict)))
-            }
-            (verdict, _) => Ok(Attempt::Done(refused(verdict))),
-        }
+        self.attempt_stack(change, attempt)
     }
 
     /// Reads the decision inputs, or `None` when the change's newest receipt
@@ -389,11 +381,10 @@ impl Landing {
         facts: &ChangeFacts,
         base: &CommitId,
         policy: &LandPolicy,
+        tree: TreeId,
+        single_layer: bool,
     ) -> LandResult<Option<Gathered>> {
-        let parent_landed = match &facts.parent {
-            ChangeParent::Base(_) => true,
-            ChangeParent::Change(parent) => self.ledger.landing_of(parent)?.is_some(),
-        };
+        let parent_landed = true;
         let mut input = LandInput {
             state: facts.state,
             parent_landed,
@@ -413,6 +404,38 @@ impl Landing {
                 receipt: None,
             }));
         }
+        let exact = self.ledger.receipt_for_tree(
+            &self.config.base_ref,
+            &facts.id,
+            &tree,
+            &policy.check_set,
+            base,
+        )?;
+        match exact {
+            ReceiptLookup::Ahead => return Ok(None),
+            ReceiptLookup::Valid { receipt, .. } => {
+                input.receipt = ReceiptCheck::SameTree;
+                input.base_moved = receipt.receipt.base != *base;
+                input.landed_since_all_independent = false;
+                return Ok(Some(Gathered {
+                    input,
+                    receipt: Some(receipt),
+                }));
+            }
+            _ => {}
+        }
+        self.gather_reused(facts, base, policy, tree, single_layer, input)
+    }
+
+    fn gather_reused(
+        &self,
+        facts: &ChangeFacts,
+        base: &CommitId,
+        policy: &LandPolicy,
+        tree: TreeId,
+        single_layer: bool,
+        mut input: LandInput,
+    ) -> LandResult<Option<Gathered>> {
         let lookup = self.ledger.best_receipt(
             &self.config.base_ref,
             &facts.id,
@@ -428,14 +451,55 @@ impl Landing {
                 None
             }
             ReceiptLookup::Valid { receipt, base_seq } => {
+                let checked = self.ledger.receipt_tree(&receipt.receipt)?;
+                if receipt.receipt.base == *base && checked.is_some_and(|t| t != tree) {
+                    input.receipt = ReceiptCheck::Invalid;
+                    return Ok(Some(Gathered {
+                        input,
+                        receipt: None,
+                    }));
+                }
                 input.receipt = ReceiptCheck::Valid;
                 input.base_moved = receipt.receipt.base != *base;
-                input.landed_since_all_independent =
-                    self.independent_since(facts, base, base_seq)?;
+                input.landed_since_all_independent = self.reuse_independent(
+                    facts,
+                    base,
+                    &receipt.receipt,
+                    base_seq,
+                    single_layer,
+                    checked,
+                )?;
                 Some(receipt)
             }
         };
         Ok(Some(Gathered { input, receipt }))
+    }
+
+    /// A stacked head alone does not bind pending ancestor edits. Rebuild
+    /// its old-base result before using reach, then include every layer's
+    /// paths in that reach. Exact-tree receipts never need this work.
+    fn reuse_independent(
+        &self,
+        facts: &ChangeFacts,
+        base: &CommitId,
+        receipt: &Receipt,
+        seq: i64,
+        single_layer: bool,
+        checked: Option<TreeId>,
+    ) -> LandResult<bool> {
+        if single_layer {
+            return self.independent_since(facts, base, seq);
+        }
+        let Some(tree) = checked else {
+            return Ok(false);
+        };
+        if self.preview_stack(&facts.id, &receipt.base)? != MergeOutcome::Clean(tree) {
+            return Ok(false);
+        }
+        let mut combined = facts.clone();
+        combined.merge_base = receipt.base;
+        combined.head = tree;
+        self.independent_since(&combined, base, seq)
     }
 
     /// Resolve against the attempt's immutable base. A cached engine can
@@ -483,46 +547,6 @@ impl Landing {
         }
     }
 
-    fn commit_land(
-        &self,
-        facts: &ChangeFacts,
-        base: CommitId,
-        tree: TreeId,
-        receipt: Option<SignedReceipt>,
-        review: ReviewMode,
-        attempts: u32,
-    ) -> LandResult<Attempt> {
-        let landed = landed_commit(facts, base, tree, receipt.as_ref())?;
-        // Written before the swap: if the swap loses, the object is an
-        // unreferenced orphan, which is harmless because objects are immutable.
-        let commit = self.deps.writer.write_landed(&landed)?;
-        let record = LandRecord {
-            ref_name: self.config.base_ref.clone(),
-            change: facts.id,
-            head: facts.head,
-            commit,
-            tier: facts.tier,
-        };
-        let swap = self
-            .ledger
-            .compare_and_swap_with(&base, &record, receipt.as_ref(), review)?;
-        match swap {
-            CasResult::Swapped { .. } => Ok(Attempt::Committed(CommittedLand { record, attempts })),
-            // A moved change is decided afresh, like a moved base: the retry
-            // reads its new head and state, and refuses if the receipt or
-            // approval no longer covers them.
-            // An untrusted receipt is decided afresh too: the retry finds it
-            // invalid and refuses the land.
-            CasResult::BaseMoved { .. } | CasResult::ChangeMoved | CasResult::ReceiptUntrusted => {
-                Ok(Attempt::Retry)
-            }
-            CasResult::OpenConflicts => Ok(Attempt::Done(LandOutcome::Refused(Refusal::Conflicts))),
-            CasResult::AlreadyLanded { commit } => {
-                Ok(Attempt::Done(LandOutcome::AlreadyLanded { commit }))
-            }
-        }
-    }
-
     /// Runs a land's post-land work (R8 step 4), or returns `None` when
     /// another thread is running it now. A `replay` may follow a run that
     /// announced the land before it crashed or failed, so it announces only
@@ -549,9 +573,14 @@ impl Landing {
         } else {
             self.deps.events.emit(landed);
         }
-        let report = self
-            .restacker(replay)
-            .after_land(&record.change, &record.commit)?;
+        let onto = self.ledger.stack_tip(&record.commit)?;
+        let report = if onto == record.commit {
+            self.restacker(replay)
+                .after_land(&record.change, &record.commit)?
+        } else {
+            self.restacker(replay)
+                .after_land_onto(&record.change, &record.commit, &onto)?
+        };
         self.ledger
             .mark_post_land_done(&record.ref_name, &record.commit)?;
         Ok(Some(report))

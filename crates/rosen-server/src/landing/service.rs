@@ -388,7 +388,7 @@ fn refusal_status(
         Refusal::AlreadyLanded => "the change has already landed".to_owned(),
         Refusal::Abandoned => "the change is abandoned".to_owned(),
         Refusal::ParentUnlanded => {
-            "the change below it in its stack has not landed; a stack lands bottom first".into()
+            "a lower change in the stack cannot land; resolve its conflicts, approval or abandoned state first".into()
         }
         Refusal::Conflicts => {
             paths = super::conflict_routes::paths(state, change.id).map_err(land_body)?;
@@ -578,6 +578,26 @@ impl Merger for Adapters {
         let state = self.state()?;
         let merged = crate::history::merge_for_land(&state, merge_base, onto, head)
             .map_err(|err| LandError::Backend(err.to_string()))?;
+        Ok(match merged.tree {
+            Some(tree) => MergeOutcome::Clean(tree),
+            None => MergeOutcome::Conflicted(merged.conflicts),
+        })
+    }
+    fn merge_layer(
+        &self,
+        merge_base: &CommitId,
+        onto: &CommitId,
+        head: &CommitId,
+        policy_base: &CommitId,
+    ) -> LandResult<MergeOutcome> {
+        let merged = crate::history::merge::merge_for_land_at(
+            &*self.state()?,
+            merge_base,
+            onto,
+            head,
+            policy_base,
+        )
+        .map_err(|err| LandError::Backend(err.to_string()))?;
         Ok(match merged.tree {
             Some(tree) => MergeOutcome::Clean(tree),
             None => MergeOutcome::Conflicted(merged.conflicts),

@@ -34,6 +34,11 @@ pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer>
     }
     let base = base_commit(ctx)?;
     let merged = merge_stack_onto(ctx, &change, &base)?;
+    if let Some(tree) = merged.tree {
+        crate::landing::Ledger::open(&ctx.state.config.metadata_path())
+            .and_then(|ledger| ledger.remember_merge_result(&change.id, &change.head, &base, &tree))
+            .map_err(|e| HistoryError::Refused(e.to_string()))?;
+    }
     Ok(MergeResultAnswer {
         change: change.id,
         head: change.head,
@@ -51,7 +56,7 @@ pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer>
 /// propagation, or a restart is pending), so measuring it from the stack's
 /// root commit would read every land since the child's basis as a deletion
 /// (#146). Once the parent has landed this is exactly the land's merge.
-fn merge_stack_onto(
+pub(crate) fn merge_stack_onto(
     ctx: &Ctx,
     change: &StackedChange,
     onto: &ObjectId,
@@ -114,39 +119,39 @@ pub(crate) fn merge_for_land(
     onto: &ObjectId,
     head: &ObjectId,
 ) -> HistoryResult<TreeMerge> {
-    let ctx = super::open(state)?;
-    let merge_base = match ctx.store.get_raw(merge_base)?.map(|raw| raw.kind) {
-        Some(ObjectKind::Commit) => ctx.index.commit(&ctx.store, merge_base)?.tree,
-        Some(ObjectKind::Tree) => *merge_base,
-        _ => {
-            return Err(HistoryError::NotFound(format!(
-                "merge base {merge_base} is not a stored commit or tree"
-            )))
-        }
-    };
-    merge_onto_commit(&ctx, merge_base, onto, *head)
+    merge_for_land_at(state, merge_base, onto, head, onto)
 }
 
-/// Merges `head`'s edits since the tree `merge_base` onto commit `onto`.
-/// The configuration in force on `onto` decides how each path merges, as it
-/// will for the land onto that base.
-fn merge_onto_commit(
-    ctx: &Ctx,
-    merge_base: ObjectId,
+pub(crate) fn merge_for_land_at(
+    state: &ServerState,
+    merge_base: &ObjectId,
     onto: &ObjectId,
-    head: ObjectId,
+    head: &ObjectId,
+    policy_base: &ObjectId,
 ) -> HistoryResult<TreeMerge> {
-    let onto_tree = ctx.index.commit(&ctx.store, onto)?.tree;
-    if merge_base == onto_tree {
-        // Nothing landed under the change: its head is the merge.
+    let ctx = super::open(state)?;
+    let basis = tree_of(&ctx, merge_base)?;
+    let onto_tree = tree_of(&ctx, onto)?;
+    if basis == onto_tree {
         return Ok(TreeMerge {
-            tree: Some(head),
+            tree: Some(*head),
             ..TreeMerge::default()
         });
     }
-    let config = ctx.state.project_config.at_commit(onto)?.config;
-    let policy = |path: &str| policy_for(&config, path);
-    merge_trees(ctx, [merge_base, onto_tree, head], &policy)
+    let config = ctx.state.project_config.at_commit(policy_base)?.config;
+    merge_trees(&ctx, [basis, onto_tree, *head], &|path| {
+        policy_for(&config, path)
+    })
+}
+
+fn tree_of(ctx: &Ctx, id: &ObjectId) -> HistoryResult<ObjectId> {
+    match ctx.store.get_raw(id)?.map(|raw| raw.kind) {
+        Some(ObjectKind::Commit) => Ok(ctx.index.commit(&ctx.store, id)?.tree),
+        Some(ObjectKind::Tree) => Ok(*id),
+        _ => Err(HistoryError::NotFound(format!(
+            "{id} is not a stored commit or tree"
+        ))),
+    }
 }
 
 /// How `path` merges under the configuration in force on the target base.

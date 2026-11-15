@@ -2,7 +2,7 @@
 //!
 //! There is no global merge queue or lock. A land re-merges the change onto
 //! the current base outside any lock, decides with the pure rules in
-//! [`rules`], writes the single landed commit, and then moves the base by a
+//! [`rules`], writes one commit per layer in stack order, and moves the base by a
 //! compare-and-swap in one SQLite transaction ([`Ledger`]). A lost race is
 //! retried with backoff while no new receipt is needed. After a land the
 //! server restacks children and probes overlapping edits for conflicts ([`restack`]).
@@ -247,6 +247,17 @@ pub trait Merger: Send + Sync {
         onto: &CommitId,
         head: &CommitId,
     ) -> LandResult<MergeOutcome>;
+    /// Merge one stack layer under the configuration at the request's base.
+    /// `onto` may be an intermediate tree, not yet a landed commit.
+    fn merge_layer(
+        &self,
+        merge_base: &CommitId,
+        onto: &ObjectId,
+        head: &CommitId,
+        _policy_base: &CommitId,
+    ) -> LandResult<MergeOutcome> {
+        self.merge(merge_base, onto, head)
+    }
 }
 
 /// Writes the landed commit object to the object store.

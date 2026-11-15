@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS base_history (
     post_land_done INTEGER NOT NULL DEFAULT 0,
     UNIQUE (ref_name, commit_id)
 );
+CREATE TABLE IF NOT EXISTS stack_lands (commit_id TEXT PRIMARY KEY, tip TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS receipts (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     change_id TEXT NOT NULL,
@@ -303,6 +304,69 @@ impl Ledger {
         Ok(CasResult::Swapped { seq })
     }
 
+    /// Validate every layer and publish the complete chain in one CAS.
+    /// Intermediate commits remain in history for R12 bisection/revert.
+    pub(super) fn compare_stack(
+        &self,
+        expected: &CommitId,
+        records: &[LandRecord],
+        facts: &[super::ChangeFacts],
+        receipt: Option<&SignedReceipt>,
+        review: ReviewMode,
+    ) -> LandResult<CasResult> {
+        let mut connection = self.lock()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (record, facts) in records.iter().zip(facts) {
+            if let Some(result) = check_attempt(&tx, expected, record, review)? {
+                return Ok(result);
+            }
+            if !stack_basis_unmoved(&tx, facts)? {
+                return Ok(CasResult::ChangeMoved);
+            }
+        }
+        if let Some(receipt) = receipt {
+            if !super::receipt_store::stored_receipt_verifies(&tx, receipt)? {
+                return Ok(CasResult::ReceiptUntrusted);
+            }
+        }
+        let top = records
+            .last()
+            .ok_or_else(|| LandError::Store("empty stack".into()))?;
+        let changed = tx.execute(
+            "UPDATE base_refs SET target = ?1 WHERE name = ?2 AND target = ?3",
+            params![top.commit.to_string(), top.ref_name, expected.to_string()],
+        )?;
+        if changed != 1 {
+            return Err(LandError::Store("stack CAS changed no ref".into()));
+        }
+        let mut seq = 0;
+        for record in records {
+            seq = record_land(&tx, record)?;
+            close_registered_change(&tx, record)?;
+            tx.execute(
+                "INSERT INTO stack_lands VALUES (?1, ?2)",
+                params![record.commit.to_string(), top.commit.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(CasResult::Swapped { seq })
+    }
+
+    /// Recovery retains the request's final base for every layer's rebase.
+    pub(super) fn stack_tip(&self, commit: &CommitId) -> LandResult<CommitId> {
+        let tip: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT tip FROM stack_lands WHERE commit_id=?1",
+                [commit.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        tip.map(parse_commit)
+            .transpose()
+            .map(|tip| tip.unwrap_or(*commit))
+    }
+
     /// Lands whose post-land work (R8 step 4) has not finished, oldest first.
     /// After a crash the server replays them; post-land work is idempotent.
     pub fn pending_post_land(&self, ref_name: &str) -> LandResult<Vec<LandRecord>> {
@@ -401,6 +465,26 @@ fn check_attempt(
     (current != expected.to_string())
         .then(|| parse_commit(current).map(|current| CasResult::BaseMoved { current }))
         .transpose()
+}
+
+/// A reparent can retain a head while changing what its edits mean.
+/// Check the edge and remembered tree inside the same transaction as CAS.
+fn stack_basis_unmoved(tx: &Connection, facts: &super::ChangeFacts) -> LandResult<bool> {
+    if !has_registry(tx)? {
+        return Ok(true);
+    }
+    let current = crate::changes::get(tx, facts.id)
+        .map_err(|e| LandError::Store(e.to_string()))?
+        .change;
+    if current.parent != facts.parent {
+        return Ok(false);
+    }
+    let basis = match current.parent {
+        rosen_core::ChangeParent::Base(commit) => commit,
+        rosen_core::ChangeParent::Change(parent) => crate::stacks::basis(tx, facts.id, parent)
+            .map_err(|e| LandError::Store(e.to_string()))?,
+    };
+    Ok(basis == facts.merge_base)
 }
 
 /// Persist history before closing the registry, so any error in either

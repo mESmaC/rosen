@@ -249,8 +249,6 @@ fn receipt_counts_only_across_prose_lands() {
     for n in [a, b, on_a] {
         landing.submit_receipt(receipt(n, root())).unwrap();
     }
-    let refused = LandOutcome::Refused(Refusal::ParentUnlanded);
-    assert_eq!(landing.land(&cid(on_a)).unwrap(), refused);
     assert!(matches!(
         landing.land(&cid(doc)).unwrap(),
         LandOutcome::Landed { .. }

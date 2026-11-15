@@ -3,9 +3,9 @@
 //! and stores it in the landing ledger, where a land looks it up.
 //!
 //! Validation here gives the checker an immediate answer. It is not what
-//! keeps a land safe: a land only accepts a receipt for the change's head
-//! at land time and a base the base ref has held, so a head that moves
-//! between this check and the store leaves a receipt no land will use.
+//! keeps a land safe: a land verifies the signature and checks the stored
+//! merge-result tree, or the independent-land reuse rules. A server rebase
+//! can change the head while keeping the checked merge result unchanged.
 //!
 //! Every receipt is signed by its submitter's machine (SPEC.md §2, R14).
 //! A remote machine's daemon signs it on the way here, and the server takes
@@ -24,6 +24,26 @@ use crate::landing::{KeyBinding, LandError, Ledger, SignedReceipt};
 use crate::machines::signing::{self, MachineKey, SERVER_MACHINE};
 use crate::rpc::change_error_code;
 use crate::{ServerConfig, ServerState};
+
+/// Prefer the exact preview shown to the checker. Older clients can submit
+/// without requesting a preview; compute that binding using the same merge.
+fn checked_tree(
+    state: &ServerState,
+    ledger: &Ledger,
+    receipt: &Receipt,
+    change: &rosen_core::Change,
+) -> Result<Option<rosen_core::ObjectId>, ErrorBody> {
+    if let Some(tree) = ledger.checked_merge_result(receipt).map_err(land_body)? {
+        return Ok(Some(tree));
+    }
+    let ctx = crate::history::open(state)
+        .map_err(|e| ErrorBody::new(ErrorCode::Internal, e.to_string()))?;
+    Ok(
+        crate::history::merge::merge_stack_onto(&ctx, change, &receipt.base)
+            .map_err(|e| ErrorBody::new(ErrorCode::Internal, e.to_string()))?
+            .tree,
+    )
+}
 
 /// Stores receipts in the landing ledger's tables of the metadata store.
 pub struct ReceiptService {
@@ -98,7 +118,10 @@ impl ReceiptService {
         let signature = request.signature;
         let (ledger, base_ref, current) = self.check(state, &receipt, change)?;
         let signed = self.signed(state, &ledger, receipt, origin, signature)?;
-        let stored = ledger.put_receipt(&signed).map_err(land_body)?;
+        let tree = checked_tree(state, &ledger, &signed.receipt, change)?;
+        let stored = ledger
+            .put_checked_receipt(&signed, tree)
+            .map_err(land_body)?;
         Ok(ReceiptRecord {
             base_current: stored.receipt.base == current,
             receipt: stored.receipt,
@@ -145,8 +168,11 @@ impl ReceiptService {
         } else {
             in_force.config.checks.pre_land.name.clone()
         };
+        let head = ledger
+            .receipt_binding_head(receipt, change.head)
+            .map_err(land_body)?;
         receipt
-            .check_binding(&change.head, change.state, &required)
+            .check_binding(&head, change.state, &required)
             .map_err(refusal_body)?;
         if !known_base {
             let base = receipt.base;

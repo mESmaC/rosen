@@ -39,6 +39,7 @@ fn receipt(cell: &str) -> ReceiptCheck {
         "missing" => ReceiptCheck::Missing,
         "invalid" => ReceiptCheck::Invalid,
         "valid" => ReceiptCheck::Valid,
+        "same_tree" => ReceiptCheck::SameTree,
         other => panic!("bad receipt {other}"),
     }
 }

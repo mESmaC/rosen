@@ -163,24 +163,19 @@ def mergeResult (merge : Nat → Nat → Nat → Option Nat) (onto : Nat) : List
       (fun tree => mergeResult merge tree cs)
 /-- Landed positions of a stack, bottom at `0`. -/
 def Prefix (landed : Nat → Bool) : Prop := ∀ i j, i ≤ j → landed j = true → landed i = true
-def land (landed : Nat → Bool) (i : Nat) : Nat → Bool := fun j => if j = i then true else landed j
-private theorem land_prefix (l : Nat → Bool) (i : Nat) (hp : Prefix l)
-    (gate : i = 0 ∨ l (i - 1) = true) : Prefix (land l i) := by
+/-- One atomic request includes every ancestor through the chosen top. -/
+def land (landed : Nat → Bool) (i : Nat) : Nat → Bool := fun j => if j ≤ i then true else landed j
+private theorem land_prefix (l : Nat → Bool) (i : Nat) (hp : Prefix l) : Prefix (land l i) := by
   intro a b hab hb
-  simp only [land] at hb ⊢
-  by_cases ha : a = i
-  · simp [ha]
-  · simp only [ha, ite_false]
-    by_cases hbi : b = i
-    · rcases gate with h0 | hg
-      · omega
-      · exact hp a (i - 1) (by omega) hg
-    · simp only [hbi, ite_false] at hb
-      exact hp a b hab hb
+  by_cases ha : a ≤ i
+  · simp [land, ha]
+  · have hbi : ¬ b ≤ i := by omega
+    exact (show land l i a = l a by simp [land, ha]).trans
+      (hp a b hab (by simpa [land, hbi] using hb))
 /-- **correct** (SPEC.md R8 step 3): propagation terminates, settles every edge,
 counts distinct changed children, keeps IDs/commits and stops at conflicts.
 Each preview merges from the child's recorded basis onto its parent's result,
-independently of the stack root. Bottom-first lands preserve a prefix. -/
+independently of the stack root. Atomic lands through any top preserve a prefix. -/
 -- SPEC.md §R8
 theorem correct (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : List Node) :
     (∀ n, cs.length < n →
@@ -193,7 +188,7 @@ theorem correct (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : Li
     (∀ onto c tail, mergeResult merge onto (c :: tail) =
       (if c.basis == onto then some c.head else merge c.basis onto c.head).bind
         (fun tree => mergeResult merge tree tail)) ∧
-    (∀ (landed : Nat → Bool) (i : Nat), Prefix landed → (i = 0 ∨ landed (i - 1) = true) →
+    (∀ (landed : Nat → Bool) (i : Nat), Prefix landed →
       Prefix (land landed i)) := by
   refine ⟨fun n hn => loop_pass merge cs q n hn, pass_settled merge cs q, pass_chain merge cs q,
     changedAt_nodup merge cs q 0, changedAt_length merge cs q 0, pass_ids merge cs q, ?_,
