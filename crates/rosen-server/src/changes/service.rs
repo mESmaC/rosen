@@ -4,7 +4,11 @@ use rosen_core::ObjectId;
 use rosen_protocol::{ChangeFilter, ChangeRecord, NewChange};
 use rusqlite::Connection;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
+
+#[path = "readers.rs"]
+mod readers;
 
 /// File name of the metadata database inside the server's data directory
 /// (D13). Landing, import and conflicts share this one database.
@@ -34,11 +38,13 @@ impl BaseSource for NoBase {
     }
 }
 
-/// The server's change registry: one SQLite connection, opened on first use
-/// so a server that never sees a change request never creates the database.
+/// The server's change registry: a lazy writer and bounded read-only WAL
+/// connections. A server that never sees a change request creates no database.
 pub struct ChangeService {
     db_path: Option<PathBuf>,
     conn: Mutex<Option<Connection>>,
+    initialized: AtomicBool,
+    readers: readers::Readers,
     base: RwLock<Arc<dyn BaseSource>>,
 }
 
@@ -55,8 +61,10 @@ impl ChangeService {
 
     fn with_path(db_path: Option<PathBuf>) -> Self {
         ChangeService {
+            readers: readers::Readers::new(db_path.clone()),
             db_path,
             conn: Mutex::new(None),
+            initialized: AtomicBool::new(false),
             base: RwLock::new(Arc::new(NoBase)),
         }
     }
@@ -102,11 +110,11 @@ impl ChangeService {
     }
 
     pub fn list(&self, filter: &ChangeFilter) -> Result<Vec<ChangeRecord>, ChangeError> {
-        self.with_conn(|conn| registry::list(conn, filter))
+        self.with_read(|conn| registry::list(conn, filter))
     }
 
     pub fn show(&self, change: &str) -> Result<ChangeRecord, ChangeError> {
-        self.with_conn(|conn| registry::get(conn, registry::resolve(conn, change)?))
+        self.with_read(|conn| registry::get(conn, registry::resolve(conn, change)?))
     }
 
     pub fn abandon(&self, change: &str) -> Result<ChangeRecord, ChangeError> {
@@ -121,6 +129,21 @@ impl ChangeService {
         self.with_conn(|conn| registry::abandon_releasing(conn, registry::resolve(conn, change)?))
     }
 
+    /// Reads through WAL connections so a registry writer waiting for a land's
+    /// SQLite transaction cannot hold foreground facts behind its mutex.
+    pub fn with_read<T>(
+        &self,
+        work: impl FnOnce(&Connection) -> Result<T, ChangeError>,
+    ) -> Result<T, ChangeError> {
+        if self.db_path.is_none() {
+            return self.with_conn(|conn| work(conn));
+        }
+        if !self.initialized.load(Ordering::Acquire) {
+            self.with_conn(|_| Ok(()))?;
+        }
+        self.readers.with_conn(work)
+    }
+
     /// Runs `work` on the connection, opening and migrating it first if needed.
     /// One connection serialises change writes in-process; SQLite's own locks
     /// cover any other connection to the same file.
@@ -131,6 +154,7 @@ impl ChangeService {
         let mut slot = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.is_none() {
             *slot = Some(self.open()?);
+            self.initialized.store(true, Ordering::Release);
         }
         work(slot.as_mut().expect("connection opened above"))
     }

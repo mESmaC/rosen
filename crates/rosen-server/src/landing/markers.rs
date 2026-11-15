@@ -2,24 +2,66 @@
 use crate::history::{trees, HistoryError, HistoryResult};
 use rosen_core::{FileMode, ObjectId, ObjectKind};
 use rosen_store::{LooseObjectStore, ObjectStore, StoreError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
+use std::sync::{Mutex, PoisonError};
 
-pub(crate) fn paths(store: &LooseObjectStore, tree: ObjectId) -> HistoryResult<Vec<String>> {
-    let mut pending = vec![(String::new(), tree)];
+/// Only fully scanned, marker-free immutable objects are retained. A bounded
+/// server-local cache avoids inflating every unchanged blob for each CAS loser.
+#[derive(Default)]
+pub(crate) struct Cache(Mutex<HashSet<ObjectId>>);
+
+impl Cache {
+    fn clean(&self, id: &ObjectId) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(id)
+    }
+
+    fn remember(&self, id: ObjectId) {
+        let mut clean = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if clean.len() >= 16384 {
+            clean.clear();
+        }
+        clean.insert(id);
+    }
+}
+
+pub(crate) fn paths(
+    store: &LooseObjectStore,
+    tree: ObjectId,
+    cache: &Cache,
+) -> HistoryResult<Vec<String>> {
+    let mut pending = vec![(String::new(), tree, None)];
     let mut checked = HashMap::new();
     let mut paths = Vec::new();
-    while let Some((prefix, tree)) = pending.pop() {
+    while let Some((prefix, tree, before)) = pending.pop() {
+        if let Some(before) = before {
+            if paths.len() == before {
+                cache.remember(tree);
+            }
+            continue;
+        }
+        if cache.clean(&tree) {
+            continue;
+        }
+        // Visit completion after all descendants, without recursive stack
+        // growth. A failed read never certifies this tree as marker-free.
+        pending.push((prefix.clone(), tree, Some(paths.len())));
         for entry in store.read_tree(&tree)?.entries() {
             let path = format!("{prefix}{}", String::from_utf8_lossy(&entry.name));
             if entry.mode.is_tree() {
-                pending.push((format!("{path}/"), entry.id));
-            } else if entry.mode != FileMode::Submodule {
+                pending.push((format!("{path}/"), entry.id, None));
+            } else if entry.mode != FileMode::Submodule && !cache.clean(&entry.id) {
                 let marked = match checked.get(&entry.id) {
                     Some(&marked) => marked,
                     None => {
                         let marked = blob_has_markers(store, entry.id)?;
                         checked.insert(entry.id, marked);
+                        if !marked {
+                            cache.remember(entry.id);
+                        }
                         marked
                     }
                 };

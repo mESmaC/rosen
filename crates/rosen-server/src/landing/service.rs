@@ -51,6 +51,7 @@ pub struct LandingService {
     finished: Condvar,
     /// Deferred overlap scans must leave blocking workers and I/O for lands.
     post_land_slots: Arc<tokio::sync::Semaphore>,
+    marker_cache: super::markers::Cache,
 }
 
 /// Counts one land request's after-answer work as running until dropped:
@@ -169,6 +170,7 @@ impl LandingService {
             finishing: Mutex::new(0),
             finished: Condvar::new(),
             post_land_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            marker_cache: super::markers::Cache::default(),
         }
     }
 
@@ -512,16 +514,17 @@ impl ChangeBook for Adapters {
 
     fn facts(&self, id: &ChangeId) -> LandResult<Option<ChangeFacts>> {
         let state = self.state()?;
-        let change = match state.changes.with_conn(|c| changes::get(c, *id)) {
+        let change = match state.changes.with_read(|c| changes::get(c, *id)) {
             Ok(record) => record.change,
             Err(ChangeError::NotFound(_)) => return Ok(None),
             Err(err) => return Err(backend(err)),
         };
         let merge_base = match change.parent {
             ChangeParent::Base(commit) => commit,
-            ChangeParent::Change(below) => {
-                self.with_changes(|c| crate::stacks::basis(c, change.id, below))?
-            }
+            ChangeParent::Change(below) => state
+                .changes
+                .with_read(|c| crate::stacks::basis(c, change.id, below))
+                .map_err(backend)?,
         };
         let gate = state.landing.gate();
         let approval = gate.approval(&change).map_err(LandError::Backend)?;
@@ -542,18 +545,21 @@ impl ChangeBook for Adapters {
     }
 
     fn stacked_on(&self, id: &ChangeId) -> LandResult<Vec<ChangeId>> {
-        self.with_changes(|conn| {
-            let mut stmt = conn.prepare_cached(
-                "SELECT id FROM changes WHERE parent_change = ?1
+        self.state()?
+            .changes
+            .with_read(|conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id FROM changes WHERE parent_change = ?1
                  AND state IN ('open', 'ready') ORDER BY created_at, id",
-            )?;
-            let ids: Vec<String> = stmt
-                .query_map(params![id.to_string()], |row| row.get(0))?
-                .collect::<Result<_, _>>()?;
-            ids.iter()
-                .map(|text| text.parse().map_err(|_| ChangeError::Corrupt(text.clone())))
-                .collect()
-        })
+                )?;
+                let ids: Vec<String> = stmt
+                    .query_map(params![id.to_string()], |row| row.get(0))?
+                    .collect::<Result<_, _>>()?;
+                ids.iter()
+                    .map(|text| text.parse().map_err(|_| ChangeError::Corrupt(text.clone())))
+                    .collect()
+            })
+            .map_err(backend)
     }
 
     fn overlapping(&self, id: &ChangeId) -> LandResult<Vec<ChangeId>> {
@@ -674,9 +680,10 @@ impl Merger for Adapters {
 
 impl CommitWriter for Adapters {
     fn write_landed(&self, commit: &LandedCommit) -> LandResult<CommitId> {
-        let store = LooseObjectStore::open(self.state()?.config.objects_dir())
+        let state = self.state()?;
+        let store = LooseObjectStore::open(state.config.objects_dir())
             .map_err(|err| LandError::Backend(err.to_string()))?;
-        let marked = super::markers::paths(&store, commit.tree)
+        let marked = super::markers::paths(&store, commit.tree, &state.landing.marker_cache)
             .map_err(|err| LandError::Backend(err.to_string()))?;
         if !marked.is_empty() {
             return Err(LandError::ConflictMarkers(marked));

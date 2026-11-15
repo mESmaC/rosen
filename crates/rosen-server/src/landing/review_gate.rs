@@ -33,10 +33,10 @@ impl ReviewGate for StoredReviews {
     /// head yet still cover the rebased one.
     fn approval(&self, change: &Change) -> Result<Option<(CommitId, Vec<AgentId>)>, String> {
         let state = self.state()?;
-        let read = |conn: &mut rusqlite::Connection| Ok(approvers(conn, change));
+        let read = |conn: &rusqlite::Connection| Ok(approvers(conn, change));
         state
             .changes
-            .with_conn(read)
+            .with_read(read)
             .map_err(|err| err.to_string())?
             .map_err(|err| err.to_string())
     }

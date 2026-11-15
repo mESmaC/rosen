@@ -124,6 +124,8 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 
 - **Generated merge artifacts.** R5/R8 preserve regeneration paths through landing; a land that needs regeneration is refused with the owning change and paths, in either review mode (#389).
   Merge-result trees awaiting regeneration cannot bind receipts; the owner rebases, regenerates and snapshots the repaired artifacts before retrying.
+- **Landing read costs.** R8 uses separate WAL readers for registry facts and bounded caches for marker-free immutable objects and landed reach under the exact build graph (#206).
+  Live receipt trust, approvals and conflict gates are still rechecked in the atomic land transaction.
 - **Text merge line endings.** R5 compares LF and CRLF lines equally and writes merged text in the base file's newline convention, so an editor rewrite does not displace concurrent additions (#391).
 - **Client–server asymmetry.** The server does every merge, rebase, landed commit and history query. The client materialises files, watches them, and uploads snapshots. Clients never run merge logic.
 - **Topology.** One authoritative server per project. On every other enrolled machine, the daemon serves its clients over the local transport, answers object reads from its own cache, and forwards every other request to the server. Refs, claims, the channel and every other piece of mutable state are read and written only on the server, so no machine can fall behind or move ahead of it.

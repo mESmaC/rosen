@@ -1,12 +1,12 @@
 //! Read build inputs from immutable base objects; never trust the candidate's
 //! configuration or collapse intervening lands into a net diff (reverts count).
-use super::reach::{independent, BuildGraph};
+use super::reach::{independent, BuildGraph, Reach};
 use super::{ChangeFacts, CommitId, LandError, LandResult, Tier};
 use rosen_core::claim::PathPattern;
 use rosen_core::project_config::BuildUnit;
 use rosen_core::{Object, ObjectId, ProjectConfig};
 use rosen_store::ObjectStore;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 
 mod cargo_workspace;
@@ -22,12 +22,64 @@ type Units = BTreeMap<String, BuildUnit>;
 /// a full walk and a reparse of every manifest (issue #108). Units are a pure
 /// function of the tree, so a stale entry is only ever a cache miss.
 #[derive(Default)]
-pub struct UnitsCache(Mutex<Option<(ObjectId, Arc<Units>)>>);
+pub struct UnitsCache {
+    units: Mutex<Option<(ObjectId, Arc<Units>)>>,
+    reaches: Mutex<Option<Arc<GraphReaches>>>,
+}
+
+/// A landed commit's reach is immutable only under the exact graph that
+/// interpreted it. A config or manifest change selects a fresh cache; an
+/// older concurrent attempt retains its own graph and never contaminates it.
+struct GraphReaches {
+    graph: BuildGraph,
+    lands: Mutex<HashMap<CommitId, Reach>>,
+}
+
+impl GraphReaches {
+    fn land(&self, store: &dyn ObjectStore, commit: &CommitId) -> Checked<Option<Reach>> {
+        if let Some(reach) = self
+            .lands
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(commit)
+        {
+            return Ok(Some(reach.clone()));
+        }
+        let record = store.read_commit(commit).map_err(error)?;
+        let Some(parent) = record.parents.first() else {
+            return Ok(None);
+        };
+        let reach = inputs::reach(store, &self.graph, parent, commit, false)?;
+        // Bound both entry count and payload; errors are never cached.
+        let bytes: usize = reach.iter().map(|unit| unit.len() + 64).sum();
+        if bytes <= 8192 {
+            let mut lands = self.lands.lock().unwrap_or_else(PoisonError::into_inner);
+            if lands.len() >= 1024 {
+                lands.clear();
+            }
+            lands.insert(*commit, reach.clone());
+        }
+        Ok(Some(reach))
+    }
+}
 
 impl UnitsCache {
+    fn reaches(&self, graph: BuildGraph) -> Arc<GraphReaches> {
+        let mut slot = self.reaches.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(cached) = slot.as_ref().filter(|cached| cached.graph == graph) {
+            return Arc::clone(cached);
+        }
+        let cache = Arc::new(GraphReaches {
+            graph,
+            lands: Mutex::default(),
+        });
+        *slot = Some(Arc::clone(&cache));
+        cache
+    }
+
     fn units(&self, store: &dyn ObjectStore, tree: ObjectId) -> Checked<Arc<Units>> {
         let cached = self
-            .0
+            .units
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
@@ -36,7 +88,8 @@ impl UnitsCache {
             Some((at, units)) if !touches_manifest(&changed(store, &at, &tree)?) => units,
             _ => Arc::new(cargo_units(store, &files(store, tree)?)?),
         };
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((tree, Arc::clone(&units)));
+        *self.units.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((tree, Arc::clone(&units)));
         Ok(units)
     }
 }
@@ -110,17 +163,22 @@ fn decide(
     } else {
         config.build_units.clone()
     };
-    let graph = graph(units, &config);
-    let own = inputs::reach(store, &graph, base, merged, facts.tier == Tier::ProseOnly)?;
+    let reaches = cache.reaches(graph(units, &config));
+    let own = inputs::reach(
+        store,
+        &reaches.graph,
+        base,
+        merged,
+        facts.tier == Tier::ProseOnly,
+    )?;
     for (commit, tier) in lands {
         if *tier == Tier::ProseOnly {
             continue;
         }
-        let record = store.read_commit(commit).map_err(error)?;
-        let Some(parent) = record.parents.first() else {
+        let Some(reach) = reaches.land(store, commit)? else {
             return Ok(false);
         };
-        if !independent(&own, &inputs::reach(store, &graph, parent, commit, false)?) {
+        if !independent(&own, &reach) {
             return Ok(false);
         }
     }

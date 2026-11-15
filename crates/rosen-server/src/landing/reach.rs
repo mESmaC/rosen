@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub type Reach = BTreeSet<String>;
 
+#[derive(PartialEq, Eq)]
 pub struct BuildGraph {
     pub units: BTreeMap<String, BuildUnit>,
     pub workspace_inputs: Vec<PathPattern>,
