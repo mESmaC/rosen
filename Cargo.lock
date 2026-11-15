@@ -914,6 +914,7 @@ dependencies = [
  "clap",
  "rosen-client",
  "rosen-core",
+ "rosen-platform",
  "serde",
  "serde_json",
  "tokio",

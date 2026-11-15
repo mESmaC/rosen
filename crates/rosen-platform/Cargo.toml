@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security_Credentials", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_ProcessStatus"] }
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Security_Credentials", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_ProcessStatus"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

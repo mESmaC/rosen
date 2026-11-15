@@ -86,6 +86,10 @@ pub mod process;
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
+pub mod run_tree;
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
 pub mod security;
 
 pub mod owner_only;

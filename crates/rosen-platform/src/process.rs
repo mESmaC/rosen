@@ -134,7 +134,7 @@ pub fn spawn_detached(
     Ok(DetachedProcess { process })
 }
 
-fn terminated(text: &OsStr) -> io::Result<Vec<u16>> {
+pub(super) fn terminated(text: &OsStr) -> io::Result<Vec<u16>> {
     nul_terminated(text.encode_wide().collect())
 }
 
@@ -148,7 +148,7 @@ fn nul_terminated(mut wide: Vec<u16>) -> io::Result<Vec<u16>> {
 
 /// Builds a command line the Microsoft C runtime splits back into exactly
 /// `program` and `args`.
-fn command_line(program: &OsStr, args: &[&OsStr]) -> io::Result<Vec<u16>> {
+pub(super) fn command_line(program: &OsStr, args: &[&OsStr]) -> io::Result<Vec<u16>> {
     let mut line = Vec::new();
     // The program name ends at the next quote, with no backslash escapes, and
     // a Windows path cannot contain a quote.

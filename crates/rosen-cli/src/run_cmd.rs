@@ -13,7 +13,7 @@ const SAY_EVERY: Duration = Duration::from_secs(30);
 /// Waits for the turn, runs `command` with this process's input and output,
 /// and gives its exit status. A queue that can't be used holds nothing back.
 /// Beneath a run that already holds a turn, the command runs at once, in it.
-pub fn run(class: &str, command: &[String]) -> io::Result<ExitStatus> {
+pub fn run(json: bool, class: &str, command: &[String]) -> io::Result<ExitStatus> {
     let class = RunClass::parse(class).ok_or_else(|| {
         io::Error::other(format!(
             "unknown class `{class}`: use landing, build, verify or prepare"
@@ -27,7 +27,44 @@ pub fn run(class: &str, command: &[String]) -> io::Result<ExitStatus> {
     let (program, arguments) = command
         .split_first()
         .ok_or_else(|| io::Error::other("a command is required after `--`"))?;
+    #[cfg(windows)]
+    if std::env::var_os(WORKER_ENV).is_none() {
+        return run_tree(json, command, holding);
+    }
+    #[cfg(not(windows))]
+    let _ = json;
     spawn(program, arguments, holding)?.wait()
+}
+
+// The job owns a small launcher so Rust can keep doing executable lookup
+// and batch-file escaping. Only that launcher skips creating another job;
+// its command never inherits this private marker, including nested runs.
+#[cfg(windows)]
+const WORKER_ENV: &str = "ROSEN_RUN_TREE_WORKER";
+
+#[cfg(windows)]
+fn run_tree(json: bool, command: &[String], holding: RunClass) -> io::Result<ExitStatus> {
+    use rosen_platform::run_tree::ProcessTree;
+    use std::ffi::OsStr;
+
+    let mut args = Vec::new();
+    if json {
+        args.push(OsStr::new("--json"));
+    }
+    args.extend([
+        OsStr::new("run"),
+        OsStr::new("--class"),
+        OsStr::new(holding.name()),
+        OsStr::new("--"),
+    ]);
+    args.extend(command.iter().map(OsStr::new));
+    let environment = [
+        (OsStr::new(WORKER_ENV), OsStr::new("1")),
+        (OsStr::new(HELD_ENV), OsStr::new(holding.name())),
+    ];
+    // Creation into the job is atomic: even a hard kill of this client
+    // cannot leave a child running between spawn and job assignment.
+    ProcessTree::spawn(&std::env::current_exe()?, &args, &environment)?.wait()
 }
 
 /// This run's turn, or `None` when the queue can't be used.
@@ -92,6 +129,8 @@ fn spawn(
 ) -> io::Result<std::process::Child> {
     let start = |name: &str| {
         let mut child = prioritized_command(name, holding);
+        #[cfg(windows)]
+        child.env_remove(WORKER_ENV);
         let threads = thread_budget().to_string();
         for variable in THREAD_VARIABLES {
             if std::env::var_os(variable).is_none() {
