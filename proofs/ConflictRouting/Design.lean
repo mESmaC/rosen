@@ -95,12 +95,12 @@ def accepts (sameHead closed : Bool) : Bool := sameHead && !closed
 def produced (m : Merge) (path : Nat) : List Region :=
   (m.hunks path).map fun h => ⟨path, h, m.base, m.head, m.onto⟩
 
-/-- `record_merge` on one row: produced regions are open, a resolved region
-the merge no longer produces stays resolved, an open one is dropped. -/
-def cell (hit : Bool) (v : Option Bool) : Option Bool :=
-  if hit then some true else if v = some false then some false else none
+/-- `record_merge` on one row: produced regions are open, and a region the
+merge no longer produces is dropped, open or resolved. -/
+def cell (hit : Bool) : Option Bool :=
+  if hit then some true else none
 def recordMerge (m : Merge) (path : Nat) (rows : Rows) : Rows :=
-  fun k => if k.path = path then cell (decide (k ∈ produced m path)) (rows k) else rows k
+  fun k => if k.path = path then cell (decide (k ∈ produced m path)) else rows k
 def mergePaths (m : Merge) : List Nat → Rows → Rows
   | [], rows => rows
   | p :: ps, rows => mergePaths m ps (recordMerge m p rows)
@@ -108,27 +108,25 @@ def route (s : State) (m : Merge) : State :=
   if accepts (s.head == m.head) s.closed then
     { s with conflicts := mergePaths m m.paths s.conflicts }
   else s
-private theorem cell_cell (hit : Bool) (v : Option Bool) : cell hit (cell hit v) = cell hit v := by
-  cases hit <;> cases v <;> simp [cell]
 private theorem mergePaths_apply (m : Merge) (k : Region) :
     ∀ (ps : List Nat) (rows : Rows), mergePaths m ps rows k =
-      if k.path ∈ ps then cell (decide (k ∈ produced m k.path)) (rows k) else rows k
+      if k.path ∈ ps then cell (decide (k ∈ produced m k.path)) else rows k
   | [], _ => by simp [mergePaths]
   | p :: ps, rows => by
     simp only [mergePaths, mergePaths_apply m k ps, recordMerge, List.mem_cons]
     by_cases hp : k.path = p
-    · subst hp; by_cases hs : k.path ∈ ps <;> simp [hs, cell_cell]
+    · subst hp; by_cases hs : k.path ∈ ps <;> simp [hs]
     · by_cases hs : k.path ∈ ps <;> simp [hp, hs]
 private theorem mergePaths_twice (m : Merge) (rows : Rows) :
     mergePaths m m.paths (mergePaths m m.paths rows) = mergePaths m m.paths rows := by
   funext k
   simp only [mergePaths_apply]
-  by_cases h : k.path ∈ m.paths <;> simp [h, cell_cell]
+  by_cases h : k.path ∈ m.paths <;> simp [h]
 
 /-- **correct** (SPEC.md §R8 step 2, conflict bullet): a change whose head
 moved or that closed gets nothing. Otherwise only its conflict rows change:
-on each routed path a row is open exactly when the merge produced it, a
-resolved region the merge no longer produces stays resolved, and every
+on each routed path a row is open exactly when the merge produced it, every
+other row there, open or resolved, is dropped, and every
 produced region holds the base, the change's own head as `ours` and the
 incoming base as `theirs`. A repeat request routes to the same state. -/
 theorem correct (s : State) (m : Merge) :
@@ -138,8 +136,7 @@ theorem correct (s : State) (m : Merge) :
     (accepts (s.head == m.head) s.closed = true →
       (∀ k, (route s m).conflicts k =
         if k.path ∈ m.paths then
-          (if k ∈ produced m k.path then some true
-           else if s.conflicts k = some false then some false else none)
+          (if k ∈ produced m k.path then some true else none)
         else s.conflicts k) ∧
       ∀ k, k ∈ produced m k.path → k.base = m.base ∧ k.ours = s.head ∧ k.theirs = m.onto) ∧
     route (route s m) m = route s m := by

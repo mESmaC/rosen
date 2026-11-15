@@ -179,18 +179,21 @@ impl ConflictSet {
     /// Records the outcome of merging one file: the latest merge is the truth for
     /// that path.
     ///
-    /// Open conflicts on `path` that the merge no longer produces are dropped, since
-    /// the region now merges. A resolved conflict that the merge produces again is
-    /// reopened: resolving it did not change the inputs, and picking a side silently
-    /// would break R5. A clean merge passes an empty `conflicts`.
+    /// Afterwards `path` holds exactly the conflicts this merge produced, all open.
+    /// Conflicts on `path` that the merge no longer produces, open or resolved, are
+    /// dropped, since the region now merges; keeping resolved ones would pile up
+    /// stale entries. A resolved conflict that the merge produces again is open
+    /// again: resolving it did not change the inputs, and picking a side silently
+    /// would break R5. A clean merge passes an empty `conflicts` and clears `path`.
     pub fn record_merge(&mut self, path: &str, conflicts: impl IntoIterator<Item = Conflict>) {
-        self.conflicts.retain(|c| c.path != path || !c.is_open());
+        self.conflicts.retain(|c| c.path != path);
         for mut conflict in conflicts {
             debug_assert_eq!(conflict.path, path, "merge result for one path only");
             conflict.state = ConflictState::Open;
-            match self.conflicts.iter_mut().find(|c| c.id == conflict.id) {
-                Some(existing) => existing.state = ConflictState::Open,
-                None => self.conflicts.push(conflict),
+            // A caller may pass a region twice (a rebase adds its kept open
+            // conflicts to the new ones); store it once.
+            if !self.conflicts.iter().any(|c| c.id == conflict.id) {
+                self.conflicts.push(conflict);
             }
         }
         self.sort();
