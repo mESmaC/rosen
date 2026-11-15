@@ -18,6 +18,14 @@ pub async fn start(session: &Session, root: &Path) -> Result<WorkspaceWatch> {
     Ok(watch)
 }
 
+/// A stuck watcher must not hold up the change after measurement ends.
+pub async fn stop(watch: WorkspaceWatch) -> Result<()> {
+    tokio::time::timeout(WATCH_TIMEOUT, watch.stop())
+        .await
+        .context("watcher shutdown timed out")??;
+    Ok(())
+}
+
 /// Time the first acknowledged snapshot that contains every edit. Validate
 /// its immutable commit, so a partial or stale snapshot cannot be a sample.
 pub async fn measure(

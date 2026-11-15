@@ -28,6 +28,9 @@ pub struct Report {
     /// Last write to an acknowledged automatic snapshot (R2), in milliseconds.
     #[serde(default)]
     pub snapshot_ms: Vec<f64>,
+    /// Watcher startup, measurement and shutdown errors, separate from correctness.
+    #[serde(default)]
+    pub snapshot_failures: u64,
     pub lands: Vec<LandSample>,
     /// Every receipt the machine's checker submitted (R8 step 1).
     pub receipts: Vec<ReceiptSample>,
@@ -120,6 +123,9 @@ pub enum Record {
     Snapshot {
         ms: f64,
     },
+    SnapshotFailure {
+        line: String,
+    },
     Land(LandSample),
     Receipt(ReceiptSample),
     Outcome(ChangeOutcome),
@@ -152,6 +158,10 @@ impl Report {
             Record::Began(_) => {}
             Record::Start(sample) => self.workspace_starts.push(sample.clone()),
             Record::Snapshot { ms } => self.snapshot_ms.push(*ms),
+            Record::SnapshotFailure { line } => {
+                self.snapshot_failures += 1;
+                self.errors.push(line.clone());
+            }
             Record::Land(sample) => self.lands.push(sample.clone()),
             Record::Receipt(sample) => self.receipts.push(sample.clone()),
             Record::Outcome(outcome) => self.changes.push(outcome.clone()),

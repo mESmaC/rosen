@@ -359,7 +359,8 @@ Machines join a project with no login, monitor or remote desktop on the joining 
   - 100 concurrent agents spread across the machines, each creating a change (some stacked), editing, claiming, submitting receipts and landing, over at least 1000 lands;
   - a new workspace is ready in under 2 s (p95) with the warm pool filled;
   - a land with a valid receipt commits in under 200 ms (p95);
-  - automatic snapshot latency is reported as samples, p50, p95, maximum and the count over R2's 2 s budget, separately from pass/fail checks; each new stress change starts its watcher and waits for its initial scan before editing, then verifies the acknowledged snapshot's immutable commit contains every expected edit;
+  - automatic snapshot latency is reported as samples, p50, p95, maximum and the count over R2's 2 s budget, separately from pass/fail checks; each new stress change attempts to start its watcher and waits for its initial scan before measuring edits, then verifies the acknowledged snapshot's immutable commit contains every expected edit;
+  - watcher startup, measurement and shutdown errors or timeouts are counted as `snapshot_failures` with diagnostics, without aborting the change; a valid sample is kept even if shutdown fails, and an explicit snapshot still makes the change's edits durable before landing;
   - no edit is lost, no land is applied twice, and the base moves only by a clean land (plus matching receipt and approval in before-land mode), or a server revert;
   - an injected failing commit is bisected and reverted, and its change reopens with its work intact;
   - no two agents ever hold the same piece or path claim, on any machine;

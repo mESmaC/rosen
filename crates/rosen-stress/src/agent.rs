@@ -191,7 +191,13 @@ impl Agent {
     async fn start_change(&mut self, n: usize, on: Option<ChangeId>) -> Result<Work> {
         let (change, root) = self.create_workspace(n, on).await?;
         let plan = self.shared.plan.clone();
-        let mut watch = crate::snapshots::start(&self.session, &root).await?;
+        let watch = match crate::snapshots::start(&self.session, &root).await {
+            Ok(watch) => Some(watch),
+            Err(err) => {
+                self.snapshot_failure(n, "startup", err);
+                None
+            }
+        };
         let expected = crate::edit::write_edits(&plan, self.index, n, &root)?;
         let written = Instant::now();
         let began = Began {
@@ -203,13 +209,28 @@ impl Agent {
             expected,
         };
         self.shared.record(Record::Began(began.clone()));
-        let measured =
-            crate::snapshots::measure(&self.session, &mut watch, &began.expected, written).await;
-        watch.stop().await?;
-        self.shared.record(Record::Snapshot { ms: measured? });
+        if let Some(mut watch) = watch {
+            let measured =
+                crate::snapshots::measure(&self.session, &mut watch, &began.expected, written)
+                    .await;
+            // Keep an acknowledged sample even if the watcher fails while stopping.
+            match measured {
+                Ok(ms) => self.shared.record(Record::Snapshot { ms }),
+                Err(err) => self.snapshot_failure(n, "measurement", err),
+            }
+            if let Err(err) = crate::snapshots::stop(watch).await {
+                self.snapshot_failure(n, "shutdown", err);
+            }
+        }
         self.claim(n, change, true).await?;
+        // This explicit snapshot provides durability even when measurement fails.
         self.snapshot(&began).await?;
         Ok(Work::from(&began))
+    }
+
+    fn snapshot_failure(&self, n: usize, phase: &str, err: anyhow::Error) {
+        let line = format!("{}: change {n} snapshot {phase}: {err:#}", self.name);
+        self.shared.record(Record::SnapshotFailure { line });
     }
 
     /// Creates the change and its workspace, measuring the start (R3). A

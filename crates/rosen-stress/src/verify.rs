@@ -352,8 +352,9 @@ fn snapshot_summary(reports: &[Report]) -> String {
         .iter()
         .filter(|ms| **ms > SNAPSHOT_BUDGET_MS)
         .count();
+    let failures: u64 = reports.iter().map(|r| r.snapshot_failures).sum();
     format!(
-        "{}snapshot budget {SNAPSHOT_BUDGET_MS:.0} ms: {over}/{} over budget\n",
+        "{}snapshot budget {SNAPSHOT_BUDGET_MS:.0} ms: {over}/{} over budget\nsnapshot failures {failures}\n",
         line("automatic snapshot (ms)", &samples),
         samples.len()
     )
@@ -423,14 +424,32 @@ fn line(label: &str, samples: &[f64]) -> String {
 mod tests {
     use super::*;
 
-    // Risk (#371, R2): making the snapshot budget a correctness gate again
-    // sends loaded post-land runs into bisections that have no culprit.
+    // Risk (#371, #372, R2): snapshot delays or measurement failures must
+    // not turn a loaded or faulted run into a correctness failure.
     #[test]
-    fn slow_snapshots_are_reported_separately_from_correctness() {
-        let reports = [Report {
+    fn snapshot_latency_and_failures_are_reported_separately_from_correctness() {
+        let mut report = Report {
             snapshot_ms: vec![250.0, 2000.0, 2500.0],
             ..Report::default()
-        }];
+        };
+        for phase in [
+            "startup timeout",
+            "measurement read error",
+            "shutdown error",
+        ] {
+            let record = crate::report::Record::SnapshotFailure { line: phase.into() };
+            let json = serde_json::to_string(&record).unwrap();
+            report.apply(&serde_json::from_str(&json).unwrap());
+        }
+        assert_eq!(report.snapshot_failures, 3);
+        assert_eq!(report.errors.len(), 3);
+        let reports = [
+            report,
+            Report {
+                snapshot_failures: 2,
+                ..Report::default()
+            },
+        ];
         let run = Run {
             plan: Plan {
                 run: "snapshot-budget".into(),
@@ -459,5 +478,14 @@ mod tests {
         let output = summary(&reports);
         assert!(output.contains("automatic snapshot (ms): n=3 p50=2000.0 p95=2500.0 max=2500.0"));
         assert!(output.contains("snapshot budget 2000 ms: 1/3 over budget"));
+        assert!(output.contains("snapshot failures 5"));
+    }
+
+    #[test]
+    fn older_reports_default_to_no_snapshot_failures() {
+        let mut json = serde_json::to_value(Report::default()).unwrap();
+        json.as_object_mut().unwrap().remove("snapshot_failures");
+        let report: Report = serde_json::from_value(json).unwrap();
+        assert_eq!(report.snapshot_failures, 0);
     }
 }
