@@ -12,6 +12,9 @@ pub struct ClaimRequest {
     /// Repository-relative paths or globs, as typed. The server validates and
     /// normalises them. An empty list in a release means every path.
     pub paths: Vec<String>,
+    /// Opt into first-claim-wins. Notices (the default) never refuse overlaps.
+    #[serde(default)]
+    pub exclusive: bool,
 }
 
 /// Parameters of [`crate::Request::ClaimList`].
@@ -25,7 +28,7 @@ pub struct ClaimFilter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimKind {
-    /// The change owns the path: no other change can claim an overlapping one.
+    /// The change declares an edit; `PathClaim::exclusive` opts into locking.
     Claim,
     /// The change edits a path another change claimed, knowingly.
     Share,
@@ -41,6 +44,9 @@ pub struct PathClaim {
     /// The path or glob, normalised.
     pub path: String,
     pub kind: ClaimKind,
+    /// True for an exclusive claim; shares and waits are never exclusive.
+    #[serde(default)]
+    pub exclusive: bool,
     /// Unix milliseconds when it was recorded.
     pub since: i64,
 }
@@ -62,6 +68,9 @@ pub enum ClaimOutcome {
     Granted {
         change: ChangeId,
         paths: Vec<String>,
+        /// Other live changes claiming, sharing or editing these paths.
+        #[serde(default)]
+        overlaps: Vec<OverlapRecord>,
     },
     /// Nothing was claimed: each holder already claims an overlapping path.
     Refused { holders: Vec<ClaimHolder> },

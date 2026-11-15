@@ -159,14 +159,17 @@ pub enum Command {
         #[arg(short = 'n', long)]
         limit: Option<usize>,
     },
-    /// Claim paths or globs for a change. The first claim wins; a refusal
-    /// names the holder and exits with status 1.
+    /// Notice intent to edit paths or globs, reporting concurrent work.
     ///
-    /// Two claims conflict when some path matches both, so `src/*.rs`
-    /// conflicts with `src/lib.rs` but not with `src/*.md`. All paths are
-    /// granted or none. Claims are released when the change lands or is
-    /// abandoned, or by `rosen release`.
-    Claim(ClaimArgs),
+    /// Notices always succeed. With --exclusive, the first claim wins and a
+    /// refusal names the holders. Records release on land, abandon or release.
+    Claim {
+        #[command(flatten)]
+        paths: ClaimArgs,
+        /// Use first-claim-wins; refuses generated files and registration lists.
+        #[arg(long)]
+        exclusive: bool,
+    },
     /// Record that a change edits paths another change has claimed. A share
     /// is never refused; it tells the holder its path is edited knowingly.
     Share(ClaimArgs),
@@ -753,7 +756,7 @@ impl Command {
             Command::Status(_) => "status",
             Command::Diff(_) => "diff",
             Command::Log { .. } => "log",
-            Command::Claim(_) => "claim",
+            Command::Claim { .. } => "claim",
             Command::Share(_) => "share",
             Command::Wait(_) => "wait",
             Command::Release(_) => "release",

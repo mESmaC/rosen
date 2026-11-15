@@ -24,13 +24,25 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
              PRIMARY KEY (change_id, kind, pattern)
          ) WITHOUT ROWID;
          CREATE INDEX IF NOT EXISTS path_claims_by_kind ON path_claims(kind);",
-    )
+    )?;
+    let has_exclusive = conn
+        .prepare("PRAGMA table_info(path_claims)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == "exclusive");
+    if !has_exclusive {
+        // Existing claims were locks. Preserve them across an upgrade.
+        conn.execute_batch("ALTER TABLE path_claims ADD COLUMN exclusive INTEGER NOT NULL DEFAULT 1 CHECK (exclusive IN (0, 1));")?;
+    }
+    Ok(())
 }
 
 /// Records joined with their change. Only open and ready changes are live:
 /// a landed or abandoned change's leftover rows never block anyone, even if
 /// a crash came between closing the change and releasing its claims.
-const SELECT: &str = "SELECT pc.change_id, c.owner, pc.pattern, pc.kind, pc.created_at
+const SELECT: &str =
+    "SELECT pc.change_id, c.owner, pc.pattern, pc.kind, pc.created_at, pc.exclusive
      FROM path_claims pc JOIN changes c ON c.id = pc.change_id";
 const LIVE: &str = "c.state IN ('open', 'ready')";
 
@@ -38,32 +50,34 @@ const LIVE: &str = "c.state IN ('open', 'ready')";
 pub fn claim(
     conn: &mut Connection,
     change: &str,
-    paths: &[String],
+    req: &rosen_protocol::ClaimRequest,
+    store: &dyn rosen_store::ObjectStore,
 ) -> Result<ClaimOutcome, ChangeError> {
-    let patterns = parse(paths)?;
+    let patterns = parse(&req.paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let id = open_change(&tx, change)?;
     let holders = holders(&tx, id, &patterns)?;
-    if !holders.is_empty() {
+    if req.exclusive && !holders.is_empty() {
         return Ok(ClaimOutcome::Refused { holders });
     }
+    let overlaps = super::notices::find(&tx, store, id, &patterns)?;
     let now = now_millis();
     for pattern in &patterns {
         insert(&tx, id, pattern, ClaimKind::Claim, now)?;
+        tx.execute("UPDATE path_claims SET exclusive = MAX(exclusive, ?3) WHERE change_id = ?1 AND pattern = ?2 AND kind = 'claim'",
+            params![id.to_string(), pattern.as_str(), req.exclusive])?;
         // Owning the path supersedes sharing or waiting on it.
         tx.execute(
             "DELETE FROM path_claims WHERE change_id = ?1 AND pattern = ?2 AND kind <> 'claim'",
             params![id.to_string(), pattern.as_str()],
         )?;
     }
-    // Staged with the grant, so a stop after the commit cannot lose it (R9).
-    let detail = serde_json::json!({ "paths": texts(&patterns) });
-    let event = crate::events::Staged::about(rosen_protocol::EventKind::Claim, id, detail);
-    crate::events::stage(&tx, &event)?;
+    announce(&tx, id, &patterns, req.exclusive, &overlaps)?;
     tx.commit()?;
     Ok(ClaimOutcome::Granted {
         change: id,
         paths: texts(&patterns),
+        overlaps,
     })
 }
 
@@ -294,8 +308,8 @@ fn insert(
 ) -> Result<(), ChangeError> {
     // OR IGNORE keeps the first record's time when a path is repeated.
     tx.execute(
-        "INSERT OR IGNORE INTO path_claims (change_id, pattern, kind, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT OR IGNORE INTO path_claims (change_id, pattern, kind, created_at, exclusive)
+         VALUES (?1, ?2, ?3, ?4, 0)",
         params![id.to_string(), pattern.as_str(), kind_text(kind), now],
     )?;
     Ok(())
@@ -315,7 +329,7 @@ fn rows<P: rusqlite::Params>(
     Ok(out)
 }
 
-type RawRow = (String, String, String, String, i64);
+type RawRow = (String, String, String, String, i64, bool);
 
 fn raw_row(row: &Row) -> rusqlite::Result<RawRow> {
     Ok((
@@ -324,10 +338,13 @@ fn raw_row(row: &Row) -> rusqlite::Result<RawRow> {
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
+        row.get(5)?,
     ))
 }
 
-fn parse_row((change, owner, path, kind, since): RawRow) -> Result<PathClaim, ChangeError> {
+fn parse_row(
+    (change, owner, path, kind, since, exclusive): RawRow,
+) -> Result<PathClaim, ChangeError> {
     let corrupt = |what: &str| ChangeError::Corrupt(format!("path claim {what}"));
     Ok(PathClaim {
         change: change.parse().map_err(|_| corrupt("change id"))?,
@@ -340,6 +357,7 @@ fn parse_row((change, owner, path, kind, since): RawRow) -> Result<PathClaim, Ch
         },
         path,
         since,
+        exclusive: kind == "claim" && exclusive,
     })
 }
 
@@ -376,4 +394,28 @@ fn now_millis() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
         })
+}
+
+/// Claims and shares for the same transactional snapshot as the new notice.
+pub(super) fn records(conn: &Connection) -> Result<Vec<PathClaim>, ChangeError> {
+    rows(
+        conn,
+        &format!("{SELECT} WHERE {LIVE} ORDER BY pc.change_id, pc.pattern"),
+        [],
+    )
+}
+
+fn announce(
+    tx: &Transaction,
+    id: ChangeId,
+    patterns: &[PathPattern],
+    exclusive: bool,
+    overlaps: &[rosen_protocol::OverlapRecord],
+) -> Result<(), ChangeError> {
+    // Stage the full audience with the grant so restart cannot lose the notice.
+    let detail = serde_json::json!({ "paths": texts(patterns), "exclusive": exclusive, "overlaps": overlaps });
+    let mut event = crate::events::Staged::about(rosen_protocol::EventKind::Claim, id, detail);
+    event.concern.agents = overlaps.iter().map(|other| other.owner.clone()).collect();
+    crate::events::stage(tx, &event)?;
+    Ok(())
 }

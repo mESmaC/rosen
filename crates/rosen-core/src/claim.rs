@@ -1,5 +1,5 @@
 //! Path claims (SPEC R6): which paths a change declares it will edit, and the
-//! first-claim-wins rule that decides whether a new claim is granted.
+//! first-claim-wins rule for opt-in exclusive requests. Notices never refuse.
 //!
 //! A claim names a path or a glob. Two claims conflict when some path matches
 //! both of them, so `src/*.rs` conflicts with `src/lib.rs` and with `src/**`,
@@ -385,7 +385,7 @@ pub struct Blocker {
     pub held: usize,
 }
 
-/// The first-claim-wins rule. A claim by `claimant` on `requested` is granted
+/// The exclusive first-claim-wins rule. A claim by `claimant` on `requested` is granted
 /// exactly when no pattern in it overlaps a claim another change holds; the
 /// claimant's own claims never block it. Returns every blocker, so a refusal
 /// can name each holder. Granting is all or nothing: one blocker refuses the

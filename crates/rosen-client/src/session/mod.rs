@@ -180,11 +180,22 @@ impl Session {
     }
 }
 
-/// Path claims (R6). `change` is a change ID or unique prefix; refusals are
+/// Path notices and exclusive claims (R6). `change` is an ID or unique prefix; refusals are
 /// outcomes naming the holder, not errors.
 impl Session {
     pub async fn claim(&self, change: &str, paths: &[String]) -> Result<ClaimOutcome, Error> {
         self.client.claim_paths(claim_request(change, paths)).await
+    }
+
+    /// First-claim-wins for paths where concurrent work should hold off.
+    pub async fn claim_exclusive(
+        &self,
+        change: &str,
+        paths: &[String],
+    ) -> Result<ClaimOutcome, Error> {
+        let mut request = claim_request(change, paths);
+        request.exclusive = true;
+        self.client.claim_paths(request).await
     }
 
     pub async fn share(&self, change: &str, paths: &[String]) -> Result<ShareOutcome, Error> {
@@ -221,6 +232,7 @@ fn claim_request(change: &str, paths: &[String]) -> ClaimRequest {
     ClaimRequest {
         change: change.to_owned(),
         paths: paths.to_vec(),
+        exclusive: false,
     }
 }
 

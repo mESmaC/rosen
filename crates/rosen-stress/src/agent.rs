@@ -390,7 +390,7 @@ impl Agent {
         if race && plan.claims_hot(n) {
             let hot = crate::plan::Plan::hot_path(unit);
             let paths = vec![hot.clone()];
-            match retrying!(self, "claim hot", |s| s.claim(&id, &paths))? {
+            match retrying!(self, "claim hot", |s| s.claim_exclusive(&id, &paths))? {
                 ClaimOutcome::Granted { .. } => self.hot_granted(change, &hot).await?,
                 ClaimOutcome::Refused { .. } => {
                     self.shared.record(Record::HotClaim { granted: false });

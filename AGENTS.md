@@ -84,8 +84,8 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Comment code whose purpose is not clear; explain why. Never add a new Markdown file unless the piece asks for one.
 
 ## Coordination (AIRC)
-- Before editing, claim your task in AIRC, and every file you expect to touch with `rosen claim <paths>`. The first claim wins; a refusal names the holder.
-- If your claim is refused, pick different unclaimed work.
+- Before editing, claim your task in AIRC, and every file you expect to touch with `rosen claim <paths>`. Path claims are notices by default and report concurrent work. Use `rosen claim --exclusive` only when concurrent edits should hold off; generated files and registration lists cannot be exclusive.
+- If a piece claim or exclusive path claim is refused, pick different unclaimed work.
 - Before editing a file another change claimed, record it with `rosen share <paths>`, or `rosen wait <paths>` when you need its change landed first.
 - If your work depends on another change, record a wait; continue, and take the rebase Rosen makes when it lands.
 - Claims are released when your change lands or is abandoned. `rosen release <paths>` gives one up sooner.

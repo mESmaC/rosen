@@ -198,7 +198,7 @@ pub enum Request {
         change: String,
         basis: rosen_core::ObjectId,
     },
-    /// Claims paths or globs for a change, first claim wins (R6). A refusal
+    /// Notices paths or globs, or opts into exclusive claims (R6). A refusal
     /// is an ordinary answer naming the holders, not an error.
     ClaimPaths(ClaimRequest),
     /// Records that a change edits paths another change may have claimed.
@@ -518,7 +518,7 @@ pub enum EventKind {
     Updated,
     /// A review comment, approval or resolution on the change (R7).
     Review,
-    /// The change claimed `detail.paths` (R6).
+    /// The change claimed `detail.paths`; `detail.overlaps` names concurrent work (R6).
     Claim,
     /// Claims were released: the change's own (`detail.paths`), or a wake
     /// for a waiting change (`detail.path`, `detail.wake`).

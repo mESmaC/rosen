@@ -81,10 +81,10 @@ def bit (b : Bool) : String := if b then "1" else "0"
 def fixtureRow (held requested : String) : String :=
   let s : State String := ⟨[⟨1, held⟩], []⟩
   "\t".intercalate [held, requested, bit (overlap held requested),
-    bit (grants overlap s 2 [requested])]
+    bit (grants overlap s 2 [requested]), bit ((notice s 2 [requested]).isSome)]
 
 def fixtureTable : String :=
-  "held\trequested\toverlap\tgranted\n" ++
+  "held\trequested\toverlap\texclusive_granted\tnotice_granted\n" ++
     String.join (patterns.flatMap fun held => patterns.map (fixtureRow held · ++ "\n"))
 
 end Claims.Fixtures

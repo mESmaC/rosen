@@ -144,7 +144,11 @@ fn print_text(record: &ChangeRecord, claims: &[PathClaim], local: Option<&Worksp
     }
     println!("claims:    {}", claims.len());
     for claim in claims {
-        let kind = format!("{:?}", claim.kind).to_lowercase();
+        let kind = if claim.exclusive {
+            "exclusive claim".to_owned()
+        } else {
+            format!("{:?}", claim.kind).to_lowercase()
+        };
         println!("  {kind} {}", claim.path);
     }
     let Some(local) = local else { return };

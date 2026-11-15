@@ -36,7 +36,7 @@ fn adopts_existing_metadata_and_reopens_with_wal() {
     assert_eq!(version, metadata::SCHEMA_VERSION);
     assert!(conn
         .execute(
-            "INSERT INTO path_claims VALUES ('missing', 'src', 'claim', 0)",
+            "INSERT INTO path_claims (change_id, pattern, kind, created_at) VALUES ('missing', 'src', 'claim', 0)",
             []
         )
         .is_err());

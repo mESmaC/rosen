@@ -86,6 +86,7 @@ async fn record(
     path: &str,
 ) {
     let request = ClaimRequest {
+        exclusive: false,
         change: id.to_string(),
         paths: vec![path.into()],
     };

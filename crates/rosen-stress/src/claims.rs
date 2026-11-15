@@ -1,5 +1,5 @@
-//! Watching first-claim-wins (R6, §5 "no two agents ever hold the same
-//! path claim, on any machine").
+//! Watching opt-in exclusive first-claim-wins (R6, §5): no two agents
+//! ever hold the same exclusive path claim, on any machine.
 //!
 //! Two views catch a double holder. Within one machine the harness knows
 //! exactly when each of its agents holds the hot path. Across machines,
@@ -65,7 +65,7 @@ impl HotClaims {
     pub fn server_clash(path: &str, claims: &[PathClaim]) -> Option<String> {
         let holders: Vec<String> = claims
             .iter()
-            .filter(|claim| claim.kind == ClaimKind::Claim && claim.path == path)
+            .filter(|claim| claim.kind == ClaimKind::Claim && claim.exclusive && claim.path == path)
             .map(|claim| format!("{} ({})", claim.change, claim.owner))
             .collect();
         (holders.len() > 1).then(|| format!("server lists {path} claimed by {holders:?}"))

@@ -192,7 +192,12 @@ fn events(
 /// The claim, share, wait or release a command asks for, if it is one.
 fn path_record_call(command: &Command) -> Option<(ClaimVerb, Option<&str>, &[String])> {
     let (verb, args) = match command {
-        Command::Claim(args) => (ClaimVerb::Claim, args),
+        Command::Claim { paths, exclusive } => (
+            ClaimVerb::Claim {
+                exclusive: *exclusive,
+            },
+            paths,
+        ),
         Command::Share(args) => (ClaimVerb::Share, args),
         Command::Wait(args) => (ClaimVerb::Wait, args),
         Command::Release(args) => {

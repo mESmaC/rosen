@@ -113,6 +113,21 @@
     },
     {
       "$ref": "#/$defs/rosen.post-land-failures~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.claim~1v2"
+    },
+    {
+      "$ref": "#/$defs/rosen.share~1v2"
+    },
+    {
+      "$ref": "#/$defs/rosen.wait~1v2"
+    },
+    {
+      "$ref": "#/$defs/rosen.release~1v2"
+    },
+    {
+      "$ref": "#/$defs/rosen.status~1v2"
     }
   ],
   "$defs": {
@@ -2923,6 +2938,303 @@
       "additionalProperties": false,
       "x-commands": [
         "review failures"
+      ]
+    },
+    "PathClaimV2": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "owner": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ClaimKind"
+        },
+        "since": {
+          "type": "integer"
+        },
+        "exclusive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "change",
+        "owner",
+        "path",
+        "kind",
+        "since",
+        "exclusive"
+      ],
+      "additionalProperties": false
+    },
+    "ClaimHolderV2": {
+      "type": "object",
+      "properties": {
+        "requested": {
+          "type": "string"
+        },
+        "held": {
+          "$ref": "#/$defs/PathClaimV2"
+        }
+      },
+      "required": [
+        "requested",
+        "held"
+      ],
+      "additionalProperties": false
+    },
+    "ClaimOutcomeV2": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "granted"
+            },
+            "change": {
+              "$ref": "#/$defs/ChangeId"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "overlaps": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/OverlapRecord"
+              }
+            }
+          },
+          "required": [
+            "outcome",
+            "change",
+            "paths",
+            "overlaps"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "outcome": {
+              "const": "refused"
+            },
+            "holders": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ClaimHolderV2"
+              }
+            }
+          },
+          "required": [
+            "outcome",
+            "holders"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ShareOutcomeV2": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "holders": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClaimHolderV2"
+          }
+        }
+      },
+      "required": [
+        "change",
+        "paths",
+        "holders"
+      ],
+      "additionalProperties": false
+    },
+    "WaitOutcomeV2": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "waiting_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClaimHolderV2"
+          }
+        },
+        "free": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "change",
+        "waiting_on",
+        "free",
+        "cursor"
+      ],
+      "additionalProperties": false
+    },
+    "ReleaseOutcomeV2": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "released": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathClaimV2"
+          }
+        },
+        "woken": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WokenWait"
+          }
+        }
+      },
+      "required": [
+        "change",
+        "released",
+        "woken"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.claim/v2": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.claim/v2"
+        },
+        "claim": {
+          "$ref": "#/$defs/ClaimOutcomeV2"
+        }
+      },
+      "required": [
+        "schema",
+        "claim"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "claim"
+      ]
+    },
+    "rosen.share/v2": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.share/v2"
+        },
+        "share": {
+          "$ref": "#/$defs/ShareOutcomeV2"
+        }
+      },
+      "required": [
+        "schema",
+        "share"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "share"
+      ]
+    },
+    "rosen.wait/v2": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.wait/v2"
+        },
+        "wait": {
+          "$ref": "#/$defs/WaitOutcomeV2"
+        }
+      },
+      "required": [
+        "schema",
+        "wait"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "wait"
+      ]
+    },
+    "rosen.release/v2": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.release/v2"
+        },
+        "release": {
+          "$ref": "#/$defs/ReleaseOutcomeV2"
+        }
+      },
+      "required": [
+        "schema",
+        "release"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "release"
+      ]
+    },
+    "rosen.status/v2": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.status/v2"
+        },
+        "change": {
+          "$ref": "#/$defs/ChangeRecord"
+        },
+        "claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathClaimV2"
+          }
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "change",
+        "claims",
+        "workspace"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "status"
       ]
     }
   }

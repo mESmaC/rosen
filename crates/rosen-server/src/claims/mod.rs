@@ -1,12 +1,13 @@
 //! Path claims, shares and waits (SPEC R6). They are also AIRC's file claims
 //! (R13): one record per path, held in the metadata store with the changes.
 //!
-//! The first-claim-wins rule is pure logic in `rosen_core::claim`; [`store`]
+//! The exclusive first-claim-wins rule is pure logic in `rosen_core::claim`; [`store`]
 //! runs it inside one SQLite transaction per operation. Events are published
 //! only after that transaction commits, so a subscriber never sees a claim or
 //! a wake that a rollback undid.
 
 mod delivery;
+mod notices;
 pub(crate) mod store;
 
 pub use delivery::recover;
@@ -73,7 +74,7 @@ fn run(state: &ServerState, call: ClaimCall) -> Result<Response, ChangeError> {
     let changes = &state.changes;
     Ok(match call {
         ClaimCall::Claim(req) => {
-            let outcome = changes.with_conn(|c| store::claim(c, &req.change, &req.paths))?;
+            let outcome = claim(state, &req)?;
             // A grant staged its `claim` event in the claim's transaction.
             if matches!(outcome, ClaimOutcome::Granted { .. }) {
                 state.events.deliver_staged();
@@ -126,4 +127,27 @@ pub fn records_for(
     id: rosen_core::ChangeId,
 ) -> Result<Vec<rosen_protocol::PathClaim>, ChangeError> {
     store::list(conn, Some(&id.to_string()))
+}
+
+fn claim(state: &ServerState, req: &ClaimRequest) -> Result<ClaimOutcome, ChangeError> {
+    if req.exclusive {
+        let config = state.project_config.at_base().map_err(ChangeError::Base)?;
+        let excluded = config
+            .map(|(_, resolved)| resolved.config.uncounted_patterns())
+            .unwrap_or_default();
+        for path in &req.paths {
+            let pattern = rosen_core::PathPattern::new(path)?;
+            if excluded.iter().any(|shared| shared.overlaps(&pattern)) {
+                return Err(rosen_core::Error::InvalidPath(format!(
+                    "{path}: exclusive claims cannot cover generated files or registration lists"
+                ))
+                .into());
+            }
+        }
+    }
+    let objects = rosen_store::LooseObjectStore::open(state.config.objects_dir())
+        .map_err(|err| ChangeError::Base(err.to_string()))?;
+    state
+        .changes
+        .with_conn(|conn| store::claim(conn, &req.change, req, &objects))
 }

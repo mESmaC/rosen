@@ -156,6 +156,7 @@ async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
     ok(
         &first,
         ClaimPaths(ClaimRequest {
+            exclusive: false,
             change: x.clone(),
             paths,
         }),

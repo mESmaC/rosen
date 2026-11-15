@@ -3,12 +3,12 @@
 
 Models the claim table (`crates/rosen-server/src/claims/store.rs`) and the
 first-claim-wins rule (`crates/rosen-core/src/claim.rs`) over any symmetric
-overlap test on patterns, and proves:
+overlap test on patterns. `claim` is exclusive; `notice` is the default. It proves:
 
-* `correct`: SPEC.md R6. Claims stay exclusive, two serialised claims on
+* `correct`: SPEC.md R6. Exclusive claims stay exclusive; two serialised exclusive claims on
   overlapping paths never both succeed, a refusal names a holder, every
   stored wait is blocked by a live claim, and a release wakes every waiter it
-  unblocks while keeping every other waiter;
+  unblocks while keeping every other waiter. Notice claims never refuse;
 * `cost_bound`: under the stated cost model, each operation costs at most a
   product of the table's sizes;
 * `optimal`: among deciders that never let two changes hold overlapping
@@ -46,9 +46,12 @@ def grants (ov : P → P → Bool) (s : State P) (c : Nat) (ps : List P) : Bool 
 def grant (s : State P) (c : Nat) (ps : List P) : State P :=
   { s with claims := ps.map (fun p => ⟨c, p⟩) ++ s.claims }
 
-/-- All or nothing: one blocked pattern refuses the whole request. -/
+/-- Exclusive requests are all or nothing: one blocked pattern refuses them. -/
 def claim (ov : P → P → Bool) (s : State P) (c : Nat) (ps : List P) : Option (State P) :=
   if grants ov s c ps then some (grant s c ps) else none
+
+/-- Default R6 notices record intent without consulting blockers. -/
+def notice (s : State P) (c : Nat) (ps : List P) : Option (State P) := some (grant s c ps)
 
 /-- A wait is stored only while something blocks it. -/
 def wait (ov : P → P → Bool) (s : State P) (c : Nat) (p : P) : State P :=
@@ -107,7 +110,7 @@ private theorem blocked_grant {ov : P → P → Bool} {s : State P} {c c' : Nat}
   exact blocked_true.mpr ⟨k, by simp [grant, hk], hne, hov⟩
 
 /-- **correct** (SPEC.md §R6, "Path claims and edit tracking"): from any state
-where claims are exclusive and every wait is blocked,
+where only exclusive claims have been made and every wait is blocked,
 1. a claim is refused exactly when a live claim on another change overlaps a
    requested path, and that claim is the holder the refusal names;
 2. a granted claim keeps claims exclusive and every wait blocked;
@@ -115,7 +118,8 @@ where claims are exclusive and every wait is blocked,
    by different changes, the second is refused: they never both succeed;
 4. a wait keeps both invariants;
 5. a release keeps both invariants, every wait it does not drop is either
-   still stored or woken, and every woken wait is unblocked. -/
+   still stored or woken, and every woken wait is unblocked;
+6. in every state, a default notice claim never refuses. -/
 -- SPEC.md §R6
 theorem correct (ov : P → P → Bool) (hsym : Symmetric ov) (s : State P) (hinv : Inv ov s) :
     (∀ c ps, claim ov s c ps = none ↔
@@ -128,9 +132,10 @@ theorem correct (ov : P → P → Bool) (hsym : Symmetric ov) (s : State P) (hin
         (∀ w ∈ s.waits, drop w = false →
           w ∈ (release ov s drop).1.waits ∨ w ∈ (release ov s drop).2) ∧
         (∀ w ∈ (release ov s drop).2,
-          blocked ov (release ov s drop).1.claims w.change w.pat = false)) := by
+          blocked ov (release ov s drop).1.claims w.change w.pat = false)) ∧
+    (∀ state : State P, ∀ c ps, notice state c ps ≠ none) := by
   obtain ⟨hx, hw⟩ := hinv
-  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro c ps
     by_cases hg : grants ov s c ps = true
     · simp only [claim, hg, ↓reduceIte, reduceCtorEq, false_iff, not_exists, not_and]
@@ -186,6 +191,8 @@ theorem correct (ov : P → P → Bool) (hsym : Symmetric ov) (s : State P) (hin
     · intro w hw'
       simp only [release, List.mem_filter, Bool.not_eq_true'] at hw' ⊢
       exact hw'.2
+
+  · intro state c ps; simp [notice]
 
 /-! ## Cost -/
 
@@ -264,7 +271,7 @@ changes hold overlapping claims, never grant a claim that breaks that. -/
 def Safe (ov : P → P → Bool) (d : State P → Nat → List P → Bool) : Prop :=
   ∀ s c ps, Exclusive ov s → d s c ps = true → Exclusive ov (grant s c ps)
 
-/-- **optimal**: first-claim-wins is safe, and no safe decider refuses fewer
+/-- **optimal**: exclusive first-claim-wins is safe, and no safe decider refuses fewer
 claims on any history of requests made from exclusive states. -/
 -- SPEC.md §R6
 theorem optimal (ov : P → P → Bool) (hsym : Symmetric ov) :

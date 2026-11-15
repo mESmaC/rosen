@@ -1,5 +1,5 @@
 //! Risk: a wrong glob overlap test lets two changes both own a path, or
-//! refuses a claim no path could share (SPEC R6). Every row of the table
+//! refuses an exclusive claim no path could share (SPEC R6). Every row of the table
 //! exported from `proofs/Claims/Export.lean`, which decides overlap by brute
 //! force over paths, must match `PathPattern::overlaps` and `blockers`.
 
@@ -13,7 +13,7 @@ fn claims_match_the_lean_fixture_table() {
     let mut rows = 0;
     for line in table.lines().skip(1) {
         let cells: Vec<&str> = line.split('\t').collect();
-        let [held, requested, overlap, granted] = cells[..] else {
+        let [held, requested, overlap, granted, _notice_granted] = cells[..] else {
             panic!("bad row {line:?}");
         };
         let held = PathPattern::new(held).expect("fixture pattern");

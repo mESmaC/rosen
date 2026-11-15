@@ -26,6 +26,7 @@ async fn setup() -> (tempfile::TempDir, Arc<ServerState>, ChangeId, ChangeId) {
         ids.push(record.change.id);
     }
     let req = |id: ChangeId| ClaimRequest {
+        exclusive: false,
         change: id.to_string(),
         paths: vec!["src/**".into()],
     };

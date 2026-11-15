@@ -9,7 +9,7 @@ use rosen_protocol::{
 use std::collections::BTreeSet;
 
 impl Client {
-    /// Claims every path for the change, or none of them. A refusal is
+    /// Records notices by default. Exclusive requests are all or nothing. A refusal is
     /// [`ClaimOutcome::Refused`] naming the holders, not an error.
     pub async fn claim_paths(&self, request: ClaimRequest) -> Result<ClaimOutcome, Error> {
         match self.request(Request::ClaimPaths(request)).await? {

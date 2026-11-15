@@ -84,7 +84,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - **Approval.** A reviewer's approval of a change at a given head. It gates landing only in `before-land` projects.
 - **Review coverage.** Each landed commit starts `unreviewed`; agents mark it `reviewed` or `issues-filed` (wire value `issues_filed`) without gating development. A repaired land starts fresh.
 - **Post-land failure.** A durable record of a confirmed culprit, its change, check kind (`build` or `test`), failure output, and any inverse commit (R12).
-- **Path claim.** A change's declared intent to edit a path or glob. The first claim wins. Other changes record a **share** (they edit it too, knowingly) or a **wait** (they hold off until the claim is released).
+- **Path claim.** A change's declared intent to edit a path or glob: a notice by default, reporting concurrent work. An opt-in **exclusive claim** uses first-claim-wins. Other changes may record a **share** (they edit it too, knowingly) or a **wait** (they hold off until claims are released).
 - **Edit regions.** The paths and line ranges a change has modified relative to its parent. The server computes them from snapshots.
 - **Overlap.** Two changes overlap when they claim the same path, or their edit regions in one file touch or sit within 3 lines of each other. Per-project configuration lists **generated files** and **registration lists**, which never count as an overlap.
 - **Build unit.** A part of the project that builds on its own, together with the units it depends on. By default each package of a Cargo workspace is a unit, read from the workspace's manifests. Project configuration can list units instead, as path globs with their dependencies.
@@ -221,15 +221,16 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - **Accept when:** a clean merge never drops or duplicates a line that either side kept, and every non-clean region becomes a conflict instead of a silent pick.
 
 ### R6 · Path claims and edit tracking
-- `rosen claim <paths…>` claims paths or globs for a change. The first claim wins. A refused claim names the holder. `share` and `wait` record the other two outcomes.
+- `rosen claim <paths…>` records notices for a change and never refuses because of overlapping work, including an exclusive claim. Its reply and a durable `claim` event name every other live change claiming, sharing or editing those paths, including generated files and registration lists. The event reaches those changes' owners so both sides learn of concurrent work.
+- `rosen claim --exclusive <paths…>` opts into first-claim-wins: an overlapping claim on another live change refuses the whole request and names its holders. It refuses any pattern that covers a generated file or registration list, using the base's configuration. Existing stored claims retain their exclusive mode on upgrade. `share` still records concurrent editing, and `wait` lets an agent choose to hold off.
 - Edit regions update from each snapshot. Ignored paths (R2) have no edit regions. The server derives the live path and region view from one captured head and parent; reverting a path to its parent removes its regions. Regions use zero-based, half-open parent line spans, with an empty span for an insertion. The view survives restart through the stored snapshot objects and change metadata. `rosen-client` exposes it through `Client::edit_regions`, including the captured head and parent tree IDs.
 - An **overlap query** returns, for a change or a set of paths, every change that overlaps it. The channel (R13) and Velocity call it.
   - A claim or share covers every line of the paths it matches, so it overlaps another change's claim, share or edit there. A wait does not, because a waiter holds off. A set of paths in a query counts as a claim. A query that names a change and paths returns only that change's overlaps on those paths.
   - Post-land conflict probes use edit-region overlaps only (R8 step 4). Claims and shares still receive overlap notices, without moving their changes.
   - Edits are measured against the change's parent. Two changes on different parents are compared in one parent's lines, after carrying the other's edits across the lines both versions share. An added, deleted, binary or mode-changed file counts as edited throughout.
-- These are AIRC's file claims: `airc_claim` files, `airc_share` and `airc_wait` record path claims, shares and waits here (R13). There is one claim record per path, not one in AIRC and one in Rosen.
+- These are AIRC's file claims: `airc_claim` files, `airc_share` and `airc_wait` record path claims, shares and waits here (R13). There is one claim record per path, not one in AIRC and one in Rosen. CLI claim, share, wait, release and status output uses v2 schemas for the new mode and concurrent-work fields; the catalog retains v1 (R10).
 - Claims release when their change lands or is abandoned. Abandonment and removal of its claims, shares and waits commit together. Release transactions retain pending notifications until published, so a restart replays a wait's wake even after its record was removed. Delivery is at least once. A wait is then signalled by an event.
-- **Accept when:** two concurrent claims on one path never both succeed, and every released claim wakes its waiters.
+- **Accept when:** two concurrent default claims on `SPEC.md` both succeed and each owner learns of the other; two exclusive claims on one path never both succeed; release wakes a waiter once no other live claim remains on its paths.
 
 ### R7 · Review
 - Review comments anchor to file, line and change head, and form threads with an open or resolved state.
@@ -322,7 +323,7 @@ The server holds each project's AIRC channel, so agents on every machine coordin
   - **events** and agent **messages** with their `to` and `intent`;
   - **presence**: the nicks joined, their machine, and each one's message mode;
   - the **Discoveries** and **Past work** ledgers.
-- **Piece claims** are first-claim-wins, each in one transaction, like path claims. A refusal names the holder and the time of its claim. A claim is kept through failure and disconnects, and released as Velocity F14 says.
+- **Piece claims** are first-claim-wins, each in one transaction, like exclusive path claims. A refusal names the holder and the time of its claim. A claim is kept through failure and disconnects, and released as Velocity F14 says.
   - A piece is locked by its identity, or by its task text when it has none. The holder claiming again extends its claim and keeps the original claim time.
   - A release drops only the caller's own pieces: one, or all of them.
 - **Presence.** A member joins with the member ID, nick and machine Velocity gave it. A nick names one joined member at a time. Leaving keeps the member's piece claims. Rejoining keeps its message mode, so a restart does not lift a quarantine.
@@ -335,7 +336,7 @@ The server holds each project's AIRC channel, so agents on every machine coordin
   - Each channel write commits in one transaction with its lines, so a stored change never lacks its line. A delivered message's line targets its recipients by nick. Joins, leaves, mode changes, claims, refusals, releases and ledger entries reach only the project view, so an agent is pushed only what it must act on.
 - **Velocity keeps the tools.** Velocity serves AIRC's tools to every agent as now, with the member ID and nick fixed at launch, and calls the server through `rosen-client` for each one. No machine keeps channel state of its own beyond its delivery cursors.
 - **Server unreachable.** Claims and messages need the server, as landing does. A tool call made while the server is unreachable fails with that reason. It is never answered from a local copy.
-- **Accept when:** two agents on different machines that claim the same piece or path at the same moment never both succeed; an event or message reaches its recipient on another machine within 1 s while both machines reach the server; and no two machines ever see different claim holders.
+- **Accept when:** two agents on different machines that claim the same piece or an exclusive path at the same moment never both succeed; an event or message reaches its recipient on another machine within 1 s while both machines reach the server; and no two machines ever see different claim holders.
 
 ### R14 · Network access and enrollment
 Machines join a project with no login, monitor or remote desktop on the joining machine, so headless machines can be added from a script.
@@ -370,7 +371,7 @@ Machines join a project with no login, monitor or remote desktop on the joining 
   - watcher startup, measurement and shutdown errors or timeouts are counted as `snapshot_failures` with diagnostics, without aborting the change; a valid sample is kept even if shutdown fails, and an explicit snapshot still makes the change's edits durable before landing;
   - no edit is lost, no land is applied twice, and the base moves only by a clean land (plus matching receipt and approval in before-land mode), or a server revert;
   - an injected failing commit is bisected and reverted, and its change reopens with its work intact;
-  - no two agents ever hold the same piece or path claim, on any machine;
+  - no two agents ever hold the same piece or exclusive path claim, on any machine;
   - the run is repeated with the server, machine daemons and clients killed at random points, and with the server unreachable from some machines for a period, and still meets those guarantees.
 - Velocity can create workspaces, claim pieces and paths, message agents, stack changes, review, submit receipts and land through `rosen-client` alone, with no git worktree, GitHub PR or local AIRC files in the loop.
 - The proofs on the proof list check, and each is tested against its fixture table. Merge is also checked against `git merge-file` on a differential corpus.
@@ -401,7 +402,7 @@ Lean proofs are written only for these features (AGENTS.md "Proofs"):
 | Feature | SPEC section | Why it needs a proof |
 |---|---|---|
 | Optimistic landing and auto-revert | R8, R12 | It decides when the base moves: the compare-and-swap, receipt and approval binding, re-check rules, stack order, and the culprit revert. A wrong rule bypasses configured gates, applies a land twice, reverts a test-only failure after land or the wrong change, or drops another change's work. |
-| Path and piece claims | R6, R13 | First-claim-wins with shares and waits is the coordination lock for every agent on every machine. A wrong rule lets two agents both own a path or a piece of work, or leaves a waiter stuck forever. |
+| Path and piece claims | R6, R13 | Piece claims and opt-in exclusive path claims use first-claim-wins; default path notices never refuse. A wrong rule serializes authors unnecessarily, grants two exclusive holders, or leaves a waiter stuck forever. |
 | Workspace deletion guard | R4 | Deletion must never remove an edit that is not yet stored on the server, including across the snapshot window and the offline journal. A wrong guard loses an agent's work. |
 | Three-way merge | R5 | Every land and rebase merges automatically. A wrong merge silently drops or duplicates lines, which corrupts work without a conflict. |
 
@@ -433,6 +434,6 @@ Rosen depends on these changes to Velocity. They are built in Velocity's reposit
 These features are proven in Lean after their code (F17). Every other feature ships with no Lean.
 
 - Optimistic landing and auto-revert (R8, R12): decides when the base moves; a wrong compare-and-swap, receipt binding, re-check rule, stack order or culprit disposition bypasses configured gates, applies a land twice, reverts a test-only failure after land or the wrong change, or drops another change's work
-- Path and piece claims (R6, R13): first-claim-wins with shares and waits is the coordination lock for every agent on every machine; a wrong rule lets two agents own one path or piece, or strands a waiter
+- Path and piece claims (R6, R13): piece claims and opt-in exclusive path claims use first-claim-wins; default path notices never refuse; a wrong rule serializes authors unnecessarily, grants two exclusive holders, or strands a waiter
 - Workspace deletion guard (R4): must never delete an edit not yet stored on the server, across the snapshot window and the offline journal; a wrong guard loses an agent's work
 - Three-way merge (R5): every land and rebase merges automatically; a wrong merge silently drops or duplicates lines

@@ -12,7 +12,7 @@ use crate::output::WAIT_SCHEMA;
 
 #[derive(Clone, Copy)]
 pub enum ClaimVerb {
-    Claim,
+    Claim { exclusive: bool },
     Share,
     Wait,
     Release,
@@ -29,10 +29,11 @@ pub async fn run(
     let request = ClaimRequest {
         change: change_of(change)?,
         paths: paths.to_vec(),
+        exclusive: matches!(verb, ClaimVerb::Claim { exclusive: true }),
     };
     let client = rosen_client::connect_or_start(endpoint).await?;
     match verb {
-        ClaimVerb::Claim => Ok(print_claim(json, &client.claim_paths(request).await?)),
+        ClaimVerb::Claim { .. } => Ok(print_claim(json, &client.claim_paths(request).await?)),
         ClaimVerb::Share => share(json, &client, request).await,
         ClaimVerb::Wait => wait(json, &client, request).await,
         ClaimVerb::Release => release(json, &client, request).await,
@@ -102,9 +103,21 @@ fn print_claim(json: bool, outcome: &ClaimOutcome) -> Succeeded {
         println!("{}", json!({ "schema": CLAIM_SCHEMA, "claim": outcome }));
     }
     match outcome {
-        ClaimOutcome::Granted { change, paths } => {
+        ClaimOutcome::Granted {
+            change,
+            paths,
+            overlaps,
+        } => {
             if !json {
                 println!("claimed {} for change {change}", paths.join(" "));
+                for overlap in overlaps {
+                    println!(
+                        "  also change {} ({}) on {}",
+                        overlap.change,
+                        overlap.owner,
+                        overlap.paths.join(" ")
+                    );
+                }
             }
             true
         }
