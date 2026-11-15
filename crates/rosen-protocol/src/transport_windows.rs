@@ -122,12 +122,7 @@ pub(super) async fn connect(name: &str) -> io::Result<BoxStream> {
 /// daemon; the DACL the real server sets cannot stop that, only this check can.
 fn verify_server_owner(name: &str, pipe: &NamedPipeClient) -> io::Result<()> {
     let pid = named_pipe_server_pid(pipe)?;
-    let owner = process_user_sid(pid).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("cannot verify the owner of {name} (server process {pid}): {err}"),
-        )
-    })?;
+    let owner = process_user_sid(pid).map_err(|err| server_owner_error(name, pid, err))?;
     if owner != current_user_sid()? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -135,4 +130,19 @@ fn verify_server_owner(name: &str, pipe: &NamedPipeClient) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn server_owner_error(name: &str, pid: u32, err: io::Error) -> io::Error {
+    // Access denial cannot establish whose daemon this is. Offer recovery for
+    // an elevated daemon without treating elevation as proof of ownership.
+    let hint = if err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+        "; the daemon may be running elevated or as another user. If this is your daemon, \
+         stop it from the shell that started it and restart it from a non-elevated shell"
+    } else {
+        ""
+    };
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("cannot verify the owner of {name} (server process {pid}): {err}{hint}; refusing to connect"),
+    )
 }
