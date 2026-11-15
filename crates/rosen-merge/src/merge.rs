@@ -10,7 +10,7 @@
 use std::ops::Range;
 
 use crate::diff::match_lines;
-use crate::lines::{split_lines, LineInterner};
+use crate::lines::{normalize_line_endings, split_lines, LineInterner};
 
 /// One region of a three-way merge result.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,8 +151,16 @@ enum Chunk {
 }
 
 /// Merges `ours` and `theirs`, both derived from `base`, line by line.
+/// CRLF and LF compare equally; output uses the base's newline convention.
 pub fn merge_text(base: &[u8], ours: &[u8], theirs: &[u8]) -> TextMerge {
-    let files = [split_lines(base), split_lines(ours), split_lines(theirs)];
+    // Normalize before matching so editor newline rewrites cannot remove the
+    // anchors that place concurrent additions, including registration entries.
+    let convention = [base, ours, theirs]
+        .into_iter()
+        .find(|text| text.contains(&b'\n'))
+        .unwrap_or(base);
+    let normalized = [base, ours, theirs].map(|text| normalize_line_endings(text, convention));
+    let files = normalized.each_ref().map(|text| split_lines(text));
     let mut interner = LineInterner::default();
     let ids = files.each_ref().map(|lines| interner.intern_all(lines));
     let ours_matches = match_lines(&ids[0], &ids[1]);

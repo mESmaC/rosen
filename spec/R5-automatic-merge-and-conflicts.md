@@ -1,5 +1,8 @@
 ### R5 · Automatic merge and conflicts
 - The server merges three ways at file level and line level, against the merge base.
+- Text merges ignore a CR immediately before LF when comparing lines, including registration lists and file-level unchanged-side shortcuts.
+  Merged text uses the base's first terminated line's newline convention; if the base has none, it uses ours' first terminated line, then theirs', otherwise LF.
+  Bare CR bytes and missing final newlines remain content; generated and binary files retain their existing byte-preserving rules.
 - Generated files listed in project configuration are regenerated, never merged.
   Registration lists keep both sides' additions.
 - A region that does not merge automatically becomes a stored conflict on the change, which records base, ours and theirs.

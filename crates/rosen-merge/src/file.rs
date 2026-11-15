@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::lines::split_lines;
+use crate::lines::{normalize_line_endings, split_lines};
 use crate::merge::{merge_text, ConflictRegion, Hunk, MarkerLabels, TextMerge};
 
 /// How a path merges, from project configuration.
@@ -76,6 +76,32 @@ impl FileConflict {
 
 /// Merges one path. `None` means the path is absent in that version.
 pub fn merge_file(
+    base: Option<&[u8]>,
+    ours: Option<&[u8]>,
+    theirs: Option<&[u8]>,
+    policy: MergePolicy,
+) -> FileMerge {
+    let files = [base, ours, theirs];
+    if policy == MergePolicy::Generated || files.iter().flatten().any(|text| is_binary(text)) {
+        return merge_file_content(base, ours, theirs, policy);
+    }
+    // Compare file presence after normalization too: a newline-only rewrite
+    // must not turn an otherwise clean deletion into a modify/delete conflict.
+    let convention = files
+        .into_iter()
+        .flatten()
+        .find(|text| text.contains(&b'\n'))
+        .unwrap_or_default();
+    let normalized = files.map(|text| text.map(|text| normalize_line_endings(text, convention)));
+    merge_file_content(
+        normalized[0].as_deref(),
+        normalized[1].as_deref(),
+        normalized[2].as_deref(),
+        policy,
+    )
+}
+
+fn merge_file_content(
     base: Option<&[u8]>,
     ours: Option<&[u8]>,
     theirs: Option<&[u8]>,
@@ -152,11 +178,18 @@ fn union_of_additions(region: &ConflictRegion) -> Vec<u8> {
     let added_by_theirs = theirs
         .iter()
         .filter(|line| !base.contains(line) && !ours.contains(line));
+    // With no terminated base line, markers can use LF even though the
+    // normalized additions use CRLF. Any terminated addition tells us which.
+    let crlf = region.crlf_markers
+        || [&region.ours, &region.theirs]
+            .iter()
+            .any(|text| text.windows(2).any(|pair| pair == b"\r\n"));
+    let newline: &[u8] = if crlf { b"\r\n" } else { b"\n" };
     let mut text = Vec::new();
     for line in kept_ours.chain(added_by_theirs) {
         // Keep each kept line terminated, so two entries never fuse.
         if text.last().is_some_and(|&byte| byte != b'\n') {
-            text.push(b'\n');
+            text.extend_from_slice(newline);
         }
         text.extend_from_slice(line);
     }
