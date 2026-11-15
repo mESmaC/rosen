@@ -68,6 +68,35 @@ async fn pending_approval_and_revocation_apply_to_the_next_request() {
     server.await.unwrap();
 }
 
+/// Risk (#155): pending requests need no credential, so without a cap one
+/// anonymous peer could fill metadata and the owner's approval list.
+#[tokio::test]
+async fn one_address_cannot_flood_pending_admission() {
+    let (_dir, state, pin, address, server) = project().await;
+    let mut anonymous = connect(&address.to_string(), pin, None).await;
+    let pending = || Request::MachinePending {
+        name: "flood".into(),
+        role: MachineRole::Agent,
+    };
+    for _ in 0..machines::pending::MAX_WAITING_PER_SOURCE {
+        assert!(matches!(
+            request(&mut anonymous, pending()).await,
+            Outcome::Ok(Response::MachineCredential(_))
+        ));
+    }
+    assert!(matches!(
+        request(&mut anonymous, pending()).await,
+        Outcome::Error(e) if e.code == ErrorCode::Refused
+    ));
+    // The local transport is a different source, so it is still admitted.
+    assert!(matches!(
+        rpc::dispatch(&state, pending()).await,
+        Outcome::Ok(Response::MachineCredential(_))
+    ));
+    state.request_shutdown();
+    server.await.unwrap();
+}
+
 async fn project() -> (
     tempfile::TempDir,
     Arc<ServerState>,

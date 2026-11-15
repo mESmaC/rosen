@@ -15,6 +15,7 @@ use rosen_protocol::{
 };
 use std::future::Future;
 use std::io;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{ReadHalf, WriteHalf};
@@ -62,11 +63,17 @@ pub enum Access {
 /// Serves one local client until it disconnects, breaks the protocol, or
 /// the server stops.
 pub async fn serve_connection(stream: BoxStream, state: Arc<ServerState>) {
-    serve_with_access(stream, state, Access::Local).await;
+    serve_with_access(stream, state, Access::Local, None).await;
 }
 
-/// Serves one peer that arrived by `access`.
-pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, access: Access) {
+/// Serves one peer that arrived by `access`, from `peer` when it came over
+/// the network.
+pub async fn serve_with_access(
+    stream: BoxStream,
+    state: Arc<ServerState>,
+    access: Access,
+    peer: Option<IpAddr>,
+) {
     let _open = state.track_connection();
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut presented = None;
@@ -97,6 +104,10 @@ pub async fn serve_with_access(stream: BoxStream, state: Arc<ServerState>, acces
         state,
         access,
         credential: presented,
+        pending_source: peer.map_or_else(
+            || crate::machines::pending::LOCAL_SOURCE.to_owned(),
+            crate::machines::pending::source_of,
+        ),
         outbox,
         in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         subscription: None,
@@ -172,6 +183,8 @@ struct Session {
     /// One permit per running request; see [`MAX_IN_FLIGHT`].
     in_flight: Arc<Semaphore>,
     credential: Option<String>,
+    /// What this peer's pending admission requests count against (#155).
+    pending_source: String,
     subscription: Option<JoinHandle<()>>,
     /// Signalled by the event stream when it finds the peer's credential
     /// refused, so the whole connection closes rather than going silent.
@@ -260,6 +273,7 @@ impl Session {
         let outbox = self.outbox.clone();
         let credential = self.credential.clone();
         let network = self.access == Access::Network;
+        let pending_source = self.pending_source.clone();
         tokio::spawn(async move {
             let allowed = !network
                 || match &request {
@@ -270,14 +284,7 @@ impl Session {
                     _ => credential.is_some(),
                 };
             let outcome = if allowed {
-                // A network peer is never the server's own machine, even
-                // without a credential: then its machine is unknown.
-                let origin = if network {
-                    crate::receipts::Origin::Machine(credential.unwrap_or_default())
-                } else {
-                    crate::receipts::Origin::Local
-                };
-                rpc::dispatch_from(&state, request, origin).await
+                route(&state, request, network, credential, pending_source).await
             } else {
                 Outcome::Error(ErrorBody::new(
                     ErrorCode::Refused,
@@ -348,6 +355,31 @@ impl Session {
         }
         if let Some(subscription) = self.subscription.take() {
             subscription.abort();
+        }
+    }
+}
+
+/// Runs an admitted request. A pending request is counted against the
+/// address it came from, which only the connection knows (#155).
+async fn route(
+    state: &Arc<ServerState>,
+    request: Request,
+    network: bool,
+    credential: Option<String>,
+    pending_source: String,
+) -> Outcome {
+    if !network {
+        return rpc::dispatch_from(state, request, crate::receipts::Origin::Local).await;
+    }
+    match request {
+        Request::MachinePending { name, role } if !state.is_shutting_down() => {
+            crate::machines::pending(state, name, role, pending_source).await
+        }
+        // A network peer is never the server's own machine, even without a
+        // credential: then its machine is unknown.
+        request => {
+            let origin = crate::receipts::Origin::Machine(credential.unwrap_or_default());
+            rpc::dispatch_from(state, request, origin).await
         }
     }
 }

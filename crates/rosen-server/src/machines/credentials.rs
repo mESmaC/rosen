@@ -65,17 +65,24 @@ pub fn pending(
     dir: &Path,
     name: &str,
     role: rosen_protocol::MachineRole,
+    source: &str,
 ) -> Result<MachineCredential, String> {
     if name.is_empty() || name.len() > 256 {
         return Err("machine name must contain 1..256 bytes".into());
     }
-    let conn = open(dir).map_err(|e| e.to_string())?;
+    let mut conn = open(dir).map_err(|e| e.to_string())?;
+    // Immediate, so the cap check and the insert see no concurrent insert.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    super::pending::admit(&tx, source, now())?;
     let credential = fresh(keys::secret()?)?;
     let role = match role {
         rosen_protocol::MachineRole::Agent => "agent",
         rosen_protocol::MachineRole::Checker => "checker",
     };
-    conn.execute("INSERT INTO machines(id,name,role,status,last_contact,credential_hash,expires_at) VALUES (?1,?2,?3,'pending',?4,?5,?6)",params![credential.machine_id,name,role,now(),keys::digest(&credential.secret),credential.expires_at]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO machines(id,name,role,status,last_contact,credential_hash,expires_at,source) VALUES (?1,?2,?3,'pending',?4,?5,?6,?7)",params![credential.machine_id,name,role,now(),keys::digest(&credential.secret),credential.expires_at,source]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(credential)
 }
 

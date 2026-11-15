@@ -2,6 +2,7 @@
 pub mod credentials;
 pub mod keys;
 pub mod manage;
+pub mod pending;
 pub mod signing;
 use crate::ServerState;
 use rosen_protocol::{CreateJoinKey, ErrorBody, ErrorCode, Outcome, Response};
@@ -20,6 +21,7 @@ pub fn now() -> u64 {
 pub fn open(data_dir: &Path) -> rusqlite::Result<Connection> {
     let conn = crate::metadata::open(&data_dir.join("metadata.sqlite"))?;
     ensure_schema(&conn)?;
+    pending::ensure_schema(&conn)?;
     Ok(conn)
 }
 /// The landing ledger reads machine status when it verifies a receipt, so
@@ -114,9 +116,11 @@ pub async fn pending(
     state: &Arc<ServerState>,
     name: String,
     role: rosen_protocol::MachineRole,
+    source: String,
 ) -> Outcome {
     run(state, move |state| {
-        credentials::pending(&state.config.data_dir, &name, role).map(Response::MachineCredential)
+        credentials::pending(&state.config.data_dir, &name, role, &source)
+            .map(Response::MachineCredential)
     })
     .await
 }

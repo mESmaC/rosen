@@ -96,7 +96,7 @@ pub async fn serve(listener: TcpListener, acceptor: TlsAcceptor, state: Arc<Serv
             _ = state.shutdown_requested() => return,
         };
         match accepted {
-            Ok((tcp, _peer)) => {
+            Ok((tcp, peer)) => {
                 let _ = tcp.set_nodelay(true);
                 let acceptor = acceptor.clone();
                 let state = Arc::clone(&state);
@@ -106,7 +106,13 @@ pub async fn serve(listener: TcpListener, acceptor: TlsAcceptor, state: Arc<Serv
                     match handshake.await {
                         Ok(Ok(stream)) => {
                             let stream: rosen_protocol::BoxStream = Box::new(stream);
-                            connection::serve_with_access(stream, state, Access::Network).await;
+                            connection::serve_with_access(
+                                stream,
+                                state,
+                                Access::Network,
+                                Some(peer.ip()),
+                            )
+                            .await;
                         }
                         Ok(Err(err)) => eprintln!("rosen-server: TLS handshake failed: {err}"),
                         Err(_) => eprintln!("rosen-server: TLS handshake timed out"),

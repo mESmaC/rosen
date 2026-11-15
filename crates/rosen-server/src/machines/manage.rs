@@ -103,6 +103,7 @@ fn machine(row: &Row<'_>) -> rusqlite::Result<MachineRecord> {
 }
 
 pub fn list(conn: &Connection) -> Result<Vec<MachineRecord>, ErrorBody> {
+    super::pending::expire(conn, super::now()).map_err(database)?;
     let mut query = conn
         .prepare("SELECT id,name,role,status,last_contact,running_agents FROM machines ORDER BY id")
         .map_err(database)?;
@@ -129,6 +130,8 @@ fn get(conn: &Connection, id: &str) -> Result<MachineRecord, ErrorBody> {
 /// neither authenticates nor rotates. The machine's daemon still holds the
 /// request-time expiry, so it simply rotates early.
 pub fn approve(conn: &Connection, id: &str) -> Result<MachineRecord, ErrorBody> {
+    // An expired request is gone, so approving it finds no machine.
+    super::pending::expire(conn, super::now()).map_err(database)?;
     let expires_at = super::now() + super::credentials::LIFETIME;
     conn.execute(
         "UPDATE machines SET status='active', expires_at=?2 WHERE id=?1 AND status='pending'",
