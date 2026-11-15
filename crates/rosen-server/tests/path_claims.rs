@@ -2,8 +2,8 @@
 //! must remain atomic; concurrent work must reach both owners, including lists.
 use rosen_core::{AgentId, ChangeId, Commit, FileMode, Signature, Tree, TreeEntry};
 use rosen_protocol::{
-    ClaimOutcome, ClaimRequest, Endpoint, EventKind, NewChange, Outcome, Request, Response,
-    WorkspaceBytes, WorkspaceWrite,
+    ClaimOutcome, ClaimRequest, Endpoint, EventKind, NewChange, Outcome, OverlapRecord, Request,
+    Response, WorkspaceBytes, WorkspaceWrite,
 };
 use rosen_server::{landing::Ledger, rpc::dispatch, ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
@@ -69,6 +69,43 @@ async fn claim(
     }
 }
 
+fn assert_notice_delivery(state: &ServerState, ids: [ChangeId; 2], replies: [ClaimOutcome; 2]) {
+    let overlaps = replies.map(|answer| match answer {
+        ClaimOutcome::Granted { overlaps, .. } => overlaps,
+        other => panic!("notice refused: {other:?}"),
+    });
+    assert_eq!(overlaps.iter().map(Vec::len).sum::<usize>(), 1);
+    let (earlier, later, reported, owner) = if overlaps[0].is_empty() {
+        (ids[0], ids[1], &overlaps[1], "first")
+    } else {
+        (ids[1], ids[0], &overlaps[0], "second")
+    };
+    let expected = vec![OverlapRecord {
+        change: earlier,
+        owner: AgentId::new(owner).unwrap(),
+        paths: vec!["SPEC.md".into()],
+    }];
+    assert_eq!(*reported, expected);
+    // R6: both owners learn of concurrent work from the later claim's event.
+    // The earlier claimant is named in its overlaps, not as its subject.
+    let detail = serde_json::json!({
+        "paths": ["SPEC.md"], "exclusive": false, "overlaps": expected,
+    });
+    for owner in ["first", "second"] {
+        let events = state
+            .events
+            .page(0, Some(&AgentId::new(owner).unwrap()), 100)
+            .unwrap()
+            .events;
+        assert!(
+            events.iter().any(|e| e.kind == EventKind::Claim
+                && e.change.as_deref() == Some(&later.to_string())
+                && e.detail == detail),
+            "{owner} did not receive the notice naming both claimants: {events:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn notices_report_both_owners_and_exclusive_races_have_one_winner() {
     let (_dir, state, [a, b, waiter]) = setup("");
@@ -77,27 +114,7 @@ async fn notices_report_both_owners_and_exclusive_races_have_one_winner() {
         claim(&state, a, "SPEC.md", false),
         claim(&peer, b, "SPEC.md", false)
     );
-    let reported = [first, second]
-        .into_iter()
-        .map(|answer| match answer {
-            ClaimOutcome::Granted { overlaps, .. } => overlaps.len(),
-            other => panic!("notice refused: {other:?}"),
-        })
-        .sum::<usize>();
-    assert_eq!(reported, 1, "the later reply names the earlier claimant");
-    for (owner, other) in [("first", b), ("second", a)] {
-        let events = state
-            .events
-            .page(0, Some(&AgentId::new(owner).unwrap()), 100)
-            .unwrap()
-            .events;
-        assert!(
-            events
-                .iter()
-                .any(|e| e.kind == EventKind::Claim
-                    && e.change.as_deref() == Some(&other.to_string()))
-        );
-    }
+    assert_notice_delivery(&state, [a, b], [first, second]);
     let (first, second) = tokio::join!(
         claim(&state, a, "schema.sql", true),
         claim(&peer, b, "schema.sql", true)
