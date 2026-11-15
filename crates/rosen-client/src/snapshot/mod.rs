@@ -153,18 +153,20 @@ impl Snapshotter {
     /// last stored tree from the machine's local store.
     pub fn open(store: &dyn ObjectStore, root: &Path) -> Result<Self, SnapshotError> {
         let root = std::path::absolute(root).map_err(|err| SnapshotError::io(root, err))?;
-        let marker = WorkspaceMarker::read(&root).map_err(|err| match err.kind() {
+        // Refuse non-workspaces before creating any local state.
+        WorkspaceMarker::read(&root).map_err(|err| match err.kind() {
             std::io::ErrorKind::NotFound => SnapshotError::NoWorkspace(root.clone()),
             _ => SnapshotError::io(&WorkspaceMarker::path(&root), err),
         })?;
         let journal = journal::Journal::open(&root).map_err(|e| SnapshotError::io(&root, e))?;
-        let (mut index, known_trees, captured_root) = {
-            // Another writer may be appending or replaying; read its tail
-            // only once it is done.
-            let _writer = journal.writer().map_err(|e| SnapshotError::io(&root, e))?;
-            open_index(store, &root, &journal, marker.tree)?
-        };
+        let writer = journal.writer().map_err(|e| SnapshotError::io(&root, e))?;
+        let marker = WorkspaceMarker::read(&root).map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => SnapshotError::NoWorkspace(root.clone()),
+            _ => SnapshotError::io(&WorkspaceMarker::path(&root), err),
+        })?;
+        let (mut index, known_trees, captured_root) = open_index(store, &root, &journal, marker.tree)?;
         stat_cache::apply(&root, &mut index);
+        drop(writer);
         let sparse = Sparse::paths(&marker.sparse).map_err(|err| {
             SnapshotError::io(
                 &WorkspaceMarker::path(&root),
@@ -288,6 +290,9 @@ impl Snapshotter {
     /// Records a stored snapshot: its trees are known from now on, and the
     /// marker names its tree for the next watcher or `rosen commit`.
     fn confirm(&mut self, prepared: &Prepared) -> Result<(), SnapshotError> {
+        // Another live writer must be able to rebuild its index, including
+        // sparse paths not present on disk, after this basis is published.
+        journal::save_trees(&self.root, prepared)?;
         self.known_trees.extend(prepared.all_trees.iter().copied());
         self.marker.tree = prepared.root;
         self.marker
@@ -305,20 +310,38 @@ impl Snapshotter {
             .writer()
             .map_err(|err| SnapshotError::io(&self.root, err))?;
         // Another writer may have stored a snapshot since this one last ran.
-        let path = WorkspaceMarker::path(&self.root);
-        self.marker.tree = WorkspaceMarker::read(&self.root)
-            .map_err(|err| SnapshotError::io(&path, err))?
-            .tree;
+        let refreshed = self.refresh_basis()?;
         // That writer may have read files whose events this one has not had
         // yet. Building on this index's older view of them would store them
         // reverted, so look at every file. A full scan rereads only files
         // whose size or time moved since this index read them.
-        let dirty = if self.newest_captured()? == self.captured_root {
+        let dirty = if !refreshed && self.newest_captured()? == self.captured_root {
             dirty
         } else {
             &Dirty::Full
         };
         Ok((lease, self.prepare(dirty)?))
+    }
+
+    /// Call under the writer lock: a rebase can run between watcher captures.
+    fn refresh_basis(&mut self) -> Result<bool, SnapshotError> {
+        let marker = WorkspaceMarker::read(&self.root)
+            .map_err(|err| SnapshotError::io(&WorkspaceMarker::path(&self.root), err))?;
+        if self.marker == marker {
+            return Ok(false);
+        }
+        self.index = Index::from_tree(&journal::cache(&self.root)?, marker.tree)?;
+        // Failed reads from the older basis must not override a newer
+        // writer's stored version when a file is temporarily unreadable.
+        self.unconfirmed.clear();
+        self.fallback.clear();
+        self.replaced.clear();
+        self.ignore = ignore::IgnoreRules::new(self.root.clone(), &marker.ignore);
+        self.sparse = Sparse::paths(&marker.sparse).map_err(|err| {
+            SnapshotError::io(&self.root, std::io::Error::other(err.to_string()))
+        })?;
+        self.marker = marker;
+        Ok(true)
     }
 
     /// The newest tree any writer captured: the last journal record's, or

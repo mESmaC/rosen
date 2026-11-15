@@ -1,17 +1,16 @@
 //! `rosen resolve` (SPEC R5, R10): marks the stored conflicts in some files of
 //! a change resolved, so the landing gate (R8) stops refusing it.
 //!
-//! Resolving trusts the owner's edit; it does not rewrite the change's head.
-//! The next land or parent update merges the head again, and a region that
-//! still fails to merge is stored open again (`ConflictSet::record_merge`),
-//! so resolving without fixing the file can never land a silent pick.
+//! Resolving checks the stored head, so a clean local file cannot hide
+//! marker content left on the server by an older client.
 
 use std::sync::Arc;
 
-use rosen_core::ChangeId;
+use rosen_core::{ChangeId, ObjectId};
 use rosen_protocol::{
     ConflictsResolved, ErrorBody, ErrorCode, Outcome, ResolveConflicts, ResolvedPath, Response,
 };
+use rosen_store::LooseObjectStore;
 use rusqlite::{Connection, TransactionBehavior};
 
 use crate::changes::{self, ChangeError};
@@ -39,9 +38,11 @@ pub async fn handle(state: &Arc<ServerState>, request: ResolveConflicts) -> Outc
 
 fn resolve(state: &ServerState, request: ResolveConflicts) -> Result<ConflictsResolved, ErrorBody> {
     let paths = normalized(&request.paths)?;
+    let store = LooseObjectStore::open(state.config.objects_dir())
+        .map_err(|err| ErrorBody::new(ErrorCode::Internal, err.to_string()))?;
     let outcome = state
         .changes
-        .with_conn(|conn| resolve_in(conn, &request.change, &paths));
+        .with_conn(|conn| resolve_in(conn, &store, &request.change, &paths));
     match outcome {
         Ok(answer) => answer,
         Err(err) => Err(ErrorBody::new(change_error_code(&err), err.to_string())),
@@ -52,6 +53,7 @@ fn resolve(state: &ServerState, request: ResolveConflicts) -> Result<ConflictsRe
 /// rolled the transaction back.
 fn resolve_in(
     conn: &mut Connection,
+    store: &LooseObjectStore,
     change: &str,
     paths: &[String],
 ) -> Result<Result<ConflictsResolved, ErrorBody>, ChangeError> {
@@ -59,7 +61,8 @@ fn resolve_in(
     // and a deferred read-then-write here could lose that race as SQLITE_BUSY.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let id = changes::resolve(&tx, change)?;
-    let state = changes::get(&tx, id)?.change.state;
+    let change = changes::get(&tx, id)?.change;
+    let state = change.state;
     if state.is_closed() {
         let why = format!(
             "change {id} is {state}; only an open or ready change has conflicts to resolve"
@@ -75,6 +78,9 @@ fn resolve_in(
     if !unknown.is_empty() {
         return Ok(Err(no_conflicts(id, &unknown, &set)));
     }
+    if let Err(body) = check_resolved_files(store, change.head, paths) {
+        return Ok(Err(body));
+    }
     let resolved = paths
         .iter()
         .map(|path| ResolvedPath {
@@ -89,6 +95,24 @@ fn resolve_in(
         resolved,
         open_paths: set.open_paths().into_iter().map(str::to_owned).collect(),
     }))
+}
+
+fn check_resolved_files(
+    store: &LooseObjectStore,
+    head: ObjectId,
+    paths: &[String],
+) -> Result<(), ErrorBody> {
+    for path in paths {
+        let marked = crate::landing::markers::path_has_markers(store, head, path)
+            .map_err(|err| ErrorBody::new(err.code(), err.to_string()))?;
+        if marked {
+            return Err(ErrorBody::new(
+                ErrorCode::Refused,
+                format!("conflict markers remain in stored {path}; snapshot its resolution first"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Accepts `\` separators and a leading `./`, as a Windows shell types them,

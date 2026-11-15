@@ -613,6 +613,11 @@ impl CommitWriter for Adapters {
     fn write_landed(&self, commit: &LandedCommit) -> LandResult<CommitId> {
         let store = LooseObjectStore::open(self.state()?.config.objects_dir())
             .map_err(|err| LandError::Backend(err.to_string()))?;
+        let marked = super::markers::paths(&store, commit.tree)
+            .map_err(|err| LandError::Backend(err.to_string()))?;
+        if !marked.is_empty() {
+            return Err(LandError::ConflictMarkers(marked));
+        }
         store
             .put_commit(&commit.to_commit())
             .map_err(|err| LandError::Backend(err.to_string()))
@@ -663,7 +668,9 @@ fn land_body(err: LandError) -> ErrorBody {
     let code = match &err {
         LandError::UnknownChange(_) => ErrorCode::NotFound,
         LandError::InvalidReceipt(_) => ErrorCode::InvalidArgument,
-        LandError::NoBase(_) | LandError::Contended { .. } => ErrorCode::Refused,
+        LandError::NoBase(_) | LandError::Contended { .. } | LandError::ConflictMarkers(_) => {
+            ErrorCode::Refused
+        }
         LandError::Store(_) | LandError::Backend(_) => ErrorCode::Internal,
     };
     ErrorBody::new(code, err.to_string())

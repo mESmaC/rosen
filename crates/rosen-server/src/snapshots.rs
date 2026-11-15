@@ -7,6 +7,7 @@
 //! so the client can repair objects that its incremental upload omitted.
 
 mod integrity;
+mod resolution;
 
 use crate::changes::{self, ChangeError};
 use crate::events::Staged;
@@ -230,15 +231,21 @@ fn record(
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let (current, parent) = state.changes.with_conn(|conn| {
-            let current = changes::get(conn, changes::resolve(conn, &request.change)?)?;
-            let parent = snapshot_parent(conn, &current.change)?;
-            Ok((current, parent))
-        })?;
-        if request.message.is_none() && holds_tree(&current.change, request) {
+        let (current, parent, open_paths) = snapshot_inputs(state, request)?;
+        if request.message.is_none()
+            && holds_tree(&current.change, request)
+            && (open_paths.is_empty() || current.change.head == request.tree)
+        {
             return Ok(unrecorded(current));
         }
-        let head = merge_snapshot(&ctx, &current.change, request)?;
+        let head = merge_snapshot(&ctx, &current.change, request, &open_paths)?;
+        if request.message.is_none()
+            && resends_latest(&current.change, request)
+            && head.tree == current.change.head
+            && head.conflicts.is_empty()
+        {
+            return Ok(unrecorded(current));
+        }
         let commit = snapshot_commit(parent, &current.change, request);
         let commit_id = store.put_commit(&commit).map_err(store_failure)?;
         let snapshot = snapshot_of(commit_id, request);
@@ -266,6 +273,18 @@ fn record(
             Err(error) => return Err(error.into()),
         }
     }
+}
+
+fn snapshot_inputs(
+    state: &ServerState,
+    request: &SnapshotRequest,
+) -> Result<(rosen_protocol::ChangeRecord, Option<ObjectId>, Vec<String>), ChangeError> {
+    state.changes.with_conn(|conn| {
+        let current = changes::get(conn, changes::resolve(conn, &request.change)?)?;
+        let parent = snapshot_parent(conn, &current.change)?;
+        let open_paths = resolution::open_paths(conn, current.change.id)?;
+        Ok((current, parent, open_paths))
+    })
 }
 
 /// The answer to a snapshot of the tree the change already holds.
@@ -469,16 +488,14 @@ impl MergedHead {
 // Local snapshot commits retain exactly the author's tree. Only the change's
 // live head incorporates the server rebase, until its owner applies it.
 //
-// Edits that conflict with the rebase are stored, not refused (D2, R5):
-// refusing left the workspace stuck, because applying the rebase needs
-// every local edit stored first (#105). The head takes diff3 markers with
-// the snapshot's side as `ours`, as a conflicting rebase writes them, and
-// the conflicts are stored open, so the owner applies the head, keeps both
-// sides and runs `rosen resolve`.
+// New conflicts are stored, not refused (#105). Already open files instead
+// take the snapshot's content verbatim: merging into their marked head would
+// nest markers and make the owner's resolution impossible to store (#383).
 fn merge_snapshot(
     ctx: &crate::history::Ctx,
     current: &Change,
     request: &SnapshotRequest,
+    open_paths: &[String],
 ) -> Result<MergedHead, ChangeError> {
     let from = request.from.ok_or_else(|| {
         ChangeError::Base("snapshot must name its workspace basis; update the client".into())
@@ -486,11 +503,11 @@ fn merge_snapshot(
     if from == current.head {
         return Ok(MergedHead::clean(request.tree));
     }
-    // Merged again, a resend would mark its own edits as a conflict.
+    let sides = resolution::merge_sides(ctx, [from, current.head, request.tree], open_paths)?;
+    // A resend still repairs open files, but never merges its own edits again.
     if resends_latest(current, request) {
-        return Ok(MergedHead::clean(current.head));
+        return Ok(MergedHead::clean(sides[1]));
     }
-    let sides = [from, current.head, request.tree];
     let merged =
         crate::history::merge::merge_trees_marked(ctx, sides, &|_| rosen_merge::MergePolicy::Text)
             .map_err(|err| ChangeError::Io(std::io::Error::other(err.to_string())))?;

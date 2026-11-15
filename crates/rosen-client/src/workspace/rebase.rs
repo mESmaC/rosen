@@ -20,7 +20,8 @@ impl Client {
         }
     }
 
-    /// Call only after the owner stops its tools and watcher at a step boundary.
+    /// Call after the owner stops its editing tools at a step boundary.
+    /// A running watcher waits on the writer lock during application.
     /// The server never calls this method in response to a rebase event.
     pub async fn apply_rebase(&self, root: &Path, owner: &AgentId) -> Result<ObjectId, Error> {
         let marker = WorkspaceMarker::read(root)?;
@@ -42,7 +43,7 @@ impl Client {
         let root = root.to_path_buf();
         tokio::task::spawn_blocking(move || {
             let mut snapshotter = Snapshotter::open(&store, &root)?;
-            snapshotter.apply_rebased_tree(&store, change.change.head, ignore)?;
+            snapshotter.apply_rebased_tree(&store, marker.tree, change.change.head, ignore)?;
             Ok(change.change.head)
         })
         .await

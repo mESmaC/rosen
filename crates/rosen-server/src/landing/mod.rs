@@ -14,6 +14,7 @@
 pub(crate) mod conflict_routes;
 mod engine;
 mod ledger;
+pub(crate) mod markers;
 pub(crate) use ledger::ensure_schema;
 mod overlap_targets;
 pub mod reach;
@@ -156,6 +157,7 @@ pub enum LandError {
     UnknownChange(ChangeId),
     NoBase(String),
     InvalidReceipt(String),
+    ConflictMarkers(Vec<String>),
     /// The compare-and-swap kept losing races for every allowed attempt.
     Contended {
         attempts: u32,
@@ -170,6 +172,13 @@ impl fmt::Display for LandError {
             LandError::UnknownChange(id) => write!(f, "unknown change {id}"),
             LandError::NoBase(name) => write!(f, "base ref {name} is not initialised"),
             LandError::InvalidReceipt(why) => write!(f, "invalid receipt: {why}"),
+            LandError::ConflictMarkers(paths) => {
+                write!(
+                    f,
+                    "conflict markers remain in {}; store a resolution before landing",
+                    paths.join(", ")
+                )
+            }
             LandError::Contended { attempts } => {
                 write!(f, "base kept moving; gave up after {attempts} attempts")
             }
