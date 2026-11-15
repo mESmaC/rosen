@@ -108,7 +108,7 @@ theorem correct (w : World) (c crash : Nat) (fresh : landed w c = false) :
       Bool.false_eq_true, ↓reduceIte,
       List.erase_cons_head]
     rw [finish _ c (once _ _)]
-    simp [furthest, Nat.max_assoc, Nat.max_left_comm, Nat.max_comm]
+    simp [furthest, Nat.max_left_comm, Nat.max_comm]
 
 /-- Cost model: post-land runs after the restart, counting each replay and the run
 of a land the repeated ask makes; merges and SQLite I/O inside a run are excluded.

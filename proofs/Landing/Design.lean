@@ -206,10 +206,15 @@ def SoundPolicy (policy : Input → Bool) : Prop :=
 private theorem oursRecheck_unsafe (i : Input) (h : oursRecheck i = true) :
     gate i = none ∧ i.mergeClean = true ∧ i.review = .beforeLand ∧ i.mergeMode = false ∧ i.tier ≠ .prose ∧
       i.baseMoved = true ∧ i.landedSinceAllIndependent = false ∧ i.receipt ≠ .sameTree := by
-  obtain ⟨s, p, c, a, v, x, t, r, b, q, m⟩ := i
-  revert h
-  cases s <;> cases p <;> cases c <;> cases a <;> cases v <;> cases x <;> cases t <;> cases r <;>
-    cases b <;> cases q <;> cases m <;> decide
+  simp only [oursRecheck, beq_iff_eq] at h
+  unfold decideLand at h
+  split at h
+  · rename_i refusal hg
+    have hr : refusal = .needsRecheck := Verdict.refuse.inj h
+    subst refusal; unfold gate at hg
+    repeat first | contradiction | split at hg
+  · repeat first | contradiction | split at h
+    all_goals cases hv : i.review <;> simp_all
 private theorem countP_le_of_imp (p q : Input → Bool) (hpq : ∀ i, p i = true → q i = true) :
     ∀ l : List Input, l.countP p ≤ l.countP q
   | [] => by simp
