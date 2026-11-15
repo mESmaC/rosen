@@ -6,8 +6,8 @@
 //! restart is a fresh server state on the same data directory.
 
 use rosen_core::{AgentId, Commit, ObjectId, Signature, Tree};
-use rosen_protocol::Request::{self, ClaimPaths, Land, ReceiptSubmit, ReviewApprove};
-use rosen_protocol::{ApproveRequest as Approve, ClaimRequest, LandStatus, Outcome, Response};
+use rosen_protocol::Request::{self, Land, ReceiptSubmit, ReviewApprove};
+use rosen_protocol::{ApproveRequest as Approve, LandStatus, Outcome, Response};
 use rosen_protocol::{NewChange, SubmitReceipt, WorkspaceWrite};
 use rosen_server::{landing::Ledger, rpc::dispatch, ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
@@ -39,9 +39,9 @@ fn read(db: &Connection, query: &str) -> String {
 }
 
 /// A new change that writes `path`.
-async fn change(state: &State, path: &str) -> String {
+async fn change(state: &State, path: &str, on: Option<String>) -> String {
     let owner = AgentId::new("agent").unwrap();
-    let Response::Change(made) = ok(state, Request::ChangeNew(NewChange { owner, on: None })).await
+    let Response::Change(made) = ok(state, Request::ChangeNew(NewChange { owner, on })).await
     else {
         panic!("change new")
     };
@@ -88,39 +88,49 @@ async fn ready(state: &State, db: &Connection, change: String) {
     ok(state, ReceiptSubmit(receipt)).await;
 }
 
-/// Claim-only overlap probes keep the target on its original root.
-fn target(db: &Connection, x: &str) -> String {
-    let seq = read(db, &format!("SELECT h.seq FROM changes c JOIN base_history h ON h.commit_id = c.parent_base WHERE c.id = '{x}'"));
-    assert_eq!(seq, "1");
-    "root".into()
+/// Before detachment, the child's basis is its unlanded parent's base.
+fn child_base(db: &Connection, child: &str) -> String {
+    let seq = read(
+        db,
+        &format!(
+            "SELECT h.seq FROM changes c
+         LEFT JOIN changes p ON p.id = c.parent_change
+         JOIN base_history h ON h.commit_id = COALESCE(c.parent_base, p.parent_base)
+         WHERE c.id = '{child}'"
+        ),
+    );
+    match seq.as_str() {
+        "1" => "root",
+        "2" => "a",
+        "3" => "b",
+        "4" => "c",
+        _ => panic!("unexpected child base position: {seq}"),
+    }
+    .into()
 }
 
-/// Crash 0 dies inside `c`'s land transaction. Crash 1 dies right after it
-/// commits, at the first post-land write: the overlap selection, keyed by
-/// the landed commit, as a target row or as the marker of an empty one.
-fn inject_crash(db: &Connection, crash: u32, c: &str) {
-    let abort = "BEGIN SELECT RAISE(ABORT, 'crash'); END";
+/// Crashes bracket the child's durable restack, independently of overlap probes.
+fn inject_crash(db: &Connection, crash: u32, c: &str, child: &str) {
     let landed = format!("(SELECT commit_id FROM base_history WHERE change_id = '{c}')");
-    let triggers = match crash {
-        0 => vec![("crash", "base_history", format!("NEW.change_id = '{c}'"))],
-        1 => vec![
-            (
-                "crash",
-                "landing_overlap_targets",
-                format!("NEW.landed = {landed}"),
-            ),
-            (
-                "crash_marker",
-                "landing_overlap_batches",
-                format!("NEW.landed = {landed}"),
-            ),
-        ],
-        _ => vec![],
+    let (operation, table, when) = match crash {
+        0 => ("INSERT", "base_history", format!("NEW.change_id = '{c}'")),
+        1 => (
+            "UPDATE",
+            "changes",
+            format!("NEW.id = '{child}' AND NEW.parent_base = {landed}"),
+        ),
+        2 => (
+            "UPDATE",
+            "base_history",
+            format!("OLD.change_id = '{c}' AND NEW.post_land_done = 1"),
+        ),
+        _ => return,
     };
-    for (name, table, when) in triggers {
-        let sql = format!("CREATE TRIGGER {name} BEFORE INSERT ON {table} WHEN {when} {abort}");
-        db.execute_batch(&sql).unwrap();
-    }
+    let sql = format!(
+        "CREATE TRIGGER crash BEFORE {operation} ON {table} WHEN {when}
+         BEGIN SELECT RAISE(ABORT, 'crash'); END"
+    );
+    db.execute_batch(&sql).unwrap();
 }
 
 fn root(state: &State) {
@@ -144,62 +154,60 @@ fn root(state: &State) {
         .unwrap();
 }
 
-/// Runs one fixture row and returns its output columns.
-async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
-    let temp = tempfile::tempdir().unwrap();
-    let first = start(temp.path());
-    root(&first);
-    let db = Connection::open(first.config.metadata_path()).unwrap();
-    // X claims every file a, b and c write; notice it without rebasing it.
-    let x = change(&first, "x").await;
-    let paths = vec!["s/**".into()];
-    ok(
-        &first,
-        ClaimPaths(ClaimRequest {
-            exclusive: false,
-            change: x.clone(),
-            paths,
-        }),
-    )
-    .await;
-    let (a, b) = (change(&first, "s/a").await, change(&first, "s/b").await);
-    let c = change(&first, "s/c").await;
+async fn prepare(first: &State, db: &Connection, a_pending: bool) -> (String, String) {
+    let a = change(first, "s/a", None).await;
+    let b = change(first, "s/b", None).await;
     for change in [a.clone(), b] {
-        ready(&first, &db, change.clone()).await;
-        ok(&first, Land { change }).await;
+        ready(first, db, change.clone()).await;
+        ok(first, Land { change }).await;
     }
-    // A land answers before its post-land work runs (issue #190).
     first.landing.settle();
-    let unfinish =
-        |id| format!("UPDATE base_history SET post_land_done = 0 WHERE change_id = '{id}'");
     if a_pending {
-        db.execute_batch(&unfinish(&a)).unwrap();
+        db.execute(
+            "UPDATE base_history SET post_land_done = 0 WHERE change_id = ?1",
+            [a],
+        )
+        .unwrap();
     }
-    ready(&first, &db, c.clone()).await;
-    inject_crash(&db, crash, &c);
-    let outcome = dispatch(&first, Land { change: c.clone() }).await;
+    // The child inherits b through c, then c's land must detach and advance it.
+    let c = change(first, "s/c", None).await;
+    let child = change(first, "x", Some(c.clone())).await;
+    ready(first, db, c.clone()).await;
+    (c, child)
+}
+
+async fn crash_land(first: &State, db: &Connection, c: &str, child: &str, crash: u32) {
+    inject_crash(db, crash, c, child);
+    let outcome = dispatch(first, Land { change: c.into() }).await;
     first.landing.settle();
     assert_eq!(
         matches!(outcome, Outcome::Error(_)),
         crash == 0,
         "{outcome:?}"
     );
-    // Crash 1 must really cut the post-land run short, or its rows pass as
-    // if nothing crashed (issue #196).
+    // Both durable boundaries must interrupt real work, not simulate a pending flag.
     let unfinished = format!("change_id = '{c}' AND post_land_done = 0");
     let unfinished = read(
-        &db,
+        db,
         &format!("SELECT COUNT(*) FROM base_history WHERE {unfinished}"),
     );
-    assert_eq!(unfinished, if crash == 1 { "1" } else { "0" });
-    db.execute_batch("DROP TRIGGER IF EXISTS crash; DROP TRIGGER IF EXISTS crash_marker")
-        .unwrap();
-    if crash == 2 {
-        db.execute_batch(&unfinish(&c)).unwrap();
-    }
+    assert_eq!(unfinished, if matches!(crash, 1 | 2) { "1" } else { "0" });
+    db.execute_batch("DROP TRIGGER IF EXISTS crash").unwrap();
+}
+
+/// Runs one fixture row against a real D19 child, including an older pending land.
+async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
+    let temp = tempfile::tempdir().unwrap();
+    let first = start(temp.path());
+    root(&first);
+    let db = Connection::open(first.config.metadata_path()).unwrap();
+    let (c, child) = prepare(&first, &db, a_pending).await;
+    crash_land(&first, &db, &c, &child, crash).await;
+    let at_crash = child_base(&db, &child);
+    drop(first);
     let restarted = start(temp.path());
     restarted.landing.recover(&restarted).unwrap();
-    let after_recovery = target(&db, &x);
+    let after_recovery = child_base(&db, &child);
     let Response::Land(answer) = ok(&restarted, Land { change: c.clone() }).await else {
         panic!()
     };
@@ -223,11 +231,12 @@ async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
         "change_id IS NOT NULL AND post_land_done = 0",
     );
     vec![
+        at_crash,
         after_recovery,
         retry.into(),
         landed,
         pending,
-        target(&db, &x),
+        child_base(&db, &child),
     ]
 }
 

@@ -1,9 +1,9 @@
-a_pending	crash	target_after_recovery	retry	c_in_history	pending_after	target_after
-0	0	root	landed	1	0	root
-0	1	root	already_landed	1	0	root
-0	2	root	already_landed	1	0	root
-0	3	root	already_landed	1	0	root
-1	0	root	landed	1	0	root
-1	1	root	already_landed	1	0	root
-1	2	root	already_landed	1	0	root
-1	3	root	already_landed	1	0	root
+a_pending	crash	child_at_crash	child_after_recovery	retry	c_in_history	pending_after	child_after
+0	0	b	b	landed	1	0	c
+0	1	b	c	already_landed	1	0	c
+0	2	c	c	already_landed	1	0	c
+0	3	c	c	already_landed	1	0	c
+1	0	b	b	landed	1	0	c
+1	1	b	c	already_landed	1	0	c
+1	2	c	c	already_landed	1	0	c
+1	3	c	c	already_landed	1	0	c

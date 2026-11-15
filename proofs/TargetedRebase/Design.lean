@@ -41,13 +41,27 @@ def capture (overlaps : List (Nat × Nat) → List Nat) (s : State) : State :=
 def release (landed : Nat) (s : State) : State :=
   { s with claims := s.claims.filter (·.1 != landed) }
 
-/-- Probes have no head-install action. Only targets whose merge conflicts
-are routed; clean results are discarded (R8 step 4). -/
-def probe (s : State) : State :=
+/-- The clean-rebase alternative installs merged heads for clean targets.
+Head identities are abstract: a fresh merged head is represented by its successor.
+`none` is the probe's decision to discard the merge, not an installed old head. -/
+def headInstall (rebase : Bool) (s : State) : Option (List Nat) :=
+  if rebase then
+    some (s.heads.mapIdx fun target head =>
+      if ((decode s.rows).getD []).contains target && !s.conflicting.contains target
+      then head + 1 else head)
+  else none
+
+/-- Both operations use the same merge outcomes; only a rebase installs heads. -/
+def mergeTargets (rebase : Bool) (s : State) : State :=
   let targets := (decode s.rows).getD []
   { s with
     probed := s.probed ++ targets
-    routed := s.routed ++ targets.filter s.conflicting.contains }
+    routed := s.routed ++ targets.filter s.conflicting.contains
+    heads := (headInstall rebase s).getD s.heads }
+
+def probe (s : State) : State := mergeTargets false s
+
+def rebase (s : State) : State := mergeTargets true s
 
 /-- The post-land steps in order. A crash runs a prefix of them. -/
 def steps (overlaps : List (Nat × Nat) → List Nat) (landed : Nat) : List (State → State) :=
@@ -95,7 +109,8 @@ private theorem saved_prefix (overlaps : List (Nat × Nat) → List Nat) (landed
   | 0 => simpa [runPrefix] using h
   | 1 => exact Or.inr (by simpa [runPrefix, steps] using capture_saved h)
   | 2 => exact Or.inr (by simpa [runPrefix, steps, release] using capture_saved h)
-  | _ + 3 => exact Or.inr (by simpa [runPrefix, steps, release, probe] using capture_saved h)
+  | _ + 3 =>
+    exact Or.inr (by simpa [runPrefix, steps, release, probe, mergeTargets] using capture_saved h)
 
 private theorem saved_crashes (overlaps : List (Nat × Nat) → List Nat) (landed : Nat)
     (claims : List (Nat × Nat)) :
@@ -111,7 +126,7 @@ private theorem unchanged_prefix (overlaps : List (Nat × Nat) → List Nat)
   match k with
   | 0 | 1 | 2 | _ + 3 =>
     by_cases h : decode s.rows = none <;>
-      simp [runPrefix, steps, capture, release, probe, h]
+      simp [runPrefix, steps, capture, release, probe, mergeTargets, headInstall, h]
 
 private theorem unchanged_crashes (overlaps : List (Nat × Nat) → List Nat)
     (landed : Nat) (crashes : List Nat) (s : State) :
@@ -128,7 +143,7 @@ crashes after any step, the completed run stores exactly the overlap set of
 the claims as they stood before release, keeps that set across replays,
 including an empty selection, releases the landed change's claims, and
 probes exactly that set in its final pass, routes exactly its conflicting
-targets, and leaves every head unchanged. -/
+targets, never selects a head-install action, and leaves every head unchanged. -/
 -- spec/R8-optimistic-landing/README.md R8
 theorem correct (overlaps : List (Nat × Nat) → List Nat) (landed : Nat)
     (crashes : List Nat) (claims : List (Nat × Nat)) (done heads conflicting : List Nat) :
@@ -136,6 +151,7 @@ theorem correct (overlaps : List (Nat × Nat) → List Nat) (landed : Nat)
     decode t.rows = some (overlaps claims) ∧
     (∀ c ∈ t.claims, c.1 ≠ landed) ∧
     t.heads = heads ∧
+    headInstall false t = none ∧
     (∃ before, t.probed = before ++ overlaps claims) ∧
     (∃ before, t.routed = before ++ (overlaps claims).filter conflicting.contains) := by
   intro t
@@ -150,21 +166,22 @@ theorem correct (overlaps : List (Nat × Nat) → List Nat) (landed : Nat)
   generalize crashes.foldl (fun s k => runPrefix overlaps landed k s)
     ⟨claims, [], done, [], conflicting, heads⟩ = s
     at hc ht hu
-  refine ⟨by rw [ht]; simpa [probe, release] using hc, ?_, ?_, ?_, ?_⟩
+  refine ⟨by rw [ht]; simpa [probe, mergeTargets, release] using hc, ?_, ?_,
+    by simp [headInstall], ?_, ?_⟩
   · intro c hc'
     rw [ht] at hc'
-    simp only [probe, release, List.mem_filter, bne_iff_ne, ne_eq] at hc'
+    simp only [probe, mergeTargets, release, List.mem_filter, bne_iff_ne, ne_eq] at hc'
     exact hc'.2
   · rw [ht]
     exact (unchanged_prefix overlaps landed 3 s).1.trans hu.1
   · refine ⟨(capture overlaps s).probed, ?_⟩
     rw [ht]
-    simp [probe, release, hc]
+    simp [probe, mergeTargets, release, hc]
   · refine ⟨(capture overlaps s).routed, ?_⟩
     have hconf : (capture overlaps s).conflicting = conflicting :=
       (unchanged_prefix overlaps landed 1 s).2.trans hu.2
     rw [ht]
-    simp [probe, release, hc, hconf]
+    simp [probe, mergeTargets, release, hc, hconf]
 
 /-- Rows the capture transaction writes: the encoded selection on the first
 capture, nothing on a replay. -/
@@ -219,7 +236,10 @@ theorem optimal (enc : List Nat → List Row) (dec : List Row → Option (List N
 #print axioms encode
 #print axioms capture
 #print axioms release
+#print axioms headInstall
+#print axioms mergeTargets
 #print axioms probe
+#print axioms rebase
 #print axioms steps
 #print axioms runPrefix
 #print axioms recover
