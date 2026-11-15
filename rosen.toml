@@ -77,6 +77,7 @@ sensitive = [
 # is one line that runs the same from cmd, PowerShell and sh.
 [checks.pre_land]
 commands = [
+    "cargo fmt --all -- --check",
     "cargo build --workspace --locked",
     "cargo clippy --workspace --all-targets --locked -- -D warnings",
 ]

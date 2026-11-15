@@ -14,6 +14,7 @@ SPEC.md indexes the specification; read the linked spec/ files for the feature y
 - For a project with a pinned Lean project, run `lake build` in `proofs/` before pushing proof changes.
 - Before you name your work (or mark a PR ready), run the checks your change can affect and see them pass. Lint reports zero warnings. Velocity then runs `rosen.toml`'s pre-land checks on the exact merge result before every land, and its post-land checks (`cargo test --workspace`) on what landed.
 - Build and check only what your change can affect. A change to docs or SPEC.md needs no build. A change to one part, such as the UI or one package, needs that part's checks, not the whole project's. Never run a build or check again when nothing it covers changed since it last passed.
+- Rust formatting: run `cargo fmt --all` before naming work; `cargo fmt --all -- --check` is required locally and in CI.
 - Rust build: `cargo build --workspace`. For one crate, use `cargo build -p <crate>`.
 - Rust lint, zero warnings: `cargo clippy --workspace --all-targets -- -D warnings`. For one crate, use `-p <crate>` in place of `--workspace`.
 - Rust tests: `cargo test --workspace`. For one crate, use `cargo test -p <crate>`.
