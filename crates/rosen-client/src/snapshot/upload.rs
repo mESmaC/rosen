@@ -215,30 +215,45 @@ fn held(data: Vec<u8>) -> ReadBlob {
 fn hash_large(path: &Path) -> io::Result<ReadBlob> {
     let mut piece = vec![0u8; HASH_PIECE];
     for _ in 0..LARGE_HASH_TRIES {
-        let mut file = File::open(path)?;
-        let before = file.metadata()?;
-        let len = before.len();
-        let mut hasher = ObjectHasher::new("blob", len);
-        loop {
-            match file.read(&mut piece) {
-                Ok(0) => break,
-                Ok(read) => hasher.update(&piece[..read]),
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) => return Err(err),
-            }
-        }
-        let after = file.metadata()?;
-        let still = after.len() == len && after.modified().ok() == before.modified().ok();
-        match hasher.finish() {
-            Some(id) if still => {
-                let source = path.to_owned();
-                return Ok((id, Vec::new(), Some(LargeBlob { id, len, source })));
-            }
-            _ => continue,
+        if let Some(blob) = hash_if_still(path, &mut piece)? {
+            return Ok(blob);
         }
     }
     let why = format!("{} kept changing while it was read", path.display());
     Err(io::Error::new(io::ErrorKind::ResourceBusy, why))
+}
+
+/// One attempt at hashing a large file, `None` when it changed meanwhile.
+/// The length and time are checked after every piece, not only at the end,
+/// so a file written without pause costs a piece or two per attempt rather
+/// than a full read: the watcher retries a busy file each second, and full
+/// rereads of a multi-GiB file would compete with its writer (issue #347).
+fn hash_if_still(path: &Path, piece: &mut [u8]) -> io::Result<Option<ReadBlob>> {
+    let mut file = File::open(path)?;
+    let before = file.metadata()?;
+    let len = before.len();
+    let unchanged = |file: &File| -> io::Result<bool> {
+        let now = file.metadata()?;
+        Ok(now.len() == len && now.modified().ok() == before.modified().ok())
+    };
+    let mut hasher = ObjectHasher::new("blob", len);
+    loop {
+        match file.read(piece) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&piece[..read]),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+        if !unchanged(&file)? {
+            return Ok(None);
+        }
+    }
+    // `None` when fewer or more bytes were read than the length hashed for.
+    let Some(id) = hasher.finish() else {
+        return Ok(None);
+    };
+    let source = path.to_owned();
+    Ok(Some((id, Vec::new(), Some(LargeBlob { id, len, source }))))
 }
 
 /// Windows has no executable bit, and R3 writes symlinks there as plain
