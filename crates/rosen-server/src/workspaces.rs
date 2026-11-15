@@ -23,6 +23,20 @@ enum Content {
     Stored(ObjectId),
 }
 
+/// Why an edit was refused. A named blob's refusal is not a change error, so
+/// it goes to the client as its own code and message (#349); `ChangeError`
+/// would word a missing blob as a missing change.
+enum EditError {
+    Change(ChangeError),
+    Blob(ErrorBody),
+}
+
+impl From<ChangeError> for EditError {
+    fn from(err: ChangeError) -> Self {
+        EditError::Change(err)
+    }
+}
+
 pub async fn write(state: &Arc<ServerState>, request: WorkspaceWrite) -> Outcome {
     let edit = Edit {
         change: request.change,
@@ -59,15 +73,16 @@ async fn run(state: &Arc<ServerState>, request: Edit) -> Outcome {
     .await
     {
         Ok(Ok(answer)) => Outcome::Ok(Response::Snapshot(answer)),
-        Ok(Err(err)) => Outcome::Error(ErrorBody::new(
+        Ok(Err(EditError::Change(err))) => Outcome::Error(ErrorBody::new(
             crate::rpc::change_error_code(&err),
             err.to_string(),
         )),
+        Ok(Err(EditError::Blob(body))) => Outcome::Error(body),
         Err(err) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, err.to_string())),
     }
 }
 
-fn edit(state: &ServerState, req: Edit) -> Result<rosen_protocol::SnapshotOutcome, ChangeError> {
+fn edit(state: &ServerState, req: Edit) -> Result<rosen_protocol::SnapshotOutcome, EditError> {
     let parts = validate_path(&req.path)?;
     let store = LooseObjectStore::open(state.config.objects_dir()).map_err(store_error)?;
     // The blob is the one large object, and hashing, compressing and syncing
@@ -108,16 +123,18 @@ fn edit(state: &ServerState, req: Edit) -> Result<rosen_protocol::SnapshotOutcom
 /// Checks that a named blob is stored, whole, and is a blob: a tree entry
 /// for a file must not name a tree or a commit, or a damaged object. The
 /// check streams the body, so a large blob is never held whole.
-fn stored_blob(store: &LooseObjectStore, id: ObjectId) -> Result<ObjectId, ChangeError> {
+fn stored_blob(store: &LooseObjectStore, id: ObjectId) -> Result<ObjectId, EditError> {
     match store.copy_raw_to(&id, &mut std::io::sink()) {
         Ok(Some((ObjectKind::Blob, _))) => Ok(id),
-        Ok(Some((kind, _))) => Err(ChangeError::Refused(rosen_core::Error::InvalidPath(
+        Ok(Some((kind, _))) => Err(EditError::Blob(ErrorBody::new(
+            ErrorCode::InvalidArgument,
             format!("{id} is a {kind:?}, not a blob"),
         ))),
-        Ok(None) => Err(ChangeError::NotFound(format!(
-            "the server does not hold blob {id}; upload it first"
+        Ok(None) => Err(EditError::Blob(ErrorBody::new(
+            ErrorCode::NotFound,
+            format!("the server does not hold blob {id}; upload it first"),
         ))),
-        Err(err) => Err(store_error(err)),
+        Err(err) => Err(store_error(err).into()),
     }
 }
 
