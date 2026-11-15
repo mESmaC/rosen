@@ -169,6 +169,12 @@ pub enum Request {
     ChangeAbandon {
         change: String,
     },
+    /// Records the parent tree an edited stack from before parent trees
+    /// were recorded started from, named by commit or tree (R8 step 3).
+    ChangeRecoverBasis {
+        change: String,
+        basis: rosen_core::ObjectId,
+    },
     /// Claims paths or globs for a change, first claim wins (R6). A refusal
     /// is an ordinary answer naming the holders, not an error.
     ClaimPaths(ClaimRequest),

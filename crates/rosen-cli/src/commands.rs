@@ -464,6 +464,16 @@ pub enum ChangeCommand {
         /// Change to abandon: its ID or a unique prefix.
         change: String,
     },
+    /// Name the parent tree an edited stacked change started from, when it
+    /// was created before Rosen recorded one. The parent's later edits are
+    /// then merged in; no snapshot is rewritten.
+    Recover {
+        /// Stacked change to recover: its ID or a unique prefix.
+        change: String,
+        /// A snapshot commit or tree of the parent change, or the commit the
+        /// change's first snapshot followed.
+        basis: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -759,6 +769,7 @@ impl ChangeCommand {
             ChangeCommand::List { .. } => "change list",
             ChangeCommand::Show { .. } => "change show",
             ChangeCommand::Abandon { .. } => "change abandon",
+            ChangeCommand::Recover { .. } => "change recover",
         }
     }
 }

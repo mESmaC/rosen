@@ -1551,7 +1551,8 @@
       "x-commands": [
         "change new",
         "change show",
-        "change abandon"
+        "change abandon",
+        "change recover"
       ]
     },
     "rosen.change.list/v1": {

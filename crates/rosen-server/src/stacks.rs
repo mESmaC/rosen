@@ -6,9 +6,10 @@ use crate::history::{
     trees::{content, file_at},
 };
 use crate::ServerState;
-use rosen_core::{ChangeId, Conflict, ObjectId};
-use rosen_protocol::EventKind;
+use rosen_core::{Change, ChangeId, ChangeParent, Conflict, ObjectId};
+use rosen_protocol::{ChangeRecord, ErrorBody, ErrorCode, EventKind, Outcome, Response};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::sync::Arc;
 
 pub(crate) fn track(conn: &Connection, id: ChangeId, tree: ObjectId) -> Result<(), ChangeError> {
     conn.execute(
@@ -33,18 +34,108 @@ pub(crate) fn basis(
     match tree {
         Some(tree) => tree.parse().map_err(failure),
         // An edited legacy stack has no recoverable exact basis. Guessing the
-        // parent's current head can interpret intervening lands as deletions.
+        // parent's current head can interpret intervening lands as deletions;
+        // its owner names the basis with `recover_basis` instead (#166).
         None => {
             let child = changes::get(conn, id)?.change;
             if child.snapshots.is_empty() {
                 Ok(child.head)
             } else {
-                Err(ChangeError::Base(
-                    "cannot safely rebase a legacy stack without its recorded parent tree".into(),
-                ))
+                Err(ChangeError::Base(format!(
+                    "cannot safely rebase a legacy stack without its recorded parent tree; \
+                     name the parent tree it started from with \
+                     `rosen change recover {id} <commit-or-tree>`"
+                )))
             }
         }
     }
+}
+
+pub async fn handle_recover(state: &Arc<ServerState>, change: String, basis: ObjectId) -> Outcome {
+    let state = Arc::clone(state);
+    match tokio::task::spawn_blocking(move || recover_basis(&state, &change, basis)).await {
+        Ok(Ok(record)) => Outcome::Ok(Response::Change(record)),
+        Ok(Err(err)) => Outcome::Error(ErrorBody::new(
+            crate::rpc::change_error_code(&err),
+            err.to_string(),
+        )),
+        Err(err) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, err.to_string())),
+    }
+}
+
+/// Records the parent tree an edited legacy stack started from (#166), named
+/// by its owner, then carries the parent's later edits in as any other stack
+/// update: a three-way merge that keeps every authored snapshot and stores
+/// conflicts on the child. The server never picks the tree. It accepts only
+/// one the stack's history recorded, and never replaces a recorded basis.
+pub fn recover_basis(
+    state: &ServerState,
+    change: &str,
+    basis: ObjectId,
+) -> Result<ChangeRecord, ChangeError> {
+    let ctx = history::open(state).map_err(failure)?;
+    let id = state.changes.show(change)?.change.id;
+    state.changes.with_conn(|conn| {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let child = changes::get(&tx, id)?.change;
+        let ChangeParent::Change(parent) = child.parent else {
+            return Err(refused("the change is not stacked on another change"));
+        };
+        if child.state.is_closed() {
+            return Err(refused("the change is closed"));
+        }
+        let recorded: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM stack_bases WHERE change_id = ?1)",
+            [id.to_string()],
+            |r| r.get(0),
+        )?;
+        if recorded {
+            return Err(refused("the change already has a recorded parent tree"));
+        }
+        let parent = changes::get(&tx, parent)?.change;
+        let tree = recorded_parent_tree(&ctx.store, &child, &parent, basis)?.ok_or_else(|| {
+            refused(
+                "the basis must be a snapshot of the parent change, or the commit \
+                 the change's first snapshot followed",
+            )
+        })?;
+        track(&tx, id, tree)?;
+        tx.commit()?;
+        Ok(())
+    })?;
+    reconcile(state)?;
+    state.changes.with_conn(|conn| changes::get(conn, id))
+}
+
+/// The parent trees a legacy stack's own history recorded: each snapshot of
+/// its parent change, and the commit its own first snapshot followed, which
+/// was the parent's newest commit then. `basis` names one by commit or tree.
+fn recorded_parent_tree(
+    store: &dyn rosen_store::ObjectStore,
+    child: &Change,
+    parent: &Change,
+    basis: ObjectId,
+) -> Result<Option<ObjectId>, ChangeError> {
+    if let Some(s) = parent
+        .snapshots
+        .iter()
+        .find(|s| s.commit == basis || s.tree == basis)
+    {
+        return Ok(Some(s.tree));
+    }
+    let Some(first) = child.snapshots.first() else {
+        return Ok(None);
+    };
+    let followed = store.read_commit(&first.commit).map_err(failure)?.parents;
+    let Some(followed) = followed.first() else {
+        return Ok(None);
+    };
+    let tree = store.read_commit(followed).map_err(failure)?.tree;
+    Ok((*followed == basis || tree == basis).then_some(tree))
+}
+
+fn refused(reason: &str) -> ChangeError {
+    ChangeError::Base(format!("cannot recover the stack basis: {reason}"))
 }
 
 /// Updates are durable before notification. A failed pass is retried at the

@@ -40,6 +40,19 @@ impl Client {
         }
         Ok(record)
     }
+
+    /// Records the parent tree an edited legacy stack started from (R8).
+    pub async fn change_recover_basis(
+        &self,
+        change: &str,
+        basis: rosen_core::ObjectId,
+    ) -> Result<ChangeRecord, Error> {
+        let change = change.to_owned();
+        expect_change(
+            self.request(Request::ChangeRecoverBasis { change, basis })
+                .await?,
+        )
+    }
 }
 
 fn expect_change(response: Response) -> Result<ChangeRecord, Error> {

@@ -5,7 +5,7 @@ use crate::server::Succeeded;
 use rosen_client::protocol::{ChangeFilter, ChangeRecord, NewChange};
 use rosen_client::workspace::{Options, Report, Sparse};
 use rosen_client::{Client, Endpoint, Error};
-use rosen_core::{AgentId, ChangeParent, ChangeState};
+use rosen_core::{AgentId, ChangeParent, ChangeState, ObjectId};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +30,10 @@ pub async fn run(
         ChangeCall::List(filter) => print_list(json, &client.change_list(filter).await?),
         ChangeCall::Show(change) => print_change(json, &client.change_show(&change).await?),
         ChangeCall::Abandon(change) => print_change(json, &client.change_abandon(&change).await?),
+        ChangeCall::RecoverBasis(change, basis) => print_change(
+            json,
+            &client.change_recover_basis(&change, basis).await?,
+        ),
     }
     Ok(true)
 }
@@ -39,6 +43,7 @@ enum ChangeCall {
     List(ChangeFilter),
     Show(String),
     Abandon(String),
+    RecoverBasis(String, ObjectId),
 }
 
 impl ChangeCall {
@@ -65,6 +70,12 @@ impl ChangeCall {
             }),
             ChangeCommand::Show { change } => ChangeCall::Show(change.clone()),
             ChangeCommand::Abandon { change } => ChangeCall::Abandon(change.clone()),
+            ChangeCommand::Recover { change, basis } => ChangeCall::RecoverBasis(
+                change.clone(),
+                basis.parse().map_err(|_| {
+                    Error::InvalidArgument(format!("{basis:?} is not a commit or tree ID"))
+                })?,
+            ),
         })
     }
 }

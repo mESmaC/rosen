@@ -146,6 +146,9 @@ pub async fn dispatch(state: &Arc<ServerState>, request: Request) -> Outcome {
         Request::ChangeRebase { change } => crate::rebase::handle(state, change).await,
         Request::EditRegions { change } => crate::overlaps::edits::handle(state, change).await,
         Request::ChangeAbandon { change } => crate::claims::abandon(state, change).await,
+        Request::ChangeRecoverBasis { change, basis } => {
+            crate::stacks::handle_recover(state, change, basis).await
+        }
         Request::ClaimPaths(req) => crate::claims::handle(state, ClaimCall::Claim(req)).await,
         Request::SharePaths(req) => crate::claims::handle(state, ClaimCall::Share(req)).await,
         Request::WaitPaths(req) => crate::claims::handle(state, ClaimCall::Wait(req)).await,

@@ -198,6 +198,47 @@ async fn stale_child_merge_result_never_reverts_landed_work() {
     assert_eq!(answer.tree, None);
 }
 
+#[tokio::test]
+async fn legacy_stack_recovers_only_from_a_recorded_parent_tree() {
+    // Risk (#166): an edited stack from before parent trees were recorded
+    // must never be merged from a tree the server guessed, and recovering it
+    // must keep every authored snapshot.
+    let (_temp, state) = setup();
+    let parent = create(&state, None).await;
+    write(&state, &parent, "shared", "original\n").await;
+    let child = create(&state, Some(&parent)).await;
+    write(&state, &child, "child", "mine\n").await;
+    state
+        .changes
+        .with_conn(|conn| Ok(conn.execute("DELETE FROM stack_bases", [])?))
+        .unwrap();
+    write(&state, &parent, "later", "parent\n").await;
+    let before = state.changes.show(&child).unwrap().change;
+    let recover = |basis| Request::ChangeRecoverBasis {
+        change: child.clone(),
+        basis,
+    };
+    // A tree outside the parent's recorded history is refused.
+    assert!(matches!(
+        dispatch(&state, recover(before.head)).await,
+        Outcome::Error(_)
+    ));
+    let started = state.changes.show(&parent).unwrap().change.snapshots[0].commit;
+    let Response::Change(after) = call(&state, recover(started)).await else {
+        panic!()
+    };
+    assert_eq!(after.change.snapshots, before.snapshots);
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let tree = store.read_tree(&after.change.head).unwrap();
+    for path in ["shared", "child", "later"] {
+        assert!(tree.get(path.as_bytes()).is_some());
+    }
+    assert!(matches!(
+        dispatch(&state, recover(started)).await,
+        Outcome::Error(_)
+    ));
+}
+
 async fn land_parent(state: &Arc<ServerState>, parent: &str) {
     let head = state.changes.show(parent).unwrap().change.head;
     let base = Ledger::open(&state.config.metadata_path())
