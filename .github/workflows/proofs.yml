@@ -24,7 +24,11 @@ permissions:
 # A new push to a PR makes the run for its previous head useless.
 concurrency:
   group: proofs-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Only a PR's newer head makes its previous run useless. On main every land is
+  # its own release candidate, and agents land faster than a run finishes, so
+  # cancelling there left main without a finished run. A new push waits instead,
+  # and GitHub keeps only the newest waiting run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lean:
