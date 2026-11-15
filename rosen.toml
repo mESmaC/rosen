@@ -60,6 +60,7 @@ sensitive = [
     "crates/rosen-server/src/network/",
     "crates/rosen-client/src/workspace/lifecycle.rs",
     "crates/rosen-client/src/workspace/delete.rs",
+    "crates/rosen-client/src/workspace/delete/",
     "crates/rosen-client/src/workspace/pool_worker.rs",
     "crates/rosen-client/src/enrollment.rs",
     "crates/rosen-platform/",

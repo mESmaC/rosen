@@ -11,12 +11,18 @@ windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+getrandom.workspace = true
+rustix = { version = "1.1", features = ["fs"] }
 
-# The only unsafe code is the audited Windows ABI boundary: file disposition,
+[dev-dependencies]
+tempfile.workspace = true
+
+# Unsafe code is confined to the audited OS ABI boundary: file disposition,
 # Credential Manager, process creation and liveness, account identity and
 # owner-only descriptors for files and the local pipe, owner-only file
 # creation, the installed memory (with sysconf on Unix), and pointing
-# standard error at a log file (with dup2 on Unix). All consumers continue to
+# standard error at a log file (with dup2 on Unix), Unix directory-relative
+# removal, and signal-zero process liveness. All consumers continue to
 # inherit the workspace's unsafe_code = forbid policy.
 [lints.rust]
 unsafe_code = "deny"

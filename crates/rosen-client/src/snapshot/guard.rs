@@ -187,8 +187,8 @@ impl Snapshotter {
 }
 
 impl Snapshotter {
-    /// Deletes only objects verified through write-excluded handles. The
-    /// path-based scan above is advisory; this phase rechecks held bytes.
+    /// Rechecks held bytes before platform-specific verified removal. The
+    /// path-based scan above is advisory; Windows also excludes writers.
     pub(crate) fn remove_verified(&mut self) -> Result<(), SnapshotError> {
         if !self.index.gitlinks.is_empty() {
             return Err(invalid(&self.root, "workspace contains submodules"));

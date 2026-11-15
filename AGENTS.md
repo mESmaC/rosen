@@ -36,7 +36,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Stress suite (the merge gate for sensitive PRs): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed 1` and `target/debug/rosen-faults drill --seed 2`, as described under Fault drill below. Each run takes about a minute. This is the project's stress command.
 - §5 benchmark, not the stress suite and never a merge gate: run it only when the user asks. It takes an hour or more and fails the latency targets until the server performance issues are fixed. On one machine: `cargo build --release -p rosen-server -p rosen-stress`, then `target/release/rosen-stress local --dir <new dir>` for three simulated machines; add `--faults --fault-seed <n>` for the kill and partition run. Across machines: `rosen-stress seed`, `rosen import` on the server, `rosen-stress agents` on each machine with `rosen-stress checker` on one, then `rosen-stress verify <reports…>`; `rosen-stress --help` has the flags.
 - Fault drill (SPEC.md §5): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed <n>`. It injects a failing commit and checks R12 bisects and reverts it unless given `--no-failing-commit`, prints a JSON report, exits non-zero when a guarantee breaks, and replays exactly from its seed.
-- CI runs the Rust build, lint and tests on Windows, and the Rust build on Linux. The Proofs workflow runs `lake build --wfail` and the axiom audit on Linux when `proofs/`, the audit script or the workflow changes.
+- CI runs the Rust build, lint and tests on Windows and macOS, and the Rust build on Linux. The Proofs workflow runs `lake build --wfail` and the axiom audit on Linux when `proofs/`, the audit script or the workflow changes.
 
 ## Code
 - Keep functions under 60 lines. Split anything longer.
@@ -122,7 +122,8 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - `crates/rosen-server/src/conflicts.rs`: SQLite schema and storage for stored conflicts; a bug lets a conflicted change land (SPEC.md R5).
 - `crates/rosen-client/src/workspace/lifecycle.rs`: guarded workspace deletion; an unsafe deletion loses local edits (SPEC.md R4).
 - `crates/rosen-client/src/workspace/delete.rs`: holds verified files and removes exact objects; a pathname race can lose another workspace's edits.
-- `crates/rosen-platform/`: the audited Windows file-disposition boundary; its handle and ABI contract protects verified deletion.
+- `crates/rosen-client/src/workspace/delete/`: Unix verified removal and recovery; a pathname race can delete an unstored replacement.
+- `crates/rosen-platform/`: the audited OS file-removal boundary; its handle and ABI contract protects verified deletion.
 - `crates/rosen-store/`: the authoritative object store; a bug loses or corrupts objects, and objects are never deleted (SPEC.md D5).
 - `crates/rosen-protocol/src/transport_windows.rs`: restricts the named pipe to the current user; a bug exposes the server to other users.
 - `crates/rosen-merge/`: every land and rebase merges through it; a bug silently drops or duplicates lines (SPEC.md R5).

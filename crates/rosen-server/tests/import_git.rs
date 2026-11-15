@@ -32,12 +32,20 @@ fn make_source(dir: &Path) -> String {
     git(dir, &["init", "--quiet", "--initial-branch=trunk"]);
     git(dir, &["config", "user.name", "Test"]);
     git(dir, &["config", "user.email", "test@example.com"]);
+    git(dir, &["config", "core.filemode", "false"]);
+    git(dir, &["config", "core.autocrlf", "false"]);
     std::fs::create_dir_all(dir.join("src/nested")).unwrap();
     std::fs::write(dir.join("src/nested/a.txt"), "one\n").unwrap();
     git(dir, &["add", "."]);
     git(dir, &["commit", "--quiet", "-m", "first"]);
     git(dir, &["checkout", "--quiet", "-b", "side"]);
-    std::fs::write(dir.join("run.sh"), "#!/bin/sh\n").unwrap();
+    let script = dir.join("run.sh");
+    std::fs::write(&script, b"#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     git(dir, &["add", "."]);
     git(dir, &["update-index", "--chmod=+x", "run.sh"]);
     git(dir, &["commit", "--quiet", "-m", "side"]);

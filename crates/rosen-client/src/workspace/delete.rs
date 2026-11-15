@@ -1,11 +1,10 @@
-//! Windows deletion keeps each hashed file unwritable until that exact
-//! object is marked delete-on-close. A new path replacement is never removed.
+//! Platform-specific removal of verified workspace objects.
 use rosen_core::ObjectId;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 pub(crate) fn remove_verified(
     _root: &Path,
     _expected: &BTreeMap<String, ObjectId>,
@@ -16,6 +15,13 @@ pub(crate) fn remove_verified(
         "workspace kept; this platform cannot delete a verified file by handle",
     ))
 }
+
+#[cfg(unix)]
+#[path = "delete/unix.rs"]
+mod unix;
+
+#[cfg(unix)]
+pub(crate) use unix::remove_verified;
 
 #[cfg(windows)]
 pub(crate) fn remove_verified(

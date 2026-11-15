@@ -92,6 +92,9 @@ pub mod owner_only;
 
 pub mod memory;
 
+#[cfg(unix)]
+pub mod unix_delete;
+
 /// False only when no running process has id `pid`; any doubt answers true,
 /// so a caller that cleans up after dead processes never touches a live
 /// one's files. A reused id reads as running, which only delays cleanup.
@@ -100,15 +103,23 @@ pub fn process_may_be_running(pid: u32) -> bool {
     process::may_be_running(pid)
 }
 
-/// Without a Windows process handle, Linux's `/proc` answers; other systems
-/// cannot tell here, so every process counts as running. An entry `/proc`
-/// refuses to stat, as under `hidepid`, counts as running too.
-#[cfg(not(windows))]
+/// Signal zero probes existence without sending a signal. Permission errors
+/// and every other uncertainty keep the process's staging directories.
+#[cfg(unix)]
+#[allow(unsafe_code)]
 pub fn process_may_be_running(pid: u32) -> bool {
-    let proc_root = std::path::Path::new("/proc");
-    !proc_root.join("self").exists()
-        || proc_root
-            .join(pid.to_string())
-            .try_exists()
-            .unwrap_or(true)
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return true;
+    };
+    if pid <= 0 {
+        return true;
+    }
+    // SAFETY: a positive pid selects one process; signal zero sends nothing.
+    (unsafe { libc::kill(pid, 0) != -1 })
+        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn process_may_be_running(_pid: u32) -> bool {
+    true
 }

@@ -28,7 +28,7 @@ async fn deletion_stores_edits_or_keeps_and_names_them() {
     offline_journal_keeps_workspace(&client, &dir.path().join("journalled")).await;
     #[cfg(windows)]
     writable_handle_keeps_workspace(&client, &dir.path().join("writable")).await;
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     interrupted_cleanup_finishes(&client, &data, &dir.path().join("interrupted")).await;
     daemon_cleans_closed_workspace(&client, &endpoint, &data, &dir.path().join("automatic")).await;
 }
@@ -149,7 +149,7 @@ async fn writable_handle_keeps_workspace(client: &Client, workspace: &Path) {
 }
 /// Issue #90: a crash after verified removal deleted some tracked files of
 /// the staged directory must not leave a cleanup that refuses forever.
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 async fn interrupted_cleanup_finishes(client: &Client, data: &Path, workspace: &Path) {
     let change = new_workspace(client, workspace).await;
     close_without_snapshot(client, &change).await;

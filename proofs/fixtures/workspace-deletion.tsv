@@ -1,4 +1,5 @@
 dirty	journal	mismatch	ignored	delete
+#375 regression: a durable Unix workspace (0 0 0 0) must be removable
 0	0	0	0	1
 0	0	0	1	1
 0	0	1	0	0
