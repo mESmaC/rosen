@@ -4,6 +4,11 @@
 mod rename;
 pub use rename::rename_noreplace;
 
+#[cfg(windows)]
+mod windows_delete;
+#[cfg(windows)]
+pub use windows_delete::reparse_tag;
+
 /// Marks the exact held file for deletion when its handles close.
 ///
 /// Callers can open the file denying write/delete sharing before hashing it,

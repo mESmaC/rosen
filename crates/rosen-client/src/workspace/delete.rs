@@ -46,6 +46,8 @@ mod windows {
     const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const REPARSE_POINT: u32 = 0x400;
+    const MOUNT_POINT_TAG: u32 = 0xa000_0003;
+    const SYMLINK_TAG: u32 = 0xa000_000c;
 
     struct CheckedFile {
         rel: String,
@@ -151,11 +153,8 @@ mod windows {
                 let rel = relative(root, &path)?;
                 let meta = fs::symlink_metadata(&path).map_err(|err| named(root, &path, err))?;
                 if meta.file_attributes() & REPARSE_POINT != 0 {
-                    return Err(io::Error::other(format!(
-                        "workspace kept; cannot verify reparse point: {rel}"
-                    )));
-                }
-                if meta.is_dir() {
+                    plan.files.push(check_link(&path, rel, expected, ignored)?);
+                } else if meta.is_dir() {
                     pending.push(path);
                 } else {
                     // Ignore classification is fixed for this deletion plan;
@@ -167,6 +166,40 @@ mod windows {
             }
         }
         Ok(plan)
+    }
+
+    fn check_link(
+        path: &Path,
+        rel: String,
+        expected: &BTreeMap<String, ObjectId>,
+        ignored: &mut impl FnMut(&str, bool) -> bool,
+    ) -> io::Result<CheckedFile> {
+        // Deny writes and renames until disposal, so classification and the
+        // target text cannot change after we verify this exact link object.
+        let file = OpenOptions::new()
+            .access_mode(0x8000_0000 | DELETE)
+            .share_mode(SHARE_READ)
+            .custom_flags(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|err| file_error(&rel, err))?;
+        let tag = rosen_platform::reparse_tag(&file).map_err(|err| file_error(&rel, err))?;
+        if !matches!(tag, Some(MOUNT_POINT_TAG | SYMLINK_TAG)) {
+            return Err(io::Error::other(format!(
+                "workspace kept; cannot verify reparse point: {rel} (tag {tag:?})"
+            )));
+        }
+        // A directory link is a leaf: neither enumeration nor deletion ever
+        // enters the target, which may belong to another workspace or store.
+        if !ignored(&rel, false) && !rel.starts_with(".rosen/") {
+            let target = fs::read_link(path).map_err(|err| file_error(&rel, err))?;
+            let bytes = target.to_string_lossy().replace('\\', "/").into_bytes();
+            if expected.get(&rel) != Some(&ObjectId::hash_object("blob", &bytes)) {
+                return Err(io::Error::other(format!(
+                    "workspace kept; unstored link: {rel}"
+                )));
+            }
+        }
+        Ok(CheckedFile { rel, file })
     }
 
     fn pin_directory(path: &Path) -> io::Result<File> {

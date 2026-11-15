@@ -12,6 +12,8 @@
 
   The refusal names the files and keeps the workspace.
 - On Windows, final removal hashes write-excluded file handles and deletes those exact objects while excluding concurrent renames.
+  Junctions and symlinks are classified through handles opened without following reparse points, then removed through those same handles without traversing their targets.
+  Ignored links need no stored content; other links must match their stored target text, and unknown reparse tags keep the workspace with a reason naming the path and tag.
   On Unix, best-effort removal opens files without following symlinks, verifies their stored blob IDs through those handles, isolates each selected file in a private directory relative to its opened parent, rechecks its device and inode against the held handle, rehashes it, and removes it with `unlinkat`.
   A replacement detected after isolation stays in that directory, named in the refusal, for recovery.
   Nonempty isolation directories always keep the workspace, even when ignore rules match them.

@@ -28,9 +28,50 @@ async fn deletion_stores_edits_or_keeps_and_names_them() {
     offline_journal_keeps_workspace(&client, &dir.path().join("journalled")).await;
     #[cfg(windows)]
     writable_handle_keeps_workspace(&client, &dir.path().join("writable")).await;
+    #[cfg(windows)]
+    pnpm_junctions_leave_targets_untouched(&client, dir.path()).await;
     #[cfg(any(windows, unix))]
     interrupted_cleanup_finishes(&client, &data, &dir.path().join("interrupted")).await;
     daemon_cleans_closed_workspace(&client, &endpoint, &data, &dir.path().join("automatic")).await;
+}
+
+#[cfg(windows)]
+async fn pnpm_junctions_leave_targets_untouched(client: &Client, root: &Path) {
+    // R4 / #388: following an ignored junction can erase another workspace
+    // or a shared pnpm store; refusing every junction leaks all prepared trees.
+    let workspace = root.join("pnpm-workspace");
+    let change = new_workspace(client, &workspace).await;
+    let target = root.join("pnpm-store");
+    std::fs::create_dir_all(target.join(".rosen")).unwrap();
+    std::fs::write(target.join(".rosen/workspace.json"), b"outside marker").unwrap();
+    std::fs::write(target.join("package.json"), b"outside package").unwrap();
+    let modules = workspace.join("ui/node_modules");
+    std::fs::create_dir_all(modules.join("@scope")).unwrap();
+    for package in ["dompurify", "@scope/package"] {
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:ROSEN_TEST_LINK -Target $env:ROSEN_TEST_TARGET -ErrorAction Stop | Out-Null",
+            ])
+            .env("ROSEN_TEST_LINK", modules.join(package))
+            .env("ROSEN_TEST_TARGET", &target)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    close_without_snapshot(client, &change).await;
+    client.workspace_delete(&workspace).await.unwrap();
+    assert!(!workspace.exists(), "pnpm junctions kept the workspace");
+    assert_eq!(
+        std::fs::read(target.join("package.json")).unwrap(),
+        b"outside package"
+    );
+    assert_eq!(
+        std::fs::read(target.join(".rosen/workspace.json")).unwrap(),
+        b"outside marker"
+    );
 }
 
 async fn abandon_stores_edits(client: &Client, store: &dyn ObjectStore, workspace: &Path) {
@@ -270,7 +311,7 @@ impl BaseSource for FixedBase {
 
 fn start_server(data: &Path, store: &dyn ObjectStore) -> Endpoint {
     let entries = vec![
-        file(store, ".gitignore", b"build/\n"),
+        file(store, ".gitignore", b"build/\nnode_modules/\n"),
         file(store, "main.rs", b"fn main() {}\n"),
     ];
     let tree = store.put_tree(&Tree::new(entries).unwrap()).unwrap();

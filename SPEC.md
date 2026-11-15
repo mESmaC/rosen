@@ -73,6 +73,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - **Snapshot.** An automatic commit of a workspace's current files. Snapshots are made by the client from file writes and stored on the server (D17). Explicit `rosen commit` messages are named snapshots.
 - **Stack.** A chain of changes, each a parent of the next. One land request includes the chosen change and its unlanded ancestors, with one commit per change, chained bottom first, and one compare-and-swap.
 - **Workspace.** The files a change is edited in. Each workspace belongs to exactly one change, and is either **local** or **server-side**.
+  Guarded deletion removes classified junctions and symlinks themselves without traversing their targets; unknown reparse kinds keep the workspace (R4; #388).
 - **Conflict.** A stored object recording the base, ours and theirs for a region that did not merge automatically. A change that has conflicts cannot land.
 - **Receipt.** A record that the required checks passed on one exact merge result. It records a signed `(change head, base commit, check set)` binding and the server-computed tree it checked. A trusted receipt for the current check set counts whenever that tree equals the current merge result, even after its head or base changes.
 - **Approval.** A reviewer's approval of a change at a given head. It gates landing only in `before-land` projects.
