@@ -1,12 +1,14 @@
 //! Named-pipe transport. Each pipe instance serves one client, so the listener
-//! keeps one idle instance ready and creates the next as soon as a client takes it.
+//! keeps a pool ready so connection bursts do not wait for the accept loop.
 
 use super::BoxStream;
 use rosen_platform::security::{
     current_user_sid, named_pipe_server_pid, process_user_sid, OwnerOnlyDescriptor, Rights,
 };
 use std::ffi::c_void;
+use std::future::{poll_fn, Future};
 use std::io;
+use std::task::Poll;
 use std::time::Duration;
 use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
@@ -17,7 +19,10 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 const PIPE_PREFIX: &str = r"\\.\pipe\";
 
 /// How long a client keeps retrying while every pipe instance is busy.
-const BUSY_RETRY_LIMIT: Duration = Duration::from_secs(5);
+const BUSY_RETRY_LIMIT: Duration = Duration::from_secs(30);
+const BUSY_RETRY_INITIAL: Duration = Duration::from_millis(10);
+const BUSY_RETRY_MAX: Duration = Duration::from_millis(250);
+const WAITING_INSTANCES: usize = 8;
 
 pub(super) fn normalize(name: String) -> String {
     if name.starts_with(PIPE_PREFIX) {
@@ -42,7 +47,7 @@ pub(super) struct Listener {
     /// DACL also grants read access to Everyone, which would break the
     /// "access is limited to the OS user" rule.
     security: OwnerOnlyDescriptor,
-    next: NamedPipeServer,
+    waiting: Vec<NamedPipeServer>,
 }
 
 impl Listener {
@@ -59,21 +64,42 @@ impl Listener {
                 err
             }
         })?;
+        let mut waiting = vec![first];
+        for _ in 1..WAITING_INSTANCES {
+            waiting.push(create_instance(name, &security, false)?);
+        }
         Ok(Self {
             name: name.to_owned(),
             security,
-            next: first,
+            waiting,
         })
     }
 
     pub(super) async fn accept(&mut self) -> io::Result<BoxStream> {
-        self.next.connect().await?;
-        // Create the replacement before handing off, so a client arriving now
-        // finds an instance instead of "not found".
+        let index = connected_instance(&self.waiting).await?;
+        // Refill before handing off so the accept loop keeps the full backlog.
         let replacement = create_instance(&self.name, &self.security, false)?;
-        let connected = std::mem::replace(&mut self.next, replacement);
+        let connected = std::mem::replace(&mut self.waiting[index], replacement);
         Ok(Box::new(connected))
     }
+}
+
+async fn connected_instance(waiting: &[NamedPipeServer]) -> io::Result<usize> {
+    // Poll every instance: Windows can connect a client to any waiting handle.
+    // Keeping the handles in the listener also makes cancelling accept safe.
+    let mut connections: Vec<_> = waiting
+        .iter()
+        .map(|pipe| Box::pin(pipe.connect()))
+        .collect();
+    poll_fn(|cx| {
+        for (index, connection) in connections.iter_mut().enumerate() {
+            if let Poll::Ready(result) = connection.as_mut().poll(cx) {
+                return Poll::Ready(result.map(|()| index));
+            }
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 fn create_instance(
@@ -98,21 +124,35 @@ fn create_instance(
 
 pub(super) async fn connect(name: &str) -> io::Result<BoxStream> {
     let started = tokio::time::Instant::now();
+    let mut delay = BUSY_RETRY_INITIAL;
     loop {
         match ClientOptions::new().open(name) {
             Ok(client) => {
                 verify_server_owner(name, &client)?;
                 return Ok(Box::new(client));
             }
-            // Every instance is taken for the moment; the listener makes a new one
-            // right after each accept, so a short wait is enough.
-            Err(err)
-                if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
-                    && started.elapsed() < BUSY_RETRY_LIMIT =>
-            {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+            Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                let remaining = BUSY_RETRY_LIMIT.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!(
+                            "cannot connect to {name} after waiting {BUSY_RETRY_LIMIT:?} \
+                             for a free pipe instance: {err}"
+                        ),
+                    ));
+                }
+                // Yield without blocking the runtime, and bound retry pressure
+                // when a burst exceeds the listener's pool or it is stalled.
+                tokio::time::sleep(delay.min(remaining)).await;
+                delay = (delay * 2).min(BUSY_RETRY_MAX);
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("cannot connect to {name}: {err}"),
+                ));
+            }
         }
     }
 }
