@@ -30,23 +30,38 @@ pub fn start(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(super::internal)?;
-    let green = match post_land::last_green(&tx, &name, job.kind)? {
+    let boundary = search_boundary(&tx, &name, job)?;
+    let answer = super::begin_kind_in(&tx, &name, boundary, job.commit, output, job.kind)?;
+    tx.commit().map_err(super::internal)?;
+    Ok(answer)
+}
+
+fn search_boundary(
+    conn: &rusqlite::Connection,
+    name: &str,
+    job: &PostLandJob,
+) -> Result<ObjectId, ErrorBody> {
+    let green = match post_land::last_green(conn, name, job.kind)? {
         Some(green) => green,
         None => {
             // No initial commit is assumed tested: confirmation will run the
             // culprit's parent, and refuses to identify a culprit if it fails.
-            let initial: String = tx
+            let initial: String = conn
                 .query_row(
                     "SELECT commit_id FROM base_history
                 WHERE ref_name=?1 ORDER BY seq LIMIT 1",
-                    [&name],
+                    [name],
                     |r| r.get(0),
                 )
                 .map_err(super::internal)?;
             ObjectId::from_hex(&initial).map_err(super::internal)?
         }
     };
-    let answer = super::begin_kind_in(&tx, &name, green, job.commit, output, job.kind)?;
-    tx.commit().map_err(super::internal)?;
-    Ok(answer)
+    match job.kind {
+        rosen_protocol::CheckKind::Test => {
+            post_land::failures::test_boundary(conn, name, green, job.commit)
+                .map_err(super::internal)
+        }
+        rosen_protocol::CheckKind::Build => Ok(green),
+    }
 }

@@ -306,6 +306,71 @@ fn restart(state: Arc<ServerState>) -> Arc<ServerState> {
     ServerState::new(config)
 }
 
+// R12 risk (#373): overlapping batches must not multiply reports or lose
+// completed batch coverage when legacy duplicate records are consolidated.
+#[tokio::test]
+async fn overlapping_test_failures_are_recorded_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = setup(temp.path());
+    let (id, _, culprit) = land(&state, "bad.rs").await;
+    let first = fail(&state, CheckKind::Test).await;
+    land(&state, "later.rs").await;
+    let second = fail(&state, CheckKind::Test).await;
+    assert_ne!(first.id, second.id);
+    confirm(&state, first, culprit).await;
+    let done = confirm(&state, second, culprit).await;
+    assert_eq!(failures(&state, &id).await.len(), 1);
+    // Recreate pre-upgrade rows: a later session reported this same culprit.
+    let conn = rusqlite::Connection::open(state.config.metadata_path()).unwrap();
+    conn.execute_batch("DROP INDEX post_land_failure_culprit")
+        .unwrap();
+    conn.execute(
+        "INSERT INTO post_land_failures SELECT ?1,change_id,commit_id,kind,output,
+         requires_revert,revert FROM post_land_failures",
+        [done.id],
+    )
+    .unwrap();
+    drop(conn);
+    let state = restart(state);
+    assert_eq!(failures(&state, &id).await.len(), 1);
+    let Response::PostLand(work) = call(&state, Request::PostLandNext).await else {
+        panic!()
+    };
+    assert!(work.job.is_none() && work.last_green.is_none());
+    let events = state.events.page(0, None, 100).unwrap();
+    assert_eq!(
+        events
+            .events
+            .iter()
+            .filter(|e| e.kind == EventKind::PostLandFailure)
+            .count(),
+        1
+    );
+}
+
+// R12 risk (#373): the old test green hides a later regression behind a
+// recorded culprit. A known failure is a search bound, never a green prefix.
+#[tokio::test]
+async fn later_test_search_starts_after_recorded_culprit() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = setup(temp.path());
+    let (first_id, _, first) = land(&state, "bad.rs").await;
+    let session = fail(&state, CheckKind::Test).await;
+    confirm(&state, session, first).await;
+    let state = restart(state);
+    let (_, _, repair) = land_bytes(&state, "bad.rs", b"fixed\n").await;
+    let (second_id, _, second) = land(&state, "second.rs").await;
+    let session = fail(&state, CheckKind::Test).await;
+    assert_eq!(session.job.as_ref().unwrap().commit, repair);
+    confirm(&state, session, second).await;
+    assert_eq!(failures(&state, &first_id).await.len(), 1);
+    assert_eq!(failures(&state, &second_id).await.len(), 1);
+    let Response::PostLand(work) = call(&state, Request::PostLandNext).await else {
+        panic!()
+    };
+    assert!(work.job.is_none() && work.last_green.is_none());
+}
+
 // R12 must use configuration once landed, including a change that changes review mode.
 #[tokio::test]
 async fn landed_configuration_selects_failure_policy() {

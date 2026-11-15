@@ -32,7 +32,8 @@ pub fn newest(conn: &Connection, name: &str) -> rusqlite::Result<Option<ObjectId
             "SELECT commit_id FROM base_history WHERE ref_name=?1 AND change_id IS NOT NULL
          AND seq > COALESCE((SELECT seq FROM post_land_green WHERE ref_name=?1),0)
          AND seq > COALESCE((SELECT MAX(h.seq) FROM post_land_failures f
-             JOIN bisections b ON f.session=b.id
+             JOIN bisections b ON b.kind=f.kind AND b.phase='done'
+                 AND json_extract(b.commits,'$[' || b.high || '][0]')=f.commit_id
              JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
              WHERE b.ref_name=?1 AND f.kind='test' AND f.requires_revert=0),0)
          ORDER BY seq DESC LIMIT 1",

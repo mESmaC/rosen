@@ -17,7 +17,60 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE TABLE IF NOT EXISTS post_land_failures (
         session INTEGER PRIMARY KEY, change_id TEXT NOT NULL, commit_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('build','test')), output TEXT NOT NULL, requires_revert INTEGER NOT NULL, revert TEXT);",
+    )?;
+    unique_culprits(conn)
+}
+
+fn unique_culprits(conn: &Connection) -> rusqlite::Result<()> {
+    let present: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type='index' AND name='post_land_failure_culprit')",
+        [],
+        |r| r.get(0),
+    )?;
+    if present {
+        return Ok(());
+    }
+    if conn.is_autocommit() {
+        let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        unique_culprits(&tx)?;
+        return tx.commit();
+    }
+    // Keep the first report, including an inverse completed by a later session.
+    // Completed bisections retain batch coverage independently of this row.
+    conn.execute_batch(
+        "UPDATE post_land_failures AS f SET revert=(
+            SELECT MAX(other.revert) FROM post_land_failures other
+            WHERE other.commit_id=f.commit_id AND other.kind=f.kind)
+         WHERE revert IS NULL;
+         DELETE FROM post_land_failures WHERE session NOT IN (
+            SELECT MIN(session) FROM post_land_failures GROUP BY commit_id,kind);
+         CREATE UNIQUE INDEX post_land_failure_culprit ON post_land_failures(commit_id,kind);",
     )
+}
+
+/// A known, non-reverting test culprit excludes earlier candidates without
+/// claiming they passed. Confirmation still checks the new culprit's parent.
+pub fn test_boundary(
+    conn: &Connection,
+    name: &str,
+    green: rosen_core::ObjectId,
+    failed: rosen_core::ObjectId,
+) -> rusqlite::Result<rosen_core::ObjectId> {
+    ensure_schema(conn)?;
+    let id: String = conn.query_row(
+        "SELECT h.commit_id FROM base_history h WHERE h.ref_name=?1
+         AND (h.commit_id=?2 OR (
+             h.seq < (SELECT seq FROM base_history WHERE ref_name=?1 AND commit_id=?3)
+             AND EXISTS (SELECT 1 FROM post_land_failures f WHERE f.commit_id=h.commit_id
+                 AND f.kind='test' AND f.requires_revert=0)))
+         ORDER BY h.seq DESC LIMIT 1",
+        params![name, green.to_string(), failed.to_string()],
+        |r| r.get(0),
+    )?;
+    id.parse().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })
 }
 
 pub fn apply(
@@ -42,8 +95,12 @@ pub fn apply(
         let commit = crate::landing::revert::revert(state, culprit.commit, &culprit.output)
             .map_err(internal)?;
         conn.execute(
-            "UPDATE post_land_failures SET revert=?2 WHERE session=?1",
-            params![session, commit.to_string()],
+            "UPDATE post_land_failures SET revert=?3 WHERE commit_id=?1 AND kind=?2",
+            params![
+                culprit.commit.to_string(),
+                kind.as_str(),
+                commit.to_string()
+            ],
         )
         .map_err(internal)?;
     }
