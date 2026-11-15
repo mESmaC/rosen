@@ -92,6 +92,13 @@ pub fn recover_basis(
         if recorded {
             return Err(refused("the change already has a recorded parent tree"));
         }
+        // Without authored snapshots, the head is already the exact parent
+        // tree it started from. Replacing it could discard later parent edits.
+        if child.snapshots.is_empty() {
+            return Err(refused(
+                "the unedited change already has a safe implicit parent tree",
+            ));
+        }
         let parent = changes::get(&tx, parent)?.change;
         let tree = recorded_parent_tree(&ctx.store, &child, &parent, basis)?.ok_or_else(|| {
             refused(
@@ -395,6 +402,7 @@ fn stack_selection_matches_proved_fixture() {
         .lines()
         .skip(1)
         .filter(|row| !row.starts_with("merge\t"))
+        .filter(|row| !row.starts_with("recovery\t"))
     {
         let f: Vec<_> = row.split('\t').collect();
         assert_eq!(

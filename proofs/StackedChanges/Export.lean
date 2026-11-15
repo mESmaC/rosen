@@ -14,6 +14,10 @@ def mergeTree (base onto head : Nat) : Option Nat := do
 
 def node (basis head : Nat) : StackedChanges.Node := ⟨0, [], head, basis, false, false⟩
 
+/-- SPEC.md R8: recovery supplies a missing basis only for an edited legacy
+child. An unedited child's head already supplies its exact implicit basis. -/
+def recoveryAllowed (edited recorded : Bool) : Bool := edited && !recorded
+
 def main : IO Unit := do
   IO.println "closed\tparent_closed\tconflicted\tsame_basis\tselected"
   for c in [false, true] do
@@ -36,7 +40,14 @@ def main : IO Unit := do
     let code := result.map toString |>.getD "-"
     IO.println s!"merge\t{name}\t{root}\t{pb}\t{ph}\t{cb}\t{ch}\t{code}"
 
+  -- Includes #361: no snapshots and no recorded basis must refuse recovery.
+  for edited in [false, true] do
+    for recorded in [false, true] do
+      let bit := fun b : Bool => if b then "1" else "0"
+      IO.println s!"recovery\t{bit edited}\t{bit recorded}\t{bit (recoveryAllowed edited recorded)}"
+
 #print axioms mergeValue
 #print axioms mergeTree
 #print axioms node
+#print axioms recoveryAllowed
 #print axioms main

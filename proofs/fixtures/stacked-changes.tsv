@@ -21,3 +21,7 @@ merge	parent-preview-keeps-land	4	0	1	1	3	7
 merge	unchanged-basis	4	4	5	5	7	7
 merge	no-intervening-land	0	0	1	1	3	3
 merge	parent-conflict-stops	7	1	2	2	3	-
+recovery	0	0	0
+recovery	0	1	0
+recovery	1	0	1
+recovery	1	1	0

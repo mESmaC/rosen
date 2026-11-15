@@ -350,6 +350,104 @@ async fn legacy_stack_recovers_only_from_a_recorded_parent_tree() {
     ));
 }
 
+#[tokio::test]
+async fn legacy_recovery_matches_fixture_and_preserves_parent_updates() {
+    // Risk (R8, #361): replacing an unedited child's implicit basis with a
+    // newer parent snapshot silently treats intervening parent work as deleted.
+    let mut checked = 0;
+    for row in include_str!("../../../proofs/fixtures/stacked-changes.tsv").lines() {
+        let fields: Vec<_> = row.split('\t').collect();
+        if fields[0] == "recovery" {
+            check_legacy_recovery(fields[1] == "1", fields[2] == "1", fields[3] == "1").await;
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 4);
+}
+
+async fn check_legacy_recovery(edited: bool, recorded: bool, allowed: bool) {
+    let (_temp, state) = setup();
+    let parent = create(&state, None).await;
+    write(&state, &parent, "shared", "original\n").await;
+    let child = create(&state, Some(&parent)).await;
+    if edited {
+        write(&state, &child, "child", "mine\n").await;
+    }
+    if !recorded {
+        state
+            .changes
+            .with_conn(|conn| {
+                Ok(conn.execute("DELETE FROM stack_bases WHERE change_id = ?1", [&child])?)
+            })
+            .unwrap();
+    }
+    write(&state, &parent, "later", "parent\n").await;
+    let before = state.changes.show(&child).unwrap().change;
+    let snapshots = state.changes.show(&parent).unwrap().change.snapshots;
+    try_legacy_recovery(&state, &child, &snapshots, allowed).await;
+    if !allowed {
+        assert_eq!(state.changes.show(&child).unwrap().change, before);
+        assert_recorded_basis_count(&state, &child, usize::from(recorded));
+    }
+    let Response::MergeResult(merged) = call(
+        &state,
+        Request::MergeResult {
+            change: child.clone(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    land_parent(&state, &parent).await;
+    let after = state.changes.show(&child).unwrap().change;
+    assert_eq!(after.snapshots, before.snapshots);
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    for head in [merged.tree.unwrap(), after.head] {
+        let tree = store.read_tree(&head).unwrap();
+        let later = tree.get(b"later").expect("parent update must survive");
+        assert_eq!(store.read_blob(&later.id).unwrap().data, b"parent\n");
+    }
+}
+
+async fn try_legacy_recovery(
+    state: &Arc<ServerState>,
+    child: &str,
+    snapshots: &[rosen_core::Snapshot],
+    allowed: bool,
+) {
+    let recover = |basis| Request::ChangeRecoverBasis {
+        change: child.into(),
+        basis,
+    };
+    if allowed {
+        call(state, recover(snapshots[0].commit)).await;
+    } else {
+        for snapshot in snapshots {
+            for basis in [snapshot.commit, snapshot.tree] {
+                let outcome = dispatch(state, recover(basis)).await;
+                assert!(matches!(outcome, Outcome::Error(ref e)
+                    if e.code == rosen_protocol::ErrorCode::Refused));
+            }
+        }
+    }
+}
+
+fn assert_recorded_basis_count(state: &ServerState, child: &str, expected: usize) {
+    state
+        .changes
+        .with_conn(|conn| {
+            let count: usize = conn.query_row(
+                "SELECT COUNT(*) FROM stack_bases WHERE change_id = ?1",
+                [child],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, expected);
+            Ok(())
+        })
+        .unwrap();
+}
+
 async fn land_parent(state: &Arc<ServerState>, parent: &str) {
     let head = state.changes.show(parent).unwrap().change.head;
     let base = Ledger::open(&state.config.metadata_path())
