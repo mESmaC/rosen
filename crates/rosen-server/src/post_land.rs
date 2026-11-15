@@ -5,7 +5,8 @@ pub mod store;
 
 use crate::{landing::Ledger, ServerState};
 use rosen_protocol::{
-    CheckKind, ErrorBody, ErrorCode, EventKind, Outcome, PostLandJob, PostLandWork, Response,
+    CheckKind, CheckPriority, ErrorBody, ErrorCode, EventKind, Outcome, PostLandJob, PostLandWork,
+    Response,
 };
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -54,7 +55,9 @@ fn run(
             ));
         }
     }
+    state.events.deliver_staged();
     deliver(state, &conn)?;
+    let kind = next_kind(state, &conn, &name, kind)?;
     let job = newest(&conn, &name, kind)?
         .map(|commit| job_at(state, commit, kind))
         .transpose()?;
@@ -73,6 +76,13 @@ fn job_at(
     Ok(PostLandJob {
         commit,
         kind,
+        priority: if kind == CheckKind::Build
+            && config.config.recheck == rosen_core::RecheckMode::Merge
+        {
+            CheckPriority::Landing
+        } else {
+            CheckPriority::Verify
+        },
         check_set: match kind {
             CheckKind::Test => config.config.checks.post_land.clone(),
             CheckKind::Build => config.config.checks.pre_land.clone(),
@@ -97,7 +107,8 @@ pub fn validate(
             "commit was never on the base",
         ));
     }
-    if job_at(state, job.commit, job.kind)? != *job {
+    let expected = job_at(state, job.commit, job.kind)?;
+    if expected.check_set != job.check_set {
         return Err(ErrorBody::new(
             ErrorCode::InvalidArgument,
             "wrong post-land check set",
@@ -170,4 +181,53 @@ fn newest(
         CheckKind::Build => builds::newest(conn, name),
     }
     .map_err(internal)
+}
+
+/// Merge-mode projects offer urgent build work before the full-test queue.
+fn next_kind(
+    state: &ServerState,
+    conn: &Connection,
+    name: &str,
+    requested: CheckKind,
+) -> Result<CheckKind, ErrorBody> {
+    let merge = state
+        .project_config
+        .at_base()
+        .map_err(internal)?
+        .is_some_and(|(_, r)| r.config.recheck == rosen_core::RecheckMode::Merge);
+    if requested == CheckKind::Test
+        && merge
+        && builds::newest(conn, name).map_err(internal)?.is_some()
+    {
+        Ok(CheckKind::Build)
+    } else {
+        Ok(requested)
+    }
+}
+
+/// Keep new work off unbuilt tips. Until the first build passes, use the
+/// imported starting point; it is not advertised as a verified green prefix.
+pub(crate) fn workspace_base(
+    config: &crate::ServerConfig,
+    name: &str,
+    resolved: &crate::project_config::Resolved,
+) -> Result<rosen_core::ObjectId, String> {
+    if resolved.config.recheck != rosen_core::RecheckMode::Merge {
+        return Ok(resolved.commit);
+    }
+    let conn = crate::metadata::open(&config.metadata_path()).map_err(|e| e.to_string())?;
+    builds::ensure_schema(&conn).map_err(|e| e.to_string())?;
+    if let Some(built) = builds::last_green(&conn, name).map_err(|e| e.to_string())? {
+        return Ok(built);
+    }
+    let initial: String = conn
+        .query_row(
+            "SELECT commit_id FROM base_history WHERE ref_name=?1 ORDER BY seq LIMIT 1",
+            [name],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    initial
+        .parse()
+        .map_err(|e: rosen_core::Error| e.to_string())
 }

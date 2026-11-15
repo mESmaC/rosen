@@ -55,6 +55,7 @@ fn print_config(json: bool, record: &ConfigRecord) {
 
 fn print_parts(config: &ProjectConfig) {
     println!("review: {}", config.review);
+    println!("recheck: {}", config.recheck.as_str());
     print_patterns("generated files", &config.generated);
     print_patterns("registration lists", &config.registration_lists);
     print_patterns("sensitive paths", &config.sensitive);

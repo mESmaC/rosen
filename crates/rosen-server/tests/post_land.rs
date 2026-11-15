@@ -7,6 +7,10 @@ use rosen_store::{LooseObjectStore, ObjectStore};
 use std::sync::Arc;
 
 fn setup() -> (tempfile::TempDir, Arc<ServerState>) {
+    setup_files(&[])
+}
+
+fn setup_files(files: &[(&str, &[u8])]) -> (tempfile::TempDir, Arc<ServerState>) {
     let temp = tempfile::tempdir().unwrap();
     let state = ServerState::new(ServerConfig {
         data_dir: temp.path().into(),
@@ -15,9 +19,20 @@ fn setup() -> (tempfile::TempDir, Arc<ServerState>) {
     });
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let who = Signature::new("test", "test@test", 0);
+    let entries = files
+        .iter()
+        .map(|(path, bytes)| {
+            rosen_core::TreeEntry::new(
+                rosen_core::FileMode::Regular,
+                *path,
+                store.put_blob(bytes).unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
     let root = store
         .put_commit(&Commit {
-            tree: store.put_tree(&Tree::default()).unwrap(),
+            tree: store.put_tree(&Tree::new(entries).unwrap()).unwrap(),
             parents: vec![],
             author: who.clone(),
             committer: who,
@@ -47,6 +62,12 @@ async fn next(state: &Arc<ServerState>) -> PostLandWork {
 }
 
 async fn land(state: &Arc<ServerState>, n: u8) -> ObjectId {
+    let (change, head) = new_edit(state, &format!("file{n}.rs"), &[n]).await;
+    approve_and_receipt(state, &change, head, current_base(state)).await;
+    land_named(state, change).await
+}
+
+async fn new_edit(state: &Arc<ServerState>, path: &str, bytes: &[u8]) -> (String, ObjectId) {
     let create = NewChange {
         owner: AgentId::new("owner").unwrap(),
         on: None,
@@ -57,8 +78,8 @@ async fn land(state: &Arc<ServerState>, n: u8) -> ObjectId {
     let change = record.change.id.to_string();
     let write = WorkspaceWrite {
         change: change.clone(),
-        path: format!("file{n}.rs"),
-        data: Some(WorkspaceBytes(vec![n])),
+        path: path.into(),
+        data: Some(WorkspaceBytes(bytes.into())),
     };
     call(state, Request::WorkspaceWrite(write)).await;
     let show = Request::ChangeShow {
@@ -67,15 +88,7 @@ async fn land(state: &Arc<ServerState>, n: u8) -> ObjectId {
     let Response::Change(record) = call(state, show).await else {
         panic!()
     };
-    let base = current_base(state);
-    approve_and_receipt(state, &change, record.change.head, base).await;
-    let Response::Land(answer) = call(state, Request::Land { change }).await else {
-        panic!()
-    };
-    let LandStatus::Landed { commit, .. } = answer.outcome else {
-        panic!("{answer:?}")
-    };
-    commit
+    (change, record.change.head)
 }
 
 fn current_base(state: &ServerState) -> ObjectId {
@@ -181,4 +194,54 @@ fn sql_prefix_matches_lean_fixtures() {
         let pending = store::pending(&conn).unwrap();
         assert_eq!(pending.len(), cells[2] as usize);
     }
+}
+
+// R3/R12 risk: tests must not postpone merge-mode builds or green their prefix;
+// an unbuilt tip must not spread into new workspaces.
+#[tokio::test]
+async fn merge_mode_prioritizes_builds_and_starts_from_last_built() {
+    let (_temp, state) = setup_files(&[("rosen.toml", b"recheck = 'merge'\n")]);
+    let a = land(&state, 1).await;
+    let old = next(&state).await.job.unwrap();
+    assert_eq!(
+        (old.kind, old.priority.as_str()),
+        (CheckKind::Build, "landing")
+    );
+    call(&state, Request::PostLandPassed(old.clone())).await;
+    let b = land(&state, 2).await;
+    let Response::Change(fresh) = call(
+        &state,
+        Request::ChangeNew(NewChange {
+            owner: AgentId::new("fresh").unwrap(),
+            on: None,
+        }),
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(fresh.change.parent, rosen_core::ChangeParent::Base(a));
+    let build = next(&state).await.job.unwrap();
+    assert_eq!(build.commit, b);
+    call(&state, Request::PostLandPassed(build)).await;
+    call(&state, Request::PostLandPassed(old)).await;
+    let tests = next(&state).await;
+    assert_eq!(tests.last_green, None);
+    assert_eq!(tests.job.unwrap().kind, CheckKind::Test);
+    let Response::Config(config) = call(&state, Request::ConfigShow(ConfigQuery::default())).await
+    else {
+        panic!()
+    };
+    assert_eq!(config.workspace_base, Some(b));
+}
+
+async fn land_named(state: &Arc<ServerState>, change: String) -> ObjectId {
+    let Response::Land(answer) = call(state, Request::Land { change }).await else {
+        panic!()
+    };
+    let LandStatus::Landed { commit, .. } = answer.outcome else {
+        panic!("{answer:?}")
+    };
+    state.landing.settle();
+    commit
 }

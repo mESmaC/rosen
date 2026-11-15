@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rosen_core::history::{LandedTrailers, ReceiptTrailer};
-use rosen_core::{ReceiptRefusal, ReviewMode, Signature, PRE_LAND_CHECK_SET};
+use rosen_core::{ReceiptRefusal, RecheckMode, ReviewMode, Signature, PRE_LAND_CHECK_SET};
 
 use super::receipt_store::{ReceiptLookup, SignedReceipt};
 use super::restack::Restacker;
@@ -32,6 +32,7 @@ pub struct LandingConfig {
     /// Whether an approval gates a land (R7), for an engine with no object
     /// store to read each base's configuration from.
     pub review: ReviewMode,
+    pub recheck: RecheckMode,
     pub max_attempts: u32,
     pub backoff_start: Duration,
     pub backoff_cap: Duration,
@@ -43,6 +44,7 @@ impl Default for LandingConfig {
             base_ref: "main".into(),
             pre_land_check_set: PRE_LAND_CHECK_SET.into(),
             review: ReviewMode::BeforeLand,
+            recheck: RecheckMode::Reach,
             // A land must commit in under 200 ms (R8); these bounds keep the
             // worst-case backoff total well inside that.
             max_attempts: 12,
@@ -120,6 +122,7 @@ struct Gathered {
 struct LandPolicy {
     check_set: String,
     review: ReviewMode,
+    recheck: RecheckMode,
 }
 
 /// What one [`Landing::recover`] pass did.
@@ -401,6 +404,7 @@ impl Landing {
             has_conflicts: facts.has_conflicts,
             approved: facts.approved_head == Some(facts.head),
             review: policy.review,
+            recheck: policy.recheck,
             tier: facts.tier,
             receipt: ReceiptCheck::Missing,
             base_moved: false,
@@ -461,8 +465,9 @@ impl Landing {
                 None
             }
             ReceiptLookup::Valid { receipt, base_seq } => {
-                let checked = self.ledger.receipt_tree(&receipt.receipt)?;
-                if receipt.receipt.base == *base && checked.is_some_and(|t| t != tree) {
+                let r = &receipt.receipt;
+                let checked = self.ledger.receipt_tree(r)?;
+                if r.base == *base && checked.is_some_and(|t| t != tree) {
                     input.receipt = ReceiptCheck::Invalid;
                     return Ok(Some(Gathered {
                         input,
@@ -470,19 +475,37 @@ impl Landing {
                     }));
                 }
                 input.receipt = ReceiptCheck::Valid;
-                input.base_moved = receipt.receipt.base != *base;
-                input.landed_since_all_independent = self.reuse_independent(
-                    facts,
-                    base,
-                    &receipt.receipt,
-                    base_seq,
-                    single_layer,
-                    checked,
-                )?;
+                input.base_moved = r.base != *base;
+                input.landed_since_all_independent = policy.recheck == RecheckMode::Reach
+                    && self.reuse_independent(facts, base, r, base_seq, single_layer, checked)?;
+                if policy.recheck == RecheckMode::Merge
+                    && !self.stack_receipt_matches(facts, base, r, single_layer, checked)?
+                {
+                    input.receipt = ReceiptCheck::Invalid;
+                }
                 Some(receipt)
             }
         };
         Ok(Some(Gathered { input, receipt }))
+    }
+
+    /// Merge mode may cross dependent lands, but a top head still cannot
+    /// authorize ancestor edits made after its receipt was checked.
+    fn stack_receipt_matches(
+        &self,
+        facts: &ChangeFacts,
+        base: &CommitId,
+        receipt: &Receipt,
+        single_layer: bool,
+        checked: Option<TreeId>,
+    ) -> LandResult<bool> {
+        if single_layer || receipt.base == *base {
+            return Ok(true);
+        }
+        let Some(tree) = checked else {
+            return Ok(false);
+        };
+        Ok(self.preview_stack(&facts.id, &receipt.base)? == MergeOutcome::Clean(tree))
     }
 
     /// A stacked head alone does not bind pending ancestor edits. Rebuild
@@ -528,11 +551,13 @@ impl Landing {
                 .map(|resolved| LandPolicy {
                     check_set: resolved.config.checks.pre_land.name.clone(),
                     review: resolved.config.review,
+                    recheck: resolved.config.recheck,
                 })
                 .map_err(|error| LandError::Backend(error.to_string())),
             None => Ok(LandPolicy {
                 check_set: self.config.pre_land_check_set.clone(),
                 review: self.config.review,
+                recheck: self.config.recheck,
             }),
         }
     }

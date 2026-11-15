@@ -4,7 +4,7 @@
 //! table `proofs/fixtures/landing.tsv` is exported from that model and
 //! checked against [`decide`] by `tests/landing_fixtures.rs`.
 
-use rosen_core::ReviewMode;
+use rosen_core::{RecheckMode, ReviewMode};
 
 use super::{ChangeState, Tier};
 
@@ -34,6 +34,7 @@ pub struct LandInput {
     /// The project's review setting at the attempt's base (R7): only
     /// `before-land` makes `approved` gate the land.
     pub review: ReviewMode,
+    pub recheck: RecheckMode,
     pub tier: Tier,
     pub receipt: ReceiptCheck,
     /// The base has moved since the receipt's base B.
@@ -58,8 +59,7 @@ pub enum Refusal {
     /// The merge onto the current base conflicts; the change gets stored
     /// conflicts.
     MergeConflict,
-    /// The base moved past a dependent land: a new receipt on the new merge
-    /// result is required.
+    /// Reach mode crossed a dependent land: a new receipt on the merge result is required.
     NeedsRecheck,
 }
 
@@ -107,6 +107,7 @@ pub fn decide(input: &LandInput) -> Verdict {
     // After-land and prose-only changes need no receipt or re-check (R8).
     let receipt_counts = input.review == ReviewMode::AfterLand
         || input.tier == Tier::ProseOnly
+        || input.recheck == RecheckMode::Merge
         || input.receipt == ReceiptCheck::SameTree
         || !input.base_moved
         || input.landed_since_all_independent;

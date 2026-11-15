@@ -2,11 +2,11 @@
 //! runs at most one prepare at a time (SPEC R3).
 use super::pool::{refresh, restore_tracked, seed_slot, Prep, Slot, WarmPool};
 use super::MaterialiseError;
-use rosen_store::LooseObjectStore;
 use super::{prepare, template, Method, Options};
 use crate::{Client, Error};
 use rosen_core::ObjectId;
 use rosen_protocol::{Endpoint, Event, EventKind, LogRequest};
+use rosen_store::LooseObjectStore;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::Arc;
@@ -183,7 +183,10 @@ async fn read_events(mut events: mpsc::Receiver<Event>, flags: Arc<EventFlags>) 
 
 /// Events after which the base may hold a new tree. A revert is a land too.
 fn moves_base(kind: EventKind) -> bool {
-    matches!(kind, EventKind::Landed | EventKind::Reverted)
+    matches!(
+        kind,
+        EventKind::Landed | EventKind::Reverted | EventKind::Built
+    )
 }
 
 /// When the daemon next runs guarded cleanup of landed and abandoned
@@ -295,8 +298,16 @@ async fn shrink(pool: &WarmPool, client: &Client) -> Result<bool, Error> {
 }
 
 async fn read_base(client: &Client) -> Result<Option<Base>, Error> {
+    let config = match client.project_config(None).await {
+        Ok(config) => config,
+        Err(Error::Server(body)) if body.code == rosen_protocol::ErrorCode::Refused => {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
     let log = client
         .log(LogRequest {
+            at: config.workspace_base.map(|id| id.to_string()),
             limit: Some(1),
             ..LogRequest::default()
         })
@@ -703,7 +714,10 @@ async fn run_prepare(pool: &WarmPool, path: &std::path::Path, base: &Base) -> Op
             return Some(Prep::Failed);
         }
     };
-    eprintln!("rosen warm pool: restoring tracked files in {}: {error}", path.display());
+    eprintln!(
+        "rosen warm pool: restoring tracked files in {}: {error}",
+        path.display()
+    );
     match error {
         MaterialiseError::TrackedDirNotDir(_) => None,
         _ => Some(Prep::Failed),

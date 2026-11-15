@@ -1,10 +1,4 @@
-/-!
-# Optimistic landing and confirmed failure disposition (SPEC R8, R12)
-The owner changed this contract in #365: after-land needs no receipt or
-approval; confirmed test failures record without requesting an inverse.
-`correct` retains CAS/stack guarantees, `cost_bound` bounds attempts, and
-`optimal` minimizes before-land rechecks. Rust checks the exported fixtures.
--/
+/-! Optimistic landing, stack atomicity and failure disposition (SPEC R8/R12; #365/#366/#368). -/
 namespace Landing
 /-- `active` covers both `open` and `ready`: the decision treats them alike. -/
 inductive ChangeState where
@@ -29,6 +23,7 @@ structure Input where
   hasConflicts : Bool
   approved : Bool
   review : ReviewMode
+  mergeMode : Bool
   tier : Tier
   receipt : ReceiptCheck
   baseMoved : Bool
@@ -62,20 +57,20 @@ def decideLand (i : Input) : Verdict :=
   | some r => .refuse r
   | none =>
     if !i.mergeClean then .refuse .mergeConflict
-    else if i.review = .afterLand ∨ i.tier = .prose ∨ i.receipt = .sameTree ∨
+    else if i.review = .afterLand ∨ i.tier = .prose ∨ i.receipt = .sameTree ∨ i.mergeMode = true ∨
         !i.baseMoved ∨ i.landedSinceAllIndependent then .land
     else .refuse .needsRecheck
 /-- SPEC.md R8 step 2, with SPEC.md R7 review modes and SPEC.md R8 step 3
 stack order: the change is live, its ancestors can join the request, it has no stored
 conflicts, its current head is approved unless the project reviews after the
 land, it merges cleanly onto the current base, and only before-land code
-needs a receipt that the re-check rules let count on this base. -/
+needs a receipt that the reach/merge re-check rules let count on this base. -/
 def Authorized (i : Input) : Prop :=
   i.state = .active ∧ i.parentLanded = true ∧ i.hasConflicts = false ∧
   (i.review = .afterLand ∨ i.approved = true) ∧ i.mergeClean = true ∧
   (i.review = .afterLand ∨ i.tier = .prose ∨
     i.receipt = .sameTree ∨
-    (i.receipt = .valid ∧ (i.baseMoved = false ∨ i.landedSinceAllIndependent = true)))
+    (i.receipt = .valid ∧ (i.mergeMode = true ∨ i.baseMoved = false ∨ i.landedSinceAllIndependent = true)))
 instance : DecidablePred Authorized := fun i => by
   unfold Authorized; infer_instance
 /-- The metadata store as landing sees it: the base ref and the landed
@@ -113,8 +108,8 @@ private theorem stack_correct (l : Ledger) (expected : Nat) (layers : List (Inpu
       expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers := by
   unfold stackCas; split <;> simp_all [eq_comm]
 private theorem decideLand_eq_land (i : Input) : decideLand i = .land ↔ Authorized i := by
-  obtain ⟨s, p, c, a, v, t, r, b, q, m⟩ := i
-  cases s <;> cases p <;> cases c <;> cases a <;> cases v <;> cases t <;> cases r <;>
+  obtain ⟨s, p, c, a, v, x, t, r, b, q, m⟩ := i
+  cases s <;> cases p <;> cases c <;> cases a <;> cases v <;> cases x <;> cases t <;> cases r <;>
     cases b <;> cases q <;> cases m <;> decide
 /-- Original CAS and stack guarantee, with the R7/R8 mode-dependent gates. -/
 private theorem land_correct (l : Ledger) (i : Input) (expected change commit : Nat) :
@@ -203,18 +198,17 @@ def recheckCost (policy : Input → Bool) (requests : List Input) : Nat :=
 /-- Our policy: exactly the requests `decideLand` refuses with `needsRecheck`. -/
 def oursRecheck (i : Input) : Bool :=
   decideLand i == .refuse .needsRecheck
-/-- The class of alternatives: before-land policies that never let a receipt count across
-a dependent land for a non-prose change that otherwise passes every check.
-Reusing it there can land code no check built (the struct literal case in R8). -/
+/-- Alternatives must recheck dependent lands in reach mode; merge mode
+permits that reuse by SPEC R8 (#366). Exact-tree receipts need no recheck. -/
 def SoundPolicy (policy : Input → Bool) : Prop :=
-  ∀ i, gate i = none → i.mergeClean = true → i.review = .beforeLand → i.tier ≠ .prose →
+  ∀ i, gate i = none → i.mergeClean = true → i.review = .beforeLand → i.mergeMode = false → i.tier ≠ .prose →
     i.baseMoved = true → i.landedSinceAllIndependent = false → i.receipt ≠ .sameTree → policy i = true
 private theorem oursRecheck_unsafe (i : Input) (h : oursRecheck i = true) :
-    gate i = none ∧ i.mergeClean = true ∧ i.review = .beforeLand ∧ i.tier ≠ .prose ∧
+    gate i = none ∧ i.mergeClean = true ∧ i.review = .beforeLand ∧ i.mergeMode = false ∧ i.tier ≠ .prose ∧
       i.baseMoved = true ∧ i.landedSinceAllIndependent = false ∧ i.receipt ≠ .sameTree := by
-  obtain ⟨s, p, c, a, v, t, r, b, q, m⟩ := i
+  obtain ⟨s, p, c, a, v, x, t, r, b, q, m⟩ := i
   revert h
-  cases s <;> cases p <;> cases c <;> cases a <;> cases v <;> cases t <;> cases r <;>
+  cases s <;> cases p <;> cases c <;> cases a <;> cases v <;> cases x <;> cases t <;> cases r <;>
     cases b <;> cases q <;> cases m <;> decide
 private theorem countP_le_of_imp (p q : Input → Bool) (hpq : ∀ i, p i = true → q i = true) :
     ∀ l : List Input, l.countP p ≤ l.countP q
@@ -233,16 +227,16 @@ theorem optimal :
     ∀ policy, SoundPolicy policy → ∀ requests : List Input,
       recheckCost oursRecheck requests ≤ recheckCost policy requests := by
   constructor
-  · intro i hg hm hv ht hb hq hr
-    obtain ⟨s, p, c, a, v, t, r, b, q, m⟩ := i
-    simp only at hg hm hv ht hb hq hr
-    subst hv hm hb hq
+  · intro i hg hm hv hx ht hb hq hr
+    obtain ⟨s, p, c, a, v, x, t, r, b, q, m⟩ := i
+    simp only at hg hm hv hx ht hb hq hr
+    subst hv hx hm hb hq
     simp [oursRecheck, decideLand, hg, ht, hr]
   · intro policy hp requests
     apply countP_le_of_imp
     intro i hi
-    obtain ⟨hg, hm, hv, ht, hb, hq, hr⟩ := oursRecheck_unsafe i hi
-    exact hp i hg hm hv ht hb hq hr
+    obtain ⟨hg, hm, hv, hx, ht, hb, hq, hr⟩ := oursRecheck_unsafe i hi
+    exact hp i hg hm hv hx ht hb hq hr
 /-! ## Fixture table -/
 def bit (b : Bool) : String := if b then "1" else "0"
 def ChangeState.code : ChangeState → String
@@ -272,16 +266,17 @@ def allInputs : List Input :=
   [false, true].flatMap fun c =>
   [false, true].flatMap fun a =>
   [ReviewMode.beforeLand, .afterLand].flatMap fun v =>
+  [false, true].flatMap fun x =>
   [Tier.prose, .normal, .sensitive].flatMap fun t =>
   [ReceiptCheck.missing, .invalid, .valid, .sameTree].flatMap fun r =>
   [(false, true), (true, false), (true, true)].flatMap fun (b, q) =>
-  [false, true].map fun m => ⟨s, p, c, a, v, t, r, b, q, m⟩
+  [false, true].map fun m => ⟨s, p, c, a, v, x, t, r, b, q, m⟩
 def fixtureRow (i : Input) : String :=
   "\t".intercalate [i.state.code, bit i.parentLanded, bit i.hasConflicts,
-    bit i.approved, i.review.code, i.tier.code, i.receipt.code, bit i.baseMoved,
+    bit i.approved, i.review.code, (if i.mergeMode then "merge" else "reach"), i.tier.code, i.receipt.code, bit i.baseMoved,
     bit i.landedSinceAllIndependent, bit i.mergeClean, (decideLand i).code]
 def fixtureTable : String :=
-  "state\tparent_landed\thas_conflicts\tapproved\treview\ttier\treceipt\tbase_moved\t" ++
+  "state\tparent_landed\thas_conflicts\tapproved\treview\trecheck\ttier\treceipt\tbase_moved\t" ++
     "landed_since_all_independent\tmerge_clean\tverdict\n" ++
     String.join (allInputs.map (fixtureRow · ++ "\n")) ++
     String.join ([ReviewMode.beforeLand, .afterLand].flatMap fun review =>

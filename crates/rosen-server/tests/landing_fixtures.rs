@@ -68,7 +68,7 @@ fn decide_matches_lean_fixture_table() {
             );
             continue;
         }
-        assert_eq!(cells.len(), 11, "row {line}");
+        assert_eq!(cells.len(), 12, "row {line}");
         for state in states(cells[0]) {
             let input = LandInput {
                 state,
@@ -76,13 +76,18 @@ fn decide_matches_lean_fixture_table() {
                 has_conflicts: bit(cells[2]),
                 approved: bit(cells[3]),
                 review: review(cells[4]),
-                tier: Tier::parse(cells[5]).expect("tier"),
-                receipt: receipt(cells[6]),
-                base_moved: bit(cells[7]),
-                landed_since_all_independent: bit(cells[8]),
-                merge_clean: bit(cells[9]),
+                recheck: match cells[5] {
+                    "reach" => rosen_core::RecheckMode::Reach,
+                    "merge" => rosen_core::RecheckMode::Merge,
+                    other => panic!("bad recheck mode {other}"),
+                },
+                tier: Tier::parse(cells[6]).expect("tier"),
+                receipt: receipt(cells[7]),
+                base_moved: bit(cells[8]),
+                landed_since_all_independent: bit(cells[9]),
+                merge_clean: bit(cells[10]),
             };
-            assert_eq!(decide(&input).code(), cells[10], "row {line} as {state:?}");
+            assert_eq!(decide(&input).code(), cells[11], "row {line} as {state:?}");
             checked += 1;
         }
     }

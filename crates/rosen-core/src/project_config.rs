@@ -49,10 +49,35 @@ pub struct ProjectConfig {
     /// `config show` output is what it was before the setting existed.
     #[serde(skip_serializing_if = "ReviewMode::is_before_land")]
     pub review: ReviewMode,
+    /// Receipt reuse on a moved base (R8); reach preserves the original rule.
+    #[serde(skip_serializing_if = "RecheckMode::is_reach")]
+    pub recheck: RecheckMode,
     pub checks: CheckSets,
     pub warm_pool: WarmPool,
     pub prepare: Prepare,
     pub mirror: Mirror,
+}
+
+/// When a receipt for the current head counts on a moved base (R8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecheckMode {
+    #[default]
+    Reach,
+    Merge,
+}
+
+impl RecheckMode {
+    pub fn is_reach(&self) -> bool {
+        *self == Self::Reach
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reach => "reach",
+            Self::Merge => "merge",
+        }
+    }
 }
 
 /// When review happens relative to a land (R7).
@@ -169,7 +194,7 @@ impl CheckSet {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WarmPool {
-    /// Ready local workspaces each daemon keeps at the base tip (R3). Zero
+    /// Ready local workspaces kept at the workspace starting commit (R3). Zero
     /// turns the pool off.
     pub size: u32,
 }

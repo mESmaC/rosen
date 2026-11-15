@@ -20,11 +20,32 @@ impl CheckKind {
     }
 }
 
+/// Scheduling contract for external checkers: build repairs precede full tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheckPriority {
+    Landing,
+    #[default]
+    Verify,
+}
+
+impl CheckPriority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Landing => "landing",
+            Self::Verify => "verify",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostLandJob {
     pub commit: ObjectId,
     #[serde(default)]
     pub kind: CheckKind,
+    /// Run-queue class for the external checker (`rosen run --class`).
+    #[serde(default)]
+    pub priority: CheckPriority,
     /// Configuration in force at this landed commit, including commands.
     pub check_set: CheckSet,
 }

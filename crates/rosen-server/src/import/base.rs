@@ -10,8 +10,8 @@ use crate::changes::{BaseSource, BaseTip};
 use crate::landing::Ledger;
 use crate::ServerConfig;
 
-/// Reads the base ref on every call, so a change always starts from the
-/// current tip, whether import set it or a land has moved it since.
+/// Reads the base policy on every call. Merge mode starts at the last built
+/// commit so a semantic break does not spread into newly created changes.
 pub struct LedgerBase {
     config: ServerConfig,
     /// Opened on first use, so a server that never creates a change never
@@ -43,12 +43,15 @@ impl LedgerBase {
 impl BaseSource for LedgerBase {
     fn base_tip(&self) -> Result<BaseTip, String> {
         let base = self.ledger()?.project_base().map_err(|e| e.to_string())?;
-        let Some((_, commit)) = base else {
+        let Some((name, commit)) = base else {
             return Err(
                 "the project has no base yet; import a repository with `rosen import`".into(),
             );
         };
         let store = LooseObjectStore::open(self.config.objects_dir()).map_err(|e| e.to_string())?;
+        let resolved =
+            crate::project_config::resolve(&store, &commit).map_err(|e| e.to_string())?;
+        let commit = crate::post_land::workspace_base(&self.config, &name, &resolved)?;
         let tree = store.read_commit(&commit).map_err(|e| e.to_string())?.tree;
         Ok(BaseTip { commit, tree })
     }

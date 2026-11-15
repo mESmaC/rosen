@@ -23,7 +23,7 @@ pub use hash::{ObjectHasher, ObjectId};
 pub use history::{CommitGraph, LandedCommit, LandedTrailers, ReceiptTrailer};
 pub use object::{Blob, Commit, FileMode, Object, ObjectKind, Signature, Tree, TreeEntry};
 pub use piece::{decide as decide_piece, piece_key, PieceDecision};
-pub use project_config::{ConfigError, ProjectConfig, ReviewMode, CONFIG_PATH};
+pub use project_config::{ConfigError, ProjectConfig, RecheckMode, ReviewMode, CONFIG_PATH};
 pub use receipt::{Receipt, ReceiptRefusal, PRE_LAND_CHECK_SET};
 pub use review::{ReviewedState, ThreadState};
 pub use stack::Stack;

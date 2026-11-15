@@ -173,7 +173,13 @@ fn record(service: &ConfigService, query: &ConfigQuery) -> Result<ConfigRecord, 
             (name, resolved)
         }
     };
+    let workspace_base = base_ref
+        .as_ref()
+        .map(|name| crate::post_land::workspace_base(&service.config, name, &resolved))
+        .transpose()
+        .map_err(internal)?;
     Ok(ConfigRecord {
+        workspace_base,
         commit: resolved.commit,
         base_ref,
         source: resolved.source,

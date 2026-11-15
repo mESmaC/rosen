@@ -258,7 +258,7 @@ pub enum Command {
     #[command(subcommand)]
     Config(ConfigCommand),
     /// Stream the events that concern you: snapshot, landed, rebased,
-    /// conflict, updated, review, claim, released, green, reverted and mirror.
+    /// conflict, updated, review, claim, released, green, built, reverted and mirror.
     ///
     /// You get an event when it is about a change you own, review, or stack
     /// on, or one whose claims or edits overlap yours; `mirror` events go to

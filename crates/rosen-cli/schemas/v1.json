@@ -196,6 +196,7 @@
         "claim",
         "released",
         "green",
+        "built",
         "reverted",
         "mirror",
         "channel",
@@ -1093,6 +1094,12 @@
             "before-land",
             "after-land"
           ]
+        },
+        "recheck": {
+          "enum": [
+            "reach",
+            "merge"
+          ]
         }
       },
       "required": [
@@ -1236,6 +1243,16 @@
         },
         "config": {
           "$ref": "#/$defs/ProjectConfig"
+        },
+        "workspace_base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

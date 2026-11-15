@@ -525,6 +525,8 @@ pub enum EventKind {
     Released,
     /// Post-land checks passed up to a commit (R12).
     Green,
+    /// Build and lint passed through this commit; full tests have their own prefix.
+    Built,
     /// The change was reverted after failing post-land checks (R12).
     Reverted,
     /// A confirmed post-land failure, including its check kind and culprit.

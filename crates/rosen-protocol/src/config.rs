@@ -19,6 +19,9 @@ pub struct ConfigRecord {
     pub commit: ObjectId,
     /// The base ref's name when `commit` is the current base.
     pub base_ref: Option<String>,
+    /// Safe starting commit for new workspaces; present for current-base queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_base: Option<ObjectId>,
     /// The commit whose `rosen.toml` is in force: `commit` itself, or its
     /// nearest first-parent ancestor with a valid file when `commit`'s is
     /// invalid. `None` when no such file exists and the defaults apply.

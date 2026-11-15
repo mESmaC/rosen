@@ -50,7 +50,7 @@ pub use objects::{
     WireObject, OBJECT_CHUNK_BYTES,
 };
 pub use pool::{LandedProseQuery, PooledWorkspace};
-pub use post_land::{CheckKind, PostLandFailure, PostLandJob, PostLandWork};
+pub use post_land::{CheckKind, CheckPriority, PostLandFailure, PostLandJob, PostLandWork};
 pub use receipt::{ReceiptRecord, ReceiptSignature, SubmitReceipt};
 pub use review::{
     Approval, ApproveRequest, CommentRequest, CommentTarget, LandedFilter, LandedReview,
