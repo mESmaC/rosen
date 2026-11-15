@@ -166,17 +166,17 @@ theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
   refine ⟨rfl, rfl, ?_⟩
   cases review <;> cases build <;> simp [reportFailure, failureReverts]
 /-- Cost model: an attempt merges and writes each layer, and performs one
-compare-and-swap; `attempts` counts attempts. `races[j]` is true when a
-competing land moved the base during attempt `j`, so its swap lost and the
-loop retries; `cap` is `max_attempts`. -/
+compare-and-swap; `attempts` counts optimistic attempts. `races[j]` is true
+when a competing land moved the base during attempt `j`, so its swap lost.
+`cap` is `max_attempts`; exhausted requests then take an exclusive turn. -/
 def attempts : Nat → List Bool → Nat
   | 0, _ => 0
   | _ + 1, [] => 1
   | _ + 1, false :: _ => 1
   | n + 1, true :: rest => 1 + attempts n rest
-/-- **cost_bound**: under the cost model of `attempts`, a land never costs
-more than `cap` attempts, nor more than one attempt per competing land that
-beat it plus one. -/
+/-- **cost_bound**: under the cost model of `attempts`, the optimistic phase
+never costs more than `cap` attempts, nor more than one attempt per competing
+land that beat it plus one. -/
 -- spec/R8-optimistic-landing/README.md R8
 theorem cost_bound (cap : Nat) (races : List Bool) :
     attempts cap races ≤ cap ∧ attempts cap races ≤ races.count true + 1 := by
@@ -238,6 +238,10 @@ theorem optimal :
     obtain ⟨hg, hm, hv, hx, ht, hb, hq, hr⟩ := oursRecheck_unsafe i hi
     exact hp i hg hm hv hx ht hb hq hr
 /-! ## Fixture table -/
+/-- With no snapshot or inverse racing the exclusive turn, it needs one
+attempt after the optimistic budget is exhausted (R8 retry; #393). -/
+def contentionAttempts (cap losses : Nat) : Nat :=
+  attempts cap (List.replicate losses true) + (if cap ≤ losses then 1 else 0)
 def bit (b : Bool) : String := if b then "1" else "0"
 def ChangeState.code : ChangeState → String
   | .active => "active" | .landed => "landed" | .abandoned => "abandoned"
@@ -281,7 +285,9 @@ def fixtureTable : String :=
     String.join (allInputs.map (fixtureRow · ++ "\n")) ++
     String.join ([ReviewMode.beforeLand, .afterLand].flatMap fun review =>
       [false, true].map fun build =>
-        "failure\t" ++ review.code ++ "\t" ++ bit build ++ "\t" ++ bit (failureReverts review build) ++ "\n")
+        "failure\t" ++ review.code ++ "\t" ++ bit build ++ "\t" ++ bit (failureReverts review build) ++ "\n") ++
+    String.join ([0, 1, 12].map fun cap =>
+      s!"contention\t{cap}\t{cap}\t{contentionAttempts cap cap}\n")
 #print axioms correct
 #print axioms cost_bound
 #print axioms optimal

@@ -1,6 +1,8 @@
 //! The land loop of SPEC R8: gather, merge, decide, write, compare-and-swap,
 //! and retry with backoff when another land wins the race.
 
+#[path = "contention.rs"]
+mod contention;
 #[path = "stack.rs"]
 mod stack;
 
@@ -33,6 +35,8 @@ pub struct LandingConfig {
     /// store to read each base's configuration from.
     pub review: ReviewMode,
     pub recheck: RecheckMode,
+    /// Optimistic attempts before waiting for an exclusive retry turn.
+    /// Zero queues immediately; contention never exhausts the land request.
     pub max_attempts: u32,
     pub backoff_start: Duration,
     pub backoff_cap: Duration,
@@ -45,8 +49,8 @@ impl Default for LandingConfig {
             pre_land_check_set: PRE_LAND_CHECK_SET.into(),
             review: ReviewMode::BeforeLand,
             recheck: RecheckMode::Reach,
-            // A land must commit in under 200 ms (R8); these bounds keep the
-            // worst-case backoff total well inside that.
+            // Keep ordinary retries short; sustained contention waits for a
+            // turn instead of failing when this optimistic budget runs out.
             max_attempts: 12,
             backoff_start: Duration::from_millis(1),
             backoff_cap: Duration::from_millis(16),
@@ -148,6 +152,8 @@ pub struct Landing {
     ledger: Ledger,
     deps: LandingDeps,
     config: LandingConfig,
+    /// Shared across reloads so queued retries exclude every live engine.
+    contention: Arc<contention::Admission>,
     recheck_store: Option<std::sync::Arc<dyn rosen_store::ObjectStore>>,
     /// Lands whose post-land work is running now. A recovery pass and the
     /// land's own request, or two passes, never run it at once, so one land
@@ -167,6 +173,7 @@ impl Landing {
             ledger,
             deps,
             config,
+            contention: Arc::default(),
             recheck_store: None,
             post_landing: Arc::default(),
             stacking: Arc::default(),
@@ -180,6 +187,7 @@ impl Landing {
         self.post_landing = Arc::clone(&old.post_landing);
         self.stacking = Arc::clone(&old.stacking);
         self.units_cache = Arc::clone(&old.units_cache);
+        self.contention = Arc::clone(&old.contention);
         self
     }
 
@@ -282,6 +290,8 @@ impl Landing {
         })
     }
 
+    /// After the optimistic budget, waits for an exclusive retry turn, shared
+    /// with replacement engines. Its guard ends before any post-land work.
     /// Lands a change like [`Landing::land`], but returns once the base move
     /// commits, so the requester hears of the land without waiting for the
     /// rebases of other changes. The caller runs [`Landing::restack_stacked`]
@@ -289,18 +299,28 @@ impl Landing {
     /// caller never does.
     pub fn decide(&self, change: &ChangeId) -> LandResult<Decision> {
         let mut delay = self.config.backoff_start;
-        for attempt in 1..=self.config.max_attempts {
-            match self.attempt(change, attempt)? {
+        let mut attempt = 0_u32;
+        let mut exclusive = None;
+        loop {
+            if exclusive.is_none() && attempt >= self.config.max_attempts {
+                exclusive = Some(self.contention.exclusive());
+            }
+            let optimistic = exclusive.is_none().then(|| self.contention.optimistic());
+            attempt = attempt.saturating_add(1);
+            let result = self.attempt(change, attempt)?;
+            drop(optimistic);
+            match result {
                 Attempt::Done(outcome) => return Ok(Decision::Decided(outcome)),
                 Attempt::Committed(land) => return Ok(Decision::Committed(land)),
                 Attempt::Retry => {}
             }
-            thread::sleep(jitter(delay, change, attempt));
-            delay = (delay * 2).min(self.config.backoff_cap);
+            // Do not hold an optimistic slot during backoff or while queuing.
+            // An exclusive retry still re-decides if a snapshot or revert races.
+            if exclusive.is_some() || attempt < self.config.max_attempts {
+                thread::sleep(jitter(delay, change, attempt));
+                delay = delay.saturating_mul(2).min(self.config.backoff_cap);
+            }
         }
-        Err(LandError::Contended {
-            attempts: self.config.max_attempts,
-        })
     }
 
     /// The part of a committed land's post-land work its requester waits

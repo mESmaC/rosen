@@ -1,1 +1,1 @@
-- **Order** is set only between changes that overlap each other, or are stacked.
+- **Order** is set between changes that overlap each other or are stacked, and between contended requests waiting for exclusive retry turns.

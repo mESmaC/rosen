@@ -55,6 +55,9 @@ fn decide_matches_lean_fixture_table() {
     let mut failures_checked = 0;
     for line in table.lines().skip(1) {
         let cells: Vec<&str> = line.split('\t').collect();
+        if cells[0] == "contention" {
+            continue; // Checked against the engine by landing_race.rs.
+        }
         if cells[0] == "failure" {
             failures_checked += 1;
             let kind = if bit(cells[2]) {

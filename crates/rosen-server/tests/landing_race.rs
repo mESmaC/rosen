@@ -18,6 +18,7 @@ struct World {
     parents: Mutex<HashMap<CommitId, CommitId>>,
     events: Mutex<Vec<LandingEvent>>,
     next: AtomicU64,
+    cancelled_merges: Mutex<u64>,
     /// Heads whose merge onto any base conflicts.
     conflicting: Mutex<HashSet<CommitId>>,
     /// Changes that get one snapshot between their merge and conflict routing.
@@ -91,6 +92,22 @@ impl ChangeBook for Shared {
 }
 
 impl Merger for Shared {
+    fn merge_layer_live(
+        &self,
+        inputs: [&ObjectId; 4],
+        current: &dyn Fn() -> LandResult<bool>,
+    ) -> LandResult<Option<MergeOutcome>> {
+        // Deterministically take the same retry path as a base moving mid-merge.
+        let mut cancelled = self.0.cancelled_merges.lock().unwrap();
+        if *cancelled > 0 {
+            *cancelled -= 1;
+            return Ok(None);
+        }
+        drop(cancelled);
+        let [base, onto, head, policy] = inputs;
+        let result = self.merge_layer(base, onto, head, policy)?;
+        Ok(current()?.then_some(result))
+    }
     fn merge(&self, _: &CommitId, onto: &CommitId, head: &CommitId) -> LandResult<MergeOutcome> {
         if self.0.conflicting.lock().unwrap().contains(head) {
             return Ok(MergeOutcome::Conflicted(vec!["shared.txt".into()]));
@@ -120,6 +137,13 @@ impl EventSink for Shared {
 }
 
 fn setup(changes: Vec<ChangeFacts>) -> (Arc<World>, Arc<Landing>) {
+    setup_with_config(changes, LandingConfig::default())
+}
+
+fn setup_with_config(
+    changes: Vec<ChangeFacts>,
+    config: LandingConfig,
+) -> (Arc<World>, Arc<Landing>) {
     let world = Arc::new(World::default());
     for facts in changes {
         world.changes.lock().unwrap().insert(facts.id, facts);
@@ -144,10 +168,7 @@ fn setup(changes: Vec<ChangeFacts>) -> (Arc<World>, Arc<Landing>) {
         commit: root(),
     };
     assert_eq!(again, existing);
-    (
-        world,
-        Arc::new(Landing::new(ledger, deps, LandingConfig::default())),
-    )
+    (world, Arc::new(Landing::new(ledger, deps, config)))
 }
 
 const ROOT: u8 = 1;
@@ -200,6 +221,42 @@ fn receipt(n: u8, base: CommitId) -> SignedReceipt {
         receipt,
         machine: SERVER_MACHINE.into(),
         signature,
+    }
+}
+
+// Risk (R8 retry): exhausting the optimistic budget must not abort a clean
+// land. Forced merge cancellations cover the old Windows failure without timing.
+#[test]
+fn exhausted_attempts_match_contention_fixtures() {
+    let table = include_str!("../../../proofs/fixtures/landing.tsv");
+    let rows: Vec<_> = table
+        .lines()
+        .filter(|row| row.starts_with("contention\t"))
+        .collect();
+    assert_eq!(rows.len(), 3);
+    for row in rows {
+        let cells: Vec<_> = row.split('\t').collect();
+        let config = LandingConfig {
+            max_attempts: cells[1].parse().unwrap(),
+            backoff_start: std::time::Duration::ZERO,
+            ..LandingConfig::default()
+        };
+        let (world, landing) = setup_with_config(
+            vec![change(1, Tier::ProseOnly, ChangeParent::Base(root()))],
+            config,
+        );
+        *world.cancelled_merges.lock().unwrap() = cells[2].parse().unwrap();
+        let LandOutcome::Landed {
+            commit, attempts, ..
+        } = landing.land(&cid(1)).unwrap()
+        else {
+            panic!("a contended clean land must finish: {row}");
+        };
+        assert_eq!(attempts, cells[3].parse::<u32>().unwrap(), "{row}");
+        assert_eq!(
+            landing.land(&cid(1)).unwrap(),
+            LandOutcome::AlreadyLanded { commit }
+        );
     }
 }
 

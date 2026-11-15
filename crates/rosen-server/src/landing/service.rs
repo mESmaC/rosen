@@ -2,10 +2,9 @@
 //! the change registry, the tree merge checkers build, the object store and
 //! the event log.
 //!
-//! The engine holds no lock across a land. It merges outside any lock and
-//! moves the base by one compare-and-swap transaction in the metadata store,
-//! so lands of unrelated changes proceed in parallel and only lose a race,
-//! never wait in a queue.
+//! Ordinary landing attempts merge concurrently and move the base by one
+//! compare-and-swap transaction. After repeated contention, a request waits
+//! for an exclusive retry turn so other lands cannot keep beating it.
 
 use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock, Weak};
 use std::time::Duration;

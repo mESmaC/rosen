@@ -1,6 +1,6 @@
 ### R8 · Optimistic landing
 Landing is the core algorithm.
-No global queue or lock exists, and unrelated changes never wait on each other.
+Normal attempts run concurrently; after repeated contention, a request waits for an exclusive retry turn (#393).
 
 <!-- split-spec: rules -->
 

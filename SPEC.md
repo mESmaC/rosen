@@ -29,7 +29,7 @@ Rosen is a version control system built so that many coding agents can work on o
 |---|---|---|
 | D1 | Product | A VCS with a CLI and a server, which replaces git for high-concurrency agent workflows. |
 | D2 | Concurrency model | Each agent works on its own **change**. Changes merge automatically at file level, and conflicts are stored as first-class objects instead of errors. |
-| D3 | Landing model | **Optimistic landing, with no global queue or lock.** A land is a compare-and-swap of the base ref. This replaces the merge queue first chosen: Velocity and Anthropic both found queues too slow at agent scale. |
+| D3 | Landing model | **Optimistic landing, with an exclusive retry turn after repeated contention.** A land is a compare-and-swap of the base ref. Normal attempts run concurrently; a request that exhausts its optimistic budget waits its turn rather than returning `Contended` because other lands won (#393). |
 | D4 | Stack | Rust, in one Cargo workspace. |
 | D5 | Storage | Objects are stored in **git format** (blobs, trees, commits), as loose content-addressed objects with no packfiles, so no repack or maintenance is needed. Rosen imports git repos and pushes landed history to a git remote. Storage sits behind a pluggable backend interface: the git-backed backend comes first, and a Rosen-native remote store comes later. |
 | D6 | Workspaces | Two modes. **Local workspaces** are files on disk for agents' tools. **Server-side workspaces** have no checkout, and are read and written through the API. Both keep resource use bounded. Local workspaces keep working when the server is unreachable (offline fallback, R2). |
