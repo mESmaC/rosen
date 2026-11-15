@@ -113,15 +113,71 @@ async fn server_rebase_preserves_history_and_requires_explicit_clean_apply() {
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_conflicting_with_pending_rebase_is_stored_and_applies() {
     let temp = tempfile::tempdir().unwrap();
-    let (state, store, client, server, _, base) = start(&temp.path().join("data"), "apply").await;
+    let root = temp.path().join("workspace");
+    let (client, server, id) = pending_rebase_conflict(temp.path(), "apply").await;
     let owner = AgentId::new("owner").unwrap();
+    let stored = client.change_show(&id).await.unwrap();
+    assert_eq!(stored.change.conflicts.len(), 1);
+    let head = client.apply_rebase(&root, &owner).await.unwrap();
+    assert_eq!(head, stored.change.head);
+    let shown = String::from_utf8(std::fs::read(root.join("b")).unwrap()).unwrap();
+    assert!(shown.starts_with("<<<<<<<") && shown.contains("mine\n") && shown.contains("b\n"));
+    server.abort();
+}
+
+// Risk (SPEC R2/R5, #383): resending from the old basis must repair an open
+// conflict without nesting markers, rewriting history or clearing its records.
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_resent_before_apply_replaces_open_conflict_and_keeps_it_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    let (client, server, id) = pending_rebase_conflict(temp.path(), "resend").await;
+    let owner = AgentId::new("owner").unwrap();
+    let before = client.change_show(&id).await.unwrap();
+    assert_eq!(before.change.conflicts.len(), 1);
+    let basis = WorkspaceMarker::read(&root).unwrap().tree;
+    let resent = client.snapshot_workspace(&root, None).await.unwrap();
+    assert!(resent.recorded);
+    let stored = client.change_show(&id).await.unwrap();
+    assert_ne!(stored.change.head, before.change.head);
+    assert_eq!(stored.change.conflicts, before.change.conflicts);
+    assert_eq!(
+        stored.change.snapshots.len(),
+        before.change.snapshots.len() + 1
+    );
+    assert_eq!(
+        stored.change.snapshots[..before.change.snapshots.len()],
+        before.change.snapshots
+    );
+    assert_eq!(WorkspaceMarker::read(&root).unwrap().tree, basis);
+    // Once the replacement is stored, another identical resend is a no-op.
+    assert!(
+        !client
+            .snapshot_workspace(&root, None)
+            .await
+            .unwrap()
+            .recorded
+    );
+    assert_eq!(
+        client.apply_rebase(&root, &owner).await.unwrap(),
+        stored.change.head
+    );
+    assert_eq!(std::fs::read(root.join("b")).unwrap(), b"mine\n");
+    server.abort();
+}
+
+async fn pending_rebase_conflict(
+    temp: &std::path::Path,
+    test: &str,
+) -> (Client, tokio::task::JoinHandle<()>, String) {
+    let (state, store, client, server, _, base) = start(&temp.join("data"), test).await;
     let new = NewChange {
-        owner: owner.clone(),
+        owner: AgentId::new("owner").unwrap(),
         on: None,
     };
     let change = client.change_new(new).await.unwrap();
     let id = change.change.id.to_string();
-    let root = temp.path().join("workspace");
+    let root = temp.join("workspace");
     client
         .materialise_change(&change, &root, Options::default())
         .await
@@ -137,16 +193,7 @@ async fn snapshot_conflicting_with_pending_rebase_is_stored_and_applies() {
     client.rebase_change(&id).await.unwrap();
     std::fs::write(root.join("b"), b"mine\n").unwrap();
     client.snapshot_workspace(&root, None).await.unwrap();
-    // A resend from the old basis must not mark its own edits again.
-    let resent = client.snapshot_workspace(&root, None).await.unwrap();
-    assert!(!resent.recorded);
-    let stored = client.change_show(&id).await.unwrap();
-    assert_eq!(stored.change.conflicts.len(), 1);
-    let head = client.apply_rebase(&root, &owner).await.unwrap();
-    assert_eq!(head, stored.change.head);
-    let shown = String::from_utf8(std::fs::read(root.join("b")).unwrap()).unwrap();
-    assert!(shown.starts_with("<<<<<<<") && shown.contains("mine\n") && shown.contains("b\n"));
-    server.abort();
+    (client, server, id)
 }
 
 async fn check_apply(client: &Client, root: &std::path::Path, owner: &AgentId, tree: ObjectId) {
