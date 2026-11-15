@@ -10,6 +10,14 @@ use rosen_store::{LooseObjectStore, ObjectStore};
 /// Called only after the checker confirms two culprit failures and a passing
 /// parent. A retry after a crash returns the original revert, never a second land.
 pub fn revert(state: &ServerState, culprit: ObjectId, output: &str) -> LandResult<ObjectId> {
+    let result = attempt(state, culprit, output);
+    if let Err(error) = &result {
+        super::revert_refused::record(state, culprit, error)?;
+    }
+    result
+}
+
+fn attempt(state: &ServerState, culprit: ObjectId, output: &str) -> LandResult<ObjectId> {
     let mut conn = crate::metadata::open(&state.config.metadata_path())?;
     db::ensure_schema(&conn)?;
     for _ in 0..12 {
@@ -81,9 +89,10 @@ fn prepare(state: &ServerState, culprit: ObjectId, base: ObjectId) -> LandResult
             MergePolicy::Text
         })
         .map_err(backend)?;
-    let tree = merged
-        .tree
-        .ok_or_else(|| LandError::Backend(format!("revert conflicts: {:?}", merged.conflicts)))?;
+    let tree = merged.tree.ok_or(LandError::RevertConflict {
+        base,
+        paths: merged.conflicts,
+    })?;
     let policy = crate::project_config::resolve(&store, &base).map_err(backend)?;
     super::size_limit::check(&store, &[tree], policy.config.max_file_size)?;
     let subject = bad

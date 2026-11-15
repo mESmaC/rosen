@@ -385,3 +385,128 @@ async fn landed_configuration_selects_failure_policy() {
     assert!(records[0].requires_revert);
     assert!(records[0].revert.is_some());
 }
+
+// R12 risk (#390): one unrevertable culprit must not mask a later build break.
+#[tokio::test]
+async fn refused_build_inverse_does_not_mask_the_next_culprit() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = setup(temp.path());
+    let (first_id, _, first) = land(&state, "bad.rs").await;
+    let (_, _, overlap) = land_bytes(&state, "bad.rs", b"overlapping work\n").await;
+    let session = fail(&state, CheckKind::Build).await;
+    let first_done = confirm(&state, session, first).await;
+    let first_record = failures(&state, &first_id).await.remove(0);
+    assert!(first_record.requires_revert && first_record.revert.is_none());
+    assert_refusal_details(&state, first, overlap);
+    assert_refusal_deduplicated(&state, first_done.id).await;
+    let (second_id, _, second) = land(&state, "second.rs").await;
+    let session = fail(&state, CheckKind::Build).await;
+    assert_eq!(session.job.as_ref().unwrap().commit, overlap);
+    let state = restart(state);
+    let Response::Bisection(session) = call(
+        &state,
+        Request::BisectNext {
+            session: session.id,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    confirm_with_known_build_failure(&state, session, first, second).await;
+    assert!(failures(&state, &first_id).await[0].revert.is_none());
+    assert!(failures(&state, &second_id).await[0].revert.is_some());
+    assert_known_build_batch_is_covered(&state).await;
+    let state = restart(state);
+    let Response::PostLand(work) = call(&state, Request::PostLandBuildNext).await else {
+        panic!()
+    };
+    assert!(work.job.is_none() && work.last_green.is_none());
+}
+
+async fn confirm_with_known_build_failure(
+    state: &Arc<ServerState>,
+    mut session: BisectState,
+    first: ObjectId,
+    second: ObjectId,
+) {
+    while let Some(job) = session.job {
+        assert_ne!(job.commit, first);
+        // The parent still fails with the recorded first culprit's output.
+        let output = if job.commit == second {
+            "second failure"
+        } else {
+            "confirmed failure"
+        };
+        let Response::Bisection(next) = call(
+            state,
+            Request::BisectSubmit(BisectResult {
+                job,
+                passed: false,
+                output: output.into(),
+            }),
+        )
+        .await
+        else {
+            panic!()
+        };
+        session = next;
+    }
+    assert_eq!(session.culprit.unwrap().commit, second);
+}
+
+async fn assert_known_build_batch_is_covered(state: &Arc<ServerState>) {
+    let Response::PostLand(work) = call(state, Request::PostLandBuildNext).await else {
+        panic!()
+    };
+    assert!(work.last_green.is_none());
+    let Response::Bisection(known) = call(
+        state,
+        Request::PostLandFailed {
+            job: work.job.unwrap(),
+            output: "confirmed failure".into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(known.job.is_none() && known.culprit.is_none() && !known.flaky);
+}
+
+fn assert_refusal_details(state: &Arc<ServerState>, first: ObjectId, overlap: ObjectId) {
+    let refusal = state
+        .events
+        .page(0, None, 100)
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|event| event.kind == EventKind::RevertRefused)
+        .unwrap();
+    assert_eq!(refusal.detail["culprit"], first.to_hex());
+    assert_eq!(
+        refusal.detail["overlapping_commits"],
+        serde_json::json!([overlap])
+    );
+    assert_eq!(refusal.detail["paths"], serde_json::json!(["bad.rs"]));
+    assert!(refusal.detail["reason"]
+        .as_str()
+        .unwrap()
+        .contains("conflict"));
+}
+
+async fn assert_refusal_deduplicated(state: &Arc<ServerState>, session: i64) {
+    // Replaying the same refusal at the same base must not publish it again.
+    call(state, Request::BisectNext { session }).await;
+    assert_eq!(
+        state
+            .events
+            .page(0, None, 100)
+            .unwrap()
+            .events
+            .iter()
+            .filter(|event| event.kind == EventKind::RevertRefused)
+            .count(),
+        1
+    );
+}

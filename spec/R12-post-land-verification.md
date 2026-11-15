@@ -31,6 +31,11 @@
     Completed batches remain covered when their culprit already has a record.
     Later test searches use the newer of the test green and the latest recorded, non-reverting test culprit before the failing batch as their lower bound.
     This does not mark the bound green; the new culprit still needs a fresh passing parent confirmation.
+  - Later build searches start after the newer of the build checkpoint, recorded build culprits and batches containing only a known failure.
+    While a build culprit awaits its inverse, the session captures the latest outstanding culprit's output durably.
+    An exact output match counts as no new failure during that search and its fresh parent confirmation; unfamiliar failures still require two failures and that parent confirmation.
+    A batch containing only the known failure is covered without marking it built or green.
+    Output comparison can distinguish new breaks only when they produce different output.
 - **Auto-revert.**
   In after-land mode only a **build** failure requests a revert; a **test** failure stays landed with its failure record for Velocity to file as an issue.
   Before-land projects keep reverting confirmed full-test failures.
@@ -40,9 +45,12 @@
   Its commits are kept on the server.
   R4 has usually deleted its local workspace by the time it is found, so its owner materialises the change's head into a workspace again to fix it (#135).
   - The inverse waits for the culprit's original post-land work to finish and merges against the current base, preserving later lands; an overlapping inverse that cannot merge cleanly refuses without moving the base.
+    A refused inverse durably publishes `revert_refused` with the culprit, attempted base, conflicting paths, overlapping later commits and reason, once per culprit and attempted base.
+    Recovery retries pending inverses independently with backoff, waking when a new land moves the base; one refused inverse never blocks another.
     The inverse land, reopened change and durable failure output commit atomically.
     Repeating a confirmed culprit returns the same revert, and its reopened change can land again under the same change ID after repair.
 - A flaky result is the checker's concern: a failure is confirmed only after the culprit fails twice and its parent passes.
   Required build reverts run immediately after confirmation; recovery retries an interrupted inverse.
 - **Accept when:** an after-land test failure is bisected, recorded and left landed; an after-land build failure is recorded and reverted, its change reopens with its work intact, and later independent work is preserved.
   Before-land full-test failures retain their existing automatic revert behavior.
+  When an initial build culprit cannot be reverted, a later independent break with different output is still found, recorded and reverted, and the first refusal is visible as an event.

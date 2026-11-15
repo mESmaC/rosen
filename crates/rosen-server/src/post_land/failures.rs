@@ -92,17 +92,14 @@ pub fn apply(
     record(&mut conn, session, kind, culprit, must_revert)?;
     state.events.deliver_staged();
     if must_revert {
-        let commit = crate::landing::revert::revert(state, culprit.commit, &culprit.output)
-            .map_err(internal)?;
-        conn.execute(
-            "UPDATE post_land_failures SET revert=?3 WHERE commit_id=?1 AND kind=?2",
-            params![
-                culprit.commit.to_string(),
-                kind.as_str(),
-                commit.to_string()
-            ],
-        )
-        .map_err(internal)?;
+        if let Err(error) = revert_recorded(state, &conn, culprit.commit, &culprit.output) {
+            state.landing.retry_post_land();
+            // A conflict leaves the confirmed failure queryable and the checker
+            // free to search later batches. Recovery owns the pending inverse.
+            if !matches!(error, crate::landing::LandError::RevertConflict { .. }) {
+                return Err(internal(error));
+            }
+        }
     }
     Ok(())
 }
@@ -206,4 +203,45 @@ fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>>
 /// R12 disposition, also checked against the landing model fixture.
 pub fn failure_reverts(review: ReviewMode, kind: CheckKind) -> bool {
     review == ReviewMode::BeforeLand || kind == CheckKind::Build
+}
+
+fn revert_recorded(
+    state: &ServerState,
+    conn: &Connection,
+    culprit: rosen_core::ObjectId,
+    output: &str,
+) -> crate::landing::LandResult<()> {
+    let commit = crate::landing::revert::revert(state, culprit, output)?;
+    conn.execute(
+        "UPDATE post_land_failures SET revert=?2 WHERE commit_id=?1 AND requires_revert=1",
+        params![culprit.to_hex(), commit.to_hex()],
+    )?;
+    Ok(())
+}
+
+/// Each pending inverse is independent: one refusal must not prevent the rest.
+/// False requests backoff; every new base also wakes the recovery worker.
+pub(crate) fn retry(state: &ServerState) -> Result<bool> {
+    let conn = crate::metadata::open(&state.config.metadata_path()).map_err(internal)?;
+    ensure_schema(&conn).map_err(internal)?;
+    let mut query = conn
+        .prepare(
+            "SELECT commit_id,output FROM post_land_failures
+        WHERE requires_revert=1 AND revert IS NULL ORDER BY session",
+        )
+        .map_err(internal)?;
+    let pending = query
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(internal)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(internal)?;
+    let mut complete = true;
+    for (culprit, output) in pending {
+        let culprit = culprit.parse().map_err(internal)?;
+        if let Err(error) = revert_recorded(state, &conn, culprit, &output) {
+            eprintln!("rosen-server: revert {culprit} pending: {error}");
+            complete = false;
+        }
+    }
+    Ok(complete)
 }

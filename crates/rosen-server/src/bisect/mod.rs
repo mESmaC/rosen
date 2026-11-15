@@ -1,5 +1,6 @@
 //! Restart-safe post-land bisection. Checks execute outside Rosen (D9, R12).
 pub mod failure;
+mod known;
 mod model;
 mod storage;
 
@@ -71,12 +72,19 @@ pub fn begin_kind_in(
     {
         return storage::load(conn, id)?.state();
     }
-    let commits = interval(conn, name, green, failed)?;
+    let (boundary, known_output) = known::context(conn, name, green, failed, kind)?;
+    let commits = interval(conn, name, boundary, failed)?;
     let high = commits.len() - 1;
-    let phase = if high == 1 { "confirm" } else { "search" };
+    let phase = if known_output.as_deref() == Some(output) {
+        "known"
+    } else if high == 1 {
+        "confirm"
+    } else {
+        "search"
+    };
     conn.execute(
         "INSERT INTO bisections
-        (ref_name,failed,commits,low,high,phase,step,output,kind) VALUES (?1,?2,?3,0,?4,?5,0,?6,?7)",
+        (ref_name,failed,commits,low,high,phase,step,output,kind,known_output) VALUES (?1,?2,?3,0,?4,?5,0,?6,?7,?8)",
         params![
             name,
             failed.to_string(),
@@ -84,7 +92,8 @@ pub fn begin_kind_in(
             high,
             phase,
             output,
-            kind.as_str()
+            kind.as_str(),
+            known_output
         ],
     )
     .map_err(internal)?;

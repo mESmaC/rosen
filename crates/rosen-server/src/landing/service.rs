@@ -125,17 +125,18 @@ pub async fn keep_recovering(state: Arc<ServerState>) {
             let report = pass.landing.recover(&pass);
             // Children of replayed lands follow them (R8 step 4, D19).
             crate::stacks::refresh(&pass);
-            report
+            let reverts = crate::post_land::failures::retry(&pass);
+            (report, reverts)
         })
         .await;
         let complete = match report {
-            Ok(Ok(report)) => {
+            Ok((Ok(report), Ok(reverted))) => {
                 for (change, why) in &report.failed {
                     eprintln!("rosen-server: post-land recovery for {change} failed: {why}");
                 }
-                report.is_complete()
+                report.is_complete() && reverted
             }
-            Ok(Err(body)) => {
+            Ok((Err(body), _)) | Ok((_, Err(body))) => {
                 eprintln!("rosen-server: landing recovery failed: {}", body.message);
                 false
             }
@@ -148,7 +149,10 @@ pub async fn keep_recovering(state: Arc<ServerState>) {
             delay = RETRY_START;
             state.landing.retry.notified().await;
         } else {
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {},
+                _ = state.landing.retry.notified() => {},
+            }
             delay = (delay * 2).min(RETRY_CAP);
         }
     }
@@ -164,6 +168,10 @@ impl LandingService {
             finishing: Mutex::new(0),
             finished: Condvar::new(),
         }
+    }
+
+    pub(crate) fn retry_post_land(&self) {
+        self.retry.notify_one();
     }
 
     pub fn set_review_gate(&self, gate: Arc<dyn ReviewGate>) {
@@ -282,6 +290,7 @@ impl LandingService {
 
     fn finish(&self, state: &ServerState, engine: &Landing, land: Option<CommittedLand>) {
         if let Some(land) = land {
+            self.retry.notify_one();
             // The land stands either way; recovery replays the rebase.
             if let Err(why) = engine.finish_land(&land) {
                 let change = land.record.change;
@@ -677,6 +686,7 @@ fn land_body(err: LandError) -> ErrorBody {
         LandError::InvalidReceipt(_) => ErrorCode::InvalidArgument,
         LandError::NoBase(_)
         | LandError::Contended { .. }
+        | LandError::RevertConflict { .. }
         | LandError::ConflictMarkers(_)
         | LandError::OversizeFiles { .. } => ErrorCode::Refused,
         LandError::Store(_) | LandError::Backend(_) => ErrorCode::Internal,

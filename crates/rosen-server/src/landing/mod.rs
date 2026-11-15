@@ -22,6 +22,7 @@ mod reach_store;
 mod receipt_store;
 mod restack;
 pub mod revert;
+mod revert_refused;
 mod revert_store;
 mod review_gate;
 pub mod rules;
@@ -159,6 +160,10 @@ pub enum LandError {
     NoBase(String),
     InvalidReceipt(String),
     ConflictMarkers(Vec<String>),
+    RevertConflict {
+        base: ObjectId,
+        paths: Vec<String>,
+    },
     OversizeFiles {
         limit: u64,
         files: Vec<(String, u64)>,
@@ -183,6 +188,9 @@ impl fmt::Display for LandError {
                     "conflict markers remain in {}; store a resolution before landing",
                     paths.join(", ")
                 )
+            }
+            LandError::RevertConflict { paths, .. } => {
+                write!(f, "revert conflicts in: {}", paths.join(", "))
             }
             LandError::OversizeFiles { limit, files } => {
                 f.write_str(&size_limit::message(*limit, files))

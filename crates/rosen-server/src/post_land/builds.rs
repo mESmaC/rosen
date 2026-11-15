@@ -25,10 +25,14 @@ pub fn last_green(conn: &Connection, name: &str) -> rusqlite::Result<Option<Obje
 }
 
 pub fn newest(conn: &Connection, name: &str) -> rusqlite::Result<Option<ObjectId>> {
+    crate::bisect::ensure_schema(conn)?;
     let text: Option<String> = conn
         .query_row(
             "SELECT commit_id FROM base_history WHERE ref_name=?1 AND tier != 'initial'
          AND seq > COALESCE((SELECT seq FROM post_land_build_green WHERE ref_name=?1),0)
+         AND seq > COALESCE((SELECT MAX(h.seq) FROM bisections b
+             JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
+             WHERE b.ref_name=?1 AND b.kind='build' AND b.phase IN ('done','known')),0)
          ORDER BY seq DESC LIMIT 1",
             [name],
             |r| r.get(0),

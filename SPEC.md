@@ -79,6 +79,8 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 - **Approval.** A reviewer's approval of a change at a given head. It gates landing only in `before-land` projects.
 - **Review coverage.** Each landed commit starts `unreviewed`; agents mark it `reviewed` or `issues-filed` (wire value `issues_filed`) without gating development. A repaired land starts fresh.
 - **Post-land failure.** A durable record of a confirmed culprit, its change, check kind (`build` or `test`), failure output, and any inverse commit (R12).
+  A refused inverse publishes `revert_refused` with the culprit, overlapping later commits and reason, and retries as the base moves.
+  Later build searches exclude recorded culprits and treat an exact match of the outstanding culprit's output as a known failure, without marking it built or green (#390).
 - **Path claim.** A change's declared intent to edit a path or glob: a notice by default, reporting concurrent work. An opt-in **exclusive claim** uses first-claim-wins. Other changes may record a **share** (they edit it too, knowingly) or a **wait** (they hold off until claims are released).
 - **Edit regions.** The paths and line ranges a change has modified relative to its parent. The server computes them from snapshots.
 - **Overlap.** Two changes overlap when they claim the same path, or their edit regions in one file touch or sit within 3 lines of each other. Per-project configuration lists **generated files** and **registration lists**, which never count as an overlap.

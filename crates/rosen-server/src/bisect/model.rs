@@ -10,6 +10,7 @@ pub(super) struct Session {
     pub phase: String,
     pub step: u64,
     pub output: String,
+    pub known_output: Option<String>,
 }
 
 /// Balanced split of the remaining possible first failures.
@@ -55,6 +56,9 @@ impl Session {
     }
 
     pub fn advance(&mut self, passed: bool, output: &str) {
+        // A matching known failure is a pass only for this search. It never
+        // advances a built/green checkpoint or suppresses an unfamiliar output.
+        let passed = passed || self.known_output.as_deref() == Some(output);
         match self.phase.as_str() {
             "search" => {
                 let middle = midpoint(self.low, self.high);

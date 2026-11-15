@@ -201,6 +201,7 @@
         "green",
         "built",
         "reverted",
+        "revert_refused",
         "mirror",
         "channel",
         "post_land_failure"

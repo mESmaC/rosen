@@ -534,6 +534,8 @@ pub enum EventKind {
     Built,
     /// The change was reverted after failing post-land checks (R12).
     Reverted,
+    /// An inverse was refused; detail names the culprit, base, overlaps and reason.
+    RevertRefused,
     /// A confirmed post-land failure, including its check kind and culprit.
     PostLandFailure,
     /// A git mirror push failed or recovered (R1). Sent to every subscriber.

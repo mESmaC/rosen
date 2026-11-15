@@ -11,13 +11,14 @@ pub(crate) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         phase TEXT NOT NULL, step INTEGER NOT NULL, output TEXT NOT NULL,
         UNIQUE(ref_name,failed));",
     )?;
-    migrate_kind(conn)
+    migrate_kind(conn)?;
+    migrate_known_output(conn)
 }
 
 pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {
     let row = conn
         .query_row(
-            "SELECT commits,low,high,phase,step,output,kind FROM bisections WHERE id=?1",
+            "SELECT commits,low,high,phase,step,output,kind,known_output FROM bisections WHERE id=?1",
             [id],
             |r| {
                 Ok((
@@ -28,6 +29,7 @@ pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {
                     r.get(4)?,
                     r.get(5)?,
                     r.get::<_, String>(6)?,
+                    r.get::<_, Option<String>>(7)?,
                 ))
             },
         )
@@ -42,6 +44,7 @@ pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {
         phase: row.3,
         step: row.4,
         output: row.5,
+        known_output: row.7,
         kind: if row.6 == "build" {
             rosen_protocol::CheckKind::Build
         } else {
@@ -92,4 +95,22 @@ fn migrate_kind(conn: &Connection) -> rusqlite::Result<()> {
         INSERT INTO bisections SELECT *, 'test' FROM bisections_legacy;
         DROP TABLE bisections_legacy;",
     )
+}
+
+fn migrate_known_output(conn: &Connection) -> rusqlite::Result<()> {
+    let present: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bisections') WHERE name='known_output')",
+        [],
+        |r| r.get(0),
+    )?;
+    if present {
+        return Ok(());
+    }
+    if conn.is_autocommit() {
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        migrate_known_output(&tx)?;
+        return tx.commit();
+    }
+    conn.execute_batch("ALTER TABLE bisections ADD COLUMN known_output TEXT")
 }
