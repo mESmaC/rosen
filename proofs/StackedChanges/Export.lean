@@ -18,8 +18,19 @@ def node (basis head : Nat) : StackedChanges.Node := ⟨0, [], head, basis, fals
 /-- One receipt on the top; lower layers still require approval and clean merges. -/
 def stackFixture (depth : Nat) : String := Id.run do
   let layers := (List.range depth).map fun n =>
-    let input : Landing.Input := ⟨.active, true, false, true, .beforeLand, .normal,
-      (if n + 1 = depth then .sameTree else .missing), true, false, true⟩
+    let input : Landing.Input := {
+      state := .active
+      parentLanded := true
+      hasConflicts := false
+      approved := true
+      review := .beforeLand
+      mergeMode := false
+      tier := .normal
+      receipt := if n + 1 = depth then .sameTree else .missing
+      baseMoved := true
+      landedSinceAllIndependent := false
+      mergeClean := true
+    }
     (input, n, n + 1)
   match Landing.stackCas ⟨0, []⟩ 0 layers with
   | none => return s!"stack_land\t{depth}\t0\t0\t0"
@@ -53,15 +64,13 @@ def main : IO Unit := do
     let result := StackedChanges.mergeResult mergeTree root [node pb ph, child]
     let code := result.map toString |>.getD "-"
     IO.println s!"merge\t{name}\t{root}\t{pb}\t{ph}\t{cb}\t{ch}\t{code}"
-  for depth in [2, 3] do
-    IO.println (stackFixture depth)
-
-
   -- Includes #361: no snapshots and no recorded basis must refuse recovery.
   for edited in [false, true] do
     for recorded in [false, true] do
       let bit := fun b : Bool => if b then "1" else "0"
       IO.println s!"recovery\t{bit edited}\t{bit recorded}\t{bit (recoveryAllowed edited recorded)}"
+  for depth in [2, 3] do
+    IO.println (stackFixture depth)
 
 #print axioms mergeValue
 #print axioms mergeTree
