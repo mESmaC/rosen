@@ -111,15 +111,7 @@ pub async fn run_machine(plan: &Plan, run: &MachineRun) -> Result<Report> {
         hot: HotClaims::default(),
         state: Mutex::new((report, journal)),
     });
-    let control = connect_when_up(&run.endpoint, DAEMON_WAIT).await?;
-    if run.pool_size > 0 && records.is_empty() {
-        fill_pool(&control, run.pool_size, run.pool_wait).await?;
-    } else if run.pool_size > 0 {
-        // Resuming mid-run: the pool is in use, so waiting for it to be
-        // full would only stall the agents.
-        control.set_pool_size(run.pool_size).await?;
-    }
-    let base = base_tip(&control).await?;
+    let base = start_up(run, !records.is_empty()).await?;
     shared.record(Record::Started { base });
     let agents = open_agents(&shared, run, &mut progress).await?;
     let started = Instant::now();
@@ -135,6 +127,43 @@ pub async fn run_machine(plan: &Plan, run: &MachineRun) -> Result<Report> {
     let mut report = shared.state.lock().expect("report lock").0.clone();
     report.workspaces_kept = workspaces_left(&report, plan).await;
     Ok(report)
+}
+
+/// Readies the daemon's pool and reads the base tip the agents start from.
+/// A planned daemon kill or partition can close the connection part way
+/// through, and a dead connection never answers again, so each failure
+/// reconnects and repeats the steps, which are all safe to repeat, until
+/// `DAEMON_WAIT` runs out.
+async fn start_up(run: &MachineRun, resuming: bool) -> Result<ObjectId> {
+    let deadline = Instant::now() + DAEMON_WAIT;
+    let tip = loop {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let control = connect_when_up(&run.endpoint, wait).await?;
+        match start_up_steps(&control, run, resuming).await {
+            Ok(tip) => break tip,
+            Err(err) if Instant::now() >= deadline => return Err(err),
+            Err(err) => {
+                eprintln!("rosen-stress: starting up: {err:#}; reconnecting");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    };
+    tip.context("the base has no commits; import the seed first")
+}
+
+async fn start_up_steps(
+    control: &Client,
+    run: &MachineRun,
+    resuming: bool,
+) -> Result<Option<ObjectId>> {
+    if run.pool_size > 0 && !resuming {
+        fill_pool(control, run.pool_size, run.pool_wait).await?;
+    } else if run.pool_size > 0 {
+        // Resuming mid-run: the pool is in use, so waiting for it to be
+        // full would only stall the agents.
+        control.set_pool_size(run.pool_size).await?;
+    }
+    Ok(read_tip(control).await?)
 }
 
 /// Connects once the daemon answers, waiting through a restart or an
@@ -226,23 +255,25 @@ async fn open_session(endpoint: &Endpoint, name: &AgentId) -> Result<Session> {
 /// cut off from the server cannot answer until the outage ends.
 pub async fn base_tip(client: &Client) -> Result<ObjectId> {
     let deadline = Instant::now() + DAEMON_WAIT;
+    let tip = loop {
+        match read_tip(client).await {
+            Ok(tip) => break tip,
+            Err(err) if Instant::now() >= deadline => return Err(err.into()),
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    };
+    tip.context("the base has no commits; import the seed first")
+}
+
+/// The base tip in one request, or `None` when the base has no commits.
+async fn read_tip(client: &Client) -> Result<Option<ObjectId>, rosen_client::Error> {
     let request = LogRequest {
         at: None,
         paths: Vec::new(),
         limit: Some(1),
     };
-    let log = loop {
-        match client.log(request.clone()).await {
-            Ok(log) => break log,
-            Err(err) if Instant::now() >= deadline => return Err(err.into()),
-            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
-        }
-    };
-    let tip = log
-        .entries
-        .first()
-        .context("the base has no commits; import the seed first")?;
-    Ok(tip.commit)
+    let log = client.log(request).await?;
+    Ok(log.entries.first().map(|entry| entry.commit))
 }
 
 /// Sets the pool target and waits until that many ready workspaces exist,
