@@ -6,8 +6,8 @@
 //! workspace (R3) needs every tree but only the blobs under its chosen paths,
 //! so a sparse fill stores trees that lack blobs and records each in
 //! [`PartialObjects`] before writing it. Every stored tree still has all its
-//! subtrees stored. So a fill stops at any object held and not recorded,
-//! walks a recorded one from the local store, and writes the trees and
+//! subtrees stored. A fill checks stored descendants too, since a complete
+//! tree can outlive damage to one of its blobs, and writes the trees and
 //! commits it fetched only after every fetched object they name. A fill cut
 //! short leaves only blobs, complete trees and recorded trees behind, never
 //! a tree missing a subtree, and the next fill finishes the job.
@@ -31,7 +31,7 @@ const IDS_PER_FETCH: usize = 1024;
 /// Makes everything reachable from `root` readable from `store`, fetching
 /// what is missing from the server, or with `sparse` paths only every tree
 /// and the blobs at or under those paths. Returns how many objects were
-/// fetched. The server is only contacted when something is missing.
+/// fetched. The server is contacted only for missing or damaged objects.
 pub async fn ensure(
     store: &LooseObjectStore,
     partial: &Arc<PartialObjects>,
@@ -63,12 +63,22 @@ pub async fn ensure(
 /// are not, because their children may not be here (see the module docs).
 pub async fn get_objects(
     store: &LooseObjectStore,
+    partial: &Arc<PartialObjects>,
     links: &LinkSlot,
     query: ObjectQuery,
 ) -> Result<ObjectBatch, ErrorBody> {
     let local_store = store.clone();
-    let mut local =
-        run_blocking(move || crate::objects::read_batch(&local_store, &query.ids)).await?;
+    let ids = query.ids.clone();
+    let (mut local, damaged) = run_blocking(move || read_cached(&local_store, &ids)).await?;
+    // Repair the persisted copy too: workspace materialisation reads the
+    // shared store directly after an RPC reports these objects local.
+    for id in &damaged {
+        ensure(store, partial, links, *id, &[]).await?;
+    }
+    if !damaged.is_empty() {
+        let local_store = store.clone();
+        local = run_blocking(move || crate::objects::read_batch(&local_store, &query.ids)).await?;
+    }
     if local.missing.is_empty() {
         return Ok(local);
     }
@@ -92,6 +102,30 @@ pub async fn get_objects(
     // The client reads these in slices, which this daemon forwards.
     local.large.extend(remote.large);
     Ok(local)
+}
+
+/// Corruption is a cache miss, including a damaged large object's body whose
+/// header alone would otherwise put it in `large` without checking its hash.
+fn read_cached(
+    store: &LooseObjectStore,
+    ids: &[ObjectId],
+) -> Result<(ObjectBatch, Vec<ObjectId>), StoreError> {
+    let mut valid = Vec::new();
+    let mut missing = Vec::new();
+    let mut damaged = Vec::new();
+    for id in ids {
+        if store.contains_valid(id)? {
+            valid.push(*id);
+        } else {
+            missing.push(*id);
+            if store.contains(id)? {
+                damaged.push(*id);
+            }
+        }
+    }
+    let mut batch = crate::objects::read_batch(store, &valid)?;
+    batch.missing.extend(missing);
+    Ok((batch, damaged))
 }
 
 /// The paths a sparse workspace holds, as the client's `Sparse` chooses
@@ -159,8 +193,7 @@ enum Need {
 struct Node {
     kind: ObjectKind,
     data: Vec<u8>,
-    /// Fetched, so written at the end; otherwise a recorded partial object
-    /// already in the store.
+    /// Fetched, so written at the end; otherwise a local tree or commit.
     fetched: bool,
     /// For a commit, its tree, named by the empty string.
     links: Vec<Link>,
@@ -184,8 +217,8 @@ struct Walk {
     /// Objects asked of the server, with the needs to apply on arrival.
     fetching: HashMap<ObjectId, Vec<Need>>,
     nodes: HashMap<ObjectId, Node>,
-    /// Objects known stored with their whole closure: blobs fetched or found,
-    /// and trees found stored and not recorded as partial.
+    /// Blobs verified locally or fetched, and trees whose selected visits
+    /// found their whole closure complete.
     complete: HashSet<ObjectId>,
     fetched: u64,
 }
@@ -224,23 +257,35 @@ impl Walk {
                 continue;
             } else if let Some(needs) = self.fetching.get_mut(&id) {
                 needs.push(need);
-            } else if !store.contains_valid(&id)? {
-                // A damaged object is fetched again like a missing one, and
-                // storing it repairs the file (issue #230).
-                self.fetching.insert(id, vec![need]);
-            } else if !self.partial.contains(&id) {
-                // Asked after the store: a record is made before its object
-                // is written, so a stored object's record is already visible.
+            } else {
+                self.resolve_stored(store, id, need)?;
+            }
+        }
+        Ok(self.fetching.keys().copied().collect())
+    }
+
+    fn resolve_stored(
+        &mut self,
+        store: &LooseObjectStore,
+        id: ObjectId,
+        need: Need,
+    ) -> Result<(), StoreError> {
+        // Streaming validation bounds memory even for multi-GiB cached blobs.
+        match store.copy_raw_to(&id, &mut std::io::sink()) {
+            Ok(Some((ObjectKind::Blob, _))) => {
                 self.complete.insert(id);
-            } else if need != Need::TreesOnly {
-                // A partial tree holds all its subtrees, so only a visit that
-                // wants blobs reads it.
+            }
+            Ok(Some(_)) => {
                 let raw = store.get_raw(&id)?.ok_or(StoreError::NotFound(id))?;
                 self.add_node(id, raw.kind, raw.data, false)?;
                 self.expand(id, &need);
             }
+            Ok(None) | Err(StoreError::Corrupt { .. }) => {
+                self.fetching.insert(id, vec![need]);
+            }
+            Err(err) => return Err(err),
         }
-        Ok(self.fetching.keys().copied().collect())
+        Ok(())
     }
 
     /// Stores fetched blobs at once, keeps trees and commits to write at the

@@ -187,7 +187,7 @@ impl Session {
                 self.reply(id, Outcome::Ok(Response::ShuttingDown)).await;
             }
             Request::GetObjects(query) => self.spawn(id, move |state, links| async move {
-                fill::get_objects(&state.store, &links, query)
+                fill::get_objects(&state.store, &state.partial, &links, query)
                     .await
                     .map(Response::Objects)
             }),

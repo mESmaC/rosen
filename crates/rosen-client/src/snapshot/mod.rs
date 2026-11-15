@@ -15,6 +15,7 @@ mod index;
 mod journal;
 mod marker;
 mod rebase;
+mod repair;
 mod scan;
 mod seed;
 mod stat_cache;
@@ -25,8 +26,8 @@ pub use journal::pending_journal;
 pub use marker::{WorkspaceMarker, STATE_DIR};
 pub use seed::seed_tree_cache;
 pub(crate) use stat_cache::seed as seed_stat_cache;
-pub use upload::Sent;
 pub(crate) use upload::put_held;
+pub use upload::Sent;
 pub use watch::{watch, WatchEvent};
 
 use crate::connection::unexpected;
@@ -485,12 +486,12 @@ async fn queue_and_replay(
 async fn store_or_queue(
     client: Option<&Client>,
     state: &mut Snapshotter,
-    prepared: Prepared,
+    mut prepared: Prepared,
     message: Option<String>,
 ) -> Result<SnapshotReport, Error> {
     let pending = state.journal.pending()?;
     if let (Some(client), true) = (client, pending.is_empty()) {
-        let result = send(client, state, &prepared, message.clone()).await;
+        let result = send(client, state, &mut prepared, message.clone()).await;
         if let Err(err) = &result {
             if !worth_journaling(err) {
                 return result;
@@ -582,7 +583,9 @@ async fn replay(client: &Client, state: &mut Snapshotter) -> Result<SnapshotRepo
         let record = state.journal.load(id, &trees)?;
         match replay_record(client, state, id, record).await {
             Ok(report) => reports.push(report),
-            Err(Error::Server(refusal)) if !transient(refusal.code) => {
+            Err(Error::Server(refusal))
+                if refusal.objects_needed.is_empty() && !transient(refusal.code) =>
+            {
                 state.journal.halt(id, &refusal, seen)?;
                 return Err(Error::JournalHalted {
                     record: id,
@@ -618,10 +621,10 @@ async fn replay_record(
     client: &Client,
     state: &mut Snapshotter,
     id: u64,
-    record: journal::Record,
+    mut record: journal::Record,
 ) -> Result<SnapshotReport, Error> {
-    let Some(message) = record.message else {
-        return send(client, state, &record.prepared, None).await;
+    let Some(message) = record.message.clone() else {
+        return replay_send(client, state, id, record, None).await;
     };
     if record.unanswered {
         let shown = client.change_show(&state.change().to_string()).await?;
@@ -638,8 +641,24 @@ async fn replay_record(
         // Past this point the server may store it with the answer lost,
         // or this process may stop before hearing it.
         state.journal.mark_unanswered(id)?;
+        record.unanswered = true;
     }
-    send(client, state, &record.prepared, Some(message)).await
+    replay_send(client, state, id, record, Some(message)).await
+}
+
+async fn replay_send(
+    client: &Client,
+    state: &mut Snapshotter,
+    id: u64,
+    mut record: journal::Record,
+    message: Option<String>,
+) -> Result<SnapshotReport, Error> {
+    let blobs = record.prepared.blobs.len();
+    let result = send(client, state, &mut record.prepared, message).await;
+    if result.is_err() && record.prepared.blobs.len() > blobs {
+        state.journal.replace(id, &record)?;
+    }
+    result
 }
 
 /// Failures the server may not have seen, so the snapshot is kept for a
@@ -648,7 +667,7 @@ async fn replay_record(
 fn worth_journaling(err: &Error) -> bool {
     match err {
         Error::Disconnected | Error::NotRunning(_) | Error::Io(_) | Error::Start(_) => true,
-        Error::Server(body) => transient(body.code),
+        Error::Server(body) => body.objects_needed.is_empty() && transient(body.code),
         _ => false,
     }
 }
@@ -666,14 +685,53 @@ fn transient(code: rosen_protocol::ErrorCode) -> bool {
 async fn send(
     client: &Client,
     snapshotter: &mut Snapshotter,
+    prepared: &mut Prepared,
+    message: Option<String>,
+) -> Result<SnapshotReport, Error> {
+    let mut requested = HashSet::new();
+    let mut pending = HashSet::new();
+    let mut repaired = Sent::default();
+    loop {
+        let result = if pending.is_empty() {
+            send_once(client, snapshotter, prepared, message.clone()).await
+        } else {
+            match repair::resend(client, snapshotter, prepared, &pending).await {
+                Ok(sent) => {
+                    repaired.blobs += sent.blobs;
+                    repaired.trees += sent.trees;
+                    repaired.bytes += sent.bytes;
+                    pending.clear();
+                    continue;
+                }
+                Err(err) => Err(err),
+            }
+        };
+        match result {
+            Err(Error::Server(body))
+                if !body.objects_needed.is_empty()
+                    && body.objects_needed.iter().any(|id| !requested.contains(id)) =>
+            {
+                requested.extend(body.objects_needed.iter().copied());
+                pending.extend(body.objects_needed);
+            }
+            Ok(mut report) => {
+                report.sent.blobs += repaired.blobs;
+                report.sent.trees += repaired.trees;
+                report.sent.bytes += repaired.bytes;
+                return Ok(report);
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn send_once(
+    client: &Client,
+    snapshotter: &mut Snapshotter,
     prepared: &Prepared,
     message: Option<String>,
 ) -> Result<SnapshotReport, Error> {
-    let unchanged = prepared.root == snapshotter.marker.tree && prepared.blobs.is_empty();
     let mut report = snapshotter.report(prepared);
-    if unchanged && message.is_none() {
-        return Ok(report);
-    }
     if snapshotter.uploaded_root != Some(prepared.root) {
         let trees = prepared
             .trees

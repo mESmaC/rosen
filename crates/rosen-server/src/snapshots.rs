@@ -3,8 +3,10 @@
 //!
 //! The client sends only what changed: the blobs of edited files and the
 //! trees above them. A tree is stored only once every object it names is
-//! stored, so any tree in the store is complete, and recording a snapshot
-//! only has to check that its root tree is present.
+//! stored. Recording also checks the stored closure for later disk damage,
+//! so the client can repair objects that its incremental upload omitted.
+
+mod integrity;
 
 use crate::changes::{self, ChangeError};
 use crate::events::Staged;
@@ -25,6 +27,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
+    #[error("snapshot objects are missing or damaged; resend {0:?} before retrying")]
+    ObjectsNeeded(Vec<ObjectId>),
     #[error("tree {tree} names {entry}, which the server does not hold; upload it first")]
     MissingEntry { tree: ObjectId, entry: ObjectId },
     #[error("uploaded tree is not valid git format: {0}")]
@@ -40,6 +44,7 @@ pub enum SnapshotError {
 impl SnapshotError {
     fn code(&self) -> ErrorCode {
         match self {
+            SnapshotError::ObjectsNeeded(_) => ErrorCode::Internal,
             SnapshotError::MissingEntry { .. }
             | SnapshotError::MalformedTree(_)
             | SnapshotError::MissingTree(_) => ErrorCode::InvalidArgument,
@@ -47,6 +52,21 @@ impl SnapshotError {
             SnapshotError::Store(StoreError::WrongKind { .. }) => ErrorCode::InvalidArgument,
             SnapshotError::Store(_) => ErrorCode::Internal,
         }
+    }
+
+    fn body(&self) -> ErrorBody {
+        let mut body = ErrorBody::new(self.code(), self.to_string());
+        if let Self::ObjectsNeeded(ids) = self {
+            body.objects_needed.clone_from(ids);
+        }
+        match self {
+            Self::MissingEntry { entry, .. } => body.objects_needed.push(*entry),
+            Self::MissingTree(id) | Self::Store(StoreError::Corrupt { id, .. }) => {
+                body.objects_needed.push(*id);
+            }
+            _ => {}
+        }
+        body
     }
 }
 
@@ -82,7 +102,7 @@ async fn on_blocking(
     let state = Arc::clone(state);
     match tokio::task::spawn_blocking(move || work(&state)).await {
         Ok(Ok(response)) => Outcome::Ok(response),
-        Ok(Err(err)) => Outcome::Error(ErrorBody::new(err.code(), err.to_string())),
+        Ok(Err(err)) => Outcome::Error(err.body()),
         Err(join) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, join.to_string())),
     }
 }
@@ -202,12 +222,10 @@ const RECORD_ATTEMPTS: u32 = 8;
 /// written for a try that lost is never named by anything.
 fn record(
     state: &ServerState,
-    store: &dyn ObjectStore,
+    store: &LooseObjectStore,
     request: &SnapshotRequest,
 ) -> Result<SnapshotOutcome, SnapshotError> {
-    if request.tree != empty_tree() && !store.contains(&request.tree)? {
-        return Err(SnapshotError::MissingTree(request.tree));
-    }
+    integrity::check(store, request.tree)?;
     let ctx = crate::history::open(state).map_err(history_failure)?;
     let mut attempt = 0;
     loop {

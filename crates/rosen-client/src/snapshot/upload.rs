@@ -28,7 +28,7 @@ const LARGE_HASH_TRIES: usize = 3;
 const HASH_PIECE: usize = 1 << 20;
 
 /// A blob to send, with the file it came from.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChangedBlob {
     pub path: String,
     /// The bytes of a blob small enough for one frame. A larger one's stay
@@ -169,7 +169,7 @@ fn is_held(err: &io::Error) -> bool {
 /// Reads one file as a blob. A symlink's blob is its target, as git stores
 /// it. A file too large for one frame is only hashed, its bytes left on
 /// disk. `None` when the file no longer exists.
-fn read_file(
+pub(super) fn read_file(
     root: &Path,
     rel: &str,
     old: Option<&Entry>,

@@ -453,6 +453,10 @@ pub struct ServerStatus {
 pub struct ErrorBody {
     pub code: ErrorCode,
     pub message: String,
+    /// Missing or damaged objects to resend before retrying a snapshot.
+    /// Older peers may omit this hint and still report the same error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects_needed: Vec<rosen_core::ObjectId>,
 }
 
 impl ErrorBody {
@@ -460,6 +464,7 @@ impl ErrorBody {
         Self {
             code,
             message: message.into(),
+            objects_needed: Vec::new(),
         }
     }
 }

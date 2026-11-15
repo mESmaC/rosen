@@ -243,6 +243,12 @@ impl Journal {
     /// Stores a record after `last`. Its trees must already be in the tree
     /// cache ([`save_trees`]). Call while holding the writer lock.
     pub fn append(&self, last: Option<u64>, record: &Record) -> Result<(), SnapshotError> {
+        self.replace(last.map_or(1, |id| id + 1), record)
+    }
+
+    /// Keeps newly recovered repair bytes in the same record on a failed
+    /// replay, without changing the order of later snapshots.
+    pub fn replace(&self, id: u64, record: &Record) -> Result<(), SnapshotError> {
         let blobs_store = self.blobs()?;
         let mut blobs = Vec::with_capacity(record.prepared.blobs.len());
         for blob in &record.prepared.blobs {
@@ -261,9 +267,8 @@ impl Journal {
             unanswered: record.unanswered,
         };
         let bytes = serde_json::to_vec(&stored).map_err(io::Error::other);
-        let next = last.map_or(1, |id| id + 1);
         bytes
-            .and_then(|bytes| self.publish(next, &bytes))
+            .and_then(|bytes| self.publish(id, &bytes))
             .map_err(|err| SnapshotError::io(&self.dir, err))
     }
 
