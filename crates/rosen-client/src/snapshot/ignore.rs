@@ -43,9 +43,21 @@ impl IgnoreRules {
     /// Whether `rel`, a `/`-separated path from the workspace root, is
     /// ignored. The caller still keeps tracked paths.
     pub fn is_ignored(&mut self, rel: &str, is_dir: bool) -> bool {
-        if always_ignored(rel) {
+        if always_ignored(rel) || self.ignores_parent(rel) {
             return true;
         }
+        self.match_path(rel, is_dir)
+    }
+
+    /// Stops before reading rules inside an excluded directory, just as a
+    /// full scan stops before entering it. Besides matching git's rules,
+    /// this avoids opening handles in build trees being renamed on Windows.
+    pub fn ignores_parent(&mut self, rel: &str) -> bool {
+        rel.match_indices('/')
+            .any(|(end, _)| self.match_path(&rel[..end], true))
+    }
+
+    fn match_path(&mut self, rel: &str, is_dir: bool) -> bool {
         let parts: Vec<&str> = rel.split('/').collect();
         let mut ignored = self
             .project

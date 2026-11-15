@@ -223,9 +223,15 @@ impl Snapshotter {
         if ignore::always_ignored(rel) {
             return false;
         }
+        if self.index.tracks(rel) || self.index.tracks_under(rel) {
+            return true;
+        }
+        // Even a metadata probe or an ignore-file lookup inside an ignored
+        // build tree can race a compiler finalizing a directory on Windows.
+        if self.ignore.ignores_parent(rel) {
+            return false;
+        }
         ignore::is_ignore_file(rel)
-            || self.index.tracks(rel)
-            || self.index.tracks_under(rel)
             || !self
                 .ignore
                 .is_ignored(rel, scan::disk(&self.root, rel).is_dir())

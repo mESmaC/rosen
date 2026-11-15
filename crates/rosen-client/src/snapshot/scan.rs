@@ -75,6 +75,10 @@ pub fn scan_path(view: &mut View<'_>, rel: &str, out: &mut ScanOutcome) -> io::R
     if rel.is_empty() || always_ignored(rel) || view.index.in_gitlink(rel) {
         return Ok(());
     }
+    // Callers can supply dirty paths directly, without the watcher's filter.
+    if !view.index.tracks(rel) && !view.index.tracks_under(rel) && view.ignore.ignores_parent(rel) {
+        return Ok(());
+    }
     if is_ignore_file(rel) {
         view.ignore.forget();
         out.ignore_changed = true;
