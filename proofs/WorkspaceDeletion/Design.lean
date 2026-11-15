@@ -1,5 +1,5 @@
 /-!
-# Workspace deletion guard (SPEC.md R4)
+# Workspace deletion guard (spec/R4-workspace-lifecycle-and-deletion.md R4)
 
 An Edit identifies both a filesystem object and its content version; a path
 alone cannot distinguish a replacement from the object previously verified.
@@ -44,7 +44,7 @@ def remaining [DecidableEq Edit] (e : Evidence Edit)
     originals.filter (fun edit => decide (edit ∉ removed)) ++ later
   else originals ++ later
 
-/-- SPEC.md R4: for any prefix of removals of verified object versions,
+/-- spec/R4-workspace-lifecycle-and-deletion.md R4: for any prefix of removals of verified object versions,
 every relevant original or later concurrent version stays server-stored or
 local. Only observed objects may enter that prefix; unobserved objects and
 later additions/replacements are retained. Thus complete workspace evidence

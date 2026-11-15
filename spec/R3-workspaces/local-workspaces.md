@@ -1,0 +1,1 @@
+- **Local workspaces** are materialised from the local store:

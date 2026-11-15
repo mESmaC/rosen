@@ -1,0 +1,1 @@
+- **Order** is set only between changes that overlap each other, or are stacked.

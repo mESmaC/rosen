@@ -1,11 +1,11 @@
 /-!
-# Design proof: path claims (SPEC.md R6)
+# Design proof: path claims (spec/R6-path-claims-and-edit-tracking.md R6)
 
 Models the claim table (`crates/rosen-server/src/claims/store.rs`) and the
 first-claim-wins rule (`crates/rosen-core/src/claim.rs`) over any symmetric
 overlap test on patterns. `claim` is exclusive; `notice` is the default. It proves:
 
-* `correct`: SPEC.md R6. Exclusive claims stay exclusive; two serialised exclusive claims on
+* `correct`: spec/R6-path-claims-and-edit-tracking.md R6. Exclusive claims stay exclusive; two serialised exclusive claims on
   overlapping paths never both succeed, a refusal names a holder, every
   stored wait is blocked by a live claim, and a release wakes every waiter it
   unblocks while keeping every other waiter. Notice claims never refuse;
@@ -109,7 +109,7 @@ private theorem blocked_grant {ov : P → P → Bool} {s : State P} {c c' : Nat}
   obtain ⟨k, hk, hne, hov⟩ := blocked_true.mp h
   exact blocked_true.mpr ⟨k, by simp [grant, hk], hne, hov⟩
 
-/-- **correct** (SPEC.md §R6, "Path claims and edit tracking"): from any state
+/-- **correct** (spec/R6-path-claims-and-edit-tracking.md R6, "Path claims and edit tracking"): from any state
 where only exclusive claims have been made and every wait is blocked,
 1. a claim is refused exactly when a live claim on another change overlaps a
    requested path, and that claim is the holder the refusal names;
@@ -120,7 +120,7 @@ where only exclusive claims have been made and every wait is blocked,
 5. a release keeps both invariants, every wait it does not drop is either
    still stored or woken, and every woken wait is unblocked;
 6. in every state, a default notice claim never refuses. -/
--- SPEC.md §R6
+-- spec/R6-path-claims-and-edit-tracking.md R6
 theorem correct (ov : P → P → Bool) (hsym : Symmetric ov) (s : State P) (hinv : Inv ov s) :
     (∀ c ps, claim ov s c ps = none ↔
         ∃ p ∈ ps, ∃ k ∈ s.claims, k.change ≠ c ∧ ov k.pat p = true) ∧
@@ -239,7 +239,7 @@ private theorem sum_map_le (f : α → Nat) (bound : Nat) (hf : ∀ x, f x ≤ b
 /-- **cost_bound**: under the cost model above, with `n` live claims, `m`
 stored waits and `r` requested patterns, a claim costs at most `r·n`, a wait
 at most `n`, and a release at most `n + m + m·n`. -/
--- SPEC.md §R6
+-- spec/R6-path-claims-and-edit-tracking.md R6
 theorem cost_bound (ov : P → P → Bool) (s : State P) (c : Nat) (ps : List P) (p : P)
     (drop : Rec P → Bool) :
     claimCost s ps ≤ ps.length * s.claims.length ∧
@@ -273,7 +273,7 @@ def Safe (ov : P → P → Bool) (d : State P → Nat → List P → Bool) : Pro
 
 /-- **optimal**: exclusive first-claim-wins is safe, and no safe decider refuses fewer
 claims on any history of requests made from exclusive states. -/
--- SPEC.md §R6
+-- spec/R6-path-claims-and-edit-tracking.md R6
 theorem optimal (ov : P → P → Bool) (hsym : Symmetric ov) :
     Safe ov (grants ov) ∧
     ∀ d, Safe ov d → ∀ requests : List (State P × Nat × List P),

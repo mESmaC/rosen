@@ -1,0 +1,1 @@
+- A legacy edited stack with no recoverable parent-tree basis is refused rather than merged against a guessed basis that could delete intervening landed work.

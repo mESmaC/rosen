@@ -1,4 +1,4 @@
-# Cargo checks from SPEC.md §5 "Done means (v1)":
+# Cargo checks from spec/5-done-means.md §5 "Done means (v1)":
 #   cargo build --workspace
 #   cargo clippy --workspace --all-targets -- -D warnings
 #   cargo test --workspace
@@ -56,7 +56,7 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
-  # SPEC.md R3's block clone path runs only on ReFS, and the Windows job's
+  # spec/R3-workspaces/README.md R3's block clone path runs only on ReFS, and the Windows job's
   # volumes are NTFS, so there every workspace falls back to a plain copy
   # (issue #39). This job formats a Dev Drive (ReFS) on the runner, which is
   # elevated, and points the temp directory at it, so every rosen-client test

@@ -1,4 +1,4 @@
-/-! # Design proof: post-land bisection (SPEC.md R12). -/
+/-! # Design proof: post-land bisection (spec/R12-post-land-verification.md R12). -/
 namespace Bisection
 
 def midpoint (lo hi : Nat) := lo + (hi - lo) / 2
@@ -7,7 +7,7 @@ def step (lo hi culprit : Nat) : Prod Nat Nat :=
   let mid := midpoint lo hi
   if mid < culprit then (mid, hi) else (lo, mid)
 
-/-- SPEC.md R12: a monotone checker passes exactly before culprit.
+/-- spec/R12-post-land-verification.md R12: a monotone checker passes exactly before culprit.
 Every split retains that culprit and strictly reduces a non-singleton range;
 a singleton identifies it. Confirmation requires a second failure and parent pass. -/
 theorem correct (lo hi culprit : Nat) (hl : lo < culprit) (hh : culprit <= hi) :

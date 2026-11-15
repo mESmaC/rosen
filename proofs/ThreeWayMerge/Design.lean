@@ -1,5 +1,5 @@
 /-!
-# Three-way merge (SPEC.md R5)
+# Three-way merge (spec/R5-automatic-merge-and-conflicts.md R5)
 
 Model of `crates/rosen-merge/src/merge.rs`. Two edit scripts, base → ours and
 base → theirs, are walked in step and cut into diff3 chunks: a *stable* chunk
@@ -104,7 +104,7 @@ def resolve : Chunk α → Region α
 def merge (ours theirs : List (Op α)) : List (Region α) :=
   (chunk ours theirs ⟨[], [], []⟩).1.map resolve
 
-/-- SPEC.md R5 for one chunk: a clean region is the whole text of a side whose
+/-- spec/R5-automatic-merge-and-conflicts.md R5 for one chunk: a clean region is the whole text of a side whose
 counterpart left the chunk as in the base (or made the same edit), so no
 kept line is dropped or duplicated; anything else is a conflict holding all
 three texts, never a silent pick. -/
@@ -152,8 +152,8 @@ theorem resolve_honest (c : Chunk α) : Honest c (resolve c) := by
 
 /-! ### Theorems -/
 
--- SPEC.md §R5
-/-- **Correctness (SPEC.md R5, "Automatic merge and conflicts").** For any two
+-- spec/R5-automatic-merge-and-conflicts.md R5
+/-- **Correctness (spec/R5-automatic-merge-and-conflicts.md R5, "Automatic merge and conflicts").** For any two
 edit scripts from one base: the chunks partition base, ours and theirs exactly
 (no line dropped or duplicated), and each output region is `Honest` for its
 chunk. -/
@@ -174,7 +174,7 @@ theorem correct (os ts : List (Op α)) (h : baseOf os = baseOf ts) :
     simp only [merge, List.getElem_map]
     exact resolve_honest _
 
--- SPEC.md §R5
+-- spec/R5-automatic-merge-and-conflicts.md R5
 /-- **Cost bound.** Cost model: one unit per recursive step of `chunk`, each of
 which reads at most one op from each script (the Rust partition advances its
 three line cursors the same way). Cutting the chunks costs at most the total
@@ -220,7 +220,7 @@ theorem resolve_conflict_forced (other : Chunk α → Region α)
         · simp [Region.isConflict] at hr
         · simp_all [Honest]
 
--- SPEC.md §R5
+-- spec/R5-automatic-merge-and-conflicts.md R5
 /-- **Optimality.** Cost model: the number of conflict regions an agent must
 resolve. Class of alternatives: every chunk-wise resolver over the same chunks
 that never picks silently, i.e. whose clean regions are all `Honest`. No such

@@ -1,11 +1,11 @@
 /-!
-# Design proof: piece claims (SPEC.md R13)
+# Design proof: piece claims (spec/R13-airc-channel-on-the-server.md R13)
 
 Models the `channel_pieces` table (`crates/rosen-server/src/channel/pieces.rs`)
 as a list of rows and the first-claim-wins rule (`rosen_core::piece::decide`),
 and proves:
 
-* `correct`: SPEC.md R13 "Piece claims". From a table where each piece has
+* `correct`: spec/R13-airc-channel-on-the-server.md R13 "Piece claims". From a table where each piece has
   at most one row, a claim is refused exactly when another member holds the
   piece, and the refusal names that holder; a granted claimant holds the
   piece afterwards and no other piece's holder moves; two serialised claims
@@ -127,7 +127,7 @@ private theorem claim_cases (t : Table K) (m : Nat) (k : K) :
     · subst hm; exact Or.inr (Or.inl ⟨rfl, by simp⟩)
     · exact Or.inr (Or.inr ⟨h, hm, rfl, by simp [hm]⟩)
 
-/-- **correct** (SPEC.md §R13, "Piece claims"): from a table with one row
+/-- **correct** (spec/R13-airc-channel-on-the-server.md R13, "Piece claims"): from a table with one row
 per piece,
 1. a claim is refused exactly when another member holds the piece, and the
    refusal names that holder; a refusal changes nothing;
@@ -139,7 +139,7 @@ per piece,
 4. a release drops exactly the releasing member's selected pieces and keeps
    every other holder;
 5. claims and releases keep one row per piece. -/
--- SPEC.md §R13
+-- spec/R13-airc-channel-on-the-server.md R13
 theorem correct (t : Table K) (hu : Unique t) :
     (∀ m k h, (claim t m k).1 = .refused h ↔ holder t k = some h ∧ h ≠ m) ∧
     (∀ m k h, (claim t m k).1 = .refused h → (claim t m k).2 = t) ∧
@@ -214,7 +214,7 @@ private theorem holderCost_le : ∀ (t : Table K) (k : K), holderCost t k ≤ t.
 /-- **cost_bound**: under the cost model above, with `n` stored rows, a claim
 reads at most `n` rows and leaves at most `n + 1`, and a release reads `n`
 rows and leaves at most `n`. -/
--- SPEC.md §R13
+-- spec/R13-airc-channel-on-the-server.md R13
 theorem cost_bound (t : Table K) (m : Nat) (k : K) (sel : K → Bool) :
     claimCost t k ≤ t.length ∧ (claim t m k).2.length ≤ t.length + 1 ∧
     releaseCost t ≤ t.length ∧ (release t m sel).length ≤ t.length := by
@@ -244,7 +244,7 @@ def Safe (d : Table K → Nat → K → Bool) : Prop :=
 
 /-- **optimal**: first claim wins is safe, and no safe decider refuses fewer
 claims on any history of requests made from tables with one row per piece. -/
--- SPEC.md §R13
+-- spec/R13-airc-channel-on-the-server.md R13
 theorem optimal :
     Safe (grants (K := K)) ∧
     ∀ d, Safe d → ∀ requests : List (Table K × Nat × K),

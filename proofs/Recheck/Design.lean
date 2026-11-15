@@ -1,4 +1,4 @@
-/-! SPEC.md §2 Reach and R8 step 2: receipt reuse over a complete interval
+/-! SPEC.md §2 Reach and spec/R8-optimistic-landing/README.md R8 step 2: receipt reuse over a complete interval
 of landed reaches, including lands subsequently reverted. Inputs are finite
 sets of unit IDs represented by lists; repeated IDs do not affect safety. -/
 namespace Recheck
@@ -20,7 +20,7 @@ def inputReach (all : List Nat) : Input → List Nat
 def reusable (ours : List Nat) (lands : List (List Nat)) : Bool :=
   lands.all fun theirs => !(ours.any fun u => theirs.contains u)
 
-/-- SPEC R8: reuse exactly when every intervening reach is disjoint. -/
+/-- spec/R8-optimistic-landing/README.md R8: reuse exactly when every intervening reach is disjoint. -/
 theorem correct (ours : List Nat) (lands : List (List Nat)) :
     reusable ours lands = true ↔
       ∀ theirs ∈ lands, ∀ u ∈ ours, u ∉ theirs := by

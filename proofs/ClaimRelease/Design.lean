@@ -1,4 +1,4 @@
-/-! Claim release notifications (SPEC.md R6). Models `claims::store::release_in`
+/-! Claim release notifications (spec/R6-path-claims-and-edit-tracking.md R6). Models `claims::store::release_in`
 and `claims::delivery`: one transaction deletes the released records and adds one
 `claim_release_delivery` note of owed events; recovery appends a note's events,
 then deletes it. Which waits wake is `Claims.correct`; here they are inputs. -/
@@ -197,14 +197,14 @@ private theorem replay_fold : ∀ (L : List Nat) (s : State), Inv s →
     · exact (List.mem_cons.mp hm).elim (fun h => Or.inr (h ▸ hcl)) Or.inl
     · exact Or.inr (publish_note s n _ m hm)
 
-/-- **correct** (SPEC.md §R6, "Release transactions retain pending
+/-- **correct** (spec/R6-path-claims-and-edit-tracking.md R6, "Release transactions retain pending
 notifications until published ... Delivery is at least once"): from a store
 with no pending notes, after any trace of committed or failed releases,
 partial (crashed) and complete deliveries, every owed event is in the log or
 in a pending note, the log holds only owed events, a failed release changes
 nothing, a committed one removes every released record, and restart recovery
 publishes exactly the owed events. -/
--- SPEC.md §R6
+-- spec/R6-path-claims-and-edit-tracking.md R6
 theorem correct (st : Store) (empty : ∀ n, st (.note n) = none) (trace : List Step) :
     let s := run (start st) trace
     (∀ e ∈ s.owed, e ∈ s.log ∨ ∃ n es, s.store (.note n) = some es ∧ e ∈ es) ∧
@@ -224,11 +224,11 @@ theorem correct (st : Store) (empty : ∀ n, st (.note n) = none) (trace : List 
   · exact hlog
   · rw [rz m (Or.inl (List.mem_range.mpr (rx ▸ (rn m es hm).1)))] at hm; cases hm
 
-/-- **cost_bound** (SPEC.md §R6). Cost model: durable row writes in the
+/-- **cost_bound** (spec/R6-path-claims-and-edit-tracking.md R6). Cost model: durable row writes in the
 release transaction (INSERT, single-row UPDATE or DELETE). Reads, the event
 appends and acknowledgement of delivery, and crash retries are excluded. A
 release writes one delete per released record and at most one note. -/
--- SPEC.md §R6
+-- spec/R6-path-claims-and-edit-tracking.md R6
 theorem cost_bound (next : Nat) (removed events : List Nat) :
     (releaseWrites next removed events).length =
         removed.length + (if events = [] then 0 else 1) ∧
@@ -251,10 +251,10 @@ def CrashSafe (p : Protocol) : Prop :=
     (∀ r ∈ removed, runWrites s (p.commit s removed events) (.record r) = none) ∧
     (∀ e ∈ events, e ∈ p.recover (runWrites s (p.commit s removed events)))
 
-/-- **optimal** (SPEC.md §R6): releasing distinct stored records that owe
+/-- **optimal** (spec/R6-path-claims-and-edit-tracking.md R6): releasing distinct stored records that owe
 events not already pending, no crash-safe design writes fewer rows in its
 release transaction than ours, under the cost model of `cost_bound`. -/
--- SPEC.md §R6
+-- spec/R6-path-claims-and-edit-tracking.md R6
 theorem optimal (p : Protocol) (hp : CrashSafe p) (s : Store) (next : Nat)
     (removed events : List Nat) (distinct : removed.Nodup)
     (stored : ∀ r ∈ removed, s (.record r) ≠ none)

@@ -1,0 +1,1 @@
+- If the files on disk differ from that snapshot, it refuses and leaves the workspace unchanged, and the owner asks again after the next snapshot.

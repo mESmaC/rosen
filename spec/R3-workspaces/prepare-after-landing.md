@@ -1,0 +1,1 @@
+- After a land, the daemon runs them again in each ready workspace unless every change landed since it was prepared is prose-only (R7).

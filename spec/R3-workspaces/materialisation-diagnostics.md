@@ -1,0 +1,1 @@
+- A materialisation failure names the failing admission file and operation, or both staging and destination paths when publication fails, along with the underlying OS error.

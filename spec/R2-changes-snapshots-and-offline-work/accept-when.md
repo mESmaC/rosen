@@ -1,0 +1,1 @@
+- **Accept when:** a change's commits survive any number of rebases unchanged; a write is on the server within 2 s while the server is reachable; and applying a rebase never overwrites a write that is not in a stored snapshot.

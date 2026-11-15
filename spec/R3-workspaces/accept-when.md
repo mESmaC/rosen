@@ -1,0 +1,1 @@
+- **Accept when:** with the warm pool filled, a new prepared workspace is ready in under 2 s; an agent's first build in it compiles only what the agent changed; and two changes never share a workspace.

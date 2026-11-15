@@ -28,7 +28,7 @@ def stackFixture (depth : Nat) : String := Id.run do
     return s!"stack_land\t{depth}\t{result.landed.length}\t{result.base}\t{if isPrefix then 1 else 0}"
 
 
-/-- SPEC.md R8: recovery supplies a missing basis only for an edited legacy
+/-- spec/R8-optimistic-landing/README.md R8: recovery supplies a missing basis only for an edited legacy
 child. An unedited child's head already supplies its exact implicit basis. -/
 def recoveryAllowed (edited recorded : Bool) : Bool := edited && !recorded
 

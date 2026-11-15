@@ -1,0 +1,1 @@
+- **base unchanged** (the base still equals the receipt's B): with the checked tree unchanged it writes the landed commit chain and compare-and-swaps the base ref from B to the top commit;

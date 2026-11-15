@@ -1,4 +1,4 @@
-/-! SPEC.md R8 step 3: stack propagation, merge results and bottom-first lands.
+/-! spec/R8-optimistic-landing/README.md R8 step 3: stack propagation, merge results and bottom-first lands.
 Fixtures check selection and server merge results in `stacked-changes.tsv`. -/
 namespace StackedChanges
 /-- The selection rule of `stacks::eligible` and the `step` query. -/
@@ -172,11 +172,11 @@ private theorem land_prefix (l : Nat → Bool) (i : Nat) (hp : Prefix l) : Prefi
   · have hbi : ¬ b ≤ i := by omega
     exact (show land l i a = l a by simp [land, ha]).trans
       (hp a b hab (by simpa [land, hbi] using hb))
-/-- **correct** (SPEC.md R8 step 3): propagation terminates, settles every edge,
+/-- **correct** (spec/R8-optimistic-landing/README.md R8 step 3): propagation terminates, settles every edge,
 counts distinct changed children, keeps IDs/commits and stops at conflicts.
 Each preview merges from the child's recorded basis onto its parent's result,
 independently of the stack root. Atomic lands through any top preserve a prefix. -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem correct (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : List Node) :
     (∀ n, cs.length < n →
       loop merge q n cs = (pass merge q cs, merges merge q cs, merges merge q cs + 1)) ∧
@@ -204,7 +204,7 @@ theorem correct (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : Li
 and selection queries, excluding merge CPU, objects and SQL rows. Conflict
 rows grow with changed paths (`ConflictRouting`). At most one merge per child
 and one final empty query. -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem cost_bound (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : List Node)
     (n : Nat) (hn : cs.length < n) :
     (loop merge q n cs).2.1 ≤ cs.length ∧
@@ -250,7 +250,7 @@ private theorem run_targets (t : Store) : ∀ (ks : List Nat) (s : Store) (k : N
 record per write, in any order or batching, yielding the propagated stack.
 Every changed child needs a write; ours uses exactly that many. This counts
 abstract records, excluding conflict rows (see `ConflictRouting`). -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem optimal (merge : Nat → Nat → Nat → Option Nat) (q : Node) (cs : List Node) :
     runWrites (toStore cs) (oursWrites merge q cs) = toStore (pass merge q cs) ∧
     (oursWrites merge q cs).length = merges merge q cs ∧

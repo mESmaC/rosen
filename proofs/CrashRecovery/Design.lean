@@ -1,4 +1,4 @@
-/-! SPEC.md R8 (step 2, step 4 and "Accept when"): a server crash at any point of a
+/-! spec/R8-optimistic-landing/README.md R8 (step 2, step 4 and "Accept when"): a server crash at any point of a
 land loses no land and applies none twice, and recovery finishes every interrupted
 post-land run without changing an overlapping change's head or parent.
 
@@ -77,7 +77,7 @@ theorem finish (v : World) (c : Nat) (done : landed v c = true) :
   cases r
   simp_all [erase_self]
 
-/-- SPEC.md R8 "Accept when" and steps 2 and 4: whatever point the server dies at,
+/-- spec/R8-optimistic-landing/README.md R8 "Accept when" and steps 2 and 4: whatever point the server dies at,
 the restart ends in the world a land that never crashed reaches: the change is in
 the base history exactly once, no post-land work is left, and the overlapping change
 keeps its original head and parent throughout every replay. -/

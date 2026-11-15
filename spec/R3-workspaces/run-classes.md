@@ -1,0 +1,1 @@
+- A run has a class, most important first: `landing` (the checks a land waits on), `build` (an agent's own builds and tests), `verify` (the full tests after a land, and bisection, R12) and `prepare` (the warm pool's prepare commands).

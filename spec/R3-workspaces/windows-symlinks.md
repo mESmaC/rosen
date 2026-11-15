@@ -1,0 +1,1 @@
+- On Windows a symlink in the tree is written as a plain file holding its target, as git does by default there.

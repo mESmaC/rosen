@@ -1,0 +1,1 @@
+- in `before-land` mode every layer also needs an approval for its current head, and only the top needs a valid receipt for the final merge result (unless the whole stack is prose-only); the following receipt rules apply only in this mode;

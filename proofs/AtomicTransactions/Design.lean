@@ -1,5 +1,5 @@
 /-!
-# Design proof: the land transaction (SPEC.md R8 step 2 and section 3)
+# Design proof: the land transaction (spec/R8-optimistic-landing/README.md R8 step 2 and section 3)
 
 Models `Ledger::compare_and_swap` in `crates/rosen-server/src/landing/ledger.rs`.
 The metadata store is a set of keyed rows. One SQLite transaction reads every
@@ -79,14 +79,14 @@ private theorem landed_rows (s : State) (change head commit : Nat) (k : Key) :
       else if k = .ref then some (.commit commit) else s k := by
   simp only [runWrites, landWrites, List.foldl, put]
 
-/-- **correct** (SPEC.md R8 step 2 and section 3): every outcome is the
+/-- **correct** (spec/R8-optimistic-landing/README.md R8 step 2 and section 3): every outcome is the
 complete old store or the complete new one. The new one exists exactly when
 the transaction commits with every gate holding: the change has not landed,
 its registry row is live at the land's head, an approval for it still holds,
 it has no open conflict, and the base equals the expected commit. It moves
 the ref to the landed commit, records the land in history, marks the
 registry row landed, and leaves every other row as it was. -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem correct (s : State) (expected change head commit : Nat) (committed : Bool) :
     (publish s expected change head commit committed = s ∧
         ¬(committed = true ∧ Gates s expected change head)) ∨
@@ -107,11 +107,11 @@ theorem correct (s : State) (expected change head commit : Nat) (committed : Boo
     simp only [Bool.and_self, ite_true, landed_rows]
     refine ⟨by simp, by simp, by simp, fun k h1 h2 h3 => by simp [h1, h2, h3]⟩
 
-/-- **cost_bound** (SPEC.md R8 step 2). Cost model: durable row writes in
+/-- **cost_bound** (spec/R8-optimistic-landing/README.md R8 step 2). Cost model: durable row writes in
 the land transaction (INSERT, single-row UPDATE or DELETE). Gate reads,
 object writes and SQLite page I/O are excluded. A land writes at most three
 rows, and a refused or rolled-back attempt writes none. -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem cost_bound (s : State) (expected change head commit : Nat) (committed : Bool) :
     (writes s expected change head commit committed).length ≤ 3 ∧
     ((committed && allowed s expected change head) = false →
@@ -138,13 +138,13 @@ private theorem writes_lower (s : State) (ws : List Write) (ks : List Key) (hn :
   have hsub : ks ⊆ ws.map Prod.fst := fun k hk => changed_written ws s k (hd k hk)
   simpa using hn.length_le_of_subset hsub
 
-/-- **optimal** (SPEC.md R8 step 2). Cost model as in `cost_bound`. The
+/-- **optimal** (spec/R8-optimistic-landing/README.md R8 step 2). Cost model as in `cost_bound`. The
 class of alternatives: any sequence of single-row writes, in any order and
 over any rows, that leaves the store exactly as this transaction publishes
 it. A land makes a new commit, so it differs from the base it was made on.
 No alternative writes fewer rows: the ref, history and registry rows each
 change, and a single-row write changes one row. -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem optimal (s : State) (expected change head commit : Nat) (committed : Bool)
     (fresh : commit ≠ expected) (alternative : List Write)
     (same : runWrites s alternative = publish s expected change head commit committed) :

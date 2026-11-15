@@ -1,7 +1,7 @@
 # AGENTS.md · rosen
 
 Read this file in full before you start any task. Every rule here is mandatory.
-SPEC.md defines what to build. The project Task List defines what is left.
+SPEC.md indexes the specification; read the linked spec/ files for the feature you change. The project Task List defines what is left.
 
 ## Where you work
 - Your thread works in a Rosen workspace by default. Velocity's first message says so and names your change. Landing your work below gives that flow.
@@ -10,7 +10,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 
 ## Commands
 - Read the project's build, run and lint commands from its manifests and SPEC.md before running them. Record those commands here when they are established.
-- Run every build, test and lint through `rosen run -- <command>`, for example `rosen run -- cargo build -p rosen-core`. Heavy commands on one machine take turns in its run queue (SPEC.md R3), so yours gets the cores while it runs, and the checks a land waits on go first. This applies in a git worktree too, whenever `rosen` is on `PATH`. A command already inside a turn runs at once, so `rosen run` never waits on itself.
+- Run every build, test and lint through `rosen run -- <command>`, for example `rosen run -- cargo build -p rosen-core`. Heavy commands on one machine take turns in its run queue (spec/R3-workspaces/README.md R3), so yours gets the cores while it runs, and the checks a land waits on go first. This applies in a git worktree too, whenever `rosen` is on `PATH`. A command already inside a turn runs at once, so `rosen run` never waits on itself.
 - For a project with a pinned Lean project, run `lake build` in `proofs/` before pushing proof changes.
 - Before you name your work (or mark a PR ready), run the checks your change can affect and see them pass. Lint reports zero warnings. Velocity then runs `rosen.toml`'s pre-land checks on the exact merge result before every land, and its post-land checks (`cargo test --workspace`) on what landed.
 - Build and check only what your change can affect. A change to docs or SPEC.md needs no build. A change to one part, such as the UI or one package, needs that part's checks, not the whole project's. Never run a build or check again when nothing it covers changed since it last passed.
@@ -36,7 +36,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Fixture tables, regenerated from `proofs/` after a model changes: `lake exe landing-fixtures > fixtures/landing.tsv` and `lake exe three-way-merge-fixtures > fixtures/three-way-merge.tsv`.
 - Stress suite (the merge gate for sensitive PRs): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed 1` and `target/debug/rosen-faults drill --seed 2`, as described under Fault drill below. Each run takes about a minute. This is the project's stress command.
 - §5 benchmark, not the stress suite and never a merge gate: run it only when the user asks. It takes an hour or more and fails the latency targets until the server performance issues are fixed. On one machine: `cargo build --release -p rosen-server -p rosen-stress`, then `target/release/rosen-stress local --dir <new dir>` for three simulated machines; add `--faults --fault-seed <n>` for the kill and partition run. Across machines: `rosen-stress seed`, `rosen import` on the server, `rosen-stress agents` on each machine with `rosen-stress checker` on one, then `rosen-stress verify <reports…>`; `rosen-stress --help` has the flags.
-- Fault drill (SPEC.md §5): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed <n>`. It injects a failing commit and checks R12 bisects and reverts it unless given `--no-failing-commit`, prints a JSON report, exits non-zero when a guarantee breaks, and replays exactly from its seed.
+- Fault drill (spec/5-done-means.md §5): `cargo build -p rosen-server -p rosen-faults`, then `target/debug/rosen-faults drill --seed <n>`. It injects a failing commit and checks R12 bisects and reverts it unless given `--no-failing-commit`, prints a JSON report, exits non-zero when a guarantee breaks, and replays exactly from its seed.
 - CI runs the Rust build, lint and tests on Windows and macOS, and the Rust build on Linux. The Proofs workflow runs `lake build --wfail` and the axiom audit on Linux when `proofs/`, the audit script or the workflow changes.
 
 ## Code
@@ -45,10 +45,12 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - Comment code whose purpose is not clear from reading it. Explain why, not what.
 
 ## Scope
+- R2, R3 and R8 keep one rule per file; add new rules as new files in their spec/ folder, with one sentence per line.
+- The spec move can be repeated with `python .github/scripts/split_spec.py --source <monolithic-SPEC.md>`; `--join` prints its original order.
 - Work only on the piece you claimed.
 - If you find an unrelated problem, file an issue for it. Do not fix it in your PR.
 - Add to the Task List only when the user asks. Otherwise, file an issue.
-- Update SPEC.md when behaviour changes. Never change a product decision yourself; file an issue when the spec contradicts itself.
+- Update the relevant spec/ rule file when behaviour changes. Never change a product decision yourself; file an issue when the spec contradicts itself.
 
 ## Implementation first
 - Build the feature first, end to end, then run it and see it work.
@@ -59,9 +61,9 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - The size rule binds a PR that builds or changes a feature. A piece an issue or review opens to add or strengthen proofs, tests or docs for a merged feature is exempt: it carries only the code fixes that work exposes, and never padding to meet the rule. Its PR description says it is such a piece and links that issue or review.
 
 ## Proofs
-- Write Lean only for features on the proof list in SPEC.md. Every other piece ships with no Lean.
+- Write Lean only for features on the proof list in SPEC.md §7. Every other piece ships with no Lean.
 - For a proof-list feature, write the code first. Then write `proofs/<Feature>/Design.lean` in the same PR with exactly three theorems:
-  - `correct`: the model meets the SPEC.md section it implements; name that section.
+  - `correct`: the model meets the spec/ section it implements; name that file and section.
   - `cost_bound`: its cost stays within a bound, under a cost model the theorem states.
   - `optimal`: no alternative in a class the theorem states costs less.
 - Export a compact fixture table to `proofs/fixtures/<feature>.tsv`, and add one test that checks the implementation against it.
@@ -78,7 +80,7 @@ SPEC.md defines what to build. The project Task List defines what is left.
 ## Tests and docs
 - Default: add no tests. Add a targeted test only for a critical contract identified in SPEC.md, with its risk in a comment.
 - Scouts and PR duty agents write the adversarial tests and stress scripts.
-- Update SPEC.md when behaviour changes.
+- Update the relevant spec/ rule file when behaviour changes.
 - Tests and docs are low priority; add them only after the feature works and only where they pay for themselves.
 - Never add a test suite for a whole module or a test that restates the implementation.
 - Copy a scout's failing script into `stress/` unchanged when fixing its bug. Never edit it.
@@ -116,23 +118,23 @@ SPEC.md defines what to build. The project Task List defines what is left.
 - List one path, folder or glob per bullet, as inline code, followed by why it is sensitive. Add migrations, worktree deletion and auth code as they are established.
 - `rosen.toml`: Rosen's own project configuration; it names the checks a land needs, the sensitive paths below and the mirror remote. Keep its `sensitive` list the same as the list in this file. Its `registration_lists` also holds `Cargo.lock` and the fixture tables, for the reason it gives.
 - `.github/workflows/`: CI config.
-- `crates/rosen-server/src/landing/`: decides when the base moves; a bug lands unchecked code or applies a land twice (SPEC.md R8).
+- `crates/rosen-server/src/landing/`: decides when the base moves; a bug lands unchecked code or applies a land twice (spec/R8-optimistic-landing/README.md R8).
 - `crates/rosen-server/src/metadata.rs`: shared SQLite connection settings and schema initialization; a bad migration can corrupt authoritative metadata.
 - `crates/rosen-server/src/changes/schema.rs`: SQLite schema and migration for changes and snapshots; a bad migration corrupts or loses metadata.
-- `crates/rosen-server/src/channel/`: the AIRC channel's SQLite schema and piece-claim lock; a bug lets two agents own one piece or loses channel state (SPEC.md R13).
-- `crates/rosen-server/src/conflicts.rs`: SQLite schema and storage for stored conflicts; a bug lets a conflicted change land (SPEC.md R5).
-- `crates/rosen-client/src/workspace/lifecycle.rs`: guarded workspace deletion; an unsafe deletion loses local edits (SPEC.md R4).
+- `crates/rosen-server/src/channel/`: the AIRC channel's SQLite schema and piece-claim lock; a bug lets two agents own one piece or loses channel state (spec/R13-airc-channel-on-the-server.md R13).
+- `crates/rosen-server/src/conflicts.rs`: SQLite schema and storage for stored conflicts; a bug lets a conflicted change land (spec/R5-automatic-merge-and-conflicts.md R5).
+- `crates/rosen-client/src/workspace/lifecycle.rs`: guarded workspace deletion; an unsafe deletion loses local edits (spec/R4-workspace-lifecycle-and-deletion.md R4).
 - `crates/rosen-client/src/workspace/delete.rs`: holds verified files and removes exact objects; a pathname race can lose another workspace's edits.
 - `crates/rosen-client/src/workspace/delete/`: Unix verified removal and recovery; a pathname race can delete an unstored replacement.
 - `crates/rosen-platform/`: the audited OS file-removal boundary; its handle and ABI contract protects verified deletion.
 - `crates/rosen-store/`: the authoritative object store; a bug loses or corrupts objects, and objects are never deleted (SPEC.md D5).
 - `crates/rosen-protocol/src/transport_windows.rs`: restricts the named pipe to the current user; a bug exposes the server to other users.
-- `crates/rosen-merge/`: every land and rebase merges through it; a bug silently drops or duplicates lines (SPEC.md R5).
-- `crates/rosen-server/src/machines/`: join-key consumption, enrollment and credential rotation; a bug admits an unauthorized machine (SPEC.md R14).
-- `crates/rosen-client/src/enrollment.rs`: TLS-pinned enrollment and Credential Manager persistence; a bug discloses a join key or machine credential (SPEC.md R14).
-- `crates/rosen-server/src/network/`: the TLS listener, certificate pinning and machine credential check; a bug admits an unenrolled peer or sends the credential to an impostor (SPEC.md R14).
+- `crates/rosen-merge/`: every land and rebase merges through it; a bug silently drops or duplicates lines (spec/R5-automatic-merge-and-conflicts.md R5).
+- `crates/rosen-server/src/machines/`: join-key consumption, enrollment and credential rotation; a bug admits an unauthorized machine (spec/R14-network-access-and-enrollment.md R14).
+- `crates/rosen-client/src/enrollment.rs`: TLS-pinned enrollment and Credential Manager persistence; a bug discloses a join key or machine credential (spec/R14-network-access-and-enrollment.md R14).
+- `crates/rosen-server/src/network/`: the TLS listener, certificate pinning and machine credential check; a bug admits an unenrolled peer or sends the credential to an impostor (spec/R14-network-access-and-enrollment.md R14).
 
-- `crates/rosen-client/src/workspace/pool_worker.rs`: removes unused ready directories on restart and pool shrink; a wrong root could delete a taken workspace (SPEC.md R3).
+- `crates/rosen-client/src/workspace/pool_worker.rs`: removes unused ready directories on restart and pool shrink; a wrong root could delete a taken workspace (spec/R3-workspaces/README.md R3).
 
 ## Landing your work
 One piece, one change (or one PR). Describe what changed, why, the theorems proved and the Task List item or issue it completes.

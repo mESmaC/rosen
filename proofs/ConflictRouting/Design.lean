@@ -1,4 +1,4 @@
-/-! Design proof for routing a conflicted land to its change (SPEC.md R8
+/-! Design proof for routing a conflicted land to its change (spec/R8-optimistic-landing/README.md R8
 step 2). Models `landing/conflict_routes.rs`, `ConflictSet::record_merge` and
 the row-diff `conflicts::save` in `crates/rosen-server`. -/
 namespace ConflictRouting
@@ -123,7 +123,7 @@ private theorem mergePaths_twice (m : Merge) (rows : Rows) :
   simp only [mergePaths_apply]
   by_cases h : k.path ∈ m.paths <;> simp [h]
 
-/-- **correct** (SPEC.md §R8 step 2, conflict bullet): a change whose head
+/-- **correct** (spec/R8-optimistic-landing/README.md R8 step 2, conflict bullet): a change whose head
 moved or that closed gets nothing. Otherwise only its conflict rows change:
 on each routed path a row is open exactly when the merge produced it, every
 other row there, open or resolved, is dropped, and every
@@ -210,7 +210,7 @@ private theorem mem_diffKeys (s : State) (m : Merge) (keys : List Region) (k : R
       mergePaths m m.paths s.conflicts k ≠ s.conflicts k := by
   simp [diffKeys, (uniq_spec _).1]
 
-/-- **cost_bound** (SPEC.md §R8 step 2, conflict bullet): under the cost model
+/-- **cost_bound** (spec/R8-optimistic-landing/README.md R8 step 2, conflict bullet): under the cost model
 of `Prog.cost` (one unit per binding read and per row written; reading the
 stored set is free), with `keys` the change's stored rows, routing costs at
 most one read plus one write per stored row on a routed path and per
@@ -232,7 +232,7 @@ theorem cost_bound (s : State) (m : Merge) (keys : List Region) (b : Bool) :
   rw [ours_cost]; rw [List.length_append] at this
   cases b <;> simp only [Bool.false_eq_true, ite_false, ite_true] <;> omega
 
-/-- **optimal** (SPEC.md §R8 step 2, conflict bullet): the class is every
+/-- **optimal** (spec/R8-optimistic-landing/README.md R8 step 2, conflict bullet): the class is every
 routine of `Prog` that, whichever way the binding read answers, leaves the
 rows `spec` requires. Ours is in the class, and whenever accepting the merge
 changes a stored row, no routine in the class costs less on either answer:

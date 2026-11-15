@@ -1,4 +1,4 @@
-# Lean checks from SPEC.md §5 "Done means (v1)" and AGENTS.md "Proofs":
+# Lean checks from spec/5-done-means.md §5 "Done means (v1)" and AGENTS.md "Proofs":
 #   lake build in proofs/, with warnings as errors so `sorry` cannot pass
 #   an axiom audit of every declaration: only propext, Classical.choice and Quot.sound
 # Lean output does not depend on the host, so one Linux job covers both platforms.

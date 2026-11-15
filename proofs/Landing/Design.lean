@@ -1,4 +1,4 @@
-/-! Optimistic landing, stack atomicity and failure disposition (SPEC R8/R12; #365/#366/#368). -/
+/-! Optimistic landing, stack atomicity and failure disposition (spec/R8-optimistic-landing/README.md R8 and spec/R12-post-land-verification.md R12; #365/#366/#368). -/
 namespace Landing
 /-- `active` covers both `open` and `ready`: the decision treats them alike. -/
 inductive ChangeState where
@@ -60,7 +60,7 @@ def decideLand (i : Input) : Verdict :=
     else if i.review = .afterLand ∨ i.tier = .prose ∨ i.receipt = .sameTree ∨ i.mergeMode = true ∨
         !i.baseMoved ∨ i.landedSinceAllIndependent then .land
     else .refuse .needsRecheck
-/-- SPEC.md R8 step 2, with SPEC.md R7 review modes and SPEC.md R8 step 3
+/-- spec/R8-optimistic-landing/README.md R8 step 2, with spec/R7-review.md R7 review modes and spec/R8-optimistic-landing/README.md R8 step 3
 stack order: the change is live, its ancestors can join the request, it has no stored
 conflicts, its current head is approved unless the project reviews after the
 land, it merges cleanly onto the current base, and only before-land code
@@ -145,7 +145,7 @@ structure Verification where
 def reportFailure (s : Verification) (review : ReviewMode) (build : Bool)
     (culprit : Nat) (out : String) : Bool × Verification :=
   (failureReverts review build, {s with failures := (culprit, build, out) :: s.failures})
-/-- **correct** (SPEC R8 and R12, owner decision #365): the original CAS,
+/-- **correct** (spec/R8-optimistic-landing/README.md R8 and R12, owner decision #365): the original CAS,
 stack and preservation requirements remain; receipts/approvals gate only
 before-land projects. Every confirmed failure is recorded, and only builds
 request a revert after land. The statement changes because the spec changed. -/
@@ -177,7 +177,7 @@ def attempts : Nat → List Bool → Nat
 /-- **cost_bound**: under the cost model of `attempts`, a land never costs
 more than `cap` attempts, nor more than one attempt per competing land that
 beat it plus one. -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem cost_bound (cap : Nat) (races : List Bool) :
     attempts cap races ≤ cap ∧ attempts cap races ≤ races.count true + 1 := by
   induction cap generalizing races with
@@ -199,7 +199,7 @@ def recheckCost (policy : Input → Bool) (requests : List Input) : Nat :=
 def oursRecheck (i : Input) : Bool :=
   decideLand i == .refuse .needsRecheck
 /-- Alternatives must recheck dependent lands in reach mode; merge mode
-permits that reuse by SPEC R8 (#366). Exact-tree receipts need no recheck. -/
+permits that reuse by spec/R8-optimistic-landing/README.md R8 (#366). Exact-tree receipts need no recheck. -/
 def SoundPolicy (policy : Input → Bool) : Prop :=
   ∀ i, gate i = none → i.mergeClean = true → i.review = .beforeLand → i.mergeMode = false → i.tier ≠ .prose →
     i.baseMoved = true → i.landedSinceAllIndependent = false → i.receipt ≠ .sameTree → policy i = true
@@ -221,7 +221,7 @@ private theorem countP_le_of_imp (p q : Input → Bool) (hpq : ∀ i, p i = true
       simp [hp]; split <;> omega
 /-- **optimal**: our re-check policy is sound, and no sound policy asks for
 fewer new receipts on any history of land requests. -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem optimal :
     SoundPolicy oursRecheck ∧
     ∀ policy, SoundPolicy policy → ∀ requests : List Input,

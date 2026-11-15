@@ -1,5 +1,5 @@
 /-!
-# Design proof: saved overlap targets (SPEC.md R8 step 4)
+# Design proof: saved overlap targets (spec/R8-optimistic-landing/README.md R8 step 4)
 
 Models `load_or_capture` in `crates/rosen-server/src/landing/overlap_targets.rs`
 and the post-land order in `landing/service.rs`: capture the overlap targets,
@@ -123,13 +123,13 @@ private theorem unchanged_crashes (overlaps : List (Nat × Nat) → List Nat)
     obtain ⟨hh, hc⟩ := unchanged_prefix overlaps landed k s
     simpa [List.foldl_cons, hh, hc] using ih (runPrefix overlaps landed k s)
 
-/-- **correct** (SPEC.md R8 step 4): however many times post-land work
+/-- **correct** (spec/R8-optimistic-landing/README.md R8 step 4): however many times post-land work
 crashes after any step, the completed run stores exactly the overlap set of
 the claims as they stood before release, keeps that set across replays,
 including an empty selection, releases the landed change's claims, and
 probes exactly that set in its final pass, routes exactly its conflicting
 targets, and leaves every head unchanged. -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem correct (overlaps : List (Nat × Nat) → List Nat) (landed : Nat)
     (crashes : List Nat) (claims : List (Nat × Nat)) (done heads conflicting : List Nat) :
     let t := recover overlaps landed crashes ⟨claims, [], done, [], conflicting, heads⟩
@@ -171,11 +171,11 @@ capture, nothing on a replay. -/
 def writes (overlaps : List (Nat × Nat) → List Nat) (s : State) : Nat :=
   if decode s.rows = none then (encode (overlaps s.claims)).length else 0
 
-/-- **cost_bound** (SPEC.md R8 step 4). Cost model: durable rows written
+/-- **cost_bound** (spec/R8-optimistic-landing/README.md R8 step 4). Cost model: durable rows written
 when saving the selection; reads of claims and edits are excluded. The first
 capture writes one row per target and one marker only for an empty
 selection, so at most `max 1 n` rows for `n` targets. A replay writes none. -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem cost_bound (overlaps : List (Nat × Nat) → List Nat) (s : State) :
     writes overlaps s ≤ max 1 (overlaps s.claims).length ∧
     (decode s.rows ≠ none → writes overlaps s = 0) := by
@@ -188,14 +188,14 @@ theorem cost_bound (overlaps : List (Nat × Nat) → List Nat) (s : State) :
     · simp
   · intro h; simp [h]
 
-/-- **optimal** (SPEC.md R8 step 4). Cost model as in `cost_bound`. The
+/-- **optimal** (spec/R8-optimistic-landing/README.md R8 step 4). Cost model as in `cost_bound`. The
 class of alternatives: any row representation of a selection where each row
 holds at most one change ID (`Row`), that reads an empty store as "no
 selection yet" (the state before capture), that recovers every selection
 exactly, including the empty one, and whose decoded IDs each appear in their
 own row (IDs are stored, not packed or computed). No such representation
 stores a selection of distinct targets in fewer rows. -/
--- SPEC.md §R8
+-- spec/R8-optimistic-landing/README.md R8
 theorem optimal (enc : List Nat → List Row) (dec : List Row → Option (List Nat))
     (empty : dec [] = none) (exact : ∀ l, dec (enc l) = some l)
     (stored : ∀ rows, ∀ t ∈ (dec rows).getD [], some t ∈ rows)

@@ -1,0 +1,1 @@
+- New changes and warm pools use the current base in `reach` mode, or the last-built starting commit in `merge` mode (R12).

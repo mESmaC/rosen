@@ -4,7 +4,7 @@ import Claims.Design
 # Fixture table for path claims
 
 Instantiates the design model with real globs. Overlap here is the meaning
-SPEC.md R6 gives it, checked by brute force: some path, up to `maxLen`
+spec/R6-path-claims-and-edit-tracking.md R6 gives it, checked by brute force: some path, up to `maxLen`
 characters over `a`, `b` and `/`, matches both patterns. The Rust
 implementation decides overlap with a product automaton instead, so the
 table checks it against this independent definition.

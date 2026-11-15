@@ -1,5 +1,5 @@
 /-!
-# Design proof: post-land batches (SPEC.md R12 "Batches")
+# Design proof: post-land batches (spec/R12-post-land-verification.md R12 "Batches")
 
 Models `post_land::store::passed` and the offer in `post_land.rs`. History
 positions are positive and zero denotes no green commit. A passing run of
@@ -15,11 +15,11 @@ def advance (green tested : Nat) : Nat := max green tested
 def offer (green tip : Nat) : Option Nat :=
   if green < tip then some tip else none
 
-/-- **correct** (SPEC.md R12 Batches): a pass makes green exactly the union
+/-- **correct** (spec/R12-post-land-verification.md R12 Batches): a pass makes green exactly the union
 of the existing prefix and the tested prefix, never a later land. Offers
 choose the newest land beyond green. This holds for arbitrary history
 lengths and for stale runs that finish after a newer one. -/
--- SPEC.md §R12
+-- spec/R12-post-land-verification.md R12
 theorem correct (green tested tip pos : Nat) :
     (pos ≤ advance green tested ↔ pos ≤ green ∨ pos ≤ tested) ∧
     green ≤ advance green tested ∧ tested ≤ advance green tested ∧
@@ -36,7 +36,7 @@ abbrev Policy := Nat → Nat → Option Nat
 def ours : Policy := offer
 
 /-- One checker request, whose run passes (the batch case; a failing run
-starts bisection, SPEC.md R12 "Failure and bisect"). -/
+starts bisection, spec/R12-post-land-verification.md R12 "Failure and bisect"). -/
 def serve (policy : Policy) (green tip : Nat) : Nat :=
   match policy green tip with
   | some tested => advance green tested
@@ -51,11 +51,11 @@ def requestsUntil (policy : Policy) (pos : Nat) : Nat → List Nat → Option Na
     | [] => none
     | tip :: rest => (requestsUntil policy pos (serve policy green tip) rest).map (· + 1)
 
-/-- **cost_bound** (SPEC.md R12 Batches). Cost model: checker requests,
+/-- **cost_bound** (spec/R12-post-land-verification.md R12 Batches). Cost model: checker requests,
 each one full post-land test run, until a land is green; runs pass. A land
 at position `pos` is green after the first request that sees it landed:
 if request `i` sees a tip at or beyond `pos`, at most `i + 1` runs. -/
--- SPEC.md §R12
+-- spec/R12-post-land-verification.md R12
 theorem cost_bound (pos : Nat) :
     ∀ (tips : List Nat) (green i : Nat) (h : i < tips.length), pos ≤ tips[i] →
       ∃ n, requestsUntil ours pos green tips = some n ∧ n ≤ i + 1
@@ -93,11 +93,11 @@ private theorem serve_le (alt : Policy) (h : Landed alt) (g g' tip : Nat) (hg : 
     simp [advance]; omega
   · omega
 
-/-- **optimal** (SPEC.md R12 Batches). Cost model as in `cost_bound`. For
+/-- **optimal** (spec/R12-post-land-verification.md R12 Batches). Cost model as in `cost_bound`. For
 every schedule of checker requests and every land, no policy that offers
 only landed commits makes that land green in fewer runs than offering the
 newest land: ours keeps a green prefix at least as long after every request. -/
--- SPEC.md §R12
+-- spec/R12-post-land-verification.md R12
 theorem optimal (alt : Policy) (landed : Landed alt) (pos : Nat) :
     ∀ (tips : List Nat) (green green' n : Nat), green' ≤ green →
       requestsUntil alt pos green' tips = some n →

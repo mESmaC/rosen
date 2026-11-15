@@ -1,5 +1,5 @@
 /-!
-# Design proof: auto-revert (SPEC.md R12)
+# Design proof: auto-revert (spec/R12-post-land-verification.md R12)
 Atomic inverse land. The immutable object merge is the
 existing ThreeWayMerge model; this model covers CAS, idempotence and reopening. -/
 namespace AutoRevert
@@ -27,7 +27,7 @@ def apply (s : State) (expected culprit change commit : Nat) (clean : Bool)
       output := fun c => if c = change then output else s.output c }
   else none
 
-/-- **correct** (SPEC.md R12 Auto-revert): exactly the successful inverse CAS reopens its culprit, records its
+/-- **correct** (spec/R12-post-land-verification.md R12 Auto-revert): exactly the successful inverse CAS reopens its culprit, records its
 output, preserves owners/snapshots and every other change, and prevents replay. -/
 private theorem apply_correct (s : State) (expected culprit change commit : Nat) (clean : Bool)
     (out : String) :
@@ -52,7 +52,7 @@ private theorem apply_correct (s : State) (expected culprit change commit : Nat)
     · intro t h
       contradiction
 
-/-- **correct** (SPEC.md R12 Auto-revert): the original preservation/replay
+/-- **correct** (spec/R12-post-land-verification.md R12 Auto-revert): the original preservation/replay
 guarantee holds, and the preparation gate permits that exact apply result
 only after original post-land recovery has finished. -/
 theorem correct (s : State) (expected culprit change commit : Nat) (clean : Bool)

@@ -1,0 +1,1 @@
+- Snapshots and commits belong to the change and are never rewritten.
