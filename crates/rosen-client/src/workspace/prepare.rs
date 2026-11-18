@@ -1,21 +1,19 @@
 //! Running the project's prepare commands in a ready workspace (SPEC R3).
 //!
 //! The pool worker is the only caller, and it prepares one workspace at a
-//! time. A machine runs one daemon per project, so each prepare also takes a
-//! turn in the machine's run queue, in its last class: two projects' prepares
-//! never run at once, and none starts while a landing check, an agent's
-//! build or the tests after a land are running or waiting. Each command runs
-//! at below-normal priority, so a more important run that starts beside a
-//! prepare gets the cores.
+//! time. Daemons share the machine's queue for prepares. Each command runs
+//! at below-normal priority, inside the prepare's resource budget.
 
 use std::path::Path;
+use std::process::ExitStatus;
+#[cfg(not(windows))]
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+#[cfg(not(windows))]
+use tokio::{io::AsyncReadExt, process::Command};
 
-use crate::run_queue::{self, RunClass, RunQueue, Turn};
+use crate::run_queue::{self, RunBudget, RunClass, RunQueue, Turn, THREAD_VARIABLES};
 
 /// A prepare that has not finished in this long is treated as failed, so a
 /// hung command cannot stop the pool worker from following the base.
@@ -31,83 +29,123 @@ const OUTPUT_TAIL: usize = 4096;
 /// Runs every command in order from `root`, stopping at the first failure.
 /// The error names the command and ends with the tail of its output.
 pub(super) async fn run(root: &Path, commands: &[String]) -> Result<(), String> {
-    let _turn = match commands.is_empty() {
-        true => None,
-        false => turn(root).await,
-    };
+    if commands.is_empty() {
+        return Ok(());
+    }
+    let turn = turn(root)
+        .await
+        .map_err(|error| format!("prepare queue: {error}"))?;
+    let budget = turn
+        .as_ref()
+        .map_or_else(|| RunClass::Prepare.budget(), Turn::budget);
     for command in commands {
-        run_one(root, command)
+        run_one(root, command, budget)
             .await
             .map_err(|why| format!("prepare command `{command}` in {}: {why}", root.display()))?;
     }
     Ok(())
 }
 
-/// This prepare's turn in the machine's run queue. `None` when the queue is
-/// off for this process or can't be used: it only schedules, so a prepare
-/// then runs without waiting.
-async fn turn(root: &Path) -> Option<Turn> {
+/// Library processes can embed the pool without enlisting in the daemon queue.
+async fn turn(root: &Path) -> std::io::Result<Option<Turn>> {
     if !run_queue::prepares_queue() {
-        return None;
+        return Ok(None);
     }
     let note = format!("prepare {}", root.display());
-    let waiter = RunQueue::machine()
-        .ok()?
-        .wait(RunClass::Prepare, &note)
-        .ok()?;
+    let waiter = RunQueue::machine()?.wait(RunClass::Prepare, &note)?;
     loop {
-        match waiter.try_start() {
-            Ok(Some(turn)) => return Some(turn),
-            // Dropping this future leaves the line: the waiter goes with it.
-            Ok(None) => tokio::time::sleep(WAIT_POLL).await,
-            Err(_) => return None,
+        if let Some(turn) = waiter.try_start()? {
+            return Ok(Some(turn));
         }
+        // Dropping this future leaves the line: the waiter goes with it.
+        tokio::time::sleep(WAIT_POLL).await;
     }
 }
 
-async fn run_one(root: &Path, command: &str) -> Result<(), String> {
-    let mut child = shell(command)
-        .current_dir(root)
-        // A prepare command that runs `rosen run` runs in this prepare's turn.
-        .env(run_queue::HELD_ENV, RunClass::Prepare.name())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    // Declared after `child`, so it drops first, while the child's handle
-    // still keeps its process ID from being reused.
-    let tree = TreeGuard(child.id());
-    let (mut stdout, mut stderr) = (child.stdout.take(), child.stderr.take());
-    // Both pipes are drained while the command runs, so a chatty build never
-    // blocks on a full pipe.
-    let finished = async {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let read_out = read_all(stdout.as_mut(), &mut out);
-        let read_err = read_all(stderr.as_mut(), &mut err);
-        let (status, _, _) = tokio::join!(child.wait(), read_out, read_err);
-        out.extend_from_slice(&err);
-        (status, out)
-    };
-    let (status, output) = tokio::time::timeout(COMMAND_LIMIT, finished)
+async fn run_one(root: &Path, command: &str, budget: RunBudget) -> Result<(), String> {
+    let (status, output) = tokio::time::timeout(COMMAND_LIMIT, run_shell(root, command, budget))
         .await
         .map_err(|_| {
             format!(
                 "did not finish within {} minutes",
                 COMMAND_LIMIT.as_secs() / 60
             )
-        })?;
-    tree.finished();
-    let status = status.map_err(|error| error.to_string())?;
+        })?
+        .map_err(|error| error.to_string())?;
     if status.success() {
         return Ok(());
     }
-    let start = output.len().saturating_sub(OUTPUT_TAIL);
     Err(format!(
         "{status}\n{}",
-        String::from_utf8_lossy(&output[start..]).trim_end()
+        String::from_utf8_lossy(&output).trim_end()
     ))
+}
+
+#[cfg(windows)]
+async fn run_shell(
+    root: &Path,
+    command: &str,
+    budget: RunBudget,
+) -> std::io::Result<(ExitStatus, Vec<u8>)> {
+    use rosen_platform::run_tree::ProcessTree;
+    use std::ffi::OsStr;
+    use std::io::Read;
+
+    let jobs = budget.jobs.to_string();
+    let mut environment = vec![(
+        OsStr::new(run_queue::HELD_ENV),
+        OsStr::new(RunClass::Prepare.name()),
+    )];
+    environment.extend(THREAD_VARIABLES.map(|name| (OsStr::new(name), OsStr::new(&jobs))));
+    let (tree, mut pipe) = ProcessTree::spawn_shell(root, command, &environment, budget.memory)?;
+    let output = tokio::task::spawn_blocking(move || {
+        let mut tail = Vec::new();
+        let mut buffer = [0; OUTPUT_TAIL];
+        while let Ok(size @ 1..) = pipe.read(&mut buffer) {
+            keep_tail(&mut tail, &buffer[..size]);
+        }
+        tail
+    });
+    let status = loop {
+        if let Some(status) = tree.try_wait()? {
+            break status;
+        }
+        tokio::time::sleep(run_queue::POLL).await;
+    };
+    Ok((status, output.await.map_err(std::io::Error::other)?))
+}
+
+#[cfg(not(windows))]
+async fn run_shell(
+    root: &Path,
+    command: &str,
+    budget: RunBudget,
+) -> std::io::Result<(ExitStatus, Vec<u8>)> {
+    let jobs = budget.jobs.to_string();
+    let mut child = shell(command)
+        .current_dir(root)
+        // A prepare command that runs `rosen run` runs in this prepare's turn.
+        .env(run_queue::HELD_ENV, RunClass::Prepare.name())
+        .envs(THREAD_VARIABLES.map(|name| (name, &jobs)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    // Drop the process group guard while the child still owns its PID.
+    let tree = TreeGuard(child.id());
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    let (status, mut out, err) = tokio::join!(child.wait(), read_tail(stdout), read_tail(stderr));
+    let status = status?;
+    tree.finished();
+    keep_tail(&mut out, &err);
+    Ok((status, out))
+}
+
+fn keep_tail(tail: &mut Vec<u8>, bytes: &[u8]) {
+    let discard = (tail.len() + bytes.len()).saturating_sub(OUTPUT_TAIL);
+    tail.drain(..discard);
+    tail.extend_from_slice(bytes);
 }
 
 /// Ends a prepare's whole process tree if dropped before it finished: at
@@ -115,14 +153,17 @@ async fn run_one(root: &Path, command: &str) -> Result<(), String> {
 /// ends only the shell, and a build it started, such as cargo or rustc,
 /// would keep running with files open in the workspace, so removing the
 /// slot or template would fail until it exited (issue #169).
+#[cfg(not(windows))]
 struct TreeGuard(Option<u32>);
 
+#[cfg(not(windows))]
 impl TreeGuard {
     fn finished(mut self) {
         self.0 = None;
     }
 }
 
+#[cfg(not(windows))]
 impl Drop for TreeGuard {
     fn drop(&mut self) {
         if let Some(pid) = self.0 {
@@ -136,15 +177,6 @@ impl Drop for TreeGuard {
     }
 }
 
-/// `/T` finds the shell's descendants by parent process ID, which holds
-/// while the shell still waits on them, as it does at the time limit.
-#[cfg(windows)]
-fn kill_tree(pid: u32) -> std::process::Command {
-    let mut kill = std::process::Command::new("taskkill");
-    kill.args(["/F", "/T", "/PID", &pid.to_string()]);
-    kill
-}
-
 /// The shell leads its own process group (see `shell`), which everything
 /// it starts joins.
 #[cfg(not(windows))]
@@ -154,22 +186,16 @@ fn kill_tree(pid: u32) -> std::process::Command {
     kill
 }
 
-async fn read_all<R: AsyncReadExt + Unpin>(pipe: Option<&mut R>, into: &mut Vec<u8>) {
-    if let Some(pipe) = pipe {
-        let _ = pipe.read_to_end(into).await;
+#[cfg(not(windows))]
+async fn read_tail<R: AsyncReadExt + Unpin>(pipe: Option<R>) -> Vec<u8> {
+    let mut tail = Vec::new();
+    if let Some(mut pipe) = pipe {
+        let mut buffer = [0; OUTPUT_TAIL];
+        while let Ok(size @ 1..) = pipe.read(&mut buffer).await {
+            keep_tail(&mut tail, &buffer[..size]);
+        }
     }
-}
-
-#[cfg(windows)]
-fn shell(command: &str) -> Command {
-    // BELOW_NORMAL_PRIORITY_CLASS; children such as rustc inherit it.
-    const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
-    let mut shell = Command::new("cmd");
-    shell
-        .arg("/C")
-        .raw_arg(command)
-        .creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
-    shell
+    tail
 }
 
 #[cfg(not(windows))]

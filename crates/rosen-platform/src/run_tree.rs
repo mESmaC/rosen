@@ -2,7 +2,8 @@
 //! belongs only to the supervising client; closing it kills every member,
 //! including when Windows closes it after a forced client exit.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
 use std::io;
 use std::marker::PhantomData;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -13,6 +14,7 @@ use std::{ptr, thread, time::Duration};
 
 use windows_sys::Win32::Foundation::{
     DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -21,14 +23,14 @@ use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
     InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject,
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW,
+    BELOW_NORMAL_PRIORITY_CLASS, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 use crate::process::{command_line, terminated};
@@ -48,18 +50,82 @@ impl ProcessTree {
         program: &Path,
         args: &[&OsStr],
         environment: &[(&OsStr, &OsStr)],
+        memory_limit: u64,
     ) -> io::Result<Self> {
-        let job = Job::new()?;
-        let process = create_process(&job.handle, program, args, &environment_block(environment)?)?;
+        let job = Job::new(memory_limit)?;
+        let application = terminated(program.as_os_str())?;
+        let mut line = command_line(program.as_os_str(), args)?;
+        let environment = environment_block(environment)?;
+        let settings = LaunchSettings {
+            application: &application,
+            environment: &environment,
+            directory: ptr::null(),
+            flags: 0,
+        };
+        let process = create_process(&job.handle, &mut line, &settings, standard_handles()?)?;
         Ok(Self { job, process })
+    }
+
+    /// Runs a prepare script through cmd.exe with a bounded job and a pipe
+    /// for combined output. The caller drains the pipe while the job runs.
+    pub fn spawn_shell(
+        directory: &Path,
+        script: &str,
+        environment: &[(&OsStr, &OsStr)],
+        memory_limit: u64,
+    ) -> io::Result<(Self, io::PipeReader)> {
+        let system_root = std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::other("SystemRoot is not set"))?;
+        let program = Path::new(&system_root).join("System32").join("cmd.exe");
+        let application = terminated(program.as_os_str())?;
+        let mut line = OsString::from(r#""cmd.exe" /D /S /C ""#);
+        line.push(script);
+        line.push("\"");
+        let mut line = terminated(&line)?;
+        let directory = terminated(directory.as_os_str())?;
+        let environment = environment_block(environment)?;
+        let settings = LaunchSettings {
+            application: &application,
+            environment: &environment,
+            directory: directory.as_ptr(),
+            flags: BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW,
+        };
+        let (reader, writer) = io::pipe()?;
+        let input = File::open("NUL")?;
+        let handles = [
+            Some(inherit_handle(input.as_raw_handle())?),
+            Some(inherit_handle(writer.as_raw_handle())?),
+            Some(inherit_handle(writer.as_raw_handle())?),
+        ];
+        let job = Job::new(memory_limit)?;
+        let process = create_process(&job.handle, &mut line, &settings, handles)?;
+        Ok((Self { job, process }, reader))
     }
 
     /// Keeps ownership until the entire tree exits, returning the launcher's
     /// status. A failed launcher stops its remaining descendants as well.
     pub fn wait(self) -> io::Result<ExitStatus> {
+        let status = self
+            .exit_status(INFINITE)?
+            .expect("infinite wait cannot time out");
+        self.job.wait_empty()?;
+        Ok(status)
+    }
+
+    /// Returns the status once the entire tree has stopped.
+    pub fn try_wait(&self) -> io::Result<Option<ExitStatus>> {
+        match self.exit_status(0)? {
+            Some(status) if self.job.active()? == 0 => Ok(Some(status)),
+            _ => Ok(None),
+        }
+    }
+
+    fn exit_status(&self, timeout: u32) -> io::Result<Option<ExitStatus>> {
         // SAFETY: this owned process handle remains live throughout the wait.
-        if unsafe { WaitForSingleObject(self.process.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0 {
-            return Err(io::Error::last_os_error());
+        match unsafe { WaitForSingleObject(self.process.as_raw_handle(), timeout) } {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => return Ok(None),
+            _ => return Err(io::Error::last_os_error()),
         }
         let mut code = 0;
         // SAFETY: the handle is live and code is a writable out parameter.
@@ -67,11 +133,10 @@ impl ProcessTree {
             return Err(io::Error::last_os_error());
         }
         let status = ExitStatus::from_raw(code);
-        if !status.success() {
+        if !status.success() && self.job.active()? != 0 {
             self.job.terminate()?;
         }
-        self.job.wait_empty()?;
-        Ok(status)
+        Ok(Some(status))
     }
 }
 
@@ -80,7 +145,8 @@ struct Job {
 }
 
 impl Job {
-    fn new() -> io::Result<Self> {
+    fn new(memory_limit: u64) -> io::Result<Self> {
+        let memory_limit = usize::try_from(memory_limit).unwrap_or(usize::MAX);
         // SAFETY: null attributes/name create a private, non-inheritable job.
         let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
         if raw.is_null() {
@@ -91,7 +157,9 @@ impl Job {
             handle: unsafe { OwnedHandle::from_raw_handle(raw) },
         };
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY;
+        limits.JobMemoryLimit = memory_limit;
         // SAFETY: the initialized buffer has the layout/size required by this
         // information class, and the handle is live. No breakaway is allowed.
         let set = unsafe {
@@ -187,43 +255,52 @@ fn standard_handles() -> io::Result<[Option<OwnedHandle>; 3]> {
             .zip([STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE])
     {
         // SAFETY: these calls take only well-defined standard-handle constants.
-        let (source, process) = unsafe { (GetStdHandle(which), GetCurrentProcess()) };
+        let source = unsafe { GetStdHandle(which) };
         if source.is_null() || source == INVALID_HANDLE_VALUE {
             continue;
         }
-        let mut duplicate = ptr::null_mut();
-        // SAFETY: the source belongs to this process, duplicate is writable,
-        // and the returned handle is owned here. Only these duplicates cross
-        // the process boundary; the job and queue handles never do.
-        if unsafe {
-            DuplicateHandle(
-                process,
-                source,
-                process,
-                &mut duplicate,
-                0,
-                1,
-                DUPLICATE_SAME_ACCESS,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: DuplicateHandle returned a new owned handle.
-        *slot = Some(unsafe { OwnedHandle::from_raw_handle(duplicate) });
+        *slot = Some(inherit_handle(source)?);
     }
     Ok(handles)
 }
 
+fn inherit_handle(source: HANDLE) -> io::Result<OwnedHandle> {
+    let mut duplicate = ptr::null_mut();
+    // SAFETY: the source belongs to this process, duplicate is writable,
+    // and the returned handle is owned here. Only these duplicates cross
+    // the process boundary; the job and queue handles never do.
+    if unsafe {
+        let process = GetCurrentProcess();
+        DuplicateHandle(
+            process,
+            source,
+            process,
+            &mut duplicate,
+            0,
+            1,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: DuplicateHandle returned a new owned handle.
+    Ok(unsafe { OwnedHandle::from_raw_handle(duplicate) })
+}
+
+struct LaunchSettings<'a> {
+    application: &'a [u16],
+    environment: &'a [u16],
+    directory: *const u16,
+    flags: u32,
+}
+
 fn create_process(
     job: &OwnedHandle,
-    program: &Path,
-    args: &[&OsStr],
-    environment: &[u16],
+    line: &mut [u16],
+    settings: &LaunchSettings<'_>,
+    handles: [Option<OwnedHandle>; 3],
 ) -> io::Result<OwnedHandle> {
-    let application = terminated(program.as_os_str())?;
-    let mut line = command_line(program.as_os_str(), args)?;
-    let handles = standard_handles()?;
     let raw_handles = handles.each_ref().map(|handle| {
         handle
             .as_ref()
@@ -249,19 +326,12 @@ fn create_process(
         startup.StartupInfo.hStdError,
     ] = raw_handles;
     startup.lpAttributeList = attributes.pointer();
-    launch(
-        &application,
-        &mut line,
-        environment,
-        &startup,
-        !inherited.is_empty(),
-    )
+    launch(line, settings, &startup, !inherited.is_empty())
 }
 
 fn launch(
-    application: &[u16],
     line: &mut [u16],
-    environment: &[u16],
+    settings: &LaunchSettings<'_>,
     startup: &STARTUPINFOEXW,
     inherit: bool,
 ) -> io::Result<OwnedHandle> {
@@ -272,14 +342,14 @@ fn launch(
     // the non-inheritable job handle. Job assignment happens inside creation.
     let created = unsafe {
         CreateProcessW(
-            application.as_ptr(),
+            settings.application.as_ptr(),
             line.as_mut_ptr(),
             ptr::null(),
             ptr::null(),
             i32::from(inherit),
-            CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-            environment.as_ptr().cast(),
-            ptr::null(),
+            CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | settings.flags,
+            settings.environment.as_ptr().cast(),
+            settings.directory,
             &startup.StartupInfo,
             &mut info,
         )

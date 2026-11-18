@@ -1,3 +1,3 @@
-- Commands started by `rosen run` default `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS` and `LEAN_NUM_THREADS` independently to `max(2, logical cores / heavy slots)`, rounding division down.
-  Heavy slots are the machine's configured `landing` plus `build` counts.
-  Each value the caller set is preserved; defaults are calculated when the command starts.
+- Each turn gets at least one job and up to half of the machine's logical cores, rounded down, capped at two jobs for prepare and five for all other classes.
+  The turn sets `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`, and `LEAN_NUM_THREADS` to this allocation, and nested runs inherit it.
+  The queue charges one GiB per job plus one GiB for other processes in the turn.

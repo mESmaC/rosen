@@ -68,6 +68,7 @@ pub struct ServerState {
     /// Shared by workspace reads, lists, diffs and writes across all transports.
     pub workspace_io: Arc<tokio::sync::Semaphore>,
     pub project_config: project_config::ConfigService,
+    pub(crate) transfers: load_limits::TransferLimits,
     pub(crate) overlap_edits: overlaps::edits::Cache,
     pub(crate) merge_results: history::merge::MergeCache,
     /// Wakes the mirror task when the base appears without a land, as an
@@ -100,6 +101,7 @@ impl ServerState {
             history: history::HistoryService::new(),
             workspace_io: load_limits::workspace_io(cap),
             project_config: project_config::ConfigService::new(config.clone()),
+            transfers: load_limits::TransferLimits::default(),
             overlap_edits: overlaps::edits::Cache::default(),
             merge_results: history::merge::MergeCache::default(),
             events: EventLog::open(config.metadata_path()),

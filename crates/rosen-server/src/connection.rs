@@ -6,9 +6,10 @@
 //! so frames from requests and events never interleave mid-frame.
 
 use crate::events::{EventError, Page};
+use crate::load_limits::{large_request, Charged, TransferLimits, TRANSFER_TIMEOUT};
 use crate::{rpc, ServerState, SERVER_NAME};
 use rosen_core::AgentId;
-use rosen_protocol::frame::{decode_body, read_frame, read_frame_body, write_frame};
+use rosen_protocol::frame::{decode_body, write_frame};
 use rosen_protocol::{
     negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Outcome, Request,
     RequestEnvelope, ServerFrame, SUPPORTED_VERSIONS,
@@ -28,14 +29,14 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Frames queued for the writer. Bounded so a client that stops reading slows
 /// its own requests and events instead of growing server memory.
-const OUTBOX_CAPACITY: usize = 256;
+const OUTBOX_CAPACITY: usize = 16;
 
 /// Requests one connection may have running at once. The outbox alone does
 /// not bound memory: a request whose answer cannot be queued still holds its
 /// task. With this cap the reader stops taking frames once every slot is
 /// busy, so a client that never reads its answers is pushed back through the
 /// transport instead of making the server spawn a task per unread request.
-const MAX_IN_FLIGHT: usize = 256;
+const MAX_IN_FLIGHT: usize = 16;
 
 /// Events read from the log per query, so a subscriber far behind catches
 /// up in bounded steps instead of loading its whole backlog at once.
@@ -49,7 +50,7 @@ const READ_RETRY: Duration = Duration::from_secs(1);
 /// none, so its stream checks again before sending, at most this often.
 const CREDENTIAL_RECHECK: Duration = Duration::from_secs(1);
 
-type Outbox = mpsc::Sender<ServerFrame>;
+type Outbox = mpsc::Sender<Charged<ServerFrame>>;
 
 /// How a peer reached the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +91,7 @@ pub async fn serve_with_access(
             }
         }
     };
-    match handshake(&mut reader, &mut writer, admit).await {
+    match handshake(&mut reader, &mut writer, &state.transfers, admit).await {
         Ok(true) => {}
         Ok(false) => return,
         Err(err) => {
@@ -99,7 +100,7 @@ pub async fn serve_with_access(
         }
     }
     let (outbox, inbox) = mpsc::channel(OUTBOX_CAPACITY);
-    let writer_task = tokio::spawn(write_frames(writer, inbox));
+    let mut writer_task = tokio::spawn(write_frames(writer, inbox));
     let mut session = Session {
         state,
         access,
@@ -114,8 +115,14 @@ pub async fn serve_with_access(
         refused: Arc::new(Notify::new()),
         machine_agent: None,
     };
-    session.read_frames(&mut reader).await;
+    let writer_finished = tokio::select! {
+        _ = session.read_frames(&mut reader) => false,
+        _ = &mut writer_task => true,
+    };
     session.close();
+    if writer_finished {
+        return;
+    }
     // The writer ends once every queued frame is written and every sender (this
     // session's and any in-flight request's) is gone.
     let _ = writer_task.await;
@@ -127,11 +134,14 @@ pub async fn serve_with_access(
 pub(crate) async fn handshake<Admit: Future<Output = bool>>(
     reader: &mut ReadHalf<BoxStream>,
     writer: &mut WriteHalf<BoxStream>,
+    transfers: &TransferLimits,
     admit: impl FnOnce(Option<String>) -> Admit,
 ) -> io::Result<bool> {
-    let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame::<_, ClientFrame>(reader))
+    let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, transfers.read_body(reader))
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no hello within the timeout"))??;
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "no hello within the timeout"))??
+        .map(|body| decode_body::<ClientFrame>(&body.value))
+        .transpose()?;
     let reply = match hello {
         None => return Ok(false),
         Some(ClientFrame::Hello {
@@ -166,9 +176,14 @@ fn reject(reason: String) -> ServerFrame {
     }
 }
 
-async fn write_frames(mut writer: WriteHalf<BoxStream>, mut inbox: mpsc::Receiver<ServerFrame>) {
+async fn write_frames(
+    mut writer: WriteHalf<BoxStream>,
+    mut inbox: mpsc::Receiver<Charged<ServerFrame>>,
+) {
     while let Some(frame) = inbox.recv().await {
-        if write_frame(&mut writer, &frame).await.is_err() {
+        let written =
+            tokio::time::timeout(TRANSFER_TIMEOUT, write_frame(&mut writer, &frame.value));
+        if !matches!(written.await, Ok(Ok(()))) {
             // The client is gone; dropping the receiver fails every pending send.
             return;
         }
@@ -205,7 +220,7 @@ impl Session {
             // The session never closes its semaphore, so this cannot fail.
             let Ok(permit) = permit else { return };
             let read = tokio::select! {
-                read = read_frame_body(reader) => read,
+                read = self.state.transfers.read_body(reader) => read,
                 _ = self.state.shutdown_requested() => return,
                 _ = self.refused.notified() => return,
             };
@@ -217,7 +232,7 @@ impl Session {
                     return;
                 }
             };
-            if !self.handle_frame(&body, permit).await {
+            if !self.handle_frame(body, permit).await {
                 return;
             }
         }
@@ -226,7 +241,7 @@ impl Session {
     /// Acts on one frame. A request keeps `permit` until it is answered; any
     /// other frame releases it. Returns false when the client broke the
     /// protocol and the connection should close.
-    async fn handle_frame(&mut self, body: &[u8], permit: OwnedSemaphorePermit) -> bool {
+    async fn handle_frame(&mut self, body: Charged<Vec<u8>>, permit: OwnedSemaphorePermit) -> bool {
         // SPEC R14: every network request rechecks the machine's status, so a
         // revoked machine's next frame is refused. `dispatch` and `subscribe`
         // rely on this check rather than reading SQLite again.
@@ -235,7 +250,7 @@ impl Session {
                 return false;
             }
         }
-        match decode_body::<ClientFrame>(body) {
+        match decode_body::<ClientFrame>(&body.value) {
             // Only the server's own machine may stop it or use its warm pool
             // (R3: each daemon's pool serves its own machine). A cache answers
             // these for its clients itself, so this only refuses a stray peer.
@@ -250,10 +265,19 @@ impl Session {
                     id,
                     outcome: Outcome::Error(refused),
                 };
-                self.outbox.send(response).await.is_ok()
+                self.outbox.send(response.into()).await.is_ok()
             }
             Ok(ClientFrame::Request { id, request }) => {
-                self.dispatch(id, request, permit);
+                let work = if large_request(&request) {
+                    let slot = self.state.transfers.large_requests.clone().acquire_owned();
+                    tokio::select! {
+                        work = slot => work.ok(),
+                        _ = self.state.shutdown_requested() => return false,
+                    }
+                } else {
+                    None
+                };
+                self.dispatch(id, request, permit, body.permit, work);
                 true
             }
             Ok(ClientFrame::Subscribe { after, subscriber }) => {
@@ -264,11 +288,18 @@ impl Session {
                 true
             }
             Ok(ClientFrame::Hello { .. }) => false,
-            Err(err) => self.answer_undecodable(body, &err.to_string()).await,
+            Err(err) => self.answer_undecodable(&body.value, &err.to_string()).await,
         }
     }
 
-    fn dispatch(&self, id: u64, request: Request, permit: OwnedSemaphorePermit) {
+    fn dispatch(
+        &self,
+        id: u64,
+        request: Request,
+        permit: OwnedSemaphorePermit,
+        input: Option<OwnedSemaphorePermit>,
+        work: Option<OwnedSemaphorePermit>,
+    ) {
         let state = Arc::clone(&self.state);
         let outbox = self.outbox.clone();
         let credential = self.credential.clone();
@@ -291,7 +322,12 @@ impl Session {
                     "machine credential required or revoked",
                 ))
             };
-            let _ = outbox.send(ServerFrame::Response { id, outcome }).await;
+            drop(input);
+            let frame = Charged {
+                value: ServerFrame::Response { id, outcome },
+                permit: work,
+            };
+            let _ = outbox.send(frame).await;
             // Freed only once the answer is queued, so a request blocked on a
             // full outbox still counts against the connection.
             drop(permit);
@@ -319,7 +355,7 @@ impl Session {
         };
         let error = Outcome::Error(ErrorBody::new(code, reason));
         let response = ServerFrame::Response { id, outcome: error };
-        self.outbox.send(response).await.is_ok()
+        self.outbox.send(response.into()).await.is_ok()
     }
 
     /// Starts (or restarts from a new cursor) this connection's event stream.
@@ -461,7 +497,7 @@ async fn forward_events(
             return;
         }
         for event in page.events {
-            if outbox.send(ServerFrame::Event(event)).await.is_err() {
+            if outbox.send(ServerFrame::Event(event).into()).await.is_err() {
                 return;
             }
         }

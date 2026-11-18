@@ -5,11 +5,10 @@
 //! event stream is the server's stream for that client. Requests the cache
 //! makes itself (object fetches) share the link under their own IDs.
 
+use crate::load_limits::{Charged, TransferLimits, TRANSFER_TIMEOUT};
 use crate::network::{tls, UpstreamConfig};
 use crate::SERVER_NAME;
-use rosen_protocol::frame::{
-    decode_body, read_frame, read_frame_body, write_frame, write_frame_body,
-};
+use rosen_protocol::frame::{decode_body, read_frame, write_frame, write_frame_body};
 use rosen_protocol::{
     BoxStream, ClientFrame, ErrorBody, ErrorCode, Outcome, Request, ServerFrame, SUPPORTED_VERSIONS,
 };
@@ -19,14 +18,14 @@ use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{ReadHalf, WriteHalf};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 /// Encoded frame bodies bound for the local client.
-pub type Relay = mpsc::Sender<Vec<u8>>;
+pub type Relay = mpsc::Sender<Charged<Vec<u8>>>;
 
 /// Frames queued for the server. Bounded like the server's own outbox.
-const OUTBOX_CAPACITY: usize = 256;
+const OUTBOX_CAPACITY: usize = 16;
 
 /// Who is waiting for the answer to a request sent upstream.
 enum Waiter {
@@ -37,15 +36,16 @@ enum Waiter {
 }
 
 /// `None` once the link has closed, so no new waiter can be stranded.
-type Pending = Arc<Mutex<Option<HashMap<u64, Waiter>>>>;
+type Pending = Arc<Mutex<Option<HashMap<u64, (Waiter, OwnedSemaphorePermit)>>>>;
 
 pub struct UpstreamLink {
-    frames: mpsc::Sender<Vec<u8>>,
+    frames: mpsc::Sender<Charged<Vec<u8>>>,
     pending: Pending,
+    slots: Arc<Semaphore>,
     next_id: AtomicU64,
     subscribed: Arc<AtomicBool>,
     closed: watch::Receiver<bool>,
-    tasks: [JoinHandle<()>; 2],
+    task: JoinHandle<()>,
 }
 
 impl UpstreamLink {
@@ -57,6 +57,7 @@ impl UpstreamLink {
         config: &UpstreamConfig,
         relay: Relay,
         lost: Arc<watch::Sender<bool>>,
+        replies: Arc<TransferLimits>,
     ) -> io::Result<Self> {
         let stream = tls::connect(&config.address, config.fingerprint).await?;
         let (mut reader, mut writer) = tokio::io::split(stream);
@@ -79,21 +80,26 @@ impl UpstreamLink {
         let route = Router {
             pending: Arc::clone(&pending),
             relay,
+            replies,
             subscribed: Arc::clone(&subscribed),
             lost,
             closed: closed_tx,
         };
-        let tasks = [
-            tokio::spawn(write_bodies(writer, outbox)),
-            tokio::spawn(route.run(reader)),
-        ];
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = write_bodies(writer, outbox) => {}
+                _ = route.read_bodies(reader) => {}
+            }
+            route.close().await;
+        });
         Ok(Self {
             frames,
             pending,
+            slots: Arc::new(Semaphore::new(OUTBOX_CAPACITY)),
             next_id: AtomicU64::new(1),
             subscribed,
             closed,
-            tasks,
+            task,
         })
     }
 
@@ -104,13 +110,13 @@ impl UpstreamLink {
     /// Sends a request on the cache's own behalf and waits for its answer.
     pub async fn request(&self, request: Request) -> Outcome {
         let (sender, answer) = oneshot::channel();
-        let id = match self.register(Waiter::Internal(sender)) {
+        let id = match self.register(Waiter::Internal(sender)).await {
             Some(id) => id,
             None => return unavailable_outcome(),
         };
         let frame = ClientFrame::Request { id, request };
         let body = serde_json::to_vec(&frame).expect("a request always serialises");
-        if self.frames.send(body).await.is_err() {
+        if self.frames.send(body.into()).await.is_err() {
             return unavailable_outcome();
         }
         answer.await.unwrap_or_else(|_| unavailable_outcome())
@@ -119,13 +125,21 @@ impl UpstreamLink {
     /// Forwards a client's request frame as it arrived, under a link ID; the
     /// answer goes back to the client under `client_id`. Returns false when
     /// the link is closed and the client has not been answered.
-    pub async fn forward(&self, client_id: u64, mut frame: Value) -> bool {
-        let Some(id) = self.register(Waiter::Relay(client_id)) else {
+    pub async fn forward(&self, client_id: u64, mut frame: Charged<Value>) -> bool {
+        let Some(id) = self.register(Waiter::Relay(client_id)).await else {
             return false;
         };
-        frame["id"] = Value::from(id);
-        let body = serde_json::to_vec(&frame).expect("a JSON value always serialises");
-        if self.frames.send(body).await.is_ok() {
+        frame.value["id"] = Value::from(id);
+        let value = serde_json::to_vec(&frame.value).expect("a JSON value always serialises");
+        if self
+            .frames
+            .send(Charged {
+                value,
+                permit: frame.permit,
+            })
+            .await
+            .is_ok()
+        {
             return true;
         }
         // If the closing router already took the waiter, it answered the client.
@@ -137,24 +151,22 @@ impl UpstreamLink {
     }
 
     /// Forwards the client's subscribe frame; events then flow to the relay.
-    pub async fn subscribe(&self, body: Vec<u8>) -> bool {
+    pub async fn subscribe(&self, body: Charged<Vec<u8>>) -> bool {
         self.subscribed.store(true, Ordering::SeqCst);
         self.frames.send(body).await.is_ok()
     }
 
-    fn register(&self, waiter: Waiter) -> Option<u64> {
+    async fn register(&self, waiter: Waiter) -> Option<u64> {
+        let slot = self.slots.clone().acquire_owned().await.ok()?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        lock(&self.pending).as_mut()?.insert(id, waiter);
+        lock(&self.pending).as_mut()?.insert(id, (waiter, slot));
         Some(id)
     }
 }
 
 impl Drop for UpstreamLink {
     fn drop(&mut self) {
-        // The router holds the read half; stopping it closes the connection.
-        for task in &self.tasks {
-            task.abort();
-        }
+        self.task.abort();
     }
 }
 
@@ -185,10 +197,12 @@ async fn hello(
 
 pub(super) async fn write_bodies(
     mut writer: WriteHalf<BoxStream>,
-    mut outbox: mpsc::Receiver<Vec<u8>>,
+    mut outbox: mpsc::Receiver<Charged<Vec<u8>>>,
 ) {
     while let Some(body) = outbox.recv().await {
-        if write_frame_body(&mut writer, &body).await.is_err() {
+        let written =
+            tokio::time::timeout(TRANSFER_TIMEOUT, write_frame_body(&mut writer, &body.value));
+        if !matches!(written.await, Ok(Ok(()))) {
             return;
         }
     }
@@ -198,21 +212,28 @@ pub(super) async fn write_bodies(
 struct Router {
     pending: Pending,
     relay: Relay,
+    replies: Arc<TransferLimits>,
     subscribed: Arc<AtomicBool>,
     lost: Arc<watch::Sender<bool>>,
     closed: watch::Sender<bool>,
 }
 
 impl Router {
-    async fn run(self, mut reader: ReadHalf<BoxStream>) {
-        while let Ok(Some(body)) = read_frame_body(&mut reader).await {
+    async fn read_bodies(&self, mut reader: ReadHalf<BoxStream>) {
+        while let Ok(Some(body)) = self.replies.read_body(&mut reader).await {
             self.route(body).await;
         }
+    }
+
+    async fn close(self) {
         let stranded = lock(&self.pending).take().unwrap_or_default();
-        for waiter in stranded.into_values() {
+        for (waiter, _) in stranded.into_values() {
             // Internal waiters wake when their sender drops here.
             if let Waiter::Relay(client_id) = waiter {
-                let _ = self.relay.send(unavailable_response(client_id)).await;
+                let _ = self
+                    .relay
+                    .send(unavailable_response(client_id).into())
+                    .await;
             }
         }
         self.closed.send_replace(true);
@@ -221,8 +242,8 @@ impl Router {
         }
     }
 
-    async fn route(&self, body: Vec<u8>) {
-        let Ok(mut frame) = decode_body::<Value>(&body) else {
+    async fn route(&self, body: Charged<Vec<u8>>) {
+        let Ok(mut frame) = decode_body::<Value>(&body.value) else {
             return;
         };
         match frame["type"].as_str() {
@@ -234,13 +255,19 @@ impl Router {
                     .as_mut()
                     .and_then(|waiting| waiting.remove(&id));
                 match waiter {
-                    Some(Waiter::Internal(sender)) => {
-                        let _ = sender.send(internal_outcome(&body));
+                    Some((Waiter::Internal(sender), _slot)) => {
+                        let _ = sender.send(internal_outcome(&body.value));
                     }
-                    Some(Waiter::Relay(client_id)) => {
+                    Some((Waiter::Relay(client_id), _slot)) => {
                         frame["id"] = Value::from(client_id);
-                        let body = serde_json::to_vec(&frame).expect("JSON always serialises");
-                        let _ = self.relay.send(body).await;
+                        let value = serde_json::to_vec(&frame).expect("JSON always serialises");
+                        let _ = self
+                            .relay
+                            .send(Charged {
+                                value,
+                                permit: body.permit,
+                            })
+                            .await;
                     }
                     None => {}
                 }

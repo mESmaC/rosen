@@ -1,4 +1,4 @@
-//! Installed memory sizes the run queue's slots and reserve; current memory
+//! Installed memory sizes the run queue's reserve; current memory
 //! headroom gates new turns (SPEC R3 "Run queue").
 
 /// Bytes of physical memory the operating system can use, or `None` when it
@@ -45,7 +45,7 @@ pub fn physical_memory() -> Option<u64> {
     None
 }
 
-/// Free system commit on Windows, available memory elsewhere, in bytes.
+/// Available memory in bytes, also limited by free system commit on Windows.
 /// `None` means this OS cannot report it; it never means zero free bytes.
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -61,7 +61,8 @@ pub fn available_memory() -> Option<u64> {
     if unsafe { GetPerformanceInfo(&mut status, size) } == 0 {
         return None;
     }
-    let pages = status.CommitLimit.saturating_sub(status.CommitTotal);
+    let commit = status.CommitLimit.saturating_sub(status.CommitTotal);
+    let pages = commit.min(status.PhysicalAvailable);
     u64::try_from(pages)
         .ok()?
         .checked_mul(status.PageSize as u64)

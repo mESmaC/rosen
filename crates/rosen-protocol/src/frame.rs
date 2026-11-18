@@ -31,9 +31,8 @@ where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
-    let frame = encode_frame(message)?;
-    writer.write_all(&frame).await?;
-    writer.flush().await
+    let body = serde_json::to_vec(message).map_err(io::Error::other)?;
+    write_frame_body(writer, &body).await
 }
 
 /// Writes an already-encoded frame body and flushes it. A forwarding daemon
@@ -57,6 +56,14 @@ pub async fn read_frame_body<R>(reader: &mut R) -> io::Result<Option<Vec<u8>>>
 where
     R: AsyncRead + Unpin,
 {
+    match read_frame_len(reader).await? {
+        Some(len) => read_frame_payload(reader, len).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Reads and validates the length before the caller budgets space for the body.
+pub async fn read_frame_len<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Option<u32>> {
     let mut prefix = [0u8; 4];
     match reader.read_exact(&mut prefix).await {
         Ok(_) => {}
@@ -67,9 +74,20 @@ where
     if len > MAX_FRAME_LEN {
         return Err(too_large(u64::from(len)));
     }
+    Ok(Some(len))
+}
+
+/// Reads a frame's payload after its length has been read.
+pub async fn read_frame_payload<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    len: u32,
+) -> io::Result<Vec<u8>> {
+    if len > MAX_FRAME_LEN {
+        return Err(too_large(u64::from(len)));
+    }
     let mut body = vec![0u8; len as usize];
     reader.read_exact(&mut body).await?;
-    Ok(Some(body))
+    Ok(body)
 }
 
 /// Reads and decodes one frame. `None` means a clean end of stream.

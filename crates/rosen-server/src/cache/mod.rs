@@ -29,6 +29,8 @@ pub struct CacheState {
     pub config: ServerConfig,
     pub pool: Arc<rosen_client::workspace::pool::WarmPool>,
     pub upstream: UpstreamConfig,
+    transfers: crate::load_limits::TransferLimits,
+    replies: Arc<crate::load_limits::TransferLimits>,
     /// The machine's object store, at the path `status` reports, so clients
     /// materialise workspaces from it directly (R3).
     pub store: LooseObjectStore,
@@ -120,6 +122,8 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
         config: config.clone(),
         pool: config.warm_pool(),
         upstream,
+        transfers: crate::load_limits::TransferLimits::default(),
+        replies: Arc::new(crate::load_limits::TransferLimits::default()),
         store,
         partial,
         signing_key: std::sync::Mutex::new(None),

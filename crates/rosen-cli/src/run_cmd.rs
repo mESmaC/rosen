@@ -5,13 +5,15 @@ use std::io;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use rosen_client::run_queue::{self, Entry, RunClass, RunQueue, Turn, Waiter, HELD_ENV, POLL};
+use rosen_client::run_queue::{
+    self, Entry, RunBudget, RunClass, RunQueue, Turn, Waiter, HELD_ENV, POLL, THREAD_VARIABLES,
+};
 
 /// How often a waiting run says what it is waiting for.
 const SAY_EVERY: Duration = Duration::from_secs(30);
 
 /// Waits for the turn, runs `command` with this process's input and output,
-/// and gives its exit status. A queue that can't be used holds nothing back.
+/// and gives its exit status.
 /// Beneath a run that already holds a turn, the command runs at once, in it.
 pub fn run(json: bool, class: &str, command: &[String]) -> io::Result<ExitStatus> {
     let class = RunClass::parse(class).ok_or_else(|| {
@@ -19,21 +21,24 @@ pub fn run(json: bool, class: &str, command: &[String]) -> io::Result<ExitStatus
             "unknown class `{class}`: use landing, build, verify or prepare"
         ))
     })?;
-    let note = format!("{} in {}", command.join(" "), current_dir());
-    let (_turn, holding) = match run_queue::held() {
-        Some(held) => (None, held),
-        None => (turn(class, &note), class),
-    };
     let (program, arguments) = command
         .split_first()
         .ok_or_else(|| io::Error::other("a command is required after `--`"))?;
+    let (turn, holding) = match run_queue::held() {
+        Some(held) => (None, held),
+        None => {
+            let note = format!("{} in {}", command.join(" "), current_dir());
+            (Some(turn(class, &note)?), class)
+        }
+    };
+    let budget = turn.as_ref().map(Turn::budget);
     #[cfg(windows)]
     if std::env::var_os(WORKER_ENV).is_none() {
-        return run_tree(json, command, holding);
+        return run_tree(json, command, holding, budget);
     }
     #[cfg(not(windows))]
     let _ = json;
-    spawn(program, arguments, holding)?.wait()
+    spawn(program, arguments, holding, budget)?.wait()
 }
 
 // The job owns a small launcher so Rust can keep doing executable lookup
@@ -43,7 +48,12 @@ pub fn run(json: bool, class: &str, command: &[String]) -> io::Result<ExitStatus
 const WORKER_ENV: &str = "ROSEN_RUN_TREE_WORKER";
 
 #[cfg(windows)]
-fn run_tree(json: bool, command: &[String], holding: RunClass) -> io::Result<ExitStatus> {
+fn run_tree(
+    json: bool,
+    command: &[String],
+    holding: RunClass,
+    budget: Option<RunBudget>,
+) -> io::Result<ExitStatus> {
     use rosen_platform::run_tree::ProcessTree;
     use std::ffi::OsStr;
 
@@ -58,24 +68,26 @@ fn run_tree(json: bool, command: &[String], holding: RunClass) -> io::Result<Exi
         OsStr::new("--"),
     ]);
     args.extend(command.iter().map(OsStr::new));
-    let environment = [
+    let mut environment = vec![
         (OsStr::new(WORKER_ENV), OsStr::new("1")),
         (OsStr::new(HELD_ENV), OsStr::new(holding.name())),
     ];
+    let threads = budget.map(|budget| budget.jobs.to_string());
+    if let Some(threads) = &threads {
+        environment.extend(THREAD_VARIABLES.map(|name| (OsStr::new(name), OsStr::new(threads))));
+    }
     // Creation into the job is atomic: even a hard kill of this client
     // cannot leave a child running between spawn and job assignment.
-    ProcessTree::spawn(&std::env::current_exe()?, &args, &environment)?.wait()
+    let limit = budget.unwrap_or_else(|| holding.budget()).memory;
+    ProcessTree::spawn(&std::env::current_exe()?, &args, &environment, limit)?.wait()
 }
 
-/// This run's turn, or `None` when the queue can't be used.
-fn turn(class: RunClass, note: &str) -> Option<Turn> {
-    let waiter = RunQueue::machine().ok()?.wait(class, note).ok()?;
+fn turn(class: RunClass, note: &str) -> io::Result<Turn> {
+    let waiter = RunQueue::machine()?.wait(class, note)?;
     let (started, mut said) = (Instant::now(), None::<Instant>);
     loop {
-        match waiter.try_start() {
-            Ok(Some(turn)) => return Some(turn),
-            Ok(None) => {}
-            Err(_) => return None,
+        if let Some(turn) = waiter.try_start()? {
+            return Ok(turn);
         }
         if said.is_none_or(|said| said.elapsed() >= SAY_EVERY) && started.elapsed() >= POLL * 20 {
             say_waiting(&waiter, class, started.elapsed());
@@ -106,7 +118,7 @@ fn say_waiting(waiter: &Waiter, class: RunClass, waited: Duration) {
         }
     );
     if let Ok(queue) = RunQueue::machine() {
-        eprintln!("rosen run: {}", memory_resources(&queue));
+        eprintln!("rosen run: {}", memory_resources(&queue, Some(class)));
     }
 }
 
@@ -126,14 +138,15 @@ fn spawn(
     program: &str,
     arguments: &[String],
     holding: RunClass,
+    budget: Option<RunBudget>,
 ) -> io::Result<std::process::Child> {
     let start = |name: &str| {
         let mut child = prioritized_command(name, holding);
         #[cfg(windows)]
         child.env_remove(WORKER_ENV);
-        let threads = thread_budget().to_string();
-        for variable in THREAD_VARIABLES {
-            if std::env::var_os(variable).is_none() {
+        if let Some(budget) = budget {
+            let threads = budget.jobs.to_string();
+            for variable in THREAD_VARIABLES {
                 child.env(variable, &threads);
             }
         }
@@ -153,37 +166,21 @@ fn spawn(
     }
 }
 
-const THREAD_VARIABLES: [&str; 3] = ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "LEAN_NUM_THREADS"];
-
-fn thread_budget() -> usize {
-    // Aging lets builds overlap landing checks, so both classes share cores.
-    let queue = RunQueue::machine().ok();
-    let slots = |class: RunClass| {
-        queue
-            .as_ref()
-            .map_or_else(|| class.default_slots(), |q| q.slots(class))
-    };
-    let heavy_slots = u64::from(slots(RunClass::Landing)) + u64::from(slots(RunClass::Build));
-    let heavy_slots = usize::try_from(heavy_slots).unwrap_or(usize::MAX).max(1);
-    let cores = std::thread::available_parallelism().map_or(1, |cores| cores.get());
-    (cores / heavy_slots).max(2)
-}
-
 fn resources(class: RunClass) -> String {
-    let threads = thread_budget().to_string();
-    let variables = THREAD_VARIABLES.map(|variable| {
-        let value = std::env::var_os(variable).unwrap_or_else(|| threads.clone().into());
-        format!("{variable}={}", value.to_string_lossy())
-    });
-    format!("{}; priority {}", variables.join(" "), priority(class))
+    let budget = class.budget();
+    format!(
+        "CARGO_BUILD_JOBS={}, memory {} GiB, priority {}",
+        budget.jobs,
+        budget.memory >> 30,
+        priority(class),
+    )
 }
 
 #[cfg(windows)]
 fn priority(class: RunClass) -> &'static str {
     match class {
         RunClass::Landing => "NORMAL_PRIORITY_CLASS",
-        RunClass::Build => "BELOW_NORMAL_PRIORITY_CLASS",
-        RunClass::Verify | RunClass::Prepare => "IDLE_PRIORITY_CLASS",
+        _ => "BELOW_NORMAL_PRIORITY_CLASS",
     }
 }
 
@@ -194,8 +191,7 @@ fn prioritized_command(program: &str, class: RunClass) -> Command {
     // where a build starts at normal priority before it can be lowered.
     let flags = match class {
         RunClass::Landing => 0x0000_0020, // NORMAL_PRIORITY_CLASS
-        RunClass::Build => 0x0000_4000,   // BELOW_NORMAL_PRIORITY_CLASS
-        RunClass::Verify | RunClass::Prepare => 0x0000_0040, // IDLE_PRIORITY_CLASS
+        _ => 0x0000_4000,                 // BELOW_NORMAL_PRIORITY_CLASS
     };
     let mut command = Command::new(program);
     command.creation_flags(flags);
@@ -253,7 +249,7 @@ pub fn slots(settings: &[String]) -> io::Result<()> {
             resources(class)
         );
     }
-    println!("{}", memory_resources(&queue));
+    println!("{}", memory_resources(&queue, None));
     Ok(())
 }
 
@@ -273,7 +269,7 @@ fn parse_memory_reserve(value: &str) -> io::Result<Option<u64>> {
         })
 }
 
-fn memory_resources(queue: &RunQueue) -> String {
+fn memory_resources(queue: &RunQueue, waiting: Option<RunClass>) -> String {
     let memory = queue.memory_headroom();
     let format_bytes = |bytes: Option<u64>| {
         bytes.map_or_else(
@@ -281,20 +277,20 @@ fn memory_resources(queue: &RunQueue) -> String {
             |bytes| format!("{:.2} GiB", bytes as f64 / (1_u64 << 30) as f64),
         )
     };
-    let kind = if cfg!(windows) {
-        "free commit"
-    } else {
-        "available memory"
-    };
-    let state = if memory.is_low() {
-        "; waiting for memory"
-    } else {
-        ""
+    let reserved = queue.running_budget().ok().map(|budget| budget.memory);
+    let state = match (waiting, reserved) {
+        (Some(class), Some(reserved))
+            if !memory.fits(reserved.saturating_add(class.budget().memory)) =>
+        {
+            "; waiting for memory"
+        }
+        _ => "",
     };
     format!(
-        "memory: {} {kind}; reserve {}{state}",
+        "memory: {} available; {} reserved by runs; {} reserve{state}",
         format_bytes(memory.available),
-        format_bytes(memory.reserve)
+        format_bytes(reserved),
+        format_bytes(memory.reserve),
     )
 }
 

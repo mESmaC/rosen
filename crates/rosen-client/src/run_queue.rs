@@ -8,16 +8,16 @@
 //! `prepare` (the warm pool's prepare commands), most important first.
 //!
 //! - Each class has a number of slots: as many runs of it go at once.
-//!   `landing` and `build` get at least two, sized from the machine's cores
-//!   and memory; `verify` and `prepare` one. A machine can set its own.
+//!   Slots set class ceilings. All classes share CPU and memory admission.
 //! - A run starts when a slot of its class is free for it, no more important
 //!   run is going, and nothing sorts ahead of it in line: every more
 //!   important waiter, and earlier waiters of its own class, which take the
 //!   free slots first.
-//! - Every new turn also needs free memory above the machine's reserve.
+//! - Each turn needs room for its CPU and memory budgets after reserving
+//!   memory for other applications and charging all live turns.
 //!   Priority aging never bypasses this gate; running turns are not stopped.
-//! - A less important run that is already going is never stopped and never
-//!   holds a more important one back. With memory to spare a landing check starts
+//! - A less important run that is already going is never stopped.
+//!   With capacity to spare a landing check starts
 //!   beside a prepare; the caller runs `verify` and `prepare` work at low
 //!   process priority, and the landing check gets the cores.
 //! - Priority alone cannot hold a run forever: after its patience a waiter stops
@@ -31,9 +31,6 @@
 //! system file locks, so it needs no daemon and survives any crash: a
 //! waiter holds its ticket file locked and a runner one of its class's slot
 //! lock files, and the system releases both when their process dies.
-//!
-//! It only schedules. A caller that cannot use it (an unwritable folder)
-//! runs its command anyway.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -69,6 +66,9 @@ pub const QUEUE_ENV: &str = "ROSEN_RUN_QUEUE";
 /// would wait for. A build script that queues its own steps can then be run
 /// through `rosen run` whole.
 pub const HELD_ENV: &str = "ROSEN_RUN_HELD";
+/// Thread limits used by a turn's commands.
+pub const THREAD_VARIABLES: [&str; 3] =
+    ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "LEAN_NUM_THREADS"];
 
 /// The class whose turn an ancestor of this process holds, if any.
 pub fn held() -> Option<RunClass> {
@@ -128,37 +128,50 @@ impl RunClass {
         match self {
             // Asked of the system once: a waiter looks every poll.
             Self::Landing | Self::Build => *MACHINE_SLOTS.get_or_init(|| {
-                let cores = std::thread::available_parallelism().map_or(1, |cores| cores.get());
-                sized_slots(cores, rosen_platform::memory::physical_memory())
+                u32::try_from(machine_cores().div_ceil(CORES_PER_SLOT)).unwrap_or(u32::MAX)
             }),
             Self::Verify | Self::Prepare => 1,
         }
+    }
+
+    pub fn budget(self) -> RunBudget {
+        self.budget_on(machine_cores())
+    }
+
+    fn budget_on(self, cores: usize) -> RunBudget {
+        let cap = match self {
+            Self::Prepare => 2,
+            _ => CORES_PER_SLOT,
+        };
+        let jobs = (cores / 2).clamp(1, cap);
+        // Leave a GiB for linkers, runners and other non-Cargo descendants.
+        let memory = (jobs as u64 + 1) * GIB;
+        RunBudget { jobs, memory }
     }
 }
 
 static MACHINE_SLOTS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 
-/// Logical cores each concurrent heavy run is given. In the SPEC R3 ramp on
-/// 20 cores, clean builds of Rosen and Velocity still did more work per
-/// second at four at once than at three (3.0 and 1.65 times one alone), so
-/// four on that machine; the ramp went no further, so neither does this.
+/// Maximum jobs per heavy turn, based on the R3 build-throughput ramp.
 const CORES_PER_SLOT: usize = 5;
-/// Memory each concurrent heavy run is given. In the ramp, free memory fell
-/// by under 2 GiB per added build; the rest is left for links, tests and
-/// the agents and tools beside them, so the runs stay out of the page file.
-const MEMORY_PER_SLOT: u64 = 8 << 30;
-/// Runs per class that every machine gets, however small: two runs side by
-/// side still beat one on any machine with more than one core.
-const MIN_SLOTS: u32 = 2;
+const GIB: u64 = 1 << 30;
+const MEMORY_FLOOR: u64 = 4 * GIB;
 
-/// The slot count for `cores` logical cores and `memory` bytes of memory:
-/// whichever runs out first, and never under [`MIN_SLOTS`].
-pub fn sized_slots(cores: usize, memory: Option<u64>) -> u32 {
-    let by_cores = u32::try_from(cores / CORES_PER_SLOT).unwrap_or(u32::MAX);
-    let by_memory = memory.map_or(u32::MAX, |bytes| {
-        u32::try_from(bytes / MEMORY_PER_SLOT).unwrap_or(u32::MAX)
-    });
-    by_cores.min(by_memory).max(MIN_SLOTS)
+fn machine_cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |cores| cores.get())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RunBudget {
+    pub jobs: usize,
+    pub memory: u64,
+}
+
+impl RunBudget {
+    fn charge(&mut self, budget: Self) {
+        self.jobs = self.jobs.saturating_add(budget.jobs);
+        self.memory = self.memory.saturating_add(budget.memory);
+    }
 }
 
 /// A run in the queue, as [`RunQueue::line`] reports it.
@@ -170,8 +183,8 @@ pub struct Entry {
     pub running: bool,
 }
 
-/// A current sample of the memory gate, in bytes. Unknown readings leave the
-/// queue usable on systems that cannot report memory, as with slot sizing.
+/// A current sample of the memory gate, in bytes. With no reading the
+/// queue cannot establish room to start a new turn.
 #[derive(Clone, Copy, Debug)]
 pub struct MemoryHeadroom {
     pub available: Option<u64>,
@@ -179,8 +192,10 @@ pub struct MemoryHeadroom {
 }
 
 impl MemoryHeadroom {
-    pub fn is_low(self) -> bool {
-        matches!((self.available, self.reserve), (Some(free), Some(reserve)) if free <= reserve)
+    pub fn fits(self, bytes: u64) -> bool {
+        self.available.is_some_and(|available| {
+            available >= self.reserve.unwrap_or(MEMORY_FLOOR).saturating_add(bytes)
+        })
     }
 }
 
@@ -260,15 +275,13 @@ impl RunQueue {
     /// The runs going now, then those waiting, in queue order.
     pub fn line(&self) -> io::Result<Vec<Entry>> {
         let mut line = Vec::new();
-        for class in RunClass::ALL {
-            for slot in self.running(class)? {
-                let note = std::fs::read_to_string(self.note_path(class, slot)).unwrap_or_default();
-                line.push(Entry {
-                    class,
-                    note,
-                    running: true,
-                });
-            }
+        for (class, slot) in self.running()? {
+            let note = std::fs::read_to_string(self.note_path(class, slot)).unwrap_or_default();
+            line.push(Entry {
+                class,
+                note,
+                running: true,
+            });
         }
         for (_, class) in self.waiting()? {
             // A waiter's note is known only once it runs: its ticket is
@@ -317,14 +330,20 @@ impl RunQueue {
         }
     }
 
-    /// The slots of `class` whose runs are going now. A slot beyond the
-    /// class's count, left from before the machine lowered it, still counts
-    /// while its run goes.
-    fn running(&self, class: RunClass) -> io::Result<Vec<u32>> {
+    // Include slots above a lowered class limit until their turns end.
+    fn running(&self) -> io::Result<Vec<(RunClass, u32)>> {
         let mut slots = Vec::new();
-        for entry in std::fs::read_dir(&self.dir)? {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(slots),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
             let name = entry?.file_name().to_string_lossy().into_owned();
-            let Some(slot) = lock_slot(&name, class) else {
+            let Some(slot) = RunClass::ALL
+                .into_iter()
+                .find_map(|class| lock_slot(&name, class).map(|slot| (class, slot)))
+            else {
                 continue;
             };
             match File::open(self.dir.join(&name)) {
@@ -347,26 +366,29 @@ impl RunQueue {
             .map_or_else(|| class.default_slots(), |(_, slots)| slots)
     }
 
-    /// Free commit on Windows or available memory elsewhere, and the machine's
-    /// reserve. By default one fifth of RAM is kept for growing commands and
-    /// other applications, independently of the class's slot count.
+    /// The machine's available memory and reserve for other applications.
     pub fn memory_headroom(&self) -> MemoryHeadroom {
         let reserve = std::fs::read_to_string(self.dir.join(RESERVE_FILE))
             .ok()
             .and_then(|text| text.trim().parse::<u64>().ok())
             .filter(|bytes| *bytes > 0)
-            .or_else(|| rosen_platform::memory::physical_memory().map(|bytes| bytes / 5));
+            .unwrap_or_else(|| {
+                rosen_platform::memory::physical_memory().map_or(0, |bytes| bytes / 5)
+            })
+            .max(MEMORY_FLOOR);
         MemoryHeadroom {
             available: rosen_platform::memory::available_memory(),
-            reserve,
+            reserve: Some(reserve),
         }
     }
 
     /// Sets the machine's reserve in bytes, or restores the RAM-based default.
     /// All classes and projects see the change on their next admission poll.
     pub fn set_memory_reserve(&self, bytes: Option<u64>) -> io::Result<()> {
-        if bytes == Some(0) {
-            return Err(io::Error::other("the memory reserve must be positive"));
+        if bytes.is_some_and(|bytes| bytes < MEMORY_FLOOR) {
+            return Err(io::Error::other(
+                "the memory reserve must be at least 4 GiB",
+            ));
         }
         std::fs::create_dir_all(&self.dir)?;
         let path = self.dir.join(RESERVE_FILE);
@@ -439,6 +461,36 @@ impl RunQueue {
         self.dir.join(format!("{}.lock", slot_stem(class, slot)))
     }
 
+    fn admission(&self) -> io::Result<Option<File>> {
+        try_lock(&self.dir.join("admission.lock"))
+    }
+
+    fn budget_path(&self, class: RunClass, slot: u32) -> PathBuf {
+        self.dir.join(format!("{}.budget", slot_stem(class, slot)))
+    }
+
+    pub fn running_budget(&self) -> io::Result<RunBudget> {
+        Ok(self.budget_for(&self.running()?))
+    }
+
+    fn budget_for(&self, slots: &[(RunClass, u32)]) -> RunBudget {
+        let mut total = RunBudget::default();
+        for &(class, slot) in slots {
+            let budget = std::fs::read_to_string(self.budget_path(class, slot))
+                .ok()
+                .and_then(|text| {
+                    let (jobs, memory) = text.split_once(' ')?;
+                    Some(RunBudget {
+                        jobs: jobs.parse().ok()?,
+                        memory: memory.parse().ok()?,
+                    })
+                })
+                .unwrap_or_else(|| class.budget());
+            total.charge(budget);
+        }
+        total
+    }
+
     /// Beside the lock, not in it: a locked file's bytes can't be read by
     /// another process on Windows.
     fn note_path(&self, class: RunClass, slot: u32) -> PathBuf {
@@ -470,6 +522,19 @@ fn lock_slot(name: &str, class: RunClass) -> Option<u32> {
     }
 }
 
+fn try_lock(path: &Path) -> io::Result<Option<File>> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
 /// A place in line. Dropping it leaves the line.
 #[derive(Debug)]
 pub struct Waiter {
@@ -487,46 +552,55 @@ impl Waiter {
     /// The turn, when it is this waiter's; `None` while it has to wait.
     /// Never blocks.
     pub fn try_start(&self) -> io::Result<Option<Turn>> {
+        self.try_start_on(machine_cores(), || self.queue.memory_headroom())
+    }
+
+    fn try_start_on(
+        &self,
+        cores: usize,
+        read_memory: impl FnOnce() -> MemoryHeadroom,
+    ) -> io::Result<Option<Turn>> {
+        // A class cannot spend free memory another class is about to reserve.
+        let Some(_admission) = self.queue.admission()? else {
+            return Ok(None);
+        };
         let yielding = self.since.elapsed() < self.class.patience();
         let slots = self.queue.slots(self.class);
-        if !self.is_next(yielding, slots)? {
+        let running = self.queue.running()?;
+        if !self.is_next(yielding, slots, &running)? {
             return Ok(None);
         }
-        // Any free slot will do; trying each in turn takes the first one no
-        // other run holds, so two runs never share a slot.
+        let budget = self.class.budget_on(cores);
+        let mut reserved = self.queue.budget_for(&running);
+        reserved.charge(budget);
+        // Live turns can still grow to their caps. Charging the full caps
+        // also covers a just-admitted command that has not started yet.
+        if reserved.jobs > cores || !read_memory().fits(reserved.memory) {
+            return Ok(None);
+        }
         for slot in 0..slots {
-            let lock = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(self.queue.lock_path(self.class, slot))?;
-            match lock.try_lock() {
-                Ok(()) => {}
-                Err(std::fs::TryLockError::WouldBlock) => continue,
-                Err(std::fs::TryLockError::Error(error)) => return Err(error),
-            }
-            // Sample after taking the slot, as close as possible to starting
-            // its command. Low memory is a busy slot, not a queue error that
-            // callers would handle by running without a turn.
-            if self.queue.memory_headroom().is_low() {
-                return Ok(None);
-            }
+            let Some(lock) = try_lock(&self.queue.lock_path(self.class, slot))? else {
+                continue;
+            };
+            let path = self.queue.budget_path(self.class, slot);
+            std::fs::write(&path, format!("{} {}", budget.jobs, budget.memory))?;
             let _ = std::fs::write(self.queue.note_path(self.class, slot), &self.note);
-            return Ok(Some(Turn { _lock: lock }));
+            return Ok(Some(Turn {
+                _lock: lock,
+                budget,
+                path,
+            }));
         }
         Ok(None)
     }
 
-    /// Those this waiter is behind: runs of its class or a more important
-    /// one going now, then the waiters ahead of it in line.
+    /// All current runs, then the waiters ahead in line.
     pub fn ahead(&self) -> io::Result<Vec<Entry>> {
         let mine = self.file_name();
         let waiting = self.queue.waiting()?;
         let ahead_in_line = waiting.iter().filter(|(name, _)| *name < mine).count();
         let line = self.queue.line()?;
-        let running = line
-            .iter()
-            .filter(|entry| entry.running && entry.class <= self.class);
+        let running = line.iter().filter(|entry| entry.running);
         let waiters = line.iter().filter(|entry| !entry.running);
         Ok(running
             .chain(waiters.take(ahead_in_line))
@@ -537,7 +611,7 @@ impl Waiter {
     /// Whether this waiter's class has a free slot left after the earlier
     /// waiters of its class take theirs and, while this waiter still yields,
     /// no more important run is waiting or going.
-    fn is_next(&self, yielding: bool, slots: u32) -> io::Result<bool> {
+    fn is_next(&self, yielding: bool, slots: u32, running: &[(RunClass, u32)]) -> io::Result<bool> {
         let mine = self.file_name();
         let mut earlier_of_class = 0;
         for (name, class) in self.queue.waiting()? {
@@ -550,21 +624,17 @@ impl Waiter {
                 return Ok(false);
             }
         }
-        let running = self.queue.running(self.class)?.len();
+        let in_class = running
+            .iter()
+            .filter(|(class, _)| *class == self.class)
+            .count();
         let free = usize::try_from(slots)
             .unwrap_or(usize::MAX)
-            .saturating_sub(running);
+            .saturating_sub(in_class);
         if earlier_of_class >= free {
             return Ok(false);
         }
-        if yielding {
-            for class in RunClass::ALL {
-                if class < self.class && !self.queue.running(class)?.is_empty() {
-                    return Ok(false);
-                }
-            }
-        }
-        Ok(true)
+        Ok(!yielding || !running.iter().any(|(class, _)| *class < self.class))
     }
 
     fn file_name(&self) -> String {
@@ -586,6 +656,20 @@ impl Drop for Waiter {
 #[derive(Debug)]
 pub struct Turn {
     _lock: File,
+    budget: RunBudget,
+    path: PathBuf,
+}
+
+impl Turn {
+    pub fn budget(&self) -> RunBudget {
+        self.budget
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// The class a ticket's file name gives it; `None` for any other file.
@@ -629,3 +713,6 @@ fn machine_dir() -> io::Result<PathBuf> {
         .join("rosen")
         .join("run-queue"))
 }
+
+#[cfg(test)]
+mod tests;
