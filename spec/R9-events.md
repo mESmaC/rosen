@@ -30,10 +30,13 @@
   - A cursor over this event log, stored in the metadata store, says what is dirty.
     An event naming a change makes that change dirty, and a `claim` also the changes it overlaps.
     `landed`, `review`, `green` and `reverted` make review coverage dirty, and `landed` the configuration in force.
-    Channel lines and push reports make nothing dirty.
+    `conflict`, `built`, `green`, `reverted`, `revert_refused`, `post_land_failure`, `bisect` and `mirror` events are sent as event lines.
+    A channel `joined`, `left` or `mode` line makes presence dirty.
+    Other channel lines are sent only with `collapse_channel = true`, and push reports make nothing dirty.
   - Nothing is sent on a timer, so an idle project wakes no endpoint.
     Sends start at most once every 10 s, about 2 s after the first dirtying event; one holding only snapshots waits up to 60 s.
-  - A request is a JSON batch `{"format":1,"through":N,"changes":[...],"conflicts":[...],"threads":[...],"coverage":[...],"config":[...]}` of at most 2 MB.
+    The machine list and presence ride on the next send, or else go 60 s after their last change.
+  - A request is a JSON batch `{"format":1,"through":N,"changes":[...],"conflicts":[...],"threads":[...],"coverage":[...],"config":[...],"events":[...],"machines":[...],"presence":[...],"channel":[...]}` of at most 2 MB.
     Each item is the whole current document, not a delta, and carries `seq`, the event sequence it reflects.
     A change's conflicts and threads are items of their own, so a large change splits across batches; an item too large for any batch is sent as a `too_large` marker.
     `through` is the sequence the endpoint holds everything through once it stores the batch, and only a pass's last batch raises it.
@@ -44,10 +47,21 @@
   - A landed or abandoned change is sent once, with its landed commit, and then only again if it reopens.
   - Coverage sends each landed change's reviewed state (R7) when it changed, and a removal when a revert takes a change off the list.
     The configuration item holds the base commit, source, error and parsed configuration, and is sent again only when what is in force changes.
+  - An event line holds the event's own `seq`, kind, change, detail and `time`, the Unix milliseconds the log stored it.
+    It is sent once, in sequence order, from the same cursor.
+    A `conflict` line's detail keeps only its paths and `onto`, a `mirror` line's leaves out the remote, and the `output` of a `post_land_failure` or `reverted` line keeps its last 64 KiB with a `truncated` flag.
+  - The machines item lists every machine (R14) with its ID, name, role, status, running agents, credential expiry, request time, `last_contact` rounded down to the minute and `out_of_contact` once an active machine has gone 5 minutes without contact.
+    Machine changes publish no event, so while `collapse` is set the server compares the list with what it last saw every 10 s, a local read only.
+    A change in anything but `last_contact` makes it dirty.
+  - The presence item lists the joined members (R13) by nick, machine, mode and `joined_at`, with `as_of`.
+    While any member is joined, it also rides on an outgoing send at most every 5 minutes, though nothing is sent just to refresh it.
+  - With `collapse_channel = true` in the base's `rosen.toml`, every `channel` line but a ledger entry is sent once, as R13 stores it, with its `seq` and `time`.
+    It is off by default, since channel lines hold agent messages; ledger entries travel only through the ledger push (R13).
   - The server keeps a fingerprint of each document it delivered and skips a dirty document the endpoint already holds.
   - The endpoint keeps the newer of two copies by `seq`, so a repeated batch changes nothing, and answers `{"highest_sequence":N}`.
     On start and after a failure the server first sends an empty batch to read that, resumes from it when it is less than was delivered, and then resends every live document.
   - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `state_push` event; the first success after failures publishes one too.
     HTTP 410 stops sending until `collapse` changes or the server restarts.
-  - Piece claims, messages, presence, channel lines, receipt signatures, machine credentials and join keys are never sent.
+  - Receipt signatures, machine credentials and their hashes, join keys, network addresses, certificate fingerprints and the data directory are never sent.
+    Messages and piece claims are sent only as channel lines with `collapse_channel = true`.
   - Without `collapse`, nothing is sent.

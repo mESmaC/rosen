@@ -1,5 +1,6 @@
 //! A document the feed sends as one: its items, the fingerprint that tells
-//! whether the endpoint already holds it, and the changes it names.
+//! whether the endpoint already holds it, and the changes it names. Event
+//! and channel lines from the log travel as units too, unfingerprinted.
 
 use std::collections::BTreeSet;
 
@@ -14,6 +15,10 @@ pub enum Section {
     Threads,
     Coverage,
     Config,
+    Events,
+    Machines,
+    Presence,
+    Channel,
 }
 
 impl Section {
@@ -24,8 +29,26 @@ impl Section {
             Section::Threads => "threads",
             Section::Coverage => "coverage",
             Section::Config => "config",
+            Section::Events => "events",
+            Section::Machines => "machines",
+            Section::Presence => "presence",
+            Section::Channel => "channel",
         }
     }
+}
+
+/// How a unit decides whether it goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Delivery {
+    /// Sent when its fingerprint differs from the one delivered.
+    #[default]
+    Document,
+    /// Sent even when unchanged, so the endpoint sees how current it is,
+    /// but only alongside something else: never in a request of its own.
+    Refresh,
+    /// A line from the event log: sent once, in sequence order, with its
+    /// own `seq`, and never recorded, since it never changes.
+    Log,
 }
 
 /// One document and the items it sends. A change sends its conflicts and
@@ -38,6 +61,7 @@ pub struct Unit {
     /// The changes a change document names as overlapping it.
     pub related: BTreeSet<String>,
     pub items: Vec<(Section, Value)>,
+    pub delivery: Delivery,
 }
 
 impl Unit {
@@ -54,6 +78,18 @@ impl Unit {
             fingerprint: hex(&hasher.finalize()),
             related: BTreeSet::new(),
             items,
+            delivery: Delivery::Document,
+        }
+    }
+
+    /// One line of the event log, keyed by its sequence.
+    pub fn log(seq: u64, section: Section, item: Value) -> Self {
+        Self {
+            document: format!("log:{seq}"),
+            fingerprint: String::new(),
+            related: BTreeSet::new(),
+            items: vec![(section, item)],
+            delivery: Delivery::Log,
         }
     }
 

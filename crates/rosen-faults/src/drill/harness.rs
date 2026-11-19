@@ -37,6 +37,8 @@ pub struct Harness {
     daemons: Vec<Slot>,
     agents: Vec<Vec<Slot>>,
     pub acks: Acks,
+    /// The secret of each join key machines enrolled with.
+    pub join_keys: Vec<String>,
 }
 
 impl Harness {
@@ -50,18 +52,20 @@ impl Harness {
         wait_ready(&spec.layout.endpoint(0)).await?;
         let mut proxies = Vec::new();
         let mut daemons = Vec::new();
+        let mut join_keys = Vec::new();
         for machine in 1..spec.machines {
             let proxy = PartitionProxy::start("127.0.0.1:0".parse()?, listen).await?;
             let dir = spec.layout.machine_dir(machine);
             let server = rosen_protocol::Endpoint::new(spec.layout.endpoint(0));
             let name = format!("daemon-{machine}");
-            enroll::enroll(
+            let key = enroll::enroll(
                 &server,
                 proxy.address(),
                 &dir,
                 &format!("{}-m{machine}", spec.layout.tag),
             )
             .await?;
+            join_keys.push(key);
             let log = logs.join(format!("{name}.log"));
             let mut daemon = Slot::new(name, daemon_recipe(spec, machine)).log_to(log);
             daemon.start()?;
@@ -76,6 +80,7 @@ impl Harness {
             daemons,
             agents: agent_slots(spec)?,
             acks: Arc::default(),
+            join_keys,
         };
         for machine in 0..spec.machines {
             for index in 0..spec.agents_per_machine {

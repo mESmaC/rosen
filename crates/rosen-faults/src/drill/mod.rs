@@ -12,6 +12,7 @@
 
 pub mod agent;
 mod enroll;
+mod feed;
 mod harness;
 mod setup;
 mod verify;
@@ -89,7 +90,8 @@ pub async fn run(args: DrillArgs) -> anyhow::Result<bool> {
     let units: Vec<String> = (0..shape.machines)
         .flat_map(|m| (0..args.agents_per_machine).map(move |i| setup::unit(m, i)))
         .collect();
-    setup::create_project(&spec.layout, &units)?;
+    let feed = feed::Intake::start().await?;
+    setup::create_project(&spec.layout, &units, &feed.root())?;
     eprintln!(
         "drill seed {seed}: {} kills, {} partitions, data in {}",
         plan.kills(),
@@ -109,12 +111,24 @@ pub async fn run(args: DrillArgs) -> anyhow::Result<bool> {
     let elapsed = start.elapsed();
     let crashed = harness.crashed();
     harness.stop().await;
+    let machine_dirs: Vec<_> = (1..spec.machines)
+        .map(|machine| spec.layout.machine_dir(machine))
+        .collect();
+    let server_dir = spec.layout.server_dir();
+    let secrets = feed::secrets(
+        &machine_dirs,
+        &harness.join_keys,
+        harness.listen(),
+        &server_dir,
+    );
+    let feed_check = feed.check(&secrets);
     for problem in harness.forget_machines(&spec.layout) {
         eprintln!("drill: could not remove a machine credential: {problem}");
     }
     let acks = harness.acks.lock().expect("acks lock").clone();
     let failing = args.failing_commit.then_some(&checker);
-    let checks = verify::verify(&spec.layout.server_config(), &acks, failing)?;
+    let mut checks = verify::verify(&spec.layout.server_config(), &acks, failing)?;
+    checks.push(feed_check);
     let ok = settled.is_ok() && crashed.is_empty() && checks.iter().all(|check| check.ok);
     let report = json!({
         "seed": seed,

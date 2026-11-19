@@ -1,9 +1,11 @@
 //! Request bodies for the state endpoint, each under its 2 MiB bound.
 //!
 //! A body is `{"format":1,"through":N,"changes":[...],"conflicts":[...],
-//! "threads":[...],"coverage":[...],"config":[...]}`. Every item carries
+//! "threads":[...],"coverage":[...],"config":[...],"events":[...],
+//! "machines":[...],"presence":[...],"channel":[...]}`. Every item carries
 //! `seq`, the event sequence it reflects, so the endpoint keeps the newer of
-//! two copies and a repeated batch changes nothing. `through` is the
+//! two copies and a repeated batch changes nothing. An event or channel
+//! line keeps its own sequence, which is its key. `through` is the
 //! sequence the endpoint is complete through once it stores the batch: the
 //! pass's sequence on its last batch, and what was already delivered on the
 //! others, so a pass cut short never claims more than arrived.
@@ -11,25 +13,31 @@
 use serde_json::{json, Map, Value};
 
 use super::store::Sent;
-use super::unit::{Section, Unit};
+use super::unit::{Delivery, Section, Unit};
 use crate::ledger_push::MAX_BODY;
 
 /// The format Collapse reads; it refuses one it does not know.
 const FORMAT: u64 = 1;
 /// Room left for the envelope around the items.
 const ENVELOPE: usize = 256;
-const SECTIONS: [Section; 5] = [
+const SECTIONS: [Section; 9] = [
     Section::Changes,
     Section::Conflicts,
     Section::Threads,
     Section::Coverage,
     Section::Config,
+    Section::Events,
+    Section::Machines,
+    Section::Presence,
+    Section::Channel,
 ];
 
 /// One request and the documents it completes.
 pub struct Batch {
     pub body: Vec<u8>,
     pub documents: Vec<(String, Sent)>,
+    /// How many log lines it completes.
+    pub lines: usize,
 }
 
 /// The body that sends nothing, asking only what the endpoint holds.
@@ -44,21 +52,29 @@ pub fn split(units: Vec<Unit>, seq: u64, delivered: u64) -> Vec<Batch> {
     let mut batches = Vec::new();
     let mut items: Vec<(Section, Value)> = Vec::new();
     let mut documents = Vec::new();
+    let mut lines = 0;
     let mut size = ENVELOPE;
     for unit in units {
+        let logged = unit.delivery == Delivery::Log;
         for (section, item) in unit.items {
-            let item = sized(stamped(item, seq));
+            let item = if logged { item } else { stamped(item, seq) };
+            let item = sized(item);
             let length = serde_json::to_vec(&item).map_or(0, |bytes| bytes.len()) + 1;
             if size + length > MAX_BODY && !items.is_empty() {
                 batches.push(Batch {
                     body: body(delivered, &items),
                     documents: std::mem::take(&mut documents),
+                    lines: std::mem::take(&mut lines),
                 });
                 items.clear();
                 size = ENVELOPE;
             }
             size += length;
             items.push((section, item));
+        }
+        if logged {
+            lines += 1;
+            continue;
         }
         let sent = Sent {
             fingerprint: unit.fingerprint,
@@ -71,6 +87,7 @@ pub fn split(units: Vec<Unit>, seq: u64, delivered: u64) -> Vec<Batch> {
         batches.push(Batch {
             body: body(seq, &items),
             documents,
+            lines,
         });
     }
     batches
@@ -91,7 +108,7 @@ fn sized(item: Value) -> Value {
         return item;
     }
     let mut marker = Map::new();
-    for key in ["id", "change", "seq"] {
+    for key in ["id", "change", "kind", "seq"] {
         if let Some(value) = item.get(key) {
             marker.insert(key.into(), value.clone());
         }

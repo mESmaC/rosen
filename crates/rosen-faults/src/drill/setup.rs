@@ -46,15 +46,22 @@ pub fn unit(machine: usize, index: usize) -> String {
 /// Creates the base: one commit whose `rosen.toml` makes each agent's
 /// directory its own build unit. Agents' changes are then independent, so a
 /// receipt survives other agents' lands (R8) and the drill's lands race on
-/// the compare-and-swap rather than queueing for re-checks.
-pub fn create_project(layout: &Layout, units: &[String]) -> anyhow::Result<ObjectId> {
+/// the compare-and-swap rather than queueing for re-checks. `collapse`
+/// names the drill's state feed endpoint, with channel lines on.
+pub fn create_project(
+    layout: &Layout,
+    units: &[String],
+    collapse: &str,
+) -> anyhow::Result<ObjectId> {
     let config = layout.server_config();
     std::fs::create_dir_all(&config.data_dir)?;
     let store = LooseObjectStore::open(config.objects_dir())?;
-    let toml: String = units
-        .iter()
-        .map(|unit| format!("[build_units.{unit}]\npaths = ['{unit}/**']\n"))
-        .collect();
+    let mut toml = format!("collapse = '{collapse}'\ncollapse_channel = true\n");
+    toml.extend(
+        units
+            .iter()
+            .map(|unit| format!("[build_units.{unit}]\npaths = ['{unit}/**']\n")),
+    );
     let blob = store.put_blob(toml.as_bytes())?;
     let entry = TreeEntry::new(FileMode::Regular, rosen_core::CONFIG_PATH, blob)
         .map_err(|err| anyhow!("{err}"))?;

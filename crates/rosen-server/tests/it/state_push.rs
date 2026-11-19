@@ -1,5 +1,5 @@
-//! End-to-end check of the state feed (issue #403, spec/R9-events.md
-//! "State feed") through the real background task and `curl`, against a
+//! End-to-end check of the state feed (issues #403 and #406,
+//! spec/R9-events.md "State feed") through the real background task and `curl`, against a
 //! local endpoint that keeps the newer copy of each item, as Collapse does.
 //!
 //! Risk: the feed is Collapse's only view of unlanded work. One that stops
@@ -12,15 +12,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rosen_core::{AgentId, Commit, FileMode, Signature, Tree, TreeEntry};
-use rosen_protocol::channel::{Author, ChannelRequest, Intent, SendMessage};
+use rosen_protocol::channel::{
+    AppendEntry, Author, ChannelRequest, Intent, Ledger as ChannelLedger, SendMessage,
+};
 use rosen_protocol::*;
 use rosen_server::{channel, landing::Ledger, rpc::dispatch, ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// A secret a channel message carries; it must never reach the endpoint.
+/// A secret a channel message carries; it must never reach the endpoint
+/// unless the project sends channel lines.
 const MESSAGE: &str = "channel-message-never-sent";
+/// A ledger entry's text; the state feed never sends ledger entries.
+const LEDGER_TEXT: &str = "ledger-entry-not-a-channel-line";
 
 /// What the fake endpoint holds.
 #[derive(Default)]
@@ -47,12 +52,18 @@ impl Intake {
     /// Keeps an item unless a newer copy is held, as Collapse does.
     fn store(&mut self, body: &[u8]) {
         let batch: Value = serde_json::from_slice(body).unwrap();
-        for section in ["changes", "conflicts", "threads", "coverage", "config"] {
+        for section in SECTIONS {
             for item in batch[section].as_array().unwrap() {
-                let key = item
-                    .get("id")
-                    .or_else(|| item.get("change"))
-                    .map_or("config".into(), Value::to_string);
+                // Lines are keyed by their own sequence, and the machine
+                // list and presence are one document each.
+                let key = match section {
+                    "events" | "channel" => item["seq"].to_string(),
+                    "machines" | "presence" | "config" => section.to_owned(),
+                    _ => item
+                        .get("id")
+                        .or_else(|| item.get("change"))
+                        .map_or("config".into(), Value::to_string),
+                };
                 let slot = self
                     .held
                     .entry((section.into(), key))
@@ -65,12 +76,31 @@ impl Intake {
         self.through = self.through.max(batch["through"].as_u64().unwrap());
     }
 
+    /// Every held item of `section`.
+    fn items(&self, section: &str) -> Vec<Value> {
+        let held = self.held.iter();
+        let items = held.filter(|((kind, _), _)| kind == section);
+        items.map(|(_, item)| item.clone()).collect()
+    }
+
     fn change(&self, id: &str) -> Option<Value> {
         self.held
             .get(&("changes".into(), json!(id).to_string()))
             .cloned()
     }
 }
+
+const SECTIONS: [&str; 9] = [
+    "changes",
+    "conflicts",
+    "threads",
+    "coverage",
+    "config",
+    "events",
+    "machines",
+    "presence",
+    "channel",
+];
 
 async fn serve(listener: tokio::net::TcpListener, intake: Arc<Mutex<Intake>>) {
     loop {
@@ -105,15 +135,16 @@ async fn serve(listener: tokio::net::TcpListener, intake: Arc<Mutex<Intake>>) {
     }
 }
 
-/// A server whose base names `collapse` as the fake endpoint's root.
-fn setup(path: &std::path::Path, collapse: &str) -> Arc<ServerState> {
+/// A server whose base names `collapse` as the fake endpoint's root, with
+/// `extra` added to its `rosen.toml`.
+fn setup(path: &std::path::Path, collapse: &str, extra: &str) -> Arc<ServerState> {
     let state = ServerState::new(ServerConfig {
         data_dir: path.into(),
         endpoint: Endpoint::new("state-push-contract"),
         warm_pool_dir: None,
     });
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
-    let config = format!("review = \"after-land\"\ncollapse = \"{collapse}\"\n");
+    let config = format!("review = \"after-land\"\ncollapse = \"{collapse}\"\n{extra}");
     let blob = store.put_blob(config.as_bytes()).unwrap();
     let entry = TreeEntry::new(FileMode::Regular, "rosen.toml", blob).unwrap();
     let tree = store.put_tree(&Tree::new(vec![entry]).unwrap()).unwrap();
@@ -193,7 +224,7 @@ async fn state_feed_converges_after_an_outage_and_sends_nothing_private() {
     let root = format!("http://{}/o/r", listener.local_addr().unwrap());
     let intake = Arc::new(Mutex::new(Intake::default()));
     tokio::spawn(serve(listener, Arc::clone(&intake)));
-    let state = setup(data.path(), &root);
+    let state = setup(data.path(), &root, "");
     let join = ChannelRequest::Join {
         member: "a".into(),
         nick: "alice".into(),
@@ -224,6 +255,26 @@ async fn state_feed_converges_after_an_outage_and_sends_nothing_private() {
         .unwrap()
         .held
         .contains_key(&("config".into(), "config".into())));
+    // The first pass also sends presence and the (empty) machine list.
+    let presence = intake.lock().unwrap().items("presence");
+    assert_eq!(presence[0]["members"][0]["nick"], "alice", "{presence:?}");
+    assert!(intake.lock().unwrap().items("machines")[0]["machines"].is_array());
+
+    // A post-land failure goes as an event line within 10 s, its output
+    // cut to the last 64 KiB.
+    let output = format!("{}tail-of-output", "x".repeat(70 * 1024));
+    let detail = json!({ "kind": "test", "output": output, "requires_revert": true });
+    let seq = state
+        .events
+        .publish(EventKind::PostLandFailure, Some(first.clone()), detail);
+    let line = |i: &Intake| i.items("events").into_iter().find(|e| e["seq"] == seq);
+    until(&intake, Duration::from_secs(15), |i| line(i).is_some()).await;
+    let line = line(&intake.lock().unwrap()).unwrap();
+    assert_eq!(line["kind"], "post_land_failure");
+    assert_eq!(line["detail"]["truncated"], true);
+    let kept = line["detail"]["output"].as_str().unwrap();
+    assert!(kept.len() == 64 * 1024 && kept.ends_with("tail-of-output"));
+    assert!(line["time"].as_i64().unwrap() > 0);
 
     // A land is sent once as landed, with coverage.
     call(
@@ -258,5 +309,74 @@ async fn state_feed_converges_after_an_outage_and_sends_nothing_private() {
         assert!(!text.contains(MESSAGE), "a channel message was sent");
         assert!(!text.contains("signature"), "a receipt signature was sent");
     }
+    assert!(
+        intake.items("channel").is_empty(),
+        "channel lines were sent"
+    );
+    feed.abort();
+}
+
+/// Risk: with `collapse_channel = true` a line sent twice or out of order
+/// shows a message twice, and a ledger entry sent here duplicates the
+/// ledger push.
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_lines_go_once_in_order_without_ledger_entries() {
+    let data = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!("http://{}/o/r", listener.local_addr().unwrap());
+    let intake = Arc::new(Mutex::new(Intake::default()));
+    tokio::spawn(serve(listener, Arc::clone(&intake)));
+    let state = setup(data.path(), &root, "collapse_channel = true\n");
+    let feed = tokio::spawn(rosen_server::state_push::run(Arc::clone(&state)));
+    let wait = Duration::from_secs(30);
+    // An endpoint never reached starts at the log's tip, so the lines
+    // under test come after the first pass.
+    until(&intake, wait, |i| !i.items("config").is_empty()).await;
+    let join = ChannelRequest::Join {
+        member: "a".into(),
+        nick: "alice".into(),
+        machine: "m1".into(),
+    };
+    channel::run(&state.events, join).unwrap();
+    let entry = AppendEntry {
+        ledger: ChannelLedger::Discovery,
+        author: Author::Agent { member: "a".into() },
+        text: LEDGER_TEXT.into(),
+        velocity_issue: None,
+    };
+    channel::run(&state.events, ChannelRequest::Append(entry)).unwrap();
+    let message = SendMessage {
+        from: Author::Agent { member: "a".into() },
+        to: vec!["alice".into()],
+        intent: Intent::Inform,
+        text: MESSAGE.into(),
+    };
+    channel::run(&state.events, ChannelRequest::Send(message)).unwrap();
+    let sent = |i: &Intake| {
+        i.bodies
+            .iter()
+            .any(|b| String::from_utf8_lossy(b).contains(MESSAGE))
+    };
+    until(&intake, wait, sent).await;
+
+    let intake = intake.lock().unwrap();
+    let mut seqs = Vec::new();
+    for body in &intake.bodies {
+        let batch: Value = serde_json::from_slice(body).unwrap();
+        let lines = batch["channel"].as_array().unwrap();
+        seqs.extend(lines.iter().map(|line| line["seq"].as_u64().unwrap()));
+        assert!(
+            !String::from_utf8_lossy(body).contains(LEDGER_TEXT),
+            "a ledger entry was sent"
+        );
+    }
+    let mut ordered = seqs.clone();
+    ordered.sort_unstable();
+    ordered.dedup();
+    assert_eq!(seqs, ordered, "channel lines repeated or out of order");
+    let mut lines = intake.items("channel");
+    lines.sort_by_key(|line| line["seq"].as_u64());
+    let kinds: Vec<Value> = lines.iter().map(|l| l["detail"]["line"].clone()).collect();
+    assert_eq!(kinds, [json!("joined"), json!("message")]);
     feed.abort();
 }

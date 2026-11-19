@@ -1127,6 +1127,12 @@
         },
         "ledger_endpoint": {
           "type": "string"
+        },
+        "collapse": {
+          "type": "string"
+        },
+        "collapse_channel": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -4340,6 +4346,280 @@
       "x-commands": [
         "land --check"
       ]
+    },
+    "StateFeedEvent": {
+      "description": "A post-land event line (R9 state feed, #406), keyed by its own seq.",
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "enum": [
+            "conflict",
+            "built",
+            "green",
+            "reverted",
+            "revert_refused",
+            "post_land_failure",
+            "bisect",
+            "mirror"
+          ]
+        },
+        "change": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "description": "The event's detail. A conflict keeps only paths and onto; mirror leaves out remote; post_land_failure and reverted keep the last 64 KiB of output with truncated.",
+          "type": "object"
+        },
+        "time": {
+          "type": "integer",
+          "description": "Unix milliseconds the event log stored the line."
+        },
+        "too_large": {
+          "const": true
+        }
+      },
+      "required": [
+        "seq",
+        "kind"
+      ]
+    },
+    "StateFeedMachine": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/MachineRole"
+        },
+        "status": {
+          "$ref": "#/$defs/MachineStatus"
+        },
+        "running_agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "credential_expires_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Unix seconds."
+        },
+        "requested_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Unix seconds."
+        },
+        "last_contact": {
+          "type": "integer",
+          "description": "Unix seconds, rounded down to the minute."
+        },
+        "out_of_contact": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "role",
+        "status",
+        "running_agents",
+        "last_contact",
+        "out_of_contact"
+      ],
+      "additionalProperties": false
+    },
+    "StateFeedMachines": {
+      "description": "The full machine list (R14), sent when it changes.",
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "machines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StateFeedMachine"
+          }
+        }
+      },
+      "required": [
+        "seq",
+        "machines"
+      ],
+      "additionalProperties": false
+    },
+    "StateFeedPresence": {
+      "description": "The joined channel members (R13).",
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "as_of": {
+          "type": "integer",
+          "description": "Unix milliseconds the list was read."
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "nick": {
+                "type": "string"
+              },
+              "machine": {
+                "type": "string"
+              },
+              "mode": {
+                "enum": [
+                  "open",
+                  "heads_down",
+                  "quarantined"
+                ]
+              },
+              "joined_at": {
+                "type": "integer",
+                "description": "Unix milliseconds."
+              }
+            },
+            "required": [
+              "nick",
+              "machine",
+              "mode",
+              "joined_at"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "seq",
+        "as_of",
+        "members"
+      ],
+      "additionalProperties": false
+    },
+    "StateFeedChannelLine": {
+      "description": "A channel event line as R13 stores it, sent only with collapse_channel = true; never a ledger entry.",
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "detail": {
+          "type": "object"
+        },
+        "time": {
+          "type": "integer",
+          "description": "Unix milliseconds the event log stored the line."
+        },
+        "too_large": {
+          "const": true
+        }
+      },
+      "required": [
+        "seq"
+      ]
+    },
+    "rosen.state_feed/v1": {
+      "description": "A state feed request body POSTed to <collapse>/rosen/state (R9), not CLI output. Items in changes, conflicts, threads, coverage and config are whole documents keyed by id, change or config.",
+      "type": "object",
+      "properties": {
+        "format": {
+          "const": 1
+        },
+        "through": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "threads": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "config": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StateFeedEvent"
+          }
+        },
+        "machines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StateFeedMachines"
+          }
+        },
+        "presence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StateFeedPresence"
+          }
+        },
+        "channel": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StateFeedChannelLine"
+          }
+        }
+      },
+      "required": [
+        "format",
+        "through",
+        "changes",
+        "conflicts",
+        "threads",
+        "coverage",
+        "config",
+        "events",
+        "machines",
+        "presence",
+        "channel"
+      ],
+      "additionalProperties": false
     }
   }
 }

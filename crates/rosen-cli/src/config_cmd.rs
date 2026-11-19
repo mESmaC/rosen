@@ -74,6 +74,14 @@ fn print_parts(config: &ProjectConfig) {
         Some(url) => println!("collapse: {url}"),
         None => println!("collapse: (none; live state is not sent)"),
     }
+    if config.collapse.is_some() {
+        let lines = if config.collapse_channel {
+            "sent"
+        } else {
+            "not sent (set collapse_channel = true to send them)"
+        };
+        println!("channel lines: {lines}");
+    }
     match config.ledger_push_url() {
         Some(url) => println!("ledger endpoint: {url}"),
         None => println!("ledger endpoint: (none; ledgers are not pushed)"),

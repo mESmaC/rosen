@@ -10,13 +10,14 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Enrolls `dir` as machine `name`. Afterwards a daemon started on `dir`
-/// with no network flags finds its server in `upstream.json`.
+/// with no network flags finds its server in `upstream.json`. Returns the
+/// encoded join key, which the state feed check scans for.
 pub async fn enroll(
     server: &Endpoint,
     proxy: SocketAddr,
     dir: &Path,
     name: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     let client = rosen_client::Client::connect(server).await?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let key = client
@@ -31,7 +32,7 @@ pub async fn enroll(
     rosen_client::enrollment::join(dir, &key, name)
         .await
         .with_context(|| format!("enrolling {name}"))?;
-    Ok(())
+    Ok(key)
 }
 
 /// Removes the machine credential `enroll` stored in the user's credential

@@ -3,15 +3,19 @@
 //! An event naming a change makes that change dirty, and a claim makes the
 //! changes it overlaps dirty too. `landed`, `review`, `green` and
 //! `reverted` make coverage dirty, and `landed` the configuration, which
-//! is only sent when its fingerprint shows `rosen.toml` changed. Channel
-//! lines, mirror and push reports never make anything dirty: the feed
-//! sends no messages, and its own reports must not wake it.
+//! is only sent when its fingerprint shows `rosen.toml` changed.
+//!
+//! Post-land events and mirror reports are lines the feed sends (#406).
+//! A channel `joined`, `left` or `mode` line makes presence dirty; other
+//! channel lines are sent only when the project opts in, and never ledger
+//! entries. The feed's and the ledger push's own reports never wake it.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
 
 use rosen_core::ChangeId;
 use rosen_protocol::{Event, EventKind};
+use serde_json::Value;
 
 use crate::events::EventLog;
 
@@ -24,6 +28,13 @@ pub struct Pending {
     pub changes: BTreeSet<ChangeId>,
     pub coverage: bool,
     pub config: bool,
+    /// Event lines, or channel lines when they are sent, wait in the log.
+    pub log: bool,
+    pub machines: bool,
+    pub presence: bool,
+    /// The presence document goes with this pass even unchanged, if any
+    /// member is joined and anything else goes.
+    pub refresh_presence: bool,
     /// Every live document, whatever was delivered before: set on start
     /// and after a failure, so the endpoint converges after any loss.
     pub everything: bool,
@@ -33,6 +44,9 @@ pub struct Pending {
     pub urgent_since: Option<Instant>,
     /// When the oldest pending snapshot arrived.
     pub snapshot_since: Option<Instant>,
+    /// When the machine list or presence last changed: they go after a
+    /// quiet spell, or with whatever goes sooner.
+    pub quiet_since: Option<Instant>,
 }
 
 impl Pending {
@@ -41,6 +55,9 @@ impl Pending {
         Self {
             coverage: true,
             config: true,
+            log: true,
+            machines: true,
+            presence: true,
             everything: true,
             scanned_to: cursor,
             urgent_since: Some(Instant::now()),
@@ -49,16 +66,33 @@ impl Pending {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty() && !self.coverage && !self.config && !self.everything
+        self.changes.is_empty()
+            && !self.coverage
+            && !self.config
+            && !self.log
+            && !self.machines
+            && !self.presence
+            && !self.everything
     }
 
-    /// Reads events after `scanned_to` and marks what they make dirty.
-    /// Reads SQLite: call it on the blocking pool.
-    pub fn scan(&mut self, events: &EventLog) -> Result<(), crate::events::EventError> {
+    /// Marks the machine list changed.
+    pub fn machines_changed(&mut self) {
+        self.machines = true;
+        self.quiet_since = Some(Instant::now());
+    }
+
+    /// Reads events after `scanned_to` and marks what they make dirty;
+    /// channel lines only count as news when `channel` sends them. Reads
+    /// SQLite: call it on the blocking pool.
+    pub fn scan(
+        &mut self,
+        events: &EventLog,
+        channel: bool,
+    ) -> Result<(), crate::events::EventError> {
         loop {
             let page = events.page(self.scanned_to, None, PAGE)?;
             for event in &page.events {
-                self.mark(event);
+                self.mark(event, channel);
             }
             if page.scanned_to <= self.scanned_to {
                 return Ok(());
@@ -67,14 +101,17 @@ impl Pending {
         }
     }
 
-    fn mark(&mut self, event: &Event) {
-        if matches!(
-            event.kind,
-            EventKind::Channel | EventKind::Mirror | EventKind::LedgerPush | EventKind::StatePush
-        ) {
-            return;
+    fn mark(&mut self, event: &Event, channel: bool) {
+        match event.kind {
+            EventKind::Channel => return self.mark_line(&event.detail, channel),
+            EventKind::LedgerPush | EventKind::StatePush => return,
+            _ => {}
         }
         let mut marked = false;
+        if is_sent_line(event.kind) {
+            self.log = true;
+            marked = true;
+        }
         if let Some(id) = event.change.as_deref().and_then(|id| id.parse().ok()) {
             marked |= self.changes.insert(id);
         }
@@ -103,6 +140,36 @@ impl Pending {
         };
         since.get_or_insert_with(Instant::now);
     }
+
+    /// A channel line: presence when membership or a mode changed, and the
+    /// line itself when the project sends them.
+    fn mark_line(&mut self, detail: &Value, channel: bool) {
+        let line = detail.get("line").and_then(Value::as_str);
+        if matches!(line, Some("joined" | "left" | "mode")) {
+            self.presence = true;
+            self.quiet_since = Some(Instant::now());
+        }
+        if channel && line != Some("ledger") {
+            self.log = true;
+            self.urgent_since.get_or_insert_with(Instant::now);
+        }
+    }
+}
+
+/// Whether the feed sends events of `kind` as lines; the same kinds
+/// [`super::log_lines::SENT_KINDS`] reads from the log.
+fn is_sent_line(kind: EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Conflict
+            | EventKind::Built
+            | EventKind::Green
+            | EventKind::Reverted
+            | EventKind::RevertRefused
+            | EventKind::PostLandFailure
+            | EventKind::Bisect
+            | EventKind::Mirror
+    )
 }
 
 /// The changes a `claim` event names as overlapping it.

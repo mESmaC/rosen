@@ -12,10 +12,10 @@ use rosen_protocol::ChangeFilter;
 use super::batch;
 use super::dirty::Pending;
 use super::facts::Stores;
-use super::review_docs;
 use super::store::{Cursor, StateStore};
-use super::unit::Unit;
+use super::unit::{Delivery, Section, Unit};
 use super::{change_doc, PushError};
+use super::{log_lines, machines_doc, review_docs};
 use crate::ledger_push::send::{self, Credential, SendFailure};
 use crate::ServerState;
 
@@ -77,24 +77,39 @@ impl Target {
     }
 }
 
-/// Sends what `pending` names through its scanned sequence. Returns how
-/// many documents went.
+/// What one pass delivered.
+#[derive(Debug, Default)]
+pub struct Delivered {
+    /// Documents and lines acknowledged.
+    pub count: usize,
+    /// Whether the presence document went, changed or not.
+    pub presence: bool,
+}
+
+/// Sends what `pending` names through its scanned sequence; `channel` says
+/// whether channel lines go too.
 pub async fn send(
     state: &Arc<ServerState>,
     target: &Target,
     pending: &Pending,
     cursor: &mut Cursor,
-) -> Result<usize, PushError> {
+    channel: bool,
+) -> Result<Delivered, PushError> {
     let seq = pending.scanned_to;
     let units = {
         // An operator rewrite of history must not run under a half-read pass.
         let _running = state.maintenance.read().await;
-        build(state, target, pending).await?
+        let mut units = build(state, target, pending).await?;
+        units.extend(extras(state, target, pending, cursor.scanned, channel).await?);
+        units
     };
     let everything = pending.everything;
     let units = target
         .with_store(move |store, endpoint| unsent(store, endpoint, units, everything))
         .await?;
+    let presence = units
+        .iter()
+        .any(|unit| unit.items.iter().any(|(s, _)| *s == Section::Presence));
     let batches = batch::split(units, seq, cursor.delivered);
     let count = batches.len();
     let mut sent = 0;
@@ -112,7 +127,7 @@ pub async fn send(
                 delivered: seq.max(cursor.delivered),
             };
         }
-        sent += batch.documents.len();
+        sent += batch.documents.len() + batch.lines;
         let documents = batch.documents;
         target
             .with_store(move |s, e| s.delivered(e, &documents, next))
@@ -127,7 +142,10 @@ pub async fn send(
             .with_store(move |s, e| s.save_cursor(e, kept))
             .await?;
     }
-    Ok(sent)
+    Ok(Delivered {
+        count: sent,
+        presence: presence && count > 0,
+    })
 }
 
 /// The endpoint acknowledged a batch but holds less than it covered: it
@@ -150,7 +168,8 @@ async fn lost(target: &Target, cursor: &mut Cursor, through: u64, held: u64) -> 
 }
 
 /// The units the endpoint does not hold yet; every one when resending
-/// everything.
+/// everything. Log lines always go. An unchanged refresh goes only when
+/// something else does, so refreshing never makes a request of its own.
 fn unsent(
     store: &mut StateStore,
     endpoint: &str,
@@ -158,11 +177,21 @@ fn unsent(
     everything: bool,
 ) -> rusqlite::Result<Vec<Unit>> {
     let mut kept = Vec::with_capacity(units.len());
+    let mut refreshed = Vec::new();
     for unit in units {
+        if unit.delivery == Delivery::Log {
+            kept.push(unit);
+            continue;
+        }
         let held = store.sent(endpoint, &unit.document)?;
         if everything || held.is_none_or(|sent| sent.fingerprint != unit.fingerprint) {
             kept.push(unit);
+        } else if unit.delivery == Delivery::Refresh {
+            refreshed.push(unit);
         }
+    }
+    if !kept.is_empty() {
+        kept.extend(refreshed);
     }
     Ok(kept)
 }
@@ -211,6 +240,59 @@ async fn build(
         units.extend(review_docs::config(state).await.map_err(PushError::Store)?);
     }
     Ok(units)
+}
+
+/// The machine list, presence, and the event and channel lines after
+/// `after`, as `pending` asks.
+async fn extras(
+    state: &Arc<ServerState>,
+    target: &Target,
+    pending: &Pending,
+    after: u64,
+    channel: bool,
+) -> Result<Vec<Unit>, PushError> {
+    let metadata = target.stores.metadata().to_owned();
+    let through = pending.scanned_to;
+    let everything = pending.everything;
+    let lines = pending.log || everything;
+    let machines = (pending.machines || everything).then(|| running_agents(state));
+    let presence = pending.presence || pending.refresh_presence || everything;
+    let refresh = pending.refresh_presence;
+    super::blocking(move || {
+        let mut units = Vec::new();
+        if let Some(running) = machines {
+            units.push(machines_doc::machines(
+                &metadata,
+                &running,
+                crate::machines::now(),
+            )?);
+        }
+        if presence {
+            units.push(machines_doc::presence(&metadata, now_millis(), refresh)?);
+        }
+        if lines {
+            units.extend(log_lines::read(&metadata, after, through, channel)?);
+        }
+        Ok(units)
+    })
+    .await
+}
+
+/// A copy of the server's count of subscribed agents per machine.
+pub fn running_agents(state: &ServerState) -> crate::machines::manage::Presence {
+    state
+        .machine_agents
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 async fn change_unit(state: &Arc<ServerState>, stores: &Stores, id: ChangeId) -> Unit {

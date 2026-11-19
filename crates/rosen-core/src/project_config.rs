@@ -77,6 +77,12 @@ pub struct ProjectConfig {
     /// It never holds a credential either.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collapse: Option<String>,
+    /// Whether the state feed also sends channel lines: messages, claims
+    /// and presence changes (R9, R13). Off by default, since channel lines
+    /// hold agent messages and the owner decides whether they leave the
+    /// machine. Ledger entries never go this way; the ledger push sends them.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub collapse_channel: bool,
 }
 
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
@@ -106,6 +112,7 @@ impl Default for ProjectConfig {
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             ledger_endpoint: None,
             collapse: None,
+            collapse_channel: false,
         }
     }
 }
