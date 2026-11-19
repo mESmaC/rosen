@@ -22,6 +22,15 @@ pub struct MachineRecord {
     pub status: MachineStatus,
     pub last_contact: u64,
     pub running_agents: Vec<String>,
+    /// When an active machine's current credential expires. Absent for a
+    /// pending or revoked machine, and once the credential has expired: an
+    /// owner reads a stalled expiry as a machine that stopped rotating.
+    /// Defaulted so peers from before #408 still read the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_expires_at: Option<u64>,
+    /// When a pending request was made; it is removed 7 days later (R14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JoinKeyRecord {

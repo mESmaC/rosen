@@ -38,6 +38,8 @@ Machines join a project with no login, monitor or remote desktop on the joining 
     An unapproved request expires, and is removed, 7 days after it was made.
 - **Machine list and revocation.**
   The server lists every machine with its role, last contact (to the minute) and running agents.
+  It also gives an active machine's credential expiry and a pending machine's request time.
+  `rosen machine list` shows "rotates in N d" for an active machine, "renewal overdue, expires in N d" once its credential is inside the seven-day renewal window, and "pending since <time>, expires in N d" for a pending request.
   Revoking a machine refuses its credential on its next request.
   Its changes, claims and workspaces are kept, as for a failed change.
 - **Discovery.**

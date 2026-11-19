@@ -98,6 +98,41 @@ async fn one_address_cannot_flood_pending_admission() {
     server.await.unwrap();
 }
 
+fn listed(conn: &rusqlite::Connection, id: &str) -> MachineRecord {
+    let records = machines::manage::list(conn).unwrap();
+    records.into_iter().find(|m| m.id == id).unwrap()
+}
+
+/// Risk (#408): an owner sees that a machine stopped rotating, or that a
+/// request is about to lapse, only through these fields of the list.
+#[test]
+fn machine_list_reports_credential_expiry_and_request_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let asked =
+        machines::credentials::pending(dir.path(), "headless", MachineRole::Agent, "local", None)
+            .unwrap();
+    let id = asked.machine_id.as_str();
+    let conn = machines::open(dir.path()).unwrap();
+    let now = machines::now();
+    let pending = listed(&conn, id);
+    assert!(pending.requested_at.is_some_and(|t| now.abs_diff(t) <= 5));
+    assert_eq!(pending.credential_expires_at, None);
+    machines::manage::approve(&conn, id).unwrap();
+    // A stalled daemon: its credential has entered the renewal window.
+    let stalled_expiry = now + 3 * 86_400;
+    conn.execute(
+        "UPDATE machines SET expires_at=?1 WHERE id=?2",
+        rusqlite::params![stalled_expiry, id],
+    )
+    .unwrap();
+    let stalled = listed(&conn, id);
+    assert_eq!(stalled.credential_expires_at, Some(stalled_expiry));
+    assert_eq!(stalled.requested_at, None);
+    machines::credentials::rotate(dir.path(), &asked.secret).unwrap();
+    let rotated = listed(&conn, id).credential_expires_at.unwrap();
+    assert!(rotated >= now + machines::credentials::LIFETIME);
+}
+
 async fn project() -> (
     tempfile::TempDir,
     Arc<ServerState>,

@@ -188,7 +188,7 @@ fn print_file(file: &FileDiff) {
 }
 
 /// `YYYY-MM-DD` in UTC, from Unix seconds (the civil-from-days algorithm).
-fn utc_date(seconds: i64) -> String {
+pub(crate) fn utc_date(seconds: i64) -> String {
     let days = seconds.div_euclid(86_400);
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

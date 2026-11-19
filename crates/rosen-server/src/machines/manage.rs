@@ -80,10 +80,28 @@ fn database(error: rusqlite::Error) -> ErrorBody {
     ErrorBody::new(ErrorCode::Internal, error.to_string())
 }
 
+/// The columns [`machine`] reads, in its order.
+const MACHINE_COLUMNS: &str = "id,name,role,status,last_contact,running_agents,expires_at";
+
 fn machine(row: &Row<'_>) -> rusqlite::Result<MachineRecord> {
     let role: String = row.get(2)?;
     let status: String = row.get(3)?;
     let agents: String = row.get(5)?;
+    let last_contact: u64 = row.get(4)?;
+    let expires_at: u64 = row.get(6)?;
+    let status = match status.as_str() {
+        "active" => MachineStatus::Active,
+        "pending" => MachineStatus::Pending,
+        _ => MachineStatus::Revoked,
+    };
+    // Rotation overwrites `expires_at`, so it is the latest credential's
+    // expiry. A pending machine's credential is reissued for 30 days on
+    // approval, so its stored expiry would mislead.
+    let credential_expires_at =
+        (status == MachineStatus::Active && expires_at > super::now()).then_some(expires_at);
+    // A pending machine cannot authenticate, so its last contact stays the
+    // time it asked (see `pending::expire`).
+    let requested_at = (status == MachineStatus::Pending).then_some(last_contact);
     Ok(MachineRecord {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -92,20 +110,20 @@ fn machine(row: &Row<'_>) -> rusqlite::Result<MachineRecord> {
         } else {
             MachineRole::Agent
         },
-        status: match status.as_str() {
-            "active" => MachineStatus::Active,
-            "pending" => MachineStatus::Pending,
-            _ => MachineStatus::Revoked,
-        },
-        last_contact: row.get(4)?,
+        status,
+        last_contact,
         running_agents: serde_json::from_str(&agents).unwrap_or_default(),
+        credential_expires_at,
+        requested_at,
     })
 }
 
 pub fn list(conn: &Connection) -> Result<Vec<MachineRecord>, ErrorBody> {
     super::pending::expire(conn, super::now()).map_err(database)?;
     let mut query = conn
-        .prepare("SELECT id,name,role,status,last_contact,running_agents FROM machines ORDER BY id")
+        .prepare(&format!(
+            "SELECT {MACHINE_COLUMNS} FROM machines ORDER BY id"
+        ))
         .map_err(database)?;
     let rows = query.query_map([], machine).map_err(database)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(database)
@@ -113,7 +131,7 @@ pub fn list(conn: &Connection) -> Result<Vec<MachineRecord>, ErrorBody> {
 
 fn get(conn: &Connection, id: &str) -> Result<MachineRecord, ErrorBody> {
     conn.query_row(
-        "SELECT id,name,role,status,last_contact,running_agents FROM machines WHERE id=?1",
+        &format!("SELECT {MACHINE_COLUMNS} FROM machines WHERE id=?1"),
         [id],
         machine,
     )

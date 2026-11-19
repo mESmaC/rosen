@@ -2653,6 +2653,16 @@
           "items": {
             "type": "string"
           }
+        },
+        "credential_expires_at": {
+          "description": "Unix seconds when an active machine's current credential expires; absent when it has none.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "requested_at": {
+          "description": "Unix seconds when a pending machine's request was made; it is removed 7 days later.",
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [

@@ -9,6 +9,7 @@ mod history_cmd;
 mod import;
 mod land_cmd;
 mod machine_cmd;
+mod machine_list;
 mod mcp;
 mod mcp_tools;
 mod mirror_cmd;

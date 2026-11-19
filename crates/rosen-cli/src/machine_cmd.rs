@@ -12,12 +12,14 @@ pub async fn run(json: bool, endpoint: &Endpoint, command: &MachineCommand) -> R
     }
     let client = rosen_client::connect_or_start(endpoint).await?;
     match command {
-        MachineCommand::List => print(
-            json,
-            MACHINES_SCHEMA,
-            "machines",
-            json!(client.machine_list().await?),
-        ),
+        MachineCommand::List => {
+            let records = client.machine_list().await?;
+            if json {
+                print(json, MACHINES_SCHEMA, "machines", json!(records));
+            } else {
+                crate::machine_list::print(&records);
+            }
+        }
         MachineCommand::Approve { machine } => print(
             json,
             MACHINE_SCHEMA,
