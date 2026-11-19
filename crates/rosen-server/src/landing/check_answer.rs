@@ -40,6 +40,8 @@ pub(super) fn answer(
             UnitsReached::Units(units) => LandReach::Units(units),
         },
         merge: merge_gate(gates.merge, stored, markers),
+        // The service adds these from the clean merge result it read.
+        line_endings: Vec::new(),
         approval: match gates.approval {
             ApprovalCheck::Held => ApprovalGate::Held {
                 reviewers: gates.top.approvers.clone(),

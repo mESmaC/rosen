@@ -57,6 +57,21 @@ async fn land_bytes(
     path: &str,
     data: &[u8],
 ) -> (String, ObjectId, ObjectId) {
+    let (id, head, answer) = land_answer(state, path, data).await;
+    let LandStatus::Landed { commit, .. } = answer.outcome else {
+        panic!("{answer:?}")
+    };
+    state.landing.settle();
+    (id, head, commit)
+}
+
+/// Writes `data` at `path` in a new change and lands it, answering the
+/// change, its head and the land's answer.
+async fn land_answer(
+    state: &Arc<ServerState>,
+    path: &str,
+    data: &[u8],
+) -> (String, ObjectId, LandAnswer) {
     let Response::Change(c) = call(
         state,
         Request::ChangeNew(NewChange {
@@ -89,11 +104,7 @@ async fn land_bytes(
         "after-land without receipt or approval: {:?}",
         started.elapsed()
     );
-    let LandStatus::Landed { commit, .. } = answer.outcome else {
-        panic!("{answer:?}")
-    };
-    state.landing.settle();
-    (id, c.change.head, commit)
+    (id, c.change.head, answer)
 }
 
 async fn fail(state: &Arc<ServerState>, kind: CheckKind) -> BisectState {
@@ -617,19 +628,62 @@ async fn land_with_no_merge_keeps_the_base_line_endings() {
     land_bytes(&state, "notes.md", b"one\ntwo\n").await;
     // The change sits directly on the base, so the land runs no merge.
     let (_, _, commit) = land_bytes(&state, "notes.md", b"one\r\ntwo\r\nthree\r\n").await;
+    assert_eq!(
+        landed_file(&state, commit, "notes.md"),
+        b"one\ntwo\nthree\n"
+    );
+}
+
+/// Risk (#424): keeping the base's line endings left files stored CRLF by an
+/// older server stuck, since a land converting them to LF stored no change.
+/// A declared `eol=lf` must win both ways, the land must say so, and a
+/// `-text` file must keep its bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn land_follows_declared_gitattributes_line_endings() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = setup(temp.path());
+    // Stored CRLF before the project declared its line endings.
+    land_bytes(&state, "stuck.md", b"one\r\ntwo\r\n").await;
+    let attributes = b"* text=auto eol=lf\n*.dat -text\n";
+    land_bytes(&state, ".gitattributes", attributes).await;
+    let (_, _, repaired) = land_bytes(&state, "stuck.md", b"one\ntwo\n").await;
+    assert_eq!(landed_file(&state, repaired, "stuck.md"), b"one\ntwo\n");
+    let crlf = b"one\r\ntwo\r\nthree\r\n";
+    let (_, _, answer) = land_answer(&state, "stuck.md", crlf).await;
+    let LandStatus::Landed {
+        commit,
+        line_endings,
+        ..
+    } = answer.outcome
+    else {
+        panic!("{answer:?}")
+    };
+    state.landing.settle();
+    assert_eq!(
+        landed_file(&state, commit, "stuck.md"),
+        b"one\ntwo\nthree\n"
+    );
+    let rewrite = LineEndingRewrite {
+        path: "stuck.md".into(),
+        eol: "lf".into(),
+    };
+    assert_eq!(line_endings, vec![rewrite]);
+    let (_, _, kept) = land_bytes(&state, "raw.dat", b"a\r\nb\r\n").await;
+    assert_eq!(landed_file(&state, kept, "raw.dat"), b"a\r\nb\r\n");
+}
+
+/// The bytes of the root file `name` in `commit`'s tree.
+fn landed_file(state: &Arc<ServerState>, commit: ObjectId, name: &str) -> Vec<u8> {
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let tree = store
         .read_tree(&store.read_commit(&commit).unwrap().tree)
         .unwrap();
-    let notes = tree
+    let entry = tree
         .entries()
         .iter()
-        .find(|e| e.name == b"notes.md")
+        .find(|e| e.name == name.as_bytes())
         .unwrap();
-    assert_eq!(
-        store.read_blob(&notes.id).unwrap().data,
-        b"one\ntwo\nthree\n"
-    );
+    store.read_blob(&entry.id).unwrap().data
 }
 
 async fn status(state: &Arc<ServerState>) -> PostLandStatus {

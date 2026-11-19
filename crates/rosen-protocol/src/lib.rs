@@ -51,7 +51,8 @@ pub use history::{
 };
 pub use land::{
     ApprovalGate, LandAnswer, LandCheck, LandReach, LandRefusal, LandStatus, LandedSince,
-    MergeGate, OversizeFile, ReachAll, ReceiptBinding, ReceiptGate, StackLayer, StoredConflict,
+    LineEndingRewrite, MergeGate, OversizeFile, ReachAll, ReceiptBinding, ReceiptGate, StackLayer,
+    StoredConflict,
 };
 pub use message::*;
 pub use objects::{

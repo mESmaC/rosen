@@ -21,7 +21,14 @@ pub struct LandAnswer {
 pub enum LandStatus {
     /// This request moved the base to `commit`. `attempts` counts the
     /// compare-and-swap attempts, more than one when other lands won races.
-    Landed { commit: ObjectId, attempts: u32 },
+    Landed {
+        commit: ObjectId,
+        attempts: u32,
+        /// Files the land wrote in other line endings than the change gave
+        /// them, following `.gitattributes` or the base (R5, #424).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        line_endings: Vec<LineEndingRewrite>,
+    },
     /// The change had already landed as `commit`; nothing moved. A land is
     /// never applied twice (R8).
     AlreadyLanded { commit: ObjectId },
@@ -59,6 +66,10 @@ pub struct LandCheck {
     pub tier: String,
     pub reach: LandReach,
     pub merge: MergeGate,
+    /// Files a clean merge result holds in other line endings than the
+    /// change gave them, following `.gitattributes` or the base (R5, #424).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub line_endings: Vec<LineEndingRewrite>,
     pub approval: ApprovalGate,
     pub receipt: ReceiptGate,
     /// The unlanded ancestors an atomic land would include, bottom first.
@@ -73,6 +84,14 @@ pub struct LandCheck {
     /// The commit the change already landed as, when it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed: Option<ObjectId>,
+}
+
+/// A file whose line endings a land rewrote from what the change gave it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineEndingRewrite {
+    pub path: String,
+    /// The newline the file landed with: `lf` or `crlf`.
+    pub eol: String,
 }
 
 /// The same reason, message and paths [`LandStatus::Refused`] would carry.

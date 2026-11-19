@@ -16,11 +16,12 @@ use rosen_core::{
     ProjectConfig, Tree,
 };
 use rosen_merge::{merge_file, FileMerge, MarkerLabels, MergePolicy};
-use rosen_protocol::MergeResultAnswer;
+use rosen_protocol::{LineEndingRewrite, MergeResultAnswer};
 use rosen_store::ObjectStore;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, PoisonError};
 
+mod gitattributes;
 mod line_endings;
 mod staging;
 
@@ -222,6 +223,41 @@ fn tree_of(ctx: &Ctx, id: &ObjectId) -> HistoryResult<ObjectId> {
     }
 }
 
+/// The files the merge result `merged` (a commit or tree) on commit `base`
+/// holds in other line endings than the change's `head` gave them (#424).
+pub(crate) fn line_ending_rewrites(
+    state: &ServerState,
+    [base, merged, head]: [&ObjectId; 3],
+) -> HistoryResult<Vec<LineEndingRewrite>> {
+    let ctx = super::open(state)?;
+    let trees = [
+        tree_of(&ctx, base)?,
+        tree_of(&ctx, merged)?,
+        tree_of(&ctx, head)?,
+    ];
+    line_endings::rewritten(&ctx.store, trees)
+}
+
+/// [`line_ending_rewrites`] for a landed `commit`, measured from its first
+/// parent, the base it landed on.
+pub(crate) fn landed_line_ending_rewrites(
+    state: &ServerState,
+    commit: &ObjectId,
+    head: &ObjectId,
+) -> HistoryResult<Vec<LineEndingRewrite>> {
+    let ctx = super::open(state)?;
+    let landed = ctx.store.read_commit(commit)?;
+    let Some(parent) = landed.parents.first() else {
+        return Ok(Vec::new());
+    };
+    let trees = [
+        ctx.store.read_commit(parent)?.tree,
+        landed.tree,
+        tree_of(&ctx, head)?,
+    ];
+    line_endings::rewritten(&ctx.store, trees)
+}
+
 /// How `path` merges under the configuration in force on the target base.
 fn policy_for(config: &ProjectConfig, path: &str) -> MergePolicy {
     if config.is_generated(path) {
@@ -384,7 +420,7 @@ fn merge_paths(
     for change in theirs_changes {
         let policy = policy(&change.path);
         let Some(ours) = ours_changes.get(&change.path) else {
-            let kept = conventions.keep(change.new, change.old, policy)?;
+            let kept = conventions.keep(&change.path, change.new, change.old, policy)?;
             edits.insert(change.path, kept);
             continue;
         };
@@ -395,7 +431,8 @@ fn merge_paths(
         match merge_one(store, sides, policy)? {
             FileOutcome::Merged(file) => {
                 let reference = ours.new.or(change.old);
-                edits.insert(change.path, conventions.keep(file, reference, policy)?);
+                let kept = conventions.keep(&change.path, file, reference, policy)?;
+                edits.insert(change.path, kept);
             }
             FileOutcome::Conflict => {
                 if mark {

@@ -449,7 +449,9 @@ impl Agent {
             };
             let ms = started.elapsed().as_secs_f64() * 1000.0;
             match answer.outcome {
-                LandStatus::Landed { commit, attempts } => {
+                LandStatus::Landed {
+                    commit, attempts, ..
+                } => {
                     let change = work.change;
                     let rechecks = round;
                     let sample = LandSample {

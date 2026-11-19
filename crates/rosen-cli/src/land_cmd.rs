@@ -2,8 +2,8 @@
 
 use crate::server::Succeeded;
 use rosen_client::protocol::{
-    ApprovalGate, LandAnswer, LandCheck, LandReach, LandStatus, LandedSince, MergeGate,
-    ReceiptBinding, ReceiptGate,
+    ApprovalGate, LandAnswer, LandCheck, LandReach, LandStatus, LandedSince, LineEndingRewrite,
+    MergeGate, ReceiptBinding, ReceiptGate,
 };
 use rosen_client::{Endpoint, Error};
 use serde_json::json;
@@ -25,10 +25,20 @@ fn print_answer(json: bool, answer: &LandAnswer) {
     }
     let base_ref = &answer.base_ref;
     match &answer.outcome {
-        LandStatus::Landed { commit, attempts } => {
+        LandStatus::Landed {
+            commit,
+            attempts,
+            line_endings,
+        } => {
             println!("landed change {} as {commit} on {base_ref}", answer.change);
             if *attempts > 1 {
                 println!("({attempts} attempts: other lands moved {base_ref} first)");
+            }
+            if !line_endings.is_empty() {
+                println!(
+                    "line endings rewritten: {}",
+                    line_endings_text(line_endings)
+                );
             }
         }
         LandStatus::AlreadyLanded { commit } => {
@@ -91,12 +101,26 @@ pub fn gate_lines(check: &LandCheck) -> Vec<(&'static str, String)> {
         1 => "1 unlanded ancestor lands with it".to_owned(),
         n => format!("{n} unlanded ancestors land with it"),
     };
-    vec![
-        ("merge:", merge_text(&check.merge)),
+    let mut lines = vec![("merge:", merge_text(&check.merge))];
+    if !check.line_endings.is_empty() {
+        lines.push(("newlines:", line_endings_text(&check.line_endings)));
+    }
+    lines.extend([
         ("approval:", approval_text(&check.approval)),
         ("receipt:", receipt_text(&check.receipt)),
         ("stack:", stack),
-    ]
+    ]);
+    lines
+}
+
+/// Each file a land writes in other line endings than the change gave it,
+/// with the newline it lands with (R5, #424).
+fn line_endings_text(rewrites: &[LineEndingRewrite]) -> String {
+    let listed: Vec<_> = rewrites
+        .iter()
+        .map(|r| format!("{} ({})", r.path, r.eol))
+        .collect();
+    listed.join(", ")
 }
 
 pub fn reach_text(reach: &LandReach) -> String {

@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use rosen_core::{AgentId, Change, ChangeParent, ChangeState, ObjectId, SnapshotKind};
 use rosen_protocol::{
-    ErrorBody, ErrorCode, LandAnswer, LandCheck, LandStatus, LandedProseQuery, Outcome, Response,
+    ErrorBody, ErrorCode, LandAnswer, LandCheck, LandStatus, LandedProseQuery, LineEndingRewrite,
+    Outcome, Response,
 };
 use rosen_store::{LooseObjectStore, ObjectStore};
 use rusqlite::params;
@@ -257,16 +258,51 @@ impl LandingService {
         let record = state.changes.show(change).map_err(change_body)?;
         let engine = self.engine(state)?;
         let gates = engine.check(&record.change.id).map_err(land_body)?;
-        let markers = match gates.merge {
+        let (markers, line_endings) = match gates.merge {
             super::MergeCheck::Clean(tree) => {
                 let store = LooseObjectStore::open(state.config.objects_dir())
                     .map_err(|err| internal(err.to_string()))?;
-                super::markers::paths(&store, tree, &self.marker_cache)
-                    .map_err(|err| internal(err.to_string()))?
+                let markers = super::markers::paths(&store, tree, &self.marker_cache)
+                    .map_err(|err| internal(err.to_string()))?;
+                let sides = [&gates.base, &tree, &gates.top.head];
+                let rewrites = crate::history::merge::line_ending_rewrites(state, sides)
+                    .map_err(|err| internal(err.to_string()))?;
+                (markers, rewrites)
             }
-            _ => Vec::new(),
+            _ => (Vec::new(), Vec::new()),
         };
-        super::check_answer::answer(state, &engine, &record.change, gates, markers)
+        let mut check =
+            super::check_answer::answer(state, &engine, &record.change, gates, markers)?;
+        check.line_endings = line_endings;
+        Ok(check)
+    }
+
+    /// The files a committed land wrote in other line endings than its
+    /// changes gave them (R5, #424): each landed commit measured from its
+    /// parent against the highest layer it holds. The land has already
+    /// committed, so a failed read only leaves the report out.
+    fn landed_line_endings(&self, land: &CommittedLand) -> Vec<LineEndingRewrite> {
+        let Some(state) = self.state.upgrade() else {
+            return Vec::new();
+        };
+        let mut heads: Vec<(CommitId, CommitId)> = Vec::new();
+        for record in land.ancestors.iter().chain(std::iter::once(&land.record)) {
+            match heads
+                .iter_mut()
+                .find(|(commit, _)| *commit == record.commit)
+            {
+                Some(layer) => layer.1 = record.head,
+                None => heads.push((record.commit, record.head)),
+            }
+        }
+        let mut rewrites = Vec::new();
+        for (commit, head) in heads {
+            match crate::history::merge::landed_line_ending_rewrites(&state, &commit, &head) {
+                Ok(found) => rewrites.extend(found),
+                Err(why) => eprintln!("rosen-server: line endings of land {commit}: {why}"),
+            }
+        }
+        rewrites
     }
 
     /// Lands `id` up to its base move, or the refusal that stops it, rebases
@@ -294,14 +330,25 @@ impl LandingService {
                     let change = land.record.change;
                     eprintln!("rosen-server: stack rebase after {change} landed failed: {why}");
                 }
-                let commit = land.record.commit;
-                let attempts = land.attempts;
-                (Ok(LandStatus::Landed { commit, attempts }), Some(land))
+                let status = LandStatus::Landed {
+                    commit: land.record.commit,
+                    attempts: land.attempts,
+                    line_endings: self.landed_line_endings(&land),
+                };
+                (Ok(status), Some(land))
             }
             // `decide` reports a land it committed as `Committed`.
             Decision::Decided(LandOutcome::Landed {
                 commit, attempts, ..
-            }) => (Ok(LandStatus::Landed { commit, attempts }), None),
+            }) => {
+                let line_endings = Vec::new();
+                let status = LandStatus::Landed {
+                    commit,
+                    attempts,
+                    line_endings,
+                };
+                (Ok(status), None)
+            }
             Decision::Decided(LandOutcome::AlreadyLanded { commit }) => {
                 if let Err(why) = engine.restack_landed(&commit) {
                     eprintln!("rosen-server: stack rebase after {id} landed failed: {why}");
