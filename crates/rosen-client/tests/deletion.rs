@@ -6,7 +6,7 @@ use rosen_client::protocol::{ChangeRecord, Listener, NewChange, Request};
 use rosen_client::snapshot::{journal_snapshot, pending_journal, Dirty, Snapshotter};
 use rosen_client::workspace::{deletion_permitted, pool::WarmPool, Options};
 use rosen_client::{Client, Endpoint, Error};
-use rosen_core::{AgentId, Commit, FileMode, ObjectId, Signature, Tree, TreeEntry};
+use rosen_core::{AgentId, Commit, FileMode, Signature, Tree, TreeEntry};
 use rosen_server::landing::Ledger;
 use rosen_server::{ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
