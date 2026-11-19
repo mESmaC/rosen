@@ -17,8 +17,10 @@ permissions:
   contents: read
 
 # A new push to a PR makes the run for its previous head useless.
+# The event name keeps a dispatched run (the timings job) out of main's push group,
+# where a later push would replace it while it waits.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   # Only a PR's newer head makes its previous run useless. On main every land is
   # its own release candidate, and agents land faster than a run finishes, so
   # cancelling there left main without a finished run. A new push waits instead,
@@ -75,6 +77,50 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+  # Build and check times (#399), on dispatch only: `gh workflow run ci.yml`.
+  # No Rust cache, so the first build is cold. Each variant times the pre-land
+  # and post-land check sets and one-crate edits, writes a table to the run
+  # summary and uploads cargo's --timings reports.
+  timings:
+    name: Windows build timings (${{ matrix.variant }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [default, rust-lld, rust-lld-line-tables]
+    env:
+      # Agents' workspaces and the land checks build with Cargo's default, so an
+      # edit build here reuses incremental state as theirs does.
+      CARGO_INCREMENTAL: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The same Dev Drive target as the Windows job, so times compare with it.
+      - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+        with:
+          drive-size: 30GB
+          drive-format: ReFS
+          env-mapping: |
+            CARGO_TARGET_DIR,{{ DEV_DRIVE }}/target
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Time the check sets
+        shell: pwsh
+        run: ./.github/scripts/build_timings.ps1 -Variant ${{ matrix.variant }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: cargo-timings-${{ matrix.variant }}
+          path: ${{ env.CARGO_TARGET_DIR }}/cargo-timings/
+          if-no-files-found: error
 
   # spec/R3-workspaces/README.md R3's block clone path runs only on ReFS, and the Windows job's
   # volumes are NTFS, so there every workspace falls back to a plain copy
