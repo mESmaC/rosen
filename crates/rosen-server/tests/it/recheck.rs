@@ -11,7 +11,7 @@ fn reach(cell: &str) -> Reach {
 
 #[test]
 fn interval_reuse_matches_proven_fixtures() {
-    let table = include_str!("../../../proofs/fixtures/recheck.tsv");
+    let table = include_str!("../../../../proofs/fixtures/recheck.tsv");
     let mut checked = 0;
     for row in table.lines().skip(1) {
         let cells: Vec<_> = row.split('\t').collect();

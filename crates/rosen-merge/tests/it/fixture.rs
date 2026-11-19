@@ -46,7 +46,7 @@ fn fixture_result(columns: [&str; 3], endings: [&str; 3]) -> String {
 
 #[test]
 fn merge_matches_lean_model_fixtures() {
-    let table = include_str!("../../../proofs/fixtures/three-way-merge.tsv");
+    let table = include_str!("../../../../proofs/fixtures/three-way-merge.tsv");
     let mut rows = 0;
     for row in table.lines().filter(|row| !row.is_empty()) {
         let [base, ours, theirs, expected]: [&str; 4] = row

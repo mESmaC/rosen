@@ -49,7 +49,7 @@ fn count(state: &ServerState, table: &str) -> i64 {
 
 #[tokio::test]
 async fn release_fixtures_cover_rollback_and_restart_delivery() {
-    for row in include_str!("../../../proofs/fixtures/claim-release.tsv")
+    for row in include_str!("../../../../proofs/fixtures/claim-release.tsv")
         .lines()
         .skip(1)
     {

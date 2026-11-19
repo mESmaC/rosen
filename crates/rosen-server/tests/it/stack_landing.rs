@@ -131,7 +131,7 @@ async fn land(state: &Arc<ServerState>, id: &str) -> rosen_core::ObjectId {
 async fn atomic_stack_and_receipt_reuse_match_proved_fixtures() {
     // R8: a receipt on the top covers one atomic request, never a lost
     // prefix or a squashed history that prevents single-culprit bisection.
-    let fixtures = include_str!("../../../proofs/fixtures/stacked-changes.tsv");
+    let fixtures = include_str!("../../../../proofs/fixtures/stacked-changes.tsv");
     let mut checked = 0;
     for row in fixtures
         .lines()

@@ -36,7 +36,7 @@ fn bisection_fixtures() {
 }
 
 fn check_rows(conn: &mut rusqlite::Connection, path: &std::path::Path) {
-    for row in include_str!("../../../proofs/fixtures/bisection.tsv")
+    for row in include_str!("../../../../proofs/fixtures/bisection.tsv")
         .lines()
         .skip(1)
     {

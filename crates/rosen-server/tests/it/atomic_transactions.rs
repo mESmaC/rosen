@@ -9,7 +9,7 @@ fn oid(n: u8) -> ObjectId {
 
 #[test]
 fn transaction_fixtures() {
-    for row in include_str!("../../../proofs/fixtures/atomic-transactions.tsv")
+    for row in include_str!("../../../../proofs/fixtures/atomic-transactions.tsv")
         .lines()
         .skip(1)
     {

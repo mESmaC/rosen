@@ -168,7 +168,7 @@ async fn batch_green_survives_restart_and_excludes_future_lands() {
 #[test]
 fn sql_prefix_matches_lean_fixtures() {
     use rosen_server::post_land::store;
-    let fixture = include_str!("../../../proofs/fixtures/batch-green.tsv");
+    let fixture = include_str!("../../../../proofs/fixtures/batch-green.tsv");
     for line in fixture.lines().skip(1) {
         let cells: Vec<u32> = line.split('\t').map(|n| n.parse().unwrap()).collect();
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();

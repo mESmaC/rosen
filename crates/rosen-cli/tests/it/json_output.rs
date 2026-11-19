@@ -35,7 +35,7 @@ fn output_catalog_and_failures_stay_machine_readable() {
     assert!(output.status.success());
     let catalog: Value = serde_json::from_slice(&output.stdout).unwrap();
     check_refs(&catalog, &catalog);
-    for line in include_str!("../src/output.rs").lines() {
+    for line in include_str!("../../src/output.rs").lines() {
         if let Some((_, tag)) = line.split_once(": &str = \"") {
             let tag = tag.trim_end_matches("\";");
             assert!(catalog["$defs"].get(tag).is_some(), "missing {tag}");

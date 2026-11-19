@@ -228,7 +228,7 @@ fn receipt(n: u8, base: CommitId) -> SignedReceipt {
 // land. Forced merge cancellations cover the old Windows failure without timing.
 #[test]
 fn exhausted_attempts_match_contention_fixtures() {
-    let table = include_str!("../../../proofs/fixtures/landing.tsv");
+    let table = include_str!("../../../../proofs/fixtures/landing.tsv");
     let rows: Vec<_> = table
         .lines()
         .filter(|row| row.starts_with("contention\t"))
@@ -394,7 +394,7 @@ fn snapshot_racing_conflict_routing_is_decided_on_its_new_head() {
 // Risk (R8 step 4): clean overlap probes must preserve checked heads/parents.
 #[test]
 fn overlap_probe_matches_proved_fixture() {
-    let f: Vec<_> = include_str!("../../../proofs/fixtures/targeted-rebase.tsv")
+    let f: Vec<_> = include_str!("../../../../proofs/fixtures/targeted-rebase.tsv")
         .lines()
         .find(|row| row.starts_with("probe\t"))
         .unwrap()

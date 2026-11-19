@@ -191,7 +191,7 @@ async fn notices_include_shares_and_edits_and_exclusive_rejects_shared_files() {
 #[tokio::test]
 async fn claims_match_the_lean_table() {
     let (_dir, state, [a, b, c]) = setup("");
-    for row in include_str!("../../../proofs/fixtures/claims.tsv")
+    for row in include_str!("../../../../proofs/fixtures/claims.tsv")
         .lines()
         .skip(1)
     {

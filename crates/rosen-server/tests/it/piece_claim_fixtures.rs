@@ -51,7 +51,7 @@ fn holders(log: &EventLog) -> String {
 
 #[test]
 fn piece_claims_match_the_lean_fixture_table() {
-    let table = include_str!("../../../proofs/fixtures/piece-claims.tsv");
+    let table = include_str!("../../../../proofs/fixtures/piece-claims.tsv");
     let mut rows = 0;
     for line in table.lines().skip(1) {
         let [history, outcomes, expected] = line.split('\t').collect::<Vec<_>>()[..] else {

@@ -309,7 +309,7 @@ async fn close_without_snapshot(client: &Client, change: &ChangeRecord) {
 }
 
 fn check_design_fixtures() {
-    for line in include_str!("../../../proofs/fixtures/workspace-deletion.tsv").lines() {
+    for line in include_str!("../../../../proofs/fixtures/workspace-deletion.tsv").lines() {
         if line.is_empty() || line.starts_with('#') || line.starts_with("dirty") {
             continue;
         }

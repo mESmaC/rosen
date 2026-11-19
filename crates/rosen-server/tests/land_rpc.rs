@@ -2,6 +2,10 @@
 //! the change's exact head and to a base the land can still trust, or a land
 //! applied twice. Runs the real server path: registry, merge, store, ledger.
 
+// This file stays its own test binary outside `tests/it/` (#414): the scout
+// script `stress/review_367_reach.ps1` reads its helpers from this path and
+// adds a sibling test binary, and scout scripts are never edited.
+
 use rosen_core::history::LandedTrailers;
 use rosen_core::{AgentId, Commit, ObjectId, ReceiptTrailer, Signature, Tree};
 use rosen_protocol::{

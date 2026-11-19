@@ -2,7 +2,7 @@
 //!
 //! This is the rule modelled by `proofs/Landing/Design.lean`; the fixture
 //! table `proofs/fixtures/landing.tsv` is exported from that model and
-//! checked against [`decide`] by `tests/landing_fixtures.rs`.
+//! checked against [`decide`] by `tests/it/landing_fixtures.rs`.
 
 use rosen_core::{RecheckMode, ReviewMode};
 

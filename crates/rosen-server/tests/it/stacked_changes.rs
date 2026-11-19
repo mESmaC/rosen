@@ -129,7 +129,7 @@ fn assert_base_keeps_unrelated(state: &ServerState, store: &dyn ObjectStore) {
         .unwrap();
     let landed = store.read_commit(&base).unwrap();
     let tree = store.read_tree(&landed.tree).unwrap();
-    let expected = include_str!("../../../proofs/fixtures/land-handoff.tsv")
+    let expected = include_str!("../../../../proofs/fixtures/land-handoff.tsv")
         .lines()
         .nth(1)
         .unwrap();
@@ -291,7 +291,7 @@ async fn stack_merge_result_matches_proved_fixture() {
     // Risk (R8): using the stack root as a stale child's basis can receipt a
     // clean tree that silently deletes intervening lands (#146, #182).
     let mut checked = 0;
-    for row in include_str!("../../../proofs/fixtures/stacked-changes.tsv")
+    for row in include_str!("../../../../proofs/fixtures/stacked-changes.tsv")
         .lines()
         .filter(|row| row.starts_with("merge\t"))
     {
@@ -368,7 +368,7 @@ async fn legacy_recovery_matches_fixture_and_preserves_parent_updates() {
     // Risk (R8, #361): replacing an unedited child's implicit basis with a
     // newer parent snapshot silently treats intervening parent work as deleted.
     let mut checked = 0;
-    for row in include_str!("../../../proofs/fixtures/stacked-changes.tsv").lines() {
+    for row in include_str!("../../../../proofs/fixtures/stacked-changes.tsv").lines() {
         let fields: Vec<_> = row.split('\t').collect();
         if fields[0] == "recovery" {
             check_legacy_recovery(fields[1] == "1", fields[2] == "1", fields[3] == "1").await;

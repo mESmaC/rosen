@@ -7,7 +7,7 @@ use rosen_core::{blockers, ChangeId, HeldClaim, PathPattern};
 
 #[test]
 fn claims_match_the_lean_fixture_table() {
-    let table = include_str!("../../../proofs/fixtures/claims.tsv");
+    let table = include_str!("../../../../proofs/fixtures/claims.tsv");
     let holder: ChangeId = "k".repeat(32).parse().expect("valid change id");
     let claimant: ChangeId = "l".repeat(32).parse().expect("valid change id");
     let mut rows = 0;

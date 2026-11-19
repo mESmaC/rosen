@@ -242,7 +242,7 @@ async fn scenario(a_pending: bool, crash: u32) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn crash_at_every_land_step_matches_the_recovery_model() {
-    let table = include_str!("../../../proofs/fixtures/crash-recovery.tsv");
+    let table = include_str!("../../../../proofs/fixtures/crash-recovery.tsv");
     for row in table.lines().skip(1).filter(|line| !line.trim().is_empty()) {
         let cells: Vec<&str> = row.trim_end().split('\t').collect();
         let actual = scenario(cells[0] == "1", cells[1].parse().unwrap()).await;
