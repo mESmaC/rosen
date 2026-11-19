@@ -47,7 +47,10 @@ pub use history::{
     FileStatus, FileVersion, LargeFile, LineKind, Log, LogEntry, LogRequest, MergeBaseAnswer,
     MergeResultAnswer, ReadAnswer, ReadRequest,
 };
-pub use land::{LandAnswer, LandStatus};
+pub use land::{
+    ApprovalGate, LandAnswer, LandCheck, LandReach, LandRefusal, LandStatus, LandedSince,
+    MergeGate, OversizeFile, ReachAll, ReceiptBinding, ReceiptGate, StackLayer, StoredConflict,
+};
 pub use message::*;
 pub use objects::{
     EnsureObjects, ObjectBatch, ObjectChunk, ObjectChunkQuery, ObjectQuery, ObjectsLocal, WireKind,

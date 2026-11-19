@@ -3,10 +3,10 @@
 
 use crate::commands::StatusArgs;
 use crate::server::Succeeded;
-use rosen_client::protocol::{ChangeRecord, ClaimFilter, PathClaim};
+use rosen_client::protocol::{ChangeRecord, ClaimFilter, LandCheck, PathClaim};
 use rosen_client::snapshot::{pending_journal, SnapshotError, WorkspaceMarker};
 use rosen_client::{Client, Endpoint, Error};
-use rosen_core::{ChangeParent, ObjectId};
+use rosen_core::{ChangeParent, ChangeState, ObjectId};
 use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -48,6 +48,15 @@ pub async fn run(json: bool, endpoint: &Endpoint, args: &StatusArgs) -> Result<S
         change: Some(record.change.id.to_string()),
     };
     let claims = client.claim_list(filter).await?;
+    // Only an open or ready change has gates left to pass. A server that
+    // cannot answer the check (no base yet, or an older build) leaves the
+    // status without it rather than failing.
+    let gates = match record.change.state {
+        ChangeState::Open | ChangeState::Ready => {
+            client.land_check(&record.change.id.to_string()).await.ok()
+        }
+        ChangeState::Landed | ChangeState::Abandoned => None,
+    };
     let local = match workspace {
         Some(root) => Some(scan_workspace(&client, &root, &record).await?),
         None => None,
@@ -58,10 +67,11 @@ pub async fn run(json: bool, endpoint: &Endpoint, args: &StatusArgs) -> Result<S
             "change": record,
             "claims": claims,
             "workspace": local,
+            "land_check": gates,
         });
         println!("{body}");
     } else {
-        print_text(&record, &claims, local.as_ref());
+        print_text(&record, &claims, gates.as_ref(), local.as_ref());
     }
     Ok(true)
 }
@@ -127,7 +137,12 @@ fn rebased_past(record: &ChangeRecord, local: ObjectId) -> bool {
     change.head != local && change.snapshots.last().map(|s| s.tree) != Some(change.head)
 }
 
-fn print_text(record: &ChangeRecord, claims: &[PathClaim], local: Option<&WorkspaceState>) {
+fn print_text(
+    record: &ChangeRecord,
+    claims: &[PathClaim],
+    gates: Option<&LandCheck>,
+    local: Option<&WorkspaceState>,
+) {
     let change = &record.change;
     println!("change:    {}", change.id);
     println!("owner:     {}", change.owner);
@@ -141,6 +156,9 @@ fn print_text(record: &ChangeRecord, claims: &[PathClaim], local: Option<&Worksp
     println!("conflicts: {}", change.conflicts.len());
     for conflict in &change.conflicts {
         println!("  {conflict}");
+    }
+    if let Some(gates) = gates {
+        print_gates(gates);
     }
     println!("claims:    {}", claims.len());
     for claim in claims {
@@ -167,5 +185,18 @@ fn print_text(record: &ChangeRecord, claims: &[PathClaim], local: Option<&Worksp
     println!("files not yet stored on the server:");
     for path in &local.unsnapshotted {
         println!("  {path}");
+    }
+}
+
+/// The tier and land gate summary on the current base (R8 "Land check").
+fn print_gates(gates: &LandCheck) {
+    let reach = crate::land_cmd::reach_text(&gates.reach);
+    println!("tier:      {} (reach {reach})", gates.tier);
+    for (gate, verdict) in crate::land_cmd::gate_lines(gates) {
+        println!("  {gate:<9} {verdict}");
+    }
+    match &gates.refusal {
+        None => println!("  landable: yes, on {}", gates.base),
+        Some(refusal) => println!("  landable: no ({})", refusal.reason),
     }
 }

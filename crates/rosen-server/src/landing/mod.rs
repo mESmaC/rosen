@@ -11,6 +11,7 @@
 //! of the server. Landing reaches them only through the traits below, so each
 //! can be wired in without touching the landing algorithm.
 
+mod check_answer;
 pub(crate) mod conflict_routes;
 mod engine;
 mod ledger;
@@ -34,8 +35,8 @@ mod timing;
 use std::fmt;
 
 pub use engine::{
-    CommittedLand, Decision, LandOutcome, Landing, LandingConfig, LandingDeps, MergePreview,
-    RecoveryReport,
+    ApprovalCheck, CheckRefusal, CommittedLand, Decision, GateCheck, LandOutcome, Landing,
+    LandingConfig, LandingDeps, MergeCheck, MergePreview, ReceiptState, RecoveryReport,
 };
 pub use ledger::{CasResult, InitBase, LandRecord, Ledger};
 pub use receipt_store::{KeyBinding, ReceiptLookup, SignedReceipt};

@@ -144,6 +144,58 @@ pub fn reusable(
     }
 }
 
+/// The build units a change reaches under the base's build graph, for the
+/// land check (R8 "Land check").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnitsReached {
+    All,
+    Units(Vec<String>),
+}
+
+/// What the edits from `old` to `new` reach under the build graph at
+/// `base`. A graph that cannot be read reaches everything, as it does for
+/// the land's own independence test.
+pub fn units_reached(
+    store: &dyn ObjectStore,
+    cache: &UnitsCache,
+    base: &CommitId,
+    [old, new]: [&ObjectId; 2],
+    prose: bool,
+) -> LandResult<UnitsReached> {
+    match own_reach(store, cache, base, [old, new], prose) {
+        // `BuildGraph::all` adds the empty-name sentinel, so only an
+        // everything-reach holds it.
+        Ok((_, own)) if own.contains("") => Ok(UnitsReached::All),
+        Ok((_, own)) => Ok(UnitsReached::Units(own.into_iter().collect())),
+        Err(Stop::Unreadable(_)) => Ok(UnitsReached::All),
+        Err(Stop::Store(error)) => Err(error),
+    }
+}
+
+/// Every land in `lands` whose reach intersects the change's, which is
+/// what makes [`reusable`] answer false. Unreadable inputs intersect all.
+pub fn intersecting(
+    store: &dyn ObjectStore,
+    cache: &UnitsCache,
+    base: &CommitId,
+    facts: &ChangeFacts,
+    merged: &ObjectId,
+    lands: &[(CommitId, Tier)],
+) -> LandResult<Vec<CommitId>> {
+    let prose = facts.tier == Tier::ProseOnly;
+    let found = own_reach(store, cache, base, [base, merged], prose)
+        .and_then(|(reaches, own)| dependent_lands(store, &reaches, &own, lands, false));
+    match found {
+        Ok(found) => Ok(found),
+        Err(Stop::Unreadable(_)) => Ok(lands
+            .iter()
+            .filter(|(_, tier)| *tier != Tier::ProseOnly)
+            .map(|(commit, _)| *commit)
+            .collect()),
+        Err(Stop::Store(error)) => Err(error),
+    }
+}
+
 fn decide(
     store: &dyn ObjectStore,
     cache: &UnitsCache,
@@ -152,6 +204,20 @@ fn decide(
     merged: &ObjectId,
     lands: &[(CommitId, Tier)],
 ) -> Checked<bool> {
+    let prose = facts.tier == Tier::ProseOnly;
+    let (reaches, own) = own_reach(store, cache, base, [base, merged], prose)?;
+    Ok(dependent_lands(store, &reaches, &own, lands, true)?.is_empty())
+}
+
+/// The build graph at `base`, and the reach of the edits from `old` to
+/// `new` under it.
+fn own_reach(
+    store: &dyn ObjectStore,
+    cache: &UnitsCache,
+    base: &CommitId,
+    [old, new]: [&ObjectId; 2],
+    prose: bool,
+) -> Checked<(Arc<GraphReaches>, Reach)> {
     let config = crate::project_config::resolve(store, base)
         .map_err(error)?
         .config;
@@ -164,25 +230,34 @@ fn decide(
         config.build_units.clone()
     };
     let reaches = cache.reaches(graph(units, &config));
-    let own = inputs::reach(
-        store,
-        &reaches.graph,
-        base,
-        merged,
-        facts.tier == Tier::ProseOnly,
-    )?;
+    let own = inputs::reach(store, &reaches.graph, old, new, prose)?;
+    Ok((reaches, own))
+}
+
+/// The non-prose lands whose reach is not independent of `own`; a land
+/// with no parent to diff against counts as dependent. The land stops at
+/// the first (`first_only`), since one is enough to need a new receipt.
+fn dependent_lands(
+    store: &dyn ObjectStore,
+    reaches: &GraphReaches,
+    own: &Reach,
+    lands: &[(CommitId, Tier)],
+    first_only: bool,
+) -> Checked<Vec<CommitId>> {
+    let mut dependent = Vec::new();
     for (commit, tier) in lands {
         if *tier == Tier::ProseOnly {
             continue;
         }
-        let Some(reach) = reaches.land(store, commit)? else {
-            return Ok(false);
-        };
-        if !independent(&own, &reach) {
-            return Ok(false);
+        let reach = reaches.land(store, commit)?;
+        if reach.is_none_or(|reach| !independent(own, &reach)) {
+            dependent.push(*commit);
+            if first_only {
+                break;
+            }
         }
     }
-    Ok(true)
+    Ok(dependent)
 }
 
 fn error(e: impl std::fmt::Display) -> LandError {

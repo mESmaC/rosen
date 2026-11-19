@@ -211,9 +211,17 @@ pub enum Command {
     /// Needs a clean merge and a compare-and-swap. Before-land projects also
     /// need approval for the current head and a receipt (except prose-only
     /// changes). After-land projects need neither. A stack lands bottom first.
+    ///
+    /// With --check, reports every gate a land would apply on the current
+    /// base (merge, approval, receipt and stack), with the review tier and
+    /// build-unit reach, and lands nothing. It exits unsuccessfully when the
+    /// change would not land.
     Land {
         /// Change to land.
         change: String,
+        /// Report the land's gates without landing or marking the change ready.
+        #[arg(long)]
+        check: bool,
     },
     /// Rebase a change onto the current base and write it into its workspace.
     ///

@@ -22,6 +22,7 @@ pub const MIRROR_REWRITE_SCHEMA: &str = "rosen.mirror.rewrite/v1";
 pub const MIRROR_ADOPT_SCHEMA: &str = "rosen.mirror.adopt/v1";
 pub const MIRROR_CATCH_UP_SCHEMA: &str = "rosen.mirror.catch-up/v1";
 pub const LAND_SCHEMA: &str = "rosen.land/v1";
+pub const LAND_CHECK_SCHEMA: &str = "rosen.land_check/v1";
 pub const LOG_SCHEMA: &str = "rosen.log/v2";
 pub const OVERLAPS_SCHEMA: &str = "rosen.overlaps/v1";
 pub const REBASE_SCHEMA: &str = "rosen.rebase/v1";

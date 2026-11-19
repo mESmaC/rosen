@@ -130,6 +130,9 @@
       "$ref": "#/$defs/rosen.status~1v2"
     },
     {
+      "$ref": "#/$defs/rosen.land_check~1v1"
+    },
+    {
       "$ref": "#/$defs/rosen.mirror.rewrite~1v1"
     },
     {
@@ -3270,6 +3273,16 @@
               "type": "null"
             }
           ]
+        },
+        "land_check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LandCheck"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -3432,6 +3445,576 @@
       "required": ["schema", "catch_up"],
       "additionalProperties": false,
       "x-commands": ["mirror catch-up"]
+    },
+    "LandCheck": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ChangeId"
+        },
+        "base_ref": {
+          "type": "string"
+        },
+        "base": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "head": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "review_mode": {
+          "enum": [
+            "before-land",
+            "after-land"
+          ]
+        },
+        "recheck_mode": {
+          "enum": [
+            "reach",
+            "merge"
+          ]
+        },
+        "tier": {
+          "enum": [
+            "prose",
+            "normal",
+            "sensitive"
+          ]
+        },
+        "reach": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "const": "all"
+            }
+          ]
+        },
+        "merge": {
+          "$ref": "#/$defs/LandCheckMerge"
+        },
+        "approval": {
+          "$ref": "#/$defs/LandCheckApproval"
+        },
+        "receipt": {
+          "$ref": "#/$defs/LandCheckReceipt"
+        },
+        "stack": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "change": {
+                "$ref": "#/$defs/ChangeId"
+              },
+              "head": {
+                "$ref": "#/$defs/ObjectId"
+              },
+              "state": {
+                "$ref": "#/$defs/ChangeState"
+              },
+              "tier": {
+                "enum": [
+                  "prose",
+                  "normal",
+                  "sensitive"
+                ]
+              },
+              "blocked": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "change",
+              "head",
+              "state",
+              "tier"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "landable": {
+          "type": "boolean"
+        },
+        "refusal": {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "reason",
+            "message"
+          ],
+          "additionalProperties": false
+        },
+        "landed": {
+          "$ref": "#/$defs/ObjectId"
+        }
+      },
+      "required": [
+        "change",
+        "base_ref",
+        "base",
+        "head",
+        "review_mode",
+        "recheck_mode",
+        "tier",
+        "reach",
+        "merge",
+        "approval",
+        "receipt",
+        "stack",
+        "landable"
+      ],
+      "additionalProperties": false
+    },
+    "LandCheckMerge": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "clean"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "conflicts"
+            },
+            "conflicts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "status",
+            "conflicts"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "merge_conflict"
+            },
+            "change": {
+              "$ref": "#/$defs/ChangeId"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "status",
+            "change",
+            "paths"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "regeneration_required"
+            },
+            "change": {
+              "$ref": "#/$defs/ChangeId"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "status",
+            "change",
+            "paths"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "oversize_files"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "path",
+                  "bytes"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "status",
+            "limit",
+            "files"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "conflict_markers"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "status",
+            "paths"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "not_checked"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LandCheckApproval": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "held"
+            },
+            "reviewers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/AgentId"
+              }
+            },
+            "head": {
+              "$ref": "#/$defs/ObjectId"
+            }
+          },
+          "required": [
+            "status",
+            "reviewers",
+            "head"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "needed"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "not_required"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LandCheckReceipt": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "valid"
+            },
+            "receipt": {
+              "type": "object",
+              "properties": {
+                "check_set": {
+                  "type": "string"
+                },
+                "head": {
+                  "$ref": "#/$defs/ObjectId"
+                },
+                "base": {
+                  "$ref": "#/$defs/ObjectId"
+                },
+                "submitter": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "check_set",
+                "head",
+                "base",
+                "submitter"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "status",
+            "receipt"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "reusable"
+            },
+            "receipt": {
+              "type": "object",
+              "properties": {
+                "check_set": {
+                  "type": "string"
+                },
+                "head": {
+                  "$ref": "#/$defs/ObjectId"
+                },
+                "base": {
+                  "$ref": "#/$defs/ObjectId"
+                },
+                "submitter": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "check_set",
+                "head",
+                "base",
+                "submitter"
+              ],
+              "additionalProperties": false
+            },
+            "landed_since": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "commit": {
+                    "$ref": "#/$defs/ObjectId"
+                  },
+                  "change": {
+                    "$ref": "#/$defs/ChangeId"
+                  }
+                },
+                "required": [
+                  "commit"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "status",
+            "receipt",
+            "landed_since"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "stale"
+            },
+            "receipt": {
+              "type": "object",
+              "properties": {
+                "check_set": {
+                  "type": "string"
+                },
+                "head": {
+                  "$ref": "#/$defs/ObjectId"
+                },
+                "base": {
+                  "$ref": "#/$defs/ObjectId"
+                },
+                "submitter": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "check_set",
+                "head",
+                "base",
+                "submitter"
+              ],
+              "additionalProperties": false
+            },
+            "intersecting": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "commit": {
+                    "$ref": "#/$defs/ObjectId"
+                  },
+                  "change": {
+                    "$ref": "#/$defs/ChangeId"
+                  }
+                },
+                "required": [
+                  "commit"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "status",
+            "receipt",
+            "intersecting"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "unbound"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "missing"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "not_required"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "const": "not_checked"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "rosen.land_check/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.land_check/v1"
+        },
+        "check": {
+          "$ref": "#/$defs/LandCheck"
+        }
+      },
+      "required": [
+        "schema",
+        "check"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "land --check"
+      ]
     }
   }
 }

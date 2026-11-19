@@ -96,6 +96,7 @@ pub(crate) fn large_request(request: &Request) -> bool {
             | Request::EditRegions { .. }
             | Request::ChangeRebase { .. }
             | Request::Land { .. }
+            | Request::LandCheck { .. }
             | Request::Import { .. }
             | Request::MirrorAdopt { .. }
             | Request::MirrorCatchUp

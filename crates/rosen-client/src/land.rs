@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::connection::{unexpected, Client};
 use crate::Error;
-use rosen_protocol::{Endpoint, LandAnswer, Request, Response};
+use rosen_protocol::{Endpoint, LandAnswer, LandCheck, Request, Response};
 
 /// How many times [`land_reconnecting`] asks before giving up on a server
 /// that keeps dropping the connection, and its first wait between asks.
@@ -22,6 +22,18 @@ impl Client {
         };
         match self.request(request).await? {
             Response::Land(answer) => Ok(answer),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Reports every gate a land of `change` would apply on the current
+    /// base, without landing it or marking it ready (R8 "Land check").
+    pub async fn land_check(&self, change: &str) -> Result<LandCheck, Error> {
+        let request = Request::LandCheck {
+            change: change.to_owned(),
+        };
+        match self.request(request).await? {
+            Response::LandCheck(check) => Ok(*check),
             other => Err(unexpected(other)),
         }
     }

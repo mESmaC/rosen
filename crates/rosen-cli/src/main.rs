@@ -134,7 +134,11 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
         Command::Log { .. } | Command::Diff(_) => history(json, &endpoint, command),
         Command::Review(review) => block_on(review_cmd::run(json, &endpoint, review)),
         Command::Receipt(receipt) => block_on(receipt_cmd::run(json, &endpoint, receipt)),
-        Command::Land { change } => block_on(land_cmd::run(json, &endpoint, change)),
+        Command::Land {
+            change,
+            check: true,
+        } => block_on(land_cmd::check(json, &endpoint, change)),
+        Command::Land { change, .. } => block_on(land_cmd::run(json, &endpoint, change)),
         Command::Rebase { change } => block_on(rebase_cmd::run(json, &endpoint, change.as_deref())),
         Command::Resolve { paths, change } => {
             block_on(resolve_cmd::run(json, &endpoint, change.as_deref(), paths))

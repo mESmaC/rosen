@@ -16,6 +16,7 @@ mod crash_recovery;
 mod enrollment;
 mod event_resume;
 mod import_git;
+mod land_check;
 mod landing_fixtures;
 mod landing_race;
 mod ledger_push;

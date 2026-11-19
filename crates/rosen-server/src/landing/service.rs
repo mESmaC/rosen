@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use rosen_core::{AgentId, Change, ChangeParent, ChangeState, ObjectId, SnapshotKind};
 use rosen_protocol::{
-    ErrorBody, ErrorCode, LandAnswer, LandStatus, LandedProseQuery, Outcome, Response,
+    ErrorBody, ErrorCode, LandAnswer, LandCheck, LandStatus, LandedProseQuery, Outcome, Response,
 };
 use rosen_store::{LooseObjectStore, ObjectStore};
 use rusqlite::params;
@@ -100,6 +100,18 @@ pub async fn land(state: &Arc<ServerState>, change: String) -> Outcome {
     let state = Arc::clone(state);
     match tokio::task::spawn_blocking(move || state.landing.land(&state, &change)).await {
         Ok(Ok(answer)) => Outcome::Ok(Response::Land(answer)),
+        Ok(Err(body)) => Outcome::Error(body),
+        Err(join) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, join.to_string())),
+    }
+}
+
+/// Answers `land_check` on the blocking pool, as `land` is answered. The
+/// check reads through the ledger's and registry's read connections and
+/// never waits on the land writer (R8 "Land check").
+pub async fn land_check(state: &Arc<ServerState>, change: String) -> Outcome {
+    let state = Arc::clone(state);
+    match tokio::task::spawn_blocking(move || state.landing.check(&state, &change)).await {
+        Ok(Ok(check)) => Outcome::Ok(Response::LandCheck(Box::new(check))),
         Ok(Err(body)) => Outcome::Error(body),
         Err(join) => Outcome::Error(ErrorBody::new(ErrorCode::Internal, join.to_string())),
     }
@@ -236,6 +248,25 @@ impl LandingService {
             base,
             outcome,
         })
+    }
+
+    /// Reports every gate a land of `change` would apply on the current
+    /// base, changing nothing (R8 "Land check"). The conflict-marker scan a
+    /// land runs when it writes its commit runs here on the merge result.
+    pub fn check(&self, state: &ServerState, change: &str) -> Result<LandCheck, ErrorBody> {
+        let record = state.changes.show(change).map_err(change_body)?;
+        let engine = self.engine(state)?;
+        let gates = engine.check(&record.change.id).map_err(land_body)?;
+        let markers = match gates.merge {
+            super::MergeCheck::Clean(tree) => {
+                let store = LooseObjectStore::open(state.config.objects_dir())
+                    .map_err(|err| internal(err.to_string()))?;
+                super::markers::paths(&store, tree, &self.marker_cache)
+                    .map_err(|err| internal(err.to_string()))?
+            }
+            _ => Vec::new(),
+        };
+        super::check_answer::answer(state, &engine, &record.change, gates, markers)
     }
 
     /// Lands `id` up to its base move, or the refusal that stops it, rebases
@@ -435,7 +466,7 @@ impl LandingService {
     }
 }
 
-fn regeneration_status(change: ChangeId, paths: Vec<String>) -> LandStatus {
+pub(super) fn regeneration_status(change: ChangeId, paths: Vec<String>) -> LandStatus {
     let message = LandError::RegenerationRequired {
         change,
         paths: paths.clone(),
@@ -456,6 +487,29 @@ fn refusal_status(
     base: &CommitId,
     refusal: Refusal,
 ) -> Result<LandStatus, ErrorBody> {
+    let paths = match refusal {
+        Refusal::Conflicts | Refusal::MergeConflict => {
+            super::conflict_routes::paths(state, change.id).map_err(land_body)?
+        }
+        _ => Vec::new(),
+    };
+    let message = refusal_message(engine, change, base, refusal, &paths)?;
+    Ok(LandStatus::Refused {
+        reason: refusal.code().to_owned(),
+        message,
+        paths,
+    })
+}
+
+/// What the agent must do about `refusal`. `paths` are the conflicted
+/// files a `conflicts` or `merge_conflict` refusal names.
+pub(super) fn refusal_message(
+    engine: &Landing,
+    change: &Change,
+    base: &CommitId,
+    refusal: Refusal,
+    paths: &[String],
+) -> Result<String, ErrorBody> {
     let set = engine.check_set_at(base).map_err(land_body)?;
     let head = change.head;
     let submit = format!(
@@ -463,15 +517,13 @@ fn refusal_status(
          `rosen receipt submit {} --head {head} --base {base}`",
         change.id
     );
-    let mut paths = Vec::new();
-    let message = match refusal {
+    Ok(match refusal {
         Refusal::AlreadyLanded => "the change has already landed".to_owned(),
         Refusal::Abandoned => "the change is abandoned".to_owned(),
         Refusal::ParentUnlanded => {
             "a lower change in the stack cannot land; resolve its conflicts, approval or abandoned state first".into()
         }
         Refusal::Conflicts => {
-            paths = super::conflict_routes::paths(state, change.id).map_err(land_body)?;
             "the change has stored conflicts; run `rosen rebase` in its workspace to get \
              conflict markers on the current base, combine both sides, then run `rosen resolve`"
                 .into()
@@ -490,14 +542,8 @@ fn refusal_status(
              so the receipt no longer counts: {submit}"
         ),
         Refusal::MergeConflict => {
-            paths = super::conflict_routes::paths(state, change.id).map_err(land_body)?;
             format!("merging onto {base} conflicts in: {}", paths.join(", "))
         }
-    };
-    Ok(LandStatus::Refused {
-        reason: refusal.code().to_owned(),
-        message,
-        paths,
     })
 }
 
@@ -748,11 +794,11 @@ fn change_body(err: ChangeError) -> ErrorBody {
     ErrorBody::new(change_error_code(&err), err.to_string())
 }
 
-fn internal(why: String) -> ErrorBody {
+pub(super) fn internal(why: String) -> ErrorBody {
     ErrorBody::new(ErrorCode::Internal, why)
 }
 
-fn land_body(err: LandError) -> ErrorBody {
+pub(super) fn land_body(err: LandError) -> ErrorBody {
     let code = match &err {
         LandError::UnknownChange(_) => ErrorCode::NotFound,
         LandError::InvalidReceipt(_) => ErrorCode::InvalidArgument,

@@ -23,6 +23,7 @@ Normal attempts run concurrently; after repeated contention, a request waits for
    - [Atomic land transaction](atomic-land-transaction.md)
    - [Compare and swap retry](compare-and-swap-retry.md)
    - [Repeat land requests](repeat-land-requests.md)
+   - [Land check](land-check.md)
 - [Step 3 · Atomic stack landing](atomic-stack-landing.md)
    - [Parent propagation](parent-propagation.md)
    - [Legacy stack basis](legacy-stack-basis.md)

@@ -1,6 +1,9 @@
 //! The land loop of SPEC R8: gather, merge, decide, write, compare-and-swap,
 //! and retry with backoff when another land wins the race.
 
+#[path = "check.rs"]
+mod check;
+pub use check::{ApprovalCheck, CheckRefusal, GateCheck, MergeCheck, ReceiptState};
 #[path = "contention.rs"]
 mod contention;
 #[path = "stack.rs"]

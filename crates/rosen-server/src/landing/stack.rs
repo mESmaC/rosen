@@ -3,7 +3,7 @@ use super::*;
 use rosen_core::ChangeState;
 
 impl Landing {
-    fn stack_facts(&self, top: &ChangeId) -> LandResult<Vec<ChangeFacts>> {
+    pub(super) fn stack_facts(&self, top: &ChangeId) -> LandResult<Vec<ChangeFacts>> {
         let mut stack = Vec::new();
         let mut id = *top;
         let mut seen = HashSet::new();
@@ -30,18 +30,36 @@ impl Landing {
         base: &CommitId,
     ) -> LandResult<MergeOutcome> {
         let stack = self.stack_facts(change)?;
+        Ok(match self.preview_layers(&stack, base)? {
+            (_, Some((_, pending))) => pending,
+            (trees, None) => MergeOutcome::Clean(trees.last().copied().unwrap_or(*base)),
+        })
+    }
+
+    /// Merges each layer onto the result below it, bottom first, from
+    /// `base`, without routing conflicts. Returns every clean layer's tree
+    /// and, when a layer does not merge cleanly, its index and outcome.
+    pub(super) fn preview_layers(
+        &self,
+        stack: &[ChangeFacts],
+        base: &CommitId,
+    ) -> LandResult<(Vec<TreeId>, Option<(usize, MergeOutcome)>)> {
+        let mut trees = Vec::new();
         let mut onto = *base;
-        for facts in stack {
+        for (index, facts) in stack.iter().enumerate() {
             match self
                 .deps
                 .merger
                 .merge_layer(&facts.merge_base, &onto, &facts.head, base)?
             {
-                MergeOutcome::Clean(tree) => onto = tree,
-                pending => return Ok(pending),
+                MergeOutcome::Clean(tree) => {
+                    trees.push(tree);
+                    onto = tree;
+                }
+                pending => return Ok((trees, Some((index, pending)))),
             }
         }
-        Ok(MergeOutcome::Clean(onto))
+        Ok((trees, None))
     }
 
     pub(super) fn attempt_stack(&self, change: &ChangeId, attempts: u32) -> LandResult<Attempt> {
@@ -97,20 +115,14 @@ impl Landing {
         result
     }
 
-    fn gather_stack(
+    pub(super) fn gather_stack(
         &self,
         stack: &[ChangeFacts],
         tree: TreeId,
         base: &CommitId,
         policy: &LandPolicy,
     ) -> LandResult<Option<Gathered>> {
-        let mut top = stack.last().expect("nonempty stack").clone();
-        // Code anywhere in the stack requires the top's receipt, even if
-        // the top layer itself only edits prose.
-        if stack.iter().any(|f| f.tier != Tier::ProseOnly) && top.tier == Tier::ProseOnly {
-            top.tier = Tier::Normal;
-        }
-        self.gather(&top, base, policy, tree, stack.len() == 1)
+        self.gather(&stack_top(stack), base, policy, tree, stack.len() == 1)
     }
 
     fn check_layers(
@@ -137,7 +149,7 @@ impl Landing {
         Ok(None)
     }
 
-    fn check_file_sizes(&self, base: &CommitId, trees: &[TreeId]) -> LandResult<()> {
+    pub(super) fn check_file_sizes(&self, base: &CommitId, trees: &[TreeId]) -> LandResult<()> {
         if let Some(store) = &self.recheck_store {
             let policy = crate::project_config::resolve(store.as_ref(), base)
                 .map_err(|e| LandError::Backend(e.to_string()))?;
@@ -265,7 +277,18 @@ impl Landing {
     }
 }
 
-fn layer_refusal(facts: &ChangeFacts, review: ReviewMode) -> Option<Refusal> {
+/// The top layer as a land decides on it, with the tier it records. Code
+/// anywhere in the stack requires the top's receipt, even if the top layer
+/// itself only edits prose.
+pub(super) fn stack_top(stack: &[ChangeFacts]) -> ChangeFacts {
+    let mut top = stack.last().expect("nonempty stack").clone();
+    if stack.iter().any(|f| f.tier != Tier::ProseOnly) && top.tier == Tier::ProseOnly {
+        top.tier = Tier::Normal;
+    }
+    top
+}
+
+pub(super) fn layer_refusal(facts: &ChangeFacts, review: ReviewMode) -> Option<Refusal> {
     match facts.state {
         ChangeState::Landed => return Some(Refusal::AlreadyLanded),
         ChangeState::Abandoned => return Some(Refusal::Abandoned),

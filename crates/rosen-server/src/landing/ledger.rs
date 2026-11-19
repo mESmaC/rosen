@@ -253,6 +253,26 @@ impl Ledger {
         .collect()
     }
 
+    /// The change recorded for the ref's `commit`; import and mirror
+    /// adoption record none.
+    pub fn landed_change(&self, ref_name: &str, commit: &CommitId) -> LandResult<Option<ChangeId>> {
+        let connection = self.read()?;
+        let change: Option<String> = connection
+            .query_row(
+                "SELECT change_id FROM base_history WHERE ref_name = ?1 AND commit_id = ?2",
+                params![ref_name, commit.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        change
+            .map(|text| {
+                text.parse()
+                    .map_err(|_| LandError::Store(format!("invalid change ID {text:?} in history")))
+            })
+            .transpose()
+    }
+
     pub fn landing_of(&self, change: &ChangeId) -> LandResult<Option<CommitId>> {
         let connection = self.read()?;
         let commit = connection

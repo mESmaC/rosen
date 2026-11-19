@@ -1,11 +1,14 @@
-//! `rosen land` (SPEC R8 step 2, R10).
+//! `rosen land` and `rosen land --check` (SPEC R8 step 2, R10).
 
 use crate::server::Succeeded;
-use rosen_client::protocol::{LandAnswer, LandStatus};
+use rosen_client::protocol::{
+    ApprovalGate, LandAnswer, LandCheck, LandReach, LandStatus, LandedSince, MergeGate,
+    ReceiptBinding, ReceiptGate,
+};
 use rosen_client::{Endpoint, Error};
 use serde_json::json;
 
-use crate::output::LAND_SCHEMA;
+use crate::output::{LAND_CHECK_SCHEMA, LAND_SCHEMA};
 
 /// Exits unsuccessfully when the land is refused, so scripts can branch on
 /// the exit code alone.
@@ -37,5 +40,152 @@ fn print_answer(json: bool, answer: &LandAnswer) {
             eprintln!("land refused ({reason}): {message}");
             eprintln!("{base_ref} is at {}", answer.base);
         }
+    }
+}
+
+/// `rosen land --check`: every gate a land would apply, without landing.
+/// Exits unsuccessfully when the change would not land now.
+pub async fn check(json: bool, endpoint: &Endpoint, change: &str) -> Result<Succeeded, Error> {
+    let client = rosen_client::connect_or_start(endpoint).await?;
+    let check = client.land_check(change).await?;
+    if json {
+        println!("{}", json!({ "schema": LAND_CHECK_SCHEMA, "check": check }));
+    } else {
+        print_check(&check);
+    }
+    Ok(check.landable)
+}
+
+fn print_check(check: &LandCheck) {
+    println!(
+        "change {} on {} at {} (head {})",
+        check.change, check.base_ref, check.base, check.head
+    );
+    println!(
+        "review:   {} · recheck {} · tier {} · reach {}",
+        check.review_mode,
+        check.recheck_mode,
+        check.tier,
+        reach_text(&check.reach)
+    );
+    for (gate, verdict) in gate_lines(check) {
+        println!("{gate:<9} {verdict}");
+    }
+    for layer in &check.stack {
+        let blocked = layer.blocked.as_deref().unwrap_or("ok");
+        println!(
+            "  {} {} {} ({blocked})",
+            layer.change, layer.state, layer.tier
+        );
+    }
+    match &check.refusal {
+        None => println!("landable: yes"),
+        Some(refusal) => println!("landable: no ({}): {}", refusal.reason, refusal.message),
+    }
+}
+
+/// One line per gate, for `rosen land --check` and `rosen status`.
+pub fn gate_lines(check: &LandCheck) -> Vec<(&'static str, String)> {
+    let stack = match check.stack.len() {
+        0 => "no unlanded ancestors".to_owned(),
+        1 => "1 unlanded ancestor lands with it".to_owned(),
+        n => format!("{n} unlanded ancestors land with it"),
+    };
+    vec![
+        ("merge:", merge_text(&check.merge)),
+        ("approval:", approval_text(&check.approval)),
+        ("receipt:", receipt_text(&check.receipt)),
+        ("stack:", stack),
+    ]
+}
+
+pub fn reach_text(reach: &LandReach) -> String {
+    match reach {
+        LandReach::All(_) => "all".into(),
+        LandReach::Units(units) if units.is_empty() => "none".into(),
+        LandReach::Units(units) => units.join(", "),
+    }
+}
+
+fn merge_text(merge: &MergeGate) -> String {
+    match merge {
+        MergeGate::Clean => "clean".into(),
+        MergeGate::Conflicts { conflicts } => {
+            let listed: Vec<_> = conflicts
+                .iter()
+                .map(|c| format!("{} {}", c.id, c.path))
+                .collect();
+            format!(
+                "blocked: {} stored conflict(s): {}",
+                conflicts.len(),
+                listed.join(", ")
+            )
+        }
+        MergeGate::MergeConflict { change, paths } => {
+            format!("conflicts merging {change}: {}", paths.join(", "))
+        }
+        MergeGate::RegenerationRequired { change, paths } => {
+            format!("regenerate in {change}: {}", paths.join(", "))
+        }
+        MergeGate::OversizeFiles { limit, files } => {
+            let listed: Vec<_> = files
+                .iter()
+                .map(|f| format!("{} ({} bytes)", f.path, f.bytes))
+                .collect();
+            format!("over max_file_size={limit}: {}", listed.join(", "))
+        }
+        MergeGate::ConflictMarkers { paths } => {
+            format!("conflict markers in: {}", paths.join(", "))
+        }
+        MergeGate::NotChecked => "not checked".into(),
+    }
+}
+
+fn approval_text(approval: &ApprovalGate) -> String {
+    match approval {
+        ApprovalGate::Held { reviewers, head } => {
+            let names: Vec<_> = reviewers.iter().map(|r| r.as_str()).collect();
+            format!("held by {} for {head}", names.join(", "))
+        }
+        ApprovalGate::Needed => "needed for the current head".into(),
+        ApprovalGate::NotRequired => "not required".into(),
+    }
+}
+
+fn receipt_text(receipt: &ReceiptGate) -> String {
+    let bound = |r: &ReceiptBinding| {
+        format!(
+            "`{}` on {} at {} by {}",
+            r.check_set, r.head, r.base, r.submitter
+        )
+    };
+    let commits = |lands: &[LandedSince]| {
+        let named: Vec<_> = lands
+            .iter()
+            .map(|l| {
+                l.change
+                    .map_or_else(|| l.commit.to_string(), |c| c.to_string())
+            })
+            .collect();
+        named.join(", ")
+    };
+    match receipt {
+        ReceiptGate::Valid { receipt } => format!("valid: {}", bound(receipt)),
+        ReceiptGate::Reusable {
+            receipt,
+            landed_since,
+        } => format!(
+            "reusable: {} across {}",
+            bound(receipt),
+            commits(landed_since)
+        ),
+        ReceiptGate::Stale {
+            receipt,
+            intersecting,
+        } => format!("stale: {} meets {}", bound(receipt), commits(intersecting)),
+        ReceiptGate::Unbound => "none bound to the current head and check set".into(),
+        ReceiptGate::Missing => "missing".into(),
+        ReceiptGate::NotRequired => "not required".into(),
+        ReceiptGate::NotChecked => "not checked".into(),
     }
 }

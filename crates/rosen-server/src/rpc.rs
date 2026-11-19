@@ -266,6 +266,7 @@ async fn dispatch_reviews(state: &Arc<ServerState>, request: Request) -> Outcome
             crate::receipts::submit(state, req, crate::receipts::Origin::Local).await
         }
         Request::Land { change } => crate::landing::service::land(state, change).await,
+        Request::LandCheck { change } => crate::landing::service::land_check(state, change).await,
         Request::ConflictResolve(req) => crate::conflict_resolve::handle(state, req).await,
         request => dispatch_objects(state, request).await,
     }

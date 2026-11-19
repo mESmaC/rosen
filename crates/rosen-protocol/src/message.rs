@@ -18,7 +18,7 @@ use crate::history::{
     Blame, BlameRequest, Diff, DiffRequest, Log, LogRequest, MergeBaseAnswer, MergeResultAnswer,
     ReadAnswer, ReadRequest,
 };
-use crate::land::LandAnswer;
+use crate::land::{LandAnswer, LandCheck};
 use crate::objects::{
     EnsureObjects, ObjectBatch, ObjectChunk, ObjectChunkQuery, ObjectQuery, ObjectsLocal,
 };
@@ -262,6 +262,13 @@ pub enum Request {
         /// A change ID or unique prefix of one.
         change: String,
     },
+    /// Reports every gate a land of a change would apply on the current
+    /// base, without landing (R8 "Land check"). Changes nothing: it never
+    /// marks the change ready, publishes an event or stores a receipt.
+    LandCheck {
+        /// A change ID or unique prefix of one.
+        change: String,
+    },
     /// Marks every open conflict stored in some files of a change resolved
     /// (`rosen resolve`, R5), in one transaction. Refused for a landed or
     /// abandoned change, and fails without changing anything when a path
@@ -396,6 +403,8 @@ pub enum Response {
     LandedReviews(Vec<LandedReview>),
     Receipt(ReceiptRecord),
     Land(LandAnswer),
+    /// Boxed: a check carries every gate's verdict.
+    LandCheck(Box<LandCheck>),
     ConflictsResolved(crate::ConflictsResolved),
     Objects(ObjectBatch),
     ObjectChunk(ObjectChunk),
