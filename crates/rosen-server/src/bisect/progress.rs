@@ -38,6 +38,10 @@ pub(super) fn opened(
     failed: ObjectId,
     by: Option<&Submitted>,
 ) -> Result<(), ErrorBody> {
+    // `bisections.id` is a plain rowid, so SQLite can hand a removed
+    // session's id to a new one. Its old steps are not this session's.
+    conn.execute("DELETE FROM bisection_steps WHERE session=?1", [session.id])
+        .map_err(super::internal)?;
     conn.execute(
         "UPDATE bisections SET opened_by=?2,opened_at=?3 WHERE id=?1",
         params![session.id, by.map(|s| &s.by), by.map(|s| s.at)],
@@ -66,8 +70,13 @@ pub(super) fn accepted(
     planned: u64,
 ) -> Result<(), ErrorBody> {
     conn.execute(
+        // The caller accepted this job in the same transaction, so its result
+        // is the step's record; writing it again must not fail the advance.
         "INSERT INTO bisection_steps(session,step,commit_id,passed,submitter,submitted_at)
-         VALUES (?1,?2,?3,?4,?5,?6)",
+         VALUES (?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(session,step) DO UPDATE SET commit_id=excluded.commit_id,
+         passed=excluded.passed,submitter=excluded.submitter,
+         submitted_at=excluded.submitted_at",
         params![
             job.session,
             job.step,

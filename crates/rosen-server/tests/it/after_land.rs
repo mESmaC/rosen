@@ -326,8 +326,10 @@ async fn overlapping_test_failures_are_recorded_once() {
     conn.execute_batch("DROP INDEX post_land_failure_culprit")
         .unwrap();
     conn.execute(
-        "INSERT INTO post_land_failures SELECT ?1,change_id,commit_id,kind,output,
-         requires_revert,revert FROM post_land_failures",
+        "INSERT INTO post_land_failures(session,change_id,commit_id,kind,output,
+         requires_revert,revert,submitter,submitted_at)
+         SELECT ?1,change_id,commit_id,kind,output,requires_revert,revert,
+         submitter,submitted_at FROM post_land_failures",
         [done.id],
     )
     .unwrap();
