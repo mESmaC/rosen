@@ -103,6 +103,9 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
     match command {
         Command::Server(ServerCommand::Start) => block_on(server::start(json, &endpoint)),
         Command::Server(ServerCommand::Status) => block_on(server::status(json, &endpoint)),
+        Command::Server(ServerCommand::Relay { allow }) => {
+            block_on(server::relay(json, &endpoint, allow))
+        }
         Command::Events { after, agent, all } => {
             events(json, &endpoint, *after, agent.as_deref(), *all)
         }

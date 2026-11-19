@@ -9,6 +9,10 @@
 //! sequence the endpoint is complete through once it stores the batch: the
 //! pass's sequence on its last batch, and what was already delivered on the
 //! others, so a pass cut short never claims more than arrived.
+//!
+//! A body holding the relay document also carries `"relay":{"allow":[...]}`,
+//! the action kinds the server runs (R14). Collapse keeps the newest it
+//! was sent, so a body without it changes nothing.
 
 use serde_json::{json, Map, Value};
 
@@ -57,7 +61,11 @@ pub fn split(units: Vec<Unit>, seq: u64, delivered: u64) -> Vec<Batch> {
     for unit in units {
         let logged = unit.delivery == Delivery::Log;
         for (section, item) in unit.items {
-            let item = if logged { item } else { stamped(item, seq) };
+            let item = if logged || section == Section::Relay {
+                item
+            } else {
+                stamped(item, seq)
+            };
             let item = sized(item);
             let length = serde_json::to_vec(&item).map_or(0, |bytes| bytes.len()) + 1;
             if size + length > MAX_BODY && !items.is_empty() {
@@ -128,6 +136,9 @@ fn body(through: u64, items: &[(Section, Value)]) -> Vec<u8> {
             .map(|(_, item)| item)
             .collect();
         envelope.insert(section.key().into(), json!(listed));
+    }
+    if let Some((_, relay)) = items.iter().find(|(kind, _)| *kind == Section::Relay) {
+        envelope.insert(Section::Relay.key().into(), relay.clone());
     }
     serde_json::to_vec(&Value::Object(envelope)).unwrap_or_default()
 }

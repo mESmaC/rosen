@@ -25,6 +25,8 @@ pub struct Target {
     pub scratch: PathBuf,
     pub credential: Option<Credential>,
     pub stores: Stores,
+    /// Told when an answer says owner actions wait in Collapse (R14).
+    pub relay: Arc<crate::relay::Wake>,
 }
 
 impl Target {
@@ -35,9 +37,12 @@ impl Target {
         let accepted = send::post_json(&self.scratch, &self.endpoint, &body, credential)
             .await
             .map_err(|failure| self.failure(failure))?;
-        // `{"highest_sequence":N}`
+        // `{"highest_sequence":N,"actions_pending":B}`
         let answer: serde_json::Value = serde_json::from_str(&accepted.body)
             .map_err(|_| self.failure(accepted.unreadable("unreadable answer")))?;
+        if answer.get("actions_pending") == Some(&serde_json::Value::Bool(true)) {
+            self.relay.actions_pending();
+        }
         answer
             .get("highest_sequence")
             .and_then(serde_json::Value::as_u64)
@@ -258,8 +263,12 @@ async fn extras(
     let machines = (pending.machines || everything).then(|| running_agents(state));
     let presence = pending.presence || pending.refresh_presence || everything;
     let refresh = pending.refresh_presence;
+    let relay = (pending.relay || everything).then(|| state.config.data_dir.clone());
     super::blocking(move || {
         let mut units = Vec::new();
+        if let Some(data_dir) = relay {
+            units.push(relay_unit(&data_dir)?);
+        }
         if let Some(running) = machines {
             units.push(machines_doc::machines(
                 &metadata,
@@ -276,6 +285,13 @@ async fn extras(
         Ok(units)
     })
     .await
+}
+
+/// The relay document: the kinds Collapse may offer its owner (R14).
+fn relay_unit(data_dir: &std::path::Path) -> rusqlite::Result<Unit> {
+    let allow = crate::relay::offered(data_dir)?;
+    let item = serde_json::json!({ "allow": allow });
+    Ok(Unit::new("relay".to_owned(), vec![(Section::Relay, item)]))
 }
 
 /// A copy of the server's count of subscribed agents per machine.

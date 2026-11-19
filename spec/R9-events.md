@@ -40,6 +40,8 @@
     Each item is the whole current document, not a delta, and carries `seq`, the event sequence it reflects.
     A change's conflicts and threads are items of their own, so a large change splits across batches; an item too large for any batch is sent as a `too_large` marker.
     `through` is the sequence the endpoint holds everything through once it stores the batch, and only a pass's last batch raises it.
+  - A batch also carries `"relay":{"allow":[...]}`, the action kinds the server runs for Collapse (R14), on start and whenever the setting or the `collapse` machine's status changed.
+    An answer holding `"actions_pending":true` makes the relay fetch actions at once.
   - A change document holds its ID, `owner@machine`, state, parent, head, title (the newest named snapshot's message), creation and update times, the land check (R8) with its verdicts, tier and reach, conflict and thread IDs, approvals including void ones, the latest receipt without its signature and `base_current`, edit regions per path with lines added and removed against the parent (R6, R11), its path claims as `notice`, `exclusive`, `share` or `wait`, the changes overlapping it with their paths, and its newest 20 named snapshots with the total snapshot count.
     A part that cannot be read is named in `unavailable`.
   - A conflict item holds its path, start line, open or resolved state, and base, ours and theirs each cut to 64 KiB with a `truncated` flag, with the base merged in and the time the `conflict` event that stored it was published.

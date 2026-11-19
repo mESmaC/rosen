@@ -54,6 +54,27 @@ Machines join a project with no login, monitor or remote desktop on the joining 
   The request names only the nick, which may not contain `@`; the server takes the machine from the connection's credential, or `server` for its own machine.
   `rosen change show` and `rosen review list --approvals` show `<nick>@<machine>`.
   Changes and approvals recorded before machines were kept show the bare nick.
+- **Collapse action relay.**
+  The project owner can approve, land and mark changes from Collapse, which cannot reach a server behind NAT, so the server fetches those requests and runs them.
+  This is not a hosted server and not a web login (§6): Rosen stays the authority, and every request goes through the same checks as one from the CLI.
+  - Only the operator turns it on, per server: `rosen server relay --allow approve,land,mark`, or `--allow none` to turn it off.
+    The server refuses the setting from any machine but its own, and `rosen mcp` offers no tool for it.
+    It lives in the metadata store, not in `rosen.toml`, because a change must not grant web authority.
+    `rosen server status` shows it, and the state feed (R9) sends the allowed kinds as `relay`, so Collapse hides buttons the server won't honour.
+  - Relayed actions run as the reserved machine `collapse`, which the machine list shows and which has no credential, so no peer can authenticate as it.
+    The nick is the Collapse account the action carries, refused if it contains `@`, so approvals and marks read `<account>@collapse`.
+    `rosen machine revoke collapse` turns the relay off as `--allow none` does; allowing a kind again re-enrolls it.
+  - With a `collapse` root set (R9), the server reads `<collapse>/rosen/doorbell` every 20 s with the state feed's push token.
+    Collapse's edge answers it with a generation number without waking Collapse's origin.
+    Only when the generation changed, or a state feed answer says `actions_pending`, does the server read `<collapse>/rosen/actions?after=<id>`.
+  - It runs only `approve` (`review approve` of the named head, so a stale head gets R7's refusal), `land` (every R8 gate) and `mark` (`review mark`, refused unless the change's current land is the named commit).
+    Claims, messages, receipts, abandon, rebase, conflict resolution, machine and key commands, configuration changes and imports are never relayed.
+  - A kind not allowed, an action past its `expires_at` and a malformed one are refused and run nothing.
+    The server stores each action ID it takes up, marked running before it runs, so a repeated ID runs nothing.
+  - The outcome is stored, then posted to `<collapse>/rosen/actions/<id>/result` as `done` or `refused`: the `Approval`, the `LandAnswer` or the `LandedReview`, or a `rosen.error/v1` object with a `code`.
+    A failed post is retried with the state feed's backoff, and a restarted server re-posts stored outcomes.
+    An action a stopped server left running is settled at the next start: by the approval or mark it stored, if any, and otherwise by one run.
+  - Each outcome, setting change and failure to reach Collapse publishes a `relay` event to every subscriber.
 - **One enrollment for Rosen and Velocity.**
   Velocity's cross-system dispatch uses the same join key, so one command adds a machine to both (§9).
 - **Accept when:** a headless machine joins from one command with no interactive step; a revoked machine's next request is refused; and a daemon that meets a certificate other than the key's fingerprint never sends the key.

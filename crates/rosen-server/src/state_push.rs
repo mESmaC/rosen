@@ -314,6 +314,7 @@ async fn reconcile(
         scratch: state.config.data_dir.join("state-push"),
         credential,
         stores: Stores::new(&state.config),
+        relay: Arc::clone(&state.relay_wake),
     };
     let held = target.post(batch::probe()).await?;
     let (metadata, endpoint) = (state.config.metadata_path(), endpoint.to_owned());

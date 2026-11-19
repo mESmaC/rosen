@@ -43,6 +43,13 @@ pub async fn dispatch_from(
                 "history rewrite is an operator command; run it on the server machine using its local endpoint")),
         };
     }
+    if let Request::RelaySet { allow } = request {
+        return match origin {
+            crate::receipts::Origin::Local => crate::relay::set(state, allow).await,
+            _ => Outcome::Error(ErrorBody::new(ErrorCode::Refused,
+                "the Collapse action relay is an operator setting; run it on the server using its local endpoint")),
+        };
+    }
     let _running = state.maintenance.read().await;
     match request {
         Request::ReceiptSubmit(req) if !state.is_shutting_down() => {
@@ -226,7 +233,10 @@ async fn dispatch_project(state: &Arc<ServerState>, request: Request) -> Outcome
         Request::PoolTake { tree, dest } => state.pool.take(tree, dest).await,
         Request::LandedProse(query) => crate::landing::service::landed_prose(state, query).await,
         Request::Ping => Outcome::Ok(Response::Pong),
-        Request::Status => Outcome::Ok(Response::Status(status(state))),
+        Request::Status => {
+            let relay = crate::relay::setting(state).await;
+            Outcome::Ok(Response::Status(status(state, relay)))
+        }
         Request::Shutdown => {
             state.request_shutdown();
             Outcome::Ok(Response::ShuttingDown)
@@ -361,7 +371,7 @@ pub(crate) fn change_error_code(err: &ChangeError) -> ErrorCode {
     }
 }
 
-fn status(state: &ServerState) -> ServerStatus {
+fn status(state: &ServerState, relay: Option<rosen_protocol::RelaySetting>) -> ServerStatus {
     let network = state.network_status();
     ServerStatus {
         server: SERVER_NAME.to_owned(),
@@ -376,5 +386,6 @@ fn status(state: &ServerState) -> ServerStatus {
         fingerprint: network.map(|(_, fingerprint)| fingerprint),
         upstream: None,
         mirror_owner: Some(crate::mirror::owner::is_owner(&state.config.data_dir)),
+        relay,
     }
 }

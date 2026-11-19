@@ -17,7 +17,9 @@ use crate::commands::Cli;
 ///   that takes.
 /// - `import` and `server start` are the operator's: the host that starts
 ///   this server has already started the project's server.
-const NOT_TOOLS: [&str; 10] = [
+/// - `server relay` grants Collapse's owner authority on this server, and
+///   only the operator may (R14).
+const NOT_TOOLS: [&str; 11] = [
     "mcp",
     "wait",
     "events",
@@ -25,6 +27,7 @@ const NOT_TOOLS: [&str; 10] = [
     "run",
     "import",
     "server start",
+    "server relay",
     "mirror drop-paths",
     "mirror adopt",
     "mirror catch-up",

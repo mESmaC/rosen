@@ -37,6 +37,17 @@ const LANDED: &str = "SELECT h.change_id, h.commit_id, h.tier, r.state, r.marked
 /// Sets the reviewed state of a landed change's current land, and stages a
 /// `review` event about it in the same transaction (R9).
 pub fn mark(conn: &mut Connection, req: &MarkReviewed) -> Result<LandedReview, ReviewError> {
+    mark_at(conn, req, None)
+}
+
+/// Like [`mark`], but refuses when the change's current land is not
+/// `expected`. A relayed mark (R14) names the commit its owner read, and
+/// a revert and new land in between must not pass it on to new code.
+pub fn mark_at(
+    conn: &mut Connection,
+    req: &MarkReviewed,
+    expected: Option<ObjectId>,
+) -> Result<LandedReview, ReviewError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let id = changes::resolve(&tx, &req.change)?;
     let record = changes::get(&tx, id)?;
@@ -51,6 +62,12 @@ pub fn mark(conn: &mut Connection, req: &MarkReviewed) -> Result<LandedReview, R
         .query_row(&query, params![id.to_string()], read_row)
         .optional()?
         .ok_or_else(|| ReviewError::Store(format!("landed change {id} has no landed commit")))?;
+    if let Some(expected) = expected.filter(|commit| commit.to_hex() != landed.1) {
+        return Err(ReviewError::Refused(format!(
+            "change {id} landed as {}, not {expected}; read the new land and mark it",
+            landed.1
+        )));
+    }
     let now = super::store::now_millis();
     tx.execute(
         "INSERT INTO landed_reviews (commit_id, change_id, state, marked_by, updated_at)

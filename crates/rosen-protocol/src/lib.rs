@@ -29,6 +29,7 @@ pub mod objects;
 pub mod pool;
 pub mod post_land;
 pub mod receipt;
+pub mod relay;
 pub mod review;
 pub mod snapshot;
 pub mod transport;
@@ -65,6 +66,7 @@ pub use post_land::{
     PostLandStatus, PostLandWork,
 };
 pub use receipt::{ReceiptRecord, ReceiptSignature, SubmitReceipt};
+pub use relay::{RelayKind, RelaySetting, COLLAPSE_MACHINE};
 pub use review::{
     Approval, ApproveRequest, CommentRequest, CommentTarget, LandedFilter, LandedReview,
     MarkReviewed, ResolveRequest, ReviewComment, ReviewThread, ThreadFilter,

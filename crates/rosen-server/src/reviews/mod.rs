@@ -77,6 +77,9 @@ pub enum ReviewCall {
     Resolve(ResolveRequest),
     List(ThreadFilter),
     Mark(MarkReviewed),
+    /// A mark that holds only while the change's land is this commit, as
+    /// the action relay sends it (R14).
+    MarkAt(MarkReviewed, ObjectId),
     Landed(LandedFilter),
 }
 
@@ -122,6 +125,11 @@ fn run(state: &ServerState, call: ReviewCall) -> Result<Response, ReviewError> {
         }
         ReviewCall::Mark(req) => {
             let review = on_conn(state, |c| landed::mark(c, &req))?;
+            state.events.deliver_staged();
+            Ok(Response::LandedReview(review))
+        }
+        ReviewCall::MarkAt(req, commit) => {
+            let review = on_conn(state, |c| landed::mark_at(c, &req, Some(commit)))?;
             state.events.deliver_staged();
             Ok(Response::LandedReview(review))
         }

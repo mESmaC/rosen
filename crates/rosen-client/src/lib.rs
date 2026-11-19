@@ -45,6 +45,7 @@ pub mod post_land;
 pub mod project_config;
 pub mod receipt_key;
 pub mod receipts;
+mod relay;
 pub mod reviews;
 pub mod run_queue;
 pub mod server_workspace;

@@ -1,7 +1,7 @@
-//! `rosen server start|status` and `rosen events`: the commands that talk to the
-//! daemon directly rather than through a project operation.
+//! `rosen server start|status|relay` and `rosen events`: the commands that
+//! talk to the daemon directly rather than through a project operation.
 
-use rosen_client::protocol::{Event, ServerStatus};
+use rosen_client::protocol::{Event, RelayKind, RelaySetting, ServerStatus};
 use rosen_client::{Client, Endpoint, Error};
 use rosen_core::AgentId;
 use serde_json::json;
@@ -57,6 +57,7 @@ fn print_status(json: bool, status: &ServerStatus) {
             "fingerprint": status.fingerprint,
             "upstream": status.upstream,
             "mirror_owner": status.mirror_owner,
+            "relay": status.relay,
         });
         println!("{body}");
     } else {
@@ -81,6 +82,51 @@ fn print_status(json: bool, status: &ServerStatus) {
             Some(false) => println!("mirror: never pushes (not the mirror owner)"),
             None => {}
         }
+        if let Some(relay) = &status.relay {
+            println!("collapse relay: {}", relay_line(relay));
+        }
+    }
+}
+
+/// Stores the relay's allow-list on the server's own machine, then prints
+/// the setting now in force.
+pub async fn relay(json: bool, endpoint: &Endpoint, allow: &[String]) -> Result<Succeeded, Error> {
+    let kinds = relay_kinds(allow).map_err(Error::InvalidArgument)?;
+    // Never start a daemon implicitly: an operator setting on a server that
+    // was not running would mean the wrong endpoint was picked.
+    let client = Client::connect(endpoint).await?;
+    let setting = client.relay_set(kinds).await?;
+    if json {
+        let body = json!({ "schema": crate::output::SERVER_RELAY_SCHEMA, "relay": setting });
+        println!("{body}");
+    } else {
+        println!("collapse relay: {}", relay_line(&setting));
+    }
+    Ok(true)
+}
+
+/// `none` alone, or kinds Rosen relays.
+fn relay_kinds(allow: &[String]) -> Result<Vec<RelayKind>, String> {
+    let words: Vec<&str> = allow.iter().map(|word| word.trim()).collect();
+    if words == ["none"] {
+        return Ok(Vec::new());
+    }
+    words
+        .iter()
+        .map(|word| {
+            RelayKind::parse(word).ok_or_else(|| {
+                format!("unknown relay kind {word:?}; use approve, land, mark or none alone")
+            })
+        })
+        .collect()
+}
+
+fn relay_line(setting: &RelaySetting) -> String {
+    let kinds: Vec<&str> = setting.allow.iter().map(|kind| kind.as_str()).collect();
+    match (setting.revoked, kinds.is_empty()) {
+        (true, _) => "off (the collapse machine is revoked)".to_owned(),
+        (false, true) => "off".to_owned(),
+        (false, false) => format!("runs {}", kinds.join(", ")),
     }
 }
 

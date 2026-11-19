@@ -32,6 +32,8 @@ pub struct Pending {
     pub log: bool,
     pub machines: bool,
     pub presence: bool,
+    /// The relay's allowed kinds (R14), which may have changed.
+    pub relay: bool,
     /// The presence document goes with this pass even unchanged, if any
     /// member is joined and anything else goes.
     pub refresh_presence: bool,
@@ -58,6 +60,7 @@ impl Pending {
             log: true,
             machines: true,
             presence: true,
+            relay: true,
             everything: true,
             scanned_to: cursor,
             urgent_since: Some(Instant::now()),
@@ -72,12 +75,15 @@ impl Pending {
             && !self.log
             && !self.machines
             && !self.presence
+            && !self.relay
             && !self.everything
     }
 
     /// Marks the machine list changed.
     pub fn machines_changed(&mut self) {
         self.machines = true;
+        // Revoking the `collapse` machine turns the relay off.
+        self.relay = true;
         self.quiet_since = Some(Instant::now());
     }
 
@@ -105,6 +111,7 @@ impl Pending {
         match event.kind {
             EventKind::Channel => return self.mark_line(&event.detail, channel),
             EventKind::LedgerPush | EventKind::StatePush => return,
+            EventKind::Relay => return self.mark_relay(&event.detail),
             _ => {}
         }
         let mut marked = false;
@@ -139,6 +146,14 @@ impl Pending {
             &mut self.urgent_since
         };
         since.get_or_insert_with(Instant::now);
+    }
+
+    /// A relay report: only a new setting changes what Collapse is told.
+    fn mark_relay(&mut self, detail: &Value) {
+        if detail.get("status").and_then(Value::as_str) == Some("setting") {
+            self.relay = true;
+            self.urgent_since.get_or_insert_with(Instant::now);
+        }
     }
 
     /// A channel line: presence when membership or a mode changed, and the

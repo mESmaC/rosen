@@ -407,7 +407,9 @@ impl ProjectConfig {
         self.collapse_url("rosen/state")
     }
 
-    fn collapse_url(&self, path: &str) -> Option<String> {
+    /// `<collapse>/<path>`, when the project names a Collapse root. The
+    /// action relay (R14) reads its doorbell and actions under it.
+    pub fn collapse_url(&self, path: &str) -> Option<String> {
         let root = self.collapse.as_deref()?;
         Some(format!("{}/{path}", root.trim_end_matches('/')))
     }

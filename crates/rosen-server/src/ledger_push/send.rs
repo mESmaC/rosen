@@ -147,7 +147,27 @@ pub async fn post_json(
         .map_err(|error| fail(format!("writing the batch: {error}")))?;
     std::fs::write(body_file.path(), body)
         .map_err(|error| fail(format!("writing the batch: {error}")))?;
-    let output = run_curl(body_file.path(), &config).await?;
+    let output = run_curl(Some(body_file.path()), &config).await?;
+    status_answer(&output)
+}
+
+/// GETs `endpoint` with the same credential and curl settings as a POST.
+/// The action relay (R14) reads Collapse's doorbell and actions this way.
+pub async fn get_json(
+    endpoint: &str,
+    credential: Option<&Credential>,
+) -> Result<Accepted, SendFailure> {
+    let config = curl_config(endpoint, credential)?;
+    let output = run_curl(None, &config).await?;
+    status_answer(&output)
+}
+
+/// The endpoint's answer, from curl's output.
+fn status_answer(output: &std::process::Output) -> Result<Accepted, SendFailure> {
+    let fail = |message: String| SendFailure::Failed {
+        status: None,
+        message,
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -184,23 +204,29 @@ fn quoted(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-async fn run_curl(body: &Path, config: &str) -> Result<std::process::Output, SendFailure> {
+/// Runs curl: a POST of the file at `body`, or a GET without one.
+async fn run_curl(body: Option<&Path>, config: &str) -> Result<std::process::Output, SendFailure> {
     let fail = |message: String| SendFailure::Failed {
         status: None,
         message,
     };
-    let mut data = std::ffi::OsString::from("@");
-    data.push(body.as_os_str());
     let mut command = tokio::process::Command::new("curl");
     // `-q` first, so a `.curlrc` on the server cannot add options.
     command
         .args(["-q", "--silent", "--show-error", "--proto", "=https,http"])
-        .args(["--max-redirs", "0", "--request", "POST"])
+        .args(["--max-redirs", "0"])
         .args(["--connect-timeout", &CONNECT_TIMEOUT.as_secs().to_string()])
-        .args(["--max-time", &REQUEST_TIMEOUT.as_secs().to_string()])
-        .args(["--header", "Content-Type: application/json"])
-        .arg("--data-binary")
-        .arg(data)
+        .args(["--max-time", &REQUEST_TIMEOUT.as_secs().to_string()]);
+    if let Some(body) = body {
+        let mut data = std::ffi::OsString::from("@");
+        data.push(body.as_os_str());
+        command
+            .args(["--request", "POST"])
+            .args(["--header", "Content-Type: application/json"])
+            .arg("--data-binary")
+            .arg(data);
+    }
+    command
         .args(["--write-out", "\\n%{http_code}", "--config", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

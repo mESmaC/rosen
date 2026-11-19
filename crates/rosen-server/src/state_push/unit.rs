@@ -19,6 +19,8 @@ pub enum Section {
     Machines,
     Presence,
     Channel,
+    /// The action kinds the relay runs (R14): one object, not a list.
+    Relay,
 }
 
 impl Section {
@@ -33,6 +35,7 @@ impl Section {
             Section::Machines => "machines",
             Section::Presence => "presence",
             Section::Channel => "channel",
+            Section::Relay => "relay",
         }
     }
 }

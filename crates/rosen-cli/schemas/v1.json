@@ -143,6 +143,9 @@
     },
     {
       "$ref": "#/$defs/rosen.mirror.catch-up~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.server.relay~1v1"
     }
   ],
   "$defs": {
@@ -2367,6 +2370,16 @@
                   "type": "null"
                 }
               ]
+            },
+            "relay": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RelaySetting"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -3693,6 +3706,31 @@
       "x-commands": [
         "mirror drop-paths"
       ]
+    },
+    "RelaySetting": {
+      "description": "The Collapse action relay (R14): the kinds the operator allowed, and whether revoking the collapse machine turned it off.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": { "enum": ["approve", "land", "mark"] }
+        },
+        "revoked": { "type": "boolean" }
+      },
+      "required": ["allow", "revoked"],
+      "additionalProperties": false
+    },
+    "rosen.server.relay/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.server.relay/v1"
+        },
+        "relay": { "$ref": "#/$defs/RelaySetting" }
+      },
+      "required": ["schema", "relay"],
+      "additionalProperties": false,
+      "x-commands": ["server relay"]
     },
     "rosen.mirror.adopt/v1": {
       "type": "object",

@@ -715,6 +715,22 @@ pub enum ServerCommand {
     /// Show whether the server is running and which project it holds. Exits
     /// with status 1, without starting a server, when none is running.
     Status,
+    /// Choose which owner requests the server fetches from the project's
+    /// Collapse endpoint and runs: `approve`, `land` and `mark`, or `none`.
+    ///
+    /// Collapse cannot reach a server behind NAT, so the server reads
+    /// Collapse's edge doorbell every 20 s and fetches queued requests only
+    /// when it rang. Each runs through the same checks as the CLI, recorded
+    /// as `<account>@collapse`, and its result or refusal goes back to
+    /// Collapse. The setting lives in the server's metadata store, never in
+    /// `rosen.toml`, and only the server's own machine can change it.
+    /// `rosen machine revoke collapse` also turns the relay off; allowing a
+    /// kind again turns it back on.
+    Relay {
+        /// Comma-separated kinds to run: approve, land, mark; or `none`.
+        #[arg(long, value_name = "KINDS", value_delimiter = ',', required = true)]
+        allow: Vec<String>,
+    },
 }
 
 /// Paths an operation applies to, for one change.
@@ -845,6 +861,7 @@ impl Command {
             Command::Workspace(WorkspaceCommand::Limits { .. }) => "workspace limits",
             Command::Server(ServerCommand::Start) => "server start",
             Command::Server(ServerCommand::Status) => "server status",
+            Command::Server(ServerCommand::Relay { .. }) => "server relay",
             Command::Config(ConfigCommand::Show { .. }) => "config show",
             Command::Events { .. } => "events",
             Command::Machine(sub) => sub.path(),

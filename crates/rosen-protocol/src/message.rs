@@ -131,6 +131,11 @@ pub enum Request {
     MirrorDropPaths {
         paths: Vec<String>,
     },
+    /// Operator-only: the action kinds the server fetches from its Collapse
+    /// endpoint and runs (R14 "Collapse action relay"); empty turns it off.
+    RelaySet {
+        allow: Vec<crate::RelayKind>,
+    },
     /// Reads the next persisted checker job for a failed batch (R12).
     BisectNext {
         session: i64,
@@ -359,6 +364,8 @@ pub enum Response {
     MirrorAdopted(crate::MirrorAdoption),
     MirrorCaughtUp(crate::MirrorCatchUp),
     MirrorRewritten(crate::HistoryRewrite),
+    /// The answer to `relay_set`: the setting now stored.
+    Relay(crate::RelaySetting),
     Bisection(crate::BisectState),
     Machines(Vec<crate::machine::MachineRecord>),
     Machine(crate::machine::MachineRecord),
@@ -477,6 +484,9 @@ pub struct ServerStatus {
     /// server marked as its owner does. Absent on a cache daemon.
     #[serde(default)]
     pub mirror_owner: Option<bool>,
+    /// The Collapse action relay's setting (R14). Absent on a cache daemon.
+    #[serde(default)]
+    pub relay: Option<crate::RelaySetting>,
 }
 
 /// Why a request failed.
@@ -579,6 +589,10 @@ pub enum EventKind {
     /// The state feed to the project's Collapse endpoint failed, stopped or
     /// recovered (R9). Sent to every subscriber.
     StatePush,
+    /// The Collapse action relay's setting changed, it ran or refused an
+    /// action, or reaching Collapse failed or recovered (R14). Sent to
+    /// every subscriber.
+    Relay,
 }
 
 /// One event. `seq` is the cursor a client resumes from after a reconnect.

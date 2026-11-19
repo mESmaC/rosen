@@ -33,6 +33,7 @@ pub mod post_land;
 pub mod project_config;
 pub mod rebase;
 pub mod receipts;
+pub mod relay;
 pub mod reviews;
 pub mod rpc;
 pub mod snapshots;
@@ -76,6 +77,9 @@ pub struct ServerState {
     /// Wakes the mirror task when the base appears without a land, as an
     /// import does (SPEC R1). A wake during a push is kept for the next wait.
     pub mirror_wake: tokio::sync::Notify,
+    /// Wakes the Collapse action relay when its setting changes or a state
+    /// feed answer says actions wait (R14).
+    pub relay_wake: Arc<relay::Wake>,
     /// Shared requests and mirror/recovery work; an operator rewrite takes
     /// exclusive access so no operation can retain an obsolete base view.
     pub maintenance: tokio::sync::RwLock<()>,
@@ -111,6 +115,7 @@ impl ServerState {
             started: Instant::now(),
             network: OnceLock::new(),
             mirror_wake: tokio::sync::Notify::new(),
+            relay_wake: Arc::default(),
             maintenance: tokio::sync::RwLock::new(()),
             open_connections: AtomicU64::new(0),
             shutdown: watch::Sender::new(false),
@@ -348,6 +353,7 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     let mirror = tokio::spawn(mirror::run(Arc::clone(&state)));
     let ledger_push = tokio::spawn(ledger_push::run(Arc::clone(&state)));
     let state_push = tokio::spawn(state_push::run(Arc::clone(&state)));
+    let relay = tokio::spawn(relay::run(Arc::clone(&state)));
     let network_task = network.map(|(tcp, acceptor, identity, address)| {
         state.set_network(identity, address);
         tokio::spawn(network::serve(tcp, acceptor, Arc::clone(&state)))
@@ -366,6 +372,9 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     // Likewise for the state feed: its cursor moves only on acknowledgement,
     // and the next start resends everything live anyway.
     state_push.abort();
+    // An action cut short here is settled at the next start: it was marked
+    // running before it ran, and its outcome is posted from the store.
+    relay.abort();
     landing_recovery.abort();
     pool_worker.abort();
     Ok(())
