@@ -123,7 +123,7 @@ async fn approve_and_receipt(
     call(state, Request::ReviewApprove(approve)).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn batch_green_survives_restart_and_excludes_future_lands() {
     let (_temp, state) = setup();
     assert!(next(&state).await.job.is_none());
@@ -198,7 +198,7 @@ fn sql_prefix_matches_lean_fixtures() {
 
 // R3/R12 risk: tests must not postpone merge-mode builds or green their prefix;
 // an unbuilt tip must not spread into new workspaces.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn merge_mode_prioritizes_builds_and_starts_from_last_built() {
     let (_temp, state) = setup_files(&[("rosen.toml", b"recheck = 'merge'\n")]);
     let a = land(&state, 1).await;

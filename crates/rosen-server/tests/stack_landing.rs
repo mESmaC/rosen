@@ -118,7 +118,7 @@ async fn land(state: &Arc<ServerState>, id: &str) -> rosen_core::ObjectId {
     commit
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn atomic_stack_and_receipt_reuse_match_proved_fixtures() {
     // R8: a receipt on the top covers one atomic request, never a lost
     // prefix or a squashed history that prevents single-culprit bisection.

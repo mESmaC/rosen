@@ -44,7 +44,7 @@ async fn land_file(
     (c.change, commit)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn culprit_reopens_once_without_losing_later_work() {
     let temp = tempfile::tempdir().unwrap();
     let (s, store, ledger, root) = setup(temp.path());

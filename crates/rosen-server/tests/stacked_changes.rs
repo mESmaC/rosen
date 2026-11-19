@@ -146,7 +146,7 @@ fn assert_base_keeps_unrelated(state: &ServerState, store: &dyn ObjectStore) {
     assert_eq!(format!("4\t{actual}"), expected);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn pending_parent_update_recovers_and_conflicts_keep_all_sides() {
     let (_temp, state) = setup();
     let parent = create(&state, None).await;
@@ -187,7 +187,7 @@ async fn pending_parent_update_recovers_and_conflicts_keep_all_sides() {
     assert_eq!(restarted.changes.show(&child).unwrap().change, after);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn stale_child_merge_result_never_reverts_landed_work() {
     // Risk (#146): a checker receipts the merge result. When a child's head
     // still sits on its parent's pre-rebase tree, measuring it from the
@@ -286,7 +286,7 @@ async fn fixture_stack(state: &Arc<ServerState>, codes: &[u8]) -> String {
     child
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn stack_merge_result_matches_proved_fixture() {
     // Risk (R8): using the stack root as a stale child's basis can receipt a
     // clean tree that silently deletes intervening lands (#146, #182).
@@ -322,7 +322,7 @@ async fn stack_merge_result_matches_proved_fixture() {
     assert_eq!(checked, 6);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn legacy_stack_recovers_only_from_a_recorded_parent_tree() {
     // Risk (#166): an edited stack from before parent trees were recorded
     // must never be merged from a tree the server guessed, and recovering it
@@ -363,7 +363,7 @@ async fn legacy_stack_recovers_only_from_a_recorded_parent_tree() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn legacy_recovery_matches_fixture_and_preserves_parent_updates() {
     // Risk (R8, #361): replacing an unedited child's implicit basis with a
     // newer parent snapshot silently treats intervening parent work as deleted.

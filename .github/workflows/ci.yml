@@ -35,8 +35,20 @@ jobs:
   windows:
     name: Windows (build, clippy, test)
     runs-on: windows-latest
+    # A deadlocked test once held this job for GitHub's 6-hour limit while every later
+    # push to main waited behind it (#411); a healthy run takes a fraction of this.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Builds write to a Dev Drive: ReFS, without real-time scanning of every file the
+      # compiler writes, which slows Rust builds on Windows runners the most.
+      - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+        with:
+          drive-size: 30GB
+          drive-format: ReFS
+          env-mapping: |
+            CARGO_TARGET_DIR,{{ DEV_DRIVE }}/target
 
       # A rust-toolchain.toml in the repository, if any, overrides this default.
       # The action is pinned to a commit on its `stable` branch, so the ref no
@@ -52,6 +64,8 @@ jobs:
       - run: cargo fmt --all -- --check
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: '. -> ${{ env.CARGO_TARGET_DIR }}'
 
       - name: cargo build
         run: cargo build --workspace
@@ -71,6 +85,7 @@ jobs:
   windows-refs:
     name: Windows ReFS (block clone tests)
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -106,6 +121,7 @@ jobs:
   macos:
     name: macOS (build, clippy, test)
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -128,6 +144,7 @@ jobs:
   linux:
     name: Linux (build)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

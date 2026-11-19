@@ -308,6 +308,9 @@ impl LandingService {
     /// Blocks until every land request answered so far has finished its
     /// after-answer work, so a caller can read its rebases, released claims
     /// and events. Recovery still owns work that failed.
+    ///
+    /// Call it from a multi-thread runtime: post-land work is spawned on the current
+    /// runtime, so on a current-thread one it can never run while this blocks (#411).
     pub fn settle(&self) {
         let count = self
             .finishing

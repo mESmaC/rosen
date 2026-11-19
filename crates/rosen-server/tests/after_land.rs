@@ -164,7 +164,7 @@ async fn failures(state: &Arc<ServerState>, change: &str) -> Vec<PostLandFailure
     found
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn after_land_records_tests_and_reverts_only_builds_across_restart() {
     let temp = tempfile::tempdir().unwrap();
     let state = setup(temp.path());
@@ -308,7 +308,7 @@ fn restart(state: Arc<ServerState>) -> Arc<ServerState> {
 
 // R12 risk (#373): overlapping batches must not multiply reports or lose
 // completed batch coverage when legacy duplicate records are consolidated.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn overlapping_test_failures_are_recorded_once() {
     let temp = tempfile::tempdir().unwrap();
     let state = setup(temp.path());
@@ -350,7 +350,7 @@ async fn overlapping_test_failures_are_recorded_once() {
 
 // R12 risk (#373): the old test green hides a later regression behind a
 // recorded culprit. A known failure is a search bound, never a green prefix.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn later_test_search_starts_after_recorded_culprit() {
     let temp = tempfile::tempdir().unwrap();
     let state = setup(temp.path());
@@ -372,7 +372,7 @@ async fn later_test_search_starts_after_recorded_culprit() {
 }
 
 // R12 must use configuration once landed, including a change that changes review mode.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn landed_configuration_selects_failure_policy() {
     let temp = tempfile::tempdir().unwrap();
     let state = setup(temp.path());
@@ -387,7 +387,7 @@ async fn landed_configuration_selects_failure_policy() {
 }
 
 // R12 risk (#390): one unrevertable culprit must not mask a later build break.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn refused_build_inverse_does_not_mask_the_next_culprit() {
     let temp = tempfile::tempdir().unwrap();
     let state = setup(temp.path());
@@ -513,7 +513,7 @@ async fn assert_refusal_deduplicated(state: &Arc<ServerState>, session: i64) {
 
 // Risk (R5/R8, #389): a generated merge must not publish or certify the
 // target base's artifact while losing the owner's regeneration requirement.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn generated_merge_refuses_until_owner_rebases_and_regenerates() {
     let temp = tempfile::tempdir().unwrap();
     let state = setup(temp.path());
