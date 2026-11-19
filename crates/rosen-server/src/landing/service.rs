@@ -91,6 +91,9 @@ type Decided = Result<LandStatus, Refusal>;
 const RETRY_START: Duration = Duration::from_millis(250);
 const RETRY_CAP: Duration = Duration::from_secs(30);
 
+/// How many lands' post-land work runs at once.
+const POST_LAND_SLOTS: u32 = 2;
+
 /// Answers `land` on the blocking pool: merging and SQLite I/O must not
 /// stall the async workers that carry every other connection.
 pub async fn land(state: &Arc<ServerState>, change: String) -> Outcome {
@@ -169,9 +172,21 @@ impl LandingService {
             retry: tokio::sync::Notify::new(),
             finishing: Mutex::new(0),
             finished: Condvar::new(),
-            post_land_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            post_land_slots: Arc::new(tokio::sync::Semaphore::new(POST_LAND_SLOTS as usize)),
             marker_cache: super::markers::Cache::default(),
         }
+    }
+
+    /// Takes every post-land slot, once the work already running ends, and
+    /// keeps lands' after-answer work queued until the permit is dropped.
+    /// A test holds it across a land to see the land answer while its
+    /// post-land work is still pending (#190), with no wall-clock bound.
+    /// Never call [`LandingService::settle`] while holding it.
+    pub async fn hold_post_land(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(&self.post_land_slots)
+            .acquire_many_owned(POST_LAND_SLOTS)
+            .await
+            .expect("the post-land slots are never closed")
     }
 
     pub(crate) fn retry_post_land(&self) {

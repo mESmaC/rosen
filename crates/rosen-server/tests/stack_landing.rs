@@ -5,6 +5,7 @@ use rosen_protocol::{NewChange, Outcome, Request, Response, WorkspaceBytes, Work
 use rosen_server::{landing::Ledger, rpc::dispatch, ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use std::sync::Arc;
+use std::time::Duration;
 
 fn setup() -> (tempfile::TempDir, Arc<ServerState>) {
     let temp = tempfile::tempdir().unwrap();
@@ -101,20 +102,28 @@ async fn receipt(state: &Arc<ServerState>, id: &str) -> rosen_core::ObjectId {
     head
 }
 
+/// Lands `id` while its post-land work is held back.
+// Risk (#190, R8 accept): a land that runs or awaits its post-land rebases
+// before answering makes every requester wait on unrelated work. With that
+// work held, a land that awaits it never answers, and one that runs it
+// inline answers with it already done; a wall-clock bound only flakes on
+// slow runners.
 async fn land(state: &Arc<ServerState>, id: &str) -> rosen_core::ObjectId {
-    let started = std::time::Instant::now();
-    let Response::Land(answer) = call(state, Request::Land { change: id.into() }).await else {
-        panic!("land response");
+    let held = state.landing.hold_post_land().await;
+    let request = call(state, Request::Land { change: id.into() });
+    let Ok(Response::Land(answer)) = tokio::time::timeout(Duration::from_secs(60), request).await
+    else {
+        panic!("the land did not answer while its post-land work was held");
     };
-    let elapsed = started.elapsed();
     let rosen_protocol::LandStatus::Landed { commit, .. } = answer.outcome else {
         panic!("{:?}", answer.outcome);
     };
-    eprintln!("stack land took {elapsed:?}");
+    let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
     assert!(
-        elapsed < std::time::Duration::from_millis(200),
-        "{elapsed:?}"
+        ledger.post_land_pending("main", &commit).unwrap(),
+        "the land answered only after its post-land work ran"
     );
+    drop(held);
     commit
 }
 
