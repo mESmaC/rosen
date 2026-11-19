@@ -19,7 +19,10 @@ mod lines;
 mod merge;
 mod overlap;
 
-pub use file::{merge_file, merge_trees, FileConflict, FileMerge, MergePolicy, Side, TreeMerge};
+pub use file::{
+    is_binary, merge_file, merge_trees, FileConflict, FileMerge, MergePolicy, Side, TreeMerge,
+};
+pub use lines::normalize_line_endings;
 pub use merge::{merge_text, ConflictRegion, Hunk, MarkerLabels, TextMerge};
 pub use overlap::{FileEdit, LineSpan, OVERLAP_DISTANCE};
 

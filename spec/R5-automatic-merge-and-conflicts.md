@@ -3,6 +3,11 @@
 - Text merges ignore a CR immediately before LF when comparing lines, including registration lists and file-level unchanged-side shortcuts.
   Merged text uses the base's first terminated line's newline convention; if the base has none, it uses ours' first terminated line, then theirs', otherwise LF.
   Bare CR bytes and missing final newlines remain content; generated and binary files retain their existing byte-preserving rules.
+- A change's merge result, which checkers build and lands write, keeps the target base's newline conventions, even when nothing landed under the change and no merge runs (#397).
+  Each text file the change adds or edits is written in the convention of the base's version of that path, read from its first terminated line.
+  A new file, or one whose base version has no terminated line, takes the convention most of the base's text files use, sampled from a bounded number of them.
+  Binary, generated, symlink and gitlink entries, and files over 16 MiB, keep their bytes.
+  Reverts, restacks and snapshot merges keep every byte; Rosen reads no `.gitattributes` or `core.autocrlf`.
 - Generated files listed in project configuration are regenerated, never merged.
   When both sides change a generated path differently, the provisional merge keeps the target base's copy and reports the path for the owner to regenerate; Rosen runs no generators (D9).
   Server rebases preserve these paths in the owner's rebase notice, including restacks after a parent lands.

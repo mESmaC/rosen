@@ -87,4 +87,15 @@ impl ObjectStore for Scratch<'_> {
         }
         self.backing.contains(id)
     }
+
+    // The default reads the whole object; the backing store reads only its
+    // header, which keeps sizing a large blob cheap (#397).
+    fn object_size(&self, id: &ObjectId) -> Result<u64, StoreError> {
+        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(object) = pending.objects.get(id) {
+            return Ok(object.data.len() as u64);
+        }
+        drop(pending);
+        self.backing.object_size(id)
+    }
 }

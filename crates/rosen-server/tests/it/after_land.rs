@@ -602,3 +602,27 @@ async fn write_artifact(state: &Arc<ServerState>, id: &str, data: &[u8]) {
     )
     .await;
 }
+
+/// Risk (#397): a land with no merge kept a Windows editor's CRLF rewrite of
+/// an LF file, so the mirror showed every line changed for a one-line edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn land_with_no_merge_keeps_the_base_line_endings() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = setup(temp.path());
+    land_bytes(&state, "notes.md", b"one\ntwo\n").await;
+    // The change sits directly on the base, so the land runs no merge.
+    let (_, _, commit) = land_bytes(&state, "notes.md", b"one\r\ntwo\r\nthree\r\n").await;
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let tree = store
+        .read_tree(&store.read_commit(&commit).unwrap().tree)
+        .unwrap();
+    let notes = tree
+        .entries()
+        .iter()
+        .find(|e| e.name == b"notes.md")
+        .unwrap();
+    assert_eq!(
+        store.read_blob(&notes.id).unwrap().data,
+        b"one\ntwo\nthree\n"
+    );
+}

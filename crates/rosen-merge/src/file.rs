@@ -153,7 +153,7 @@ fn merge_file_content(
 }
 
 /// Git's heuristic: a NUL byte in the first 8000 bytes marks a binary file.
-pub(crate) fn is_binary(text: &[u8]) -> bool {
+pub fn is_binary(text: &[u8]) -> bool {
     text.iter().take(8000).any(|&byte| byte == 0)
 }
 

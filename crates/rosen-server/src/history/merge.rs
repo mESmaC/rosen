@@ -21,6 +21,7 @@ use rosen_store::ObjectStore;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, PoisonError};
 
+mod line_endings;
 mod staging;
 
 /// Only immutable inputs belong in this cache; no receipt or gate decision does.
@@ -66,7 +67,7 @@ fn cached_merge(
         return Ok(result);
     }
     // Store reads, merging and durable writes never hold the cache mutex.
-    let result = merge_trees(ctx, sides, policy)?;
+    let result = merge_with_store(&ctx.store, sides, policy, KeepLineEndings::Yes)?;
     ctx.state.merge_results.remember(key, &result);
     Ok(result)
 }
@@ -126,15 +127,7 @@ pub(crate) fn merge_stack_onto(
     let mut regenerate = Vec::new();
     for change in stack[..unlanded].iter().rev() {
         let measured_from = built_on(ctx, change)?;
-        let step = if measured_from == tree {
-            // Nothing landed under the change: its head is the merge.
-            TreeMerge {
-                tree: Some(change.head),
-                ..TreeMerge::default()
-            }
-        } else {
-            cached_merge(ctx, [measured_from, tree, change.head], *onto, &policy)?
-        };
+        let step = cached_merge(ctx, [measured_from, tree, change.head], *onto, &policy)?;
         let Some(merged) = step.tree else {
             // A change below conflicts: the stack has no buildable result.
             return Ok(step);
@@ -185,12 +178,6 @@ pub(crate) fn merge_for_land_at(
     let ctx = super::open(state)?;
     let basis = tree_of(&ctx, merge_base)?;
     let onto_tree = tree_of(&ctx, onto)?;
-    if basis == onto_tree {
-        return Ok(TreeMerge {
-            tree: Some(*head),
-            ..TreeMerge::default()
-        });
-    }
     let config = ctx.state.project_config.at_commit(policy_base)?.config;
     cached_merge(&ctx, [basis, onto_tree, *head], *policy_base, &|path| {
         policy_for(&config, path)
@@ -208,19 +195,14 @@ pub(crate) fn merge_for_land_attempt(
     if !current()? {
         return Ok(None);
     }
-    if sides[0] == sides[1] {
-        return Ok(Some(TreeMerge {
-            tree: Some(*head),
-            ..TreeMerge::default()
-        }));
-    }
     let key = [sides[0], sides[1], sides[2], *policy_base];
     if let Some(result) = state.merge_results.get(&key) {
         return Ok(Some(result));
     }
     let config = state.project_config.at_commit(policy_base)?.config;
     let scratch = staging::Scratch::new(&ctx.store);
-    let result = merge_with_store(&scratch, sides, &|path| policy_for(&config, path))?;
+    let policy = |path: &str| policy_for(&config, path);
+    let result = merge_with_store(&scratch, sides, &policy, KeepLineEndings::Yes)?;
     if !current()? || (result.tree.is_some() && !scratch.persist(current)?) {
         return Ok(None);
     }
@@ -270,22 +252,42 @@ enum FileOutcome {
     Regenerate,
 }
 
+/// Whether a merge rewrites what the change contributes in the target's
+/// newline convention (#397). A merge result that lands does; a revert,
+/// restack or snapshot merge keeps each side's bytes exactly.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeepLineEndings {
+    Yes,
+    No,
+}
+
 /// Merges `theirs`' edits since `base` onto `ours`, given as
 /// `[base, ours, theirs]` trees, with each path merged under `policy`.
+/// Every byte either side kept is kept, line endings included.
 pub(crate) fn merge_trees(
     ctx: &Ctx,
     sides: [ObjectId; 3],
     policy: &dyn Fn(&str) -> MergePolicy,
 ) -> HistoryResult<TreeMerge> {
-    merge_with_store(&ctx.store, sides, policy)
+    merge_with_store(&ctx.store, sides, policy, KeepLineEndings::No)
 }
 
 fn merge_with_store(
     store: &dyn ObjectStore,
     sides: [ObjectId; 3],
     policy: &dyn Fn(&str) -> MergePolicy,
+    endings: KeepLineEndings,
 ) -> HistoryResult<TreeMerge> {
-    let (edits, mut merge) = merge_paths(store, sides, policy, false)?;
+    if sides[0] == sides[1] && endings == KeepLineEndings::Yes {
+        // Nothing landed under the change: its head is the merge, with the
+        // base's line endings kept in each text file it touched (#397).
+        let tree = line_endings::keep_in_tree(store, sides[0], sides[2], policy)?;
+        return Ok(TreeMerge {
+            tree: Some(tree),
+            ..TreeMerge::default()
+        });
+    }
+    let (edits, mut merge) = merge_paths(store, sides, policy, false, endings)?;
     let tree = apply(store, Some(sides[1]), &edits, &mut merge.conflicts)?;
     if !merge.conflicts.is_empty() {
         merge.conflicts.sort();
@@ -328,7 +330,7 @@ pub(crate) fn merge_trees_marked(
     sides: [ObjectId; 3],
     policy: &dyn Fn(&str) -> MergePolicy,
 ) -> HistoryResult<TreeMerge> {
-    let (edits, mut merge) = merge_paths(&ctx.store, sides, policy, true)?;
+    let (edits, mut merge) = merge_paths(&ctx.store, sides, policy, true, KeepLineEndings::No)?;
     let mut collisions = Vec::new();
     let tree = apply(&ctx.store, Some(sides[1]), &edits, &mut collisions)?;
     if collisions.is_empty() {
@@ -356,6 +358,7 @@ fn merge_paths(
     [base, ours, theirs]: [ObjectId; 3],
     policy: &dyn Fn(&str) -> MergePolicy,
     mark: bool,
+    endings: KeepLineEndings,
 ) -> HistoryResult<(PathEdits, TreeMerge)> {
     let theirs_changes = changed_files(store, Some(base), Some(theirs), &[])?;
     if theirs_changes.is_empty() {
@@ -375,19 +378,24 @@ fn merge_paths(
             .collect();
     let mut edits = BTreeMap::new();
     let mut merge = TreeMerge::default();
+    // What the change contributes keeps the target's line endings (#397).
+    let mut conventions =
+        line_endings::Conventions::new(store, ours, endings == KeepLineEndings::Yes);
     for change in theirs_changes {
+        let policy = policy(&change.path);
         let Some(ours) = ours_changes.get(&change.path) else {
-            edits.insert(change.path, change.new);
+            let kept = conventions.keep(change.new, change.old, policy)?;
+            edits.insert(change.path, kept);
             continue;
         };
         if ours.new == change.new {
             continue;
         }
         let sides = [change.old, ours.new, change.new];
-        let policy = policy(&change.path);
         match merge_one(store, sides, policy)? {
             FileOutcome::Merged(file) => {
-                edits.insert(change.path, file);
+                let reference = ours.new.or(change.old);
+                edits.insert(change.path, conventions.keep(file, reference, policy)?);
             }
             FileOutcome::Conflict => {
                 if mark {
