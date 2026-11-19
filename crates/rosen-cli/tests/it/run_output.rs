@@ -12,6 +12,11 @@ fn failed_run_keeps_both_streams_and_summarizes_the_last_40_lines() {
     fs::create_dir_all(&state).unwrap();
     fs::create_dir_all(&subdir).unwrap();
     fs::write(state.join("workspace.json"), "{}").unwrap();
+    // rosen reports the canonical path; on macOS the temp folder is a symlink
+    // (/var -> /private/var), so compare against the canonical state folder.
+    // Windows canonical paths carry a \\?\ prefix rosen does not print.
+    #[cfg(not(windows))]
+    let state = fs::canonicalize(&state).unwrap();
     let shell = if cfg!(windows) {
         [
             "powershell.exe",
