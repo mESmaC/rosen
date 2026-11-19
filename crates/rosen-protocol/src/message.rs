@@ -552,6 +552,9 @@ pub enum EventKind {
     /// An AIRC channel line (R13), with its channel-specific payload in detail.
     /// Uses the same sequence, subscription and acknowledgement as R9 events.
     Channel,
+    /// A ledger push to the configured endpoint failed or recovered (R13).
+    /// Sent to every subscriber.
+    LedgerPush,
 }
 
 /// One event. `seq` is the cursor a client resumes from after a reconnect.

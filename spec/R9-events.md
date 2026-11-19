@@ -9,10 +9,10 @@
 - A `rebased` event reports an installed rebase, including a stack restack or an owner-requested rebase.
   A clean overlap probe emits none.
   Claim-only overlaps receive the `landed` notice.
-- The event types are `snapshot`, `landed`, `rebased`, `conflict`, `updated`, `review`, `claim`, `released`, `green`, `built`, `reverted`, `revert_refused`, `post_land_failure` and `mirror`.
+- The event types are `snapshot`, `landed`, `rebased`, `conflict`, `updated`, `review`, `claim`, `released`, `green`, `built`, `reverted`, `revert_refused`, `post_land_failure`, `mirror` and `ledger_push` (R13).
 - Each event is delivered only to subscribers it concerns: the change's owner, its reviewers, changes stacked on it, and the holders of overlapping changes or claims.
 - An event's audience is fixed when it is published.
-  An event about no change, such as `mirror`, goes to every subscriber.
+  An event about no change, such as `mirror` or `ledger_push`, goes to every subscriber.
 - A subscriber names its agent.
   A subscription that names no agent is the project view: it gets every event and stores no cursor.
 - Delivery is at least once and resumes from a cursor after reconnect.

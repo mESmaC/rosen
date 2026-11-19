@@ -44,4 +44,21 @@ Rosen is its store and its authority.
   Claims and messages need the server, as landing does.
   A tool call made while the server is unreachable fails with that reason.
   It is never answered from a local copy.
+- **Ledger push.**
+  When the base's `rosen.toml` names a root `ledger_endpoint`, the server sends new Discoveries and Past work entries there, such as Collapse's `https://api.collapse.sh/<owner>/<name>/ledgers`.
+  The URL is `https` with no credentials in it; plain `http` is accepted only for a loopback host.
+  The token comes from git's credential helper on the server, the one the mirror push uses (R1), and goes as HTTPS basic auth.
+  - One background task sends, off the append path, as the mirror push runs after a land.
+    An append never waits for it and never fails because of it.
+  - Each request is a JSON batch `{"entries":[...]}` of at most 1,000 entries and 2 MB, in sequence order.
+    An entry carries its ledger, sequence, author nick, machine, UTC time and text, plus the Rosen or Velocity issue title a discovery has.
+    Text, names and titles longer than the endpoint accepts are cut to fit.
+  - Only the two ledgers are read, so claims, events, messages and presence are never sent.
+    Velocity's versioned records inside the ledgers (`velocity-airc/` envelopes and older bare JSON checkouts, task results and delivery acknowledgements) are skipped; a discovery in Velocity's envelope is sent as its text and issue title.
+  - The endpoint stores entries by sequence and answers with the highest sequence it holds in each ledger.
+    The server stores how far each ledger has reached each endpoint, so a restart resumes there.
+    On start and after a failure it first sends an empty batch to read what the endpoint holds, and resends from there when that is less than it delivered.
+  - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `ledger_push` event (R9); the first success after failures publishes one too.
+    HTTP 410 (the endpoint's repository is archived) stops sending until `ledger_endpoint` changes or the server restarts.
+  - Without `ledger_endpoint`, nothing is sent.
 - **Accept when:** two agents on different machines that claim the same piece or an exclusive path at the same moment never both succeed; an event or message reaches its recipient on another machine within 1 s while both machines reach the server; and no two machines ever see different claim holders.

@@ -18,6 +18,7 @@ mod event_resume;
 mod import_git;
 mod landing_fixtures;
 mod landing_race;
+mod ledger_push;
 mod machine_management;
 mod metadata;
 mod mirror_push;

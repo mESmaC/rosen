@@ -210,7 +210,8 @@
         "revert_refused",
         "mirror",
         "channel",
-        "post_land_failure"
+        "post_land_failure",
+        "ledger_push"
       ]
     },
     "ChangeParent": {
@@ -1115,6 +1116,9 @@
           "type": "integer",
           "minimum": 0,
           "default": 104857600
+        },
+        "ledger_endpoint": {
+          "type": "string"
         }
       },
       "required": [

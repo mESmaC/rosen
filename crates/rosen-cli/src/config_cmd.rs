@@ -70,6 +70,10 @@ fn print_parts(config: &ProjectConfig) {
         Some(remote) => println!("mirror remote: {remote}"),
         None => println!("mirror remote: (the one `rosen import --mirror` stored, if any)"),
     }
+    match &config.ledger_endpoint {
+        Some(url) => println!("ledger endpoint: {url}"),
+        None => println!("ledger endpoint: (none; ledgers are not pushed)"),
+    }
 }
 
 fn print_build_units(config: &ProjectConfig) {

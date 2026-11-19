@@ -63,6 +63,12 @@ pub struct ProjectConfig {
         skip_serializing_if = "is_default_max_file_size"
     )]
     pub max_file_size: u64,
+    /// Where the server sends new Discoveries and Past work entries after
+    /// each append (R13), such as Collapse's
+    /// `https://api.collapse.sh/<owner>/<name>/ledgers`. `None` sends
+    /// nothing. Like `mirror.remote`, it never holds a credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger_endpoint: Option<String>,
 }
 
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
@@ -90,6 +96,7 @@ impl Default for ProjectConfig {
             prepare: Default::default(),
             mirror: Default::default(),
             max_file_size: DEFAULT_MAX_FILE_SIZE,
+            ledger_endpoint: None,
         }
     }
 }
@@ -358,8 +365,11 @@ impl ProjectConfig {
                 self.warm_pool.size
             )));
         }
-        match &self.mirror.remote {
-            Some(remote) => mirror_remote(remote),
+        if let Some(remote) = &self.mirror.remote {
+            mirror_remote(remote)?;
+        }
+        match &self.ledger_endpoint {
+            Some(url) => ledger_endpoint(url),
             None => Ok(()),
         }
     }
@@ -538,6 +548,48 @@ fn split_port(host_port: &str) -> (&str, &str) {
     }
 }
 
+/// The server POSTs ledger entries to this URL with the push token from its
+/// credential helper, and the text is repository content any approved change
+/// can edit. So it must be `https`, where the token is never sent in the
+/// clear, and carry no credentials of its own. Plain `http` is accepted only
+/// for a loopback host, which never leaves the server machine, so a local
+/// endpoint can be tried out.
+fn ledger_endpoint(url: &str) -> Result<(), ConfigError> {
+    let refuse = |why: &str| {
+        let shown = without_userinfo(url);
+        Err(ConfigError(format!("ledger_endpoint {shown:?} {why}")))
+    };
+    // The URL reaches curl inside a quoted config line; these characters
+    // could end that quoting, and none belongs in a URL.
+    let plain = |c: char| c.is_ascii_graphic() && c != '"' && c != '\\';
+    if url.is_empty() || !url.chars().all(plain) {
+        return refuse("must be a URL with no spaces, quotes, backslashes or control characters");
+    }
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return refuse("must be an https URL");
+    };
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if authority.contains('@') {
+        return refuse("carries credentials; give them to git's credential helper on the server");
+    }
+    if path.is_empty() {
+        return refuse("names no path");
+    }
+    let (host, port) = split_port(authority);
+    if !port.chars().all(|c| c.is_ascii_digit()) {
+        return refuse(&format!("has a port {port:?} that is not a number"));
+    }
+    if let Err(why) = host_name(host) {
+        return refuse(&why);
+    }
+    match scheme {
+        "https" => Ok(()),
+        "http" if matches!(host, "localhost" | "127.0.0.1" | "[::1]") => Ok(()),
+        "http" => refuse("must use https; plain http is only for a loopback host"),
+        _ => refuse("must be an https URL"),
+    }
+}
+
 /// The remote with any URL user information blanked, so a refusal that
 /// `rosen config show` prints never repeats a token.
 fn without_userinfo(remote: &str) -> String {
@@ -593,5 +645,29 @@ mod tests {
         }
         let refusal = parsed("https://ghp_token@github.com/r.git").unwrap_err();
         assert!(!refusal.to_string().contains("ghp_token"), "{refusal}");
+    }
+
+    /// Risk (issue #395): the server sends the push token to this URL. One
+    /// carrying a token, or plain http to another machine, would publish it.
+    #[test]
+    fn ledger_endpoint_accepts_only_https_without_credentials() {
+        let parsed = |url: &str| ProjectConfig::parse(&format!("ledger_endpoint = {url:?}\n"));
+        for good in [
+            "https://api.collapse.sh/mESmaC/rosen/ledgers",
+            "http://127.0.0.1:8080/o/r/ledgers",
+        ] {
+            assert!(parsed(good).is_ok(), "refused {good}");
+        }
+        for bad in [
+            "https://tok@api.collapse.sh/o/r/ledgers",
+            "http://api.collapse.sh/o/r/ledgers",
+            "file:///srv/ledgers",
+            "https://api.collapse.sh",
+            "https://api.collapse.sh/a\"b",
+        ] {
+            assert!(parsed(bad).is_err(), "accepted {bad}");
+        }
+        let refusal = parsed("https://tok@api.collapse.sh/o/r/ledgers").unwrap_err();
+        assert!(!refusal.to_string().contains("tok@"), "{refusal}");
     }
 }

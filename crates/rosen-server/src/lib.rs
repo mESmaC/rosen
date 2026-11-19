@@ -19,6 +19,7 @@ pub mod events;
 pub mod history;
 pub mod import;
 pub mod landing;
+pub mod ledger_push;
 pub mod listener;
 pub mod load_limits;
 pub mod machines;
@@ -344,6 +345,7 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
         landing::service::keep_recovering(recovering).await;
     });
     let mirror = tokio::spawn(mirror::run(Arc::clone(&state)));
+    let ledger_push = tokio::spawn(ledger_push::run(Arc::clone(&state)));
     let network_task = network.map(|(tcp, acceptor, identity, address)| {
         state.set_network(identity, address);
         tokio::spawn(network::serve(tcp, acceptor, Arc::clone(&state)))
@@ -356,6 +358,9 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     // A push cut short here is retried at the next start: the mirror's
     // pushed commit is only recorded once the remote accepts it.
     mirror.abort();
+    // A send cut short here is resent at the next start: the cursor only
+    // moves once the endpoint acknowledges a batch.
+    ledger_push.abort();
     landing_recovery.abort();
     pool_worker.abort();
     Ok(())
