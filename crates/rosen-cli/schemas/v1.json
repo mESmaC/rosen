@@ -134,6 +134,9 @@
     },
     {
       "$ref": "#/$defs/rosen.mirror.adopt~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.mirror.catch-up~1v1"
     }
   ],
   "$defs": {
@@ -3364,6 +3367,67 @@
       "required": ["schema", "adoption"],
       "additionalProperties": false,
       "x-commands": ["mirror adopt"]
+    },
+    "rosen.mirror.catch-up/v1": {
+      "description": "The command exits non-zero when rebase_errors is not empty. Diverged histories move nothing: that refusal prints rosen.error/v1 with command \"mirror catch-up\", naming both tips and the commits on each side.",
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.mirror.catch-up/v1"
+        },
+        "catch_up": {
+          "type": "object",
+          "properties": {
+            "base_ref": { "type": "string" },
+            "status": { "enum": ["up_to_date", "ahead", "fast_forwarded"] },
+            "old_base": { "$ref": "#/$defs/ObjectId" },
+            "new_base": { "$ref": "#/$defs/ObjectId" },
+            "remote_tip": { "$ref": "#/$defs/ObjectId" },
+            "commits": {
+              "description": "Imported base commits along the mirror's first-parent line, oldest first.",
+              "type": "array",
+              "items": { "$ref": "#/$defs/ObjectId" }
+            },
+            "rebased": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/ChangeId" }
+            },
+            "conflicted": {
+              "description": "The rebased changes that now hold conflicts.",
+              "type": "array",
+              "items": { "$ref": "#/$defs/ChangeId" }
+            },
+            "rebase_errors": {
+              "description": "Open changes the catch-up could not rebase; each rebases when it lands. change is empty when the failure covers every open change.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "change": { "type": "string" },
+                  "error": { "type": "string" }
+                },
+                "required": ["change", "error"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "base_ref",
+            "status",
+            "old_base",
+            "new_base",
+            "remote_tip",
+            "commits",
+            "rebased",
+            "conflicted",
+            "rebase_errors"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": ["schema", "catch_up"],
+      "additionalProperties": false,
+      "x-commands": ["mirror catch-up"]
     }
   }
 }

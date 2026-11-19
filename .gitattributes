@@ -1,0 +1,3 @@
+# Every text file is LF on every checkout, so a Windows checkout or land
+# never rewrites whole files to CRLF (#397, #420).
+* text=auto eol=lf
