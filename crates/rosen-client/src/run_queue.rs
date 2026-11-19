@@ -168,6 +168,23 @@ pub struct RunBudget {
 }
 
 impl RunBudget {
+    /// A budget from whole jobs and GiB.
+    pub fn new(jobs: usize, memory_gib: u64) -> Self {
+        Self {
+            jobs,
+            memory: memory_gib.saturating_mul(GIB),
+        }
+    }
+
+    /// This budget, held within `cap` and to at least one job and one GiB,
+    /// so a caller can ask for less than its class's cap but never more.
+    fn within(self, cap: Self) -> Self {
+        Self {
+            jobs: self.jobs.clamp(1, cap.jobs),
+            memory: self.memory.clamp(GIB.min(cap.memory), cap.memory),
+        }
+    }
+
     fn charge(&mut self, budget: Self) {
         self.jobs = self.jobs.saturating_add(budget.jobs);
         self.memory = self.memory.saturating_add(budget.memory);
@@ -223,6 +240,21 @@ impl RunQueue {
     /// Takes a place in line for a run of `class`. `note` says what the run
     /// is, for those waiting behind it.
     pub fn wait(&self, class: RunClass, note: &str) -> io::Result<Waiter> {
+        self.wait_for(class, None, note)
+    }
+
+    /// Like [`RunQueue::wait`], for a run that needs only `budget`, held
+    /// within its class's cap. The waiter is admitted and charged on it.
+    pub fn wait_with(&self, class: RunClass, budget: RunBudget, note: &str) -> io::Result<Waiter> {
+        self.wait_for(class, Some(budget), note)
+    }
+
+    fn wait_for(
+        &self,
+        class: RunClass,
+        requested: Option<RunBudget>,
+        note: &str,
+    ) -> io::Result<Waiter> {
         std::fs::create_dir_all(&self.dir)?;
         let arrived = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -253,6 +285,7 @@ impl RunQueue {
         Ok(Waiter {
             queue: self.clone(),
             class,
+            requested,
             note: note.to_owned(),
             path,
             _ticket: ticket,
@@ -263,7 +296,17 @@ impl RunQueue {
     /// Waits in line on this thread and returns the turn. Blocking: call it
     /// off an async runtime's threads.
     pub fn turn(&self, class: RunClass, note: &str) -> io::Result<Turn> {
-        let waiter = self.wait(class, note)?;
+        Self::take_turn(self.wait(class, note)?)
+    }
+
+    /// Like [`RunQueue::turn`], for a run that needs only `budget`, held
+    /// within its class's cap. Its budget file records that budget, so other
+    /// waiters count it, and the turn's thread variables follow it.
+    pub fn turn_with(&self, class: RunClass, budget: RunBudget, note: &str) -> io::Result<Turn> {
+        Self::take_turn(self.wait_with(class, budget, note)?)
+    }
+
+    fn take_turn(waiter: Waiter) -> io::Result<Turn> {
         loop {
             if let Some(turn) = waiter.try_start()? {
                 return Ok(turn);
@@ -540,6 +583,8 @@ fn try_lock(path: &Path) -> io::Result<Option<File>> {
 pub struct Waiter {
     queue: RunQueue,
     class: RunClass,
+    /// The budget the caller asked for, if less than the class's cap.
+    requested: Option<RunBudget>,
     /// Shown to those waiting behind this run once it has its turn.
     note: String,
     path: PathBuf,
@@ -570,7 +615,7 @@ impl Waiter {
         if !self.is_next(yielding, slots, &running)? {
             return Ok(None);
         }
-        let budget = self.class.budget_on(cores);
+        let budget = self.budget_on(cores);
         let mut reserved = self.queue.budget_for(&running);
         reserved.charge(budget);
         // Live turns can still grow to their caps. Charging the full caps
@@ -592,6 +637,18 @@ impl Waiter {
             }));
         }
         Ok(None)
+    }
+
+    /// The budget this waiter is admitted and charged on: what its caller
+    /// asked for within the class's cap, or the cap.
+    pub fn budget(&self) -> RunBudget {
+        self.budget_on(machine_cores())
+    }
+
+    fn budget_on(&self, cores: usize) -> RunBudget {
+        let cap = self.class.budget_on(cores);
+        self.requested
+            .map_or(cap, |requested| requested.within(cap))
     }
 
     /// All current runs, then the waiters ahead in line.

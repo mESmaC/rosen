@@ -38,7 +38,10 @@ pub fn run(json: bool, args: &RunArgs) -> io::Result<ExitStatus> {
         Some(held) => (None, held),
         None => {
             let note = format!("{} in {}", args.command.join(" "), current_dir());
-            (Some(turn(class, &note)?), class)
+            (
+                Some(turn(class, requested_budget(args, class), &note)?),
+                class,
+            )
         }
     };
     let budget = turn.as_ref().map(Turn::budget);
@@ -103,9 +106,28 @@ fn run_tree(
     ProcessTree::spawn(&std::env::current_exe()?, &args, &environment, limit)?.wait()
 }
 
-fn turn(class: RunClass, note: &str) -> io::Result<Turn> {
+/// The budget `--jobs` and `--memory-gib` ask for, or `None` for the
+/// class's full allocation. A missing half follows the class's rule: its
+/// cap of jobs, and one GiB per job plus one.
+fn requested_budget(args: &RunArgs, class: RunClass) -> Option<RunBudget> {
+    if args.jobs.is_none() && args.memory_gib.is_none() {
+        return None;
+    }
+    let jobs = args.jobs.map_or(class.budget().jobs, |jobs| {
+        usize::try_from(jobs).unwrap_or(usize::MAX)
+    });
+    let memory_gib = args
+        .memory_gib
+        .unwrap_or_else(|| u64::try_from(jobs).unwrap_or(u64::MAX).saturating_add(1));
+    Some(RunBudget::new(jobs, memory_gib))
+}
+
+fn turn(class: RunClass, requested: Option<RunBudget>, note: &str) -> io::Result<Turn> {
     let queue = RunQueue::machine()?;
-    let waiter = queue.wait(class, note)?;
+    let waiter = match requested {
+        Some(budget) => queue.wait_with(class, budget, note)?,
+        None => queue.wait(class, note)?,
+    };
     let started = Instant::now();
     let mut next_report = started + POLL * 20;
     let mut previous = None;
@@ -117,7 +139,7 @@ fn turn(class: RunClass, note: &str) -> io::Result<Turn> {
             next_report = Instant::now() + POLL * 10;
             if let Ok(progress) = WaitProgress::read(&waiter) {
                 if previous.as_ref() != Some(&progress) {
-                    progress.print(&queue, class, started);
+                    progress.print(&queue, class, waiter.budget(), started);
                     previous = Some(progress);
                 }
             }
@@ -145,7 +167,7 @@ impl WaitProgress {
         Ok(Self { running, waiting })
     }
 
-    fn print(&self, queue: &RunQueue, class: RunClass, started: Instant) {
+    fn print(&self, queue: &RunQueue, class: RunClass, budget: RunBudget, started: Instant) {
         let running = if self.running.is_empty() {
             "nothing".to_owned()
         } else {
@@ -155,9 +177,9 @@ impl WaitProgress {
             "rosen run: waited {}s for a turn ({}; {}); running now: {running}; {} ahead in line; {}",
             started.elapsed().as_secs(),
             class.name(),
-            resources(class),
+            resources(class, budget),
             self.waiting,
-            memory_resources(queue, Some(class)),
+            memory_resources(queue, Some(budget)),
         );
     }
 }
@@ -205,8 +227,7 @@ fn spawn(
     }
 }
 
-fn resources(class: RunClass) -> String {
-    let budget = class.budget();
+fn resources(class: RunClass, budget: RunBudget) -> String {
     format!(
         "CARGO_BUILD_JOBS={}, memory {} GiB, priority {}",
         budget.jobs,
@@ -285,7 +306,7 @@ pub fn slots(settings: &[String]) -> io::Result<()> {
         println!(
             "{:<8} {slots} ({source}); {}",
             class.name(),
-            resources(class)
+            resources(class, class.budget())
         );
     }
     println!("{}", memory_resources(&queue, None));
@@ -308,7 +329,8 @@ fn parse_memory_reserve(value: &str) -> io::Result<Option<u64>> {
         })
 }
 
-fn memory_resources(queue: &RunQueue, waiting: Option<RunClass>) -> String {
+/// `waiting` is the budget of the run waiting for its turn, if any.
+fn memory_resources(queue: &RunQueue, waiting: Option<RunBudget>) -> String {
     let memory = queue.memory_headroom();
     let format_bytes = |bytes: Option<u64>| {
         bytes.map_or_else(
@@ -318,9 +340,7 @@ fn memory_resources(queue: &RunQueue, waiting: Option<RunClass>) -> String {
     };
     let reserved = queue.running_budget().ok().map(|budget| budget.memory);
     let state = match (waiting, reserved) {
-        (Some(class), Some(reserved))
-            if !memory.fits(reserved.saturating_add(class.budget().memory)) =>
-        {
+        (Some(budget), Some(reserved)) if !memory.fits(reserved.saturating_add(budget.memory)) => {
             "; waiting for memory"
         }
         _ => "",

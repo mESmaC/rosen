@@ -1,5 +1,6 @@
-- `rosen run [--class <class>] [--full] -- <command>` waits for the turn, runs the command and exits with its status.
+- `rosen run [--class <class>] [--jobs <n>] [--memory-gib <m>] [--full] -- <command>` waits for the turn, runs the command and exits with its status.
   The class defaults to `build`.
+  `--jobs` and `--memory-gib` ask for a smaller turn than the class's full allocation; a missing jobs count takes the class's cap and missing memory takes one GiB per job plus one.
   By default it saves the command's standard output and standard error together in a unique log under the workspace's `.rosen/run-logs`, or under the system temporary directory outside a workspace.
   It prints the command, exit status and duration, followed on failure by any Cargo diagnostic blocks and Rust test failures with their output, or the last 40 lines when those details are unavailable.
   The summary ends with the log path.

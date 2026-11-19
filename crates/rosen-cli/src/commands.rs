@@ -345,6 +345,17 @@ pub struct RunArgs {
     /// Stream the command's output directly to the caller.
     #[arg(long, conflicts_with = "slots")]
     pub full: bool,
+    /// Ask for a turn with only N jobs instead of the class's full
+    /// allocation, for a command that needs less. It is admitted and charged
+    /// on that, and its thread variables are set to it. Held to the class's
+    /// cap. Memory defaults to one GiB per job plus one.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..), conflicts_with = "slots")]
+    pub jobs: Option<u64>,
+    /// Ask for a turn with only M GiB of memory instead of the class's full
+    /// allocation. It is admitted and charged on that, and on Windows the
+    /// command's memory is capped at it. Held to the class's cap.
+    #[arg(long, value_name = "M", value_parser = clap::value_parser!(u64).range(1..), conflicts_with = "slots")]
+    pub memory_gib: Option<u64>,
     /// The command and its arguments, after `--`.
     #[arg(
         last = true,

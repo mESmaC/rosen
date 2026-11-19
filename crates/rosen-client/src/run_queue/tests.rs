@@ -1,6 +1,6 @@
 //! The machine's run queue (SPEC R3 "Run queue").
 
-use super::{MemoryHeadroom, RunClass, RunQueue, Turn, Waiter, GIB, MEMORY_FLOOR};
+use super::{MemoryHeadroom, RunBudget, RunClass, RunQueue, Turn, Waiter, GIB, MEMORY_FLOOR};
 
 fn admit(waiter: &Waiter, cores: usize, available: u64) -> Option<Turn> {
     waiter
@@ -93,4 +93,44 @@ fn every_class_charges_live_turns_before_starting() {
 
     drop(preparing);
     assert!(admit(&landing, 4, MEMORY_FLOOR + 3 * GIB).is_some());
+}
+
+// Risk: a light run charged at its class's full cap waits for memory it will
+// never use (mESmaC/rosen#417); one left out of the queue's count lets a heavy
+// turn be admitted on memory the light run is already using.
+#[test]
+fn a_caller_set_budget_is_admitted_and_counted_on_what_it_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let queue = RunQueue::at(dir.path());
+    let verify = queue.wait(RunClass::Verify, "verify").unwrap();
+    let _verifying = admit(&verify, 16, 32 * GIB).unwrap();
+    drop(verify);
+
+    let full = queue.wait(RunClass::Build, "full").unwrap();
+    assert!(admit(&full, 16, MEMORY_FLOOR + 10 * GIB).is_none());
+    drop(full);
+    let light = queue
+        .wait_with(RunClass::Build, RunBudget::new(2, 3), "light")
+        .unwrap();
+    let lighting = admit(&light, 16, MEMORY_FLOOR + 10 * GIB)
+        .expect("a 2-job, 3 GiB turn fits beside a 6 GiB verify turn");
+    assert_eq!(
+        (lighting.budget().jobs, lighting.budget().memory),
+        (2, 3 * GIB)
+    );
+    drop(light);
+    assert_eq!(queue.running_budget().unwrap().memory, 9 * GIB);
+
+    let landing = queue.wait(RunClass::Landing, "land").unwrap();
+    assert!(admit(&landing, 16, MEMORY_FLOOR + 15 * GIB - 1).is_none());
+    assert!(admit(&landing, 16, MEMORY_FLOOR + 15 * GIB).is_some());
+
+    let greedy = queue
+        .wait_with(RunClass::Prepare, RunBudget::new(9, 99), "greedy")
+        .unwrap();
+    let cap = RunClass::Prepare.budget_on(16);
+    assert_eq!(
+        (greedy.budget_on(16).jobs, greedy.budget_on(16).memory),
+        (cap.jobs, cap.memory)
+    );
 }
