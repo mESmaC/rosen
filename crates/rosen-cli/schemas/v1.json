@@ -3713,7 +3713,7 @@
       "properties": {
         "allow": {
           "type": "array",
-          "items": { "enum": ["approve", "land", "mark", "config"] }
+          "items": { "enum": ["approve", "land", "mark", "config", "revoke"] }
         },
         "revoked": { "type": "boolean" }
       },
