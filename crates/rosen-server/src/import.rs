@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use rosen_core::ObjectId;
 use rosen_store::ObjectStore;
 
+pub(crate) use copy::{copy_objects, filter_missing};
 pub(crate) use git_source::git_command;
 pub use git_source::GitSource;
 
@@ -74,8 +75,7 @@ pub enum ImportError {
     Store(String),
     /// Local file system work, such as the temporary clone, failed.
     Io(std::io::Error),
-    /// The import target already has a base. Only a land moves the base
-    /// (SPEC §2 Project), so import never replaces one.
+    /// The import target already has a base. Import never replaces one.
     BaseAlreadySet {
         branch: String,
         base_commit: ObjectId,
@@ -137,8 +137,8 @@ pub fn import_repository(
     };
     let base_commit = source.branch_tip(&branch)?;
     let reachable = source.reachable_objects(&base_commit)?;
-    let missing = copy::filter_missing(&reachable, store)?;
-    copy::copy_objects(&source, &missing, store)?;
+    let missing = filter_missing(&reachable, store)?;
+    copy_objects(&source, &missing, store)?;
     Ok(ImportReport {
         branch,
         base_commit,

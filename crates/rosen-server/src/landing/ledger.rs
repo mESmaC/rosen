@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS base_refs (
     target TEXT NOT NULL
 );
 -- Every commit a base ref has held, in order. The first row of a ref is its
--- initial commit (change_id NULL); every later row is one land.
+-- initial commit. Mirror adoption and the initial commit have no change_id.
 CREATE TABLE IF NOT EXISTS base_history (
     seq            INTEGER PRIMARY KEY AUTOINCREMENT,
     ref_name       TEXT NOT NULL,
@@ -238,7 +238,9 @@ impl Ledger {
             ));
         }
         let mut query = connection.prepare(
-            "SELECT commit_id,tier FROM base_history WHERE ref_name=?1 AND seq>?2 AND seq<=?3 ORDER BY seq")?;
+            "SELECT commit_id,tier FROM base_history
+             WHERE ref_name=?1 AND seq>?2 AND seq<=?3 AND tier != 'mirror' ORDER BY seq",
+        )?;
         let rows = query.query_map(params![ref_name, after, end], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;

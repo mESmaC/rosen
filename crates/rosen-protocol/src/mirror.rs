@@ -3,6 +3,14 @@ use rosen_core::ObjectId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorAdoption {
+    pub base_ref: String,
+    pub old_base: ObjectId,
+    pub new_base: ObjectId,
+    pub remote_tip: ObjectId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryRewrite {
     pub base_ref: String,
     pub old_base: ObjectId,

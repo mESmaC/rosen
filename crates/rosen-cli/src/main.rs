@@ -105,6 +105,9 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
             events(json, &endpoint, *after, agent.as_deref(), *all)
         }
         Command::Config(config) => block_on(config_cmd::run(json, &endpoint, config)),
+        Command::Mirror(commands::MirrorCommand::Adopt { commit }) => {
+            block_on(mirror_cmd::adopt(json, &endpoint, *commit))
+        }
         Command::Mirror(commands::MirrorCommand::DropPaths { paths }) => {
             block_on(mirror_cmd::drop_paths(json, &endpoint, paths))
         }

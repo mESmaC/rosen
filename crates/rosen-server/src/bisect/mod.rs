@@ -131,7 +131,7 @@ fn interval(
     let mut query = conn
         .prepare(
             "SELECT commit_id,change_id FROM base_history
-        WHERE ref_name=?1 AND seq>=?2 AND seq<=?3 ORDER BY seq",
+        WHERE ref_name=?1 AND seq>=?2 AND seq<=?3 AND tier != 'mirror' ORDER BY seq",
         )
         .map_err(internal)?;
     let rows = query

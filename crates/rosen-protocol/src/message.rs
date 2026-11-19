@@ -120,6 +120,10 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
+    /// Operator-only: adopt the specified Git mirror tip.
+    MirrorAdopt {
+        commit: rosen_core::ObjectId,
+    },
     /// Operator-only: remove literal paths from unmirrored base history.
     MirrorDropPaths {
         paths: Vec<String>,
@@ -339,6 +343,7 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
+    MirrorAdopted(crate::MirrorAdoption),
     MirrorRewritten(crate::HistoryRewrite),
     Bisection(crate::BisectState),
     Machines(Vec<crate::machine::MachineRecord>),

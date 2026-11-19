@@ -15,6 +15,7 @@
 //! interrupted reaches the mirror when the server comes back, and after an
 //! import, which sets the base without a land.
 
+pub(crate) mod adopt;
 mod push;
 pub mod rewrite;
 mod state;

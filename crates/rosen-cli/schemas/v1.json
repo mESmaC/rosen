@@ -131,6 +131,9 @@
     },
     {
       "$ref": "#/$defs/rosen.mirror.rewrite~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.mirror.adopt~1v1"
     }
   ],
   "$defs": {
@@ -3329,6 +3332,28 @@
       "x-commands": [
         "mirror drop-paths"
       ]
+    },
+    "rosen.mirror.adopt/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.mirror.adopt/v1"
+        },
+        "adoption": {
+          "type": "object",
+          "properties": {
+            "base_ref": { "type": "string" },
+            "old_base": { "$ref": "#/$defs/ObjectId" },
+            "new_base": { "$ref": "#/$defs/ObjectId" },
+            "remote_tip": { "$ref": "#/$defs/ObjectId" }
+          },
+          "required": ["base_ref", "old_base", "new_base", "remote_tip"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["schema", "adoption"],
+      "additionalProperties": false,
+      "x-commands": ["mirror adopt"]
     }
   }
 }

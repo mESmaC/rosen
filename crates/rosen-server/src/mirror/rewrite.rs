@@ -1,7 +1,7 @@
 //! Operator-only repair of unmirrored landed history (SPEC R1, #385).
 mod metadata;
 mod objects;
-mod remote;
+pub(super) mod remote;
 
 use std::sync::Arc;
 

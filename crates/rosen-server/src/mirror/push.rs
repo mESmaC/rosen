@@ -6,7 +6,7 @@
 //! never writes into, repacks or prunes the authoritative store.
 
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use rosen_core::ObjectId;
@@ -61,6 +61,7 @@ pub async fn push(
         // that no one at a headless server will answer.
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
+        .env("LC_ALL", "C")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -72,16 +73,28 @@ pub async fn push(
         .map_err(|_| fail(format!("git push did not finish within {PUSH_TIMEOUT:?}")))?
         .map_err(|error| fail(format!("git push: {error}")))?;
     if output.status.success() {
-        return Ok(());
+        Ok(())
+    } else {
+        Err(reported_failure(remote, &output))
     }
+}
+
+fn reported_failure(remote: &str, output: &Output) -> PushFailure {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(PushFailure {
-        // Porcelain output marks a refused ref with `!` and `[rejected]` or
-        // `[remote rejected]`.
-        rejected: stdout.lines().any(|line| line.starts_with('!')),
-        message: hide_credentials(remote, &format!("{}\n{}", stdout.trim(), stderr.trim())),
-    })
+    let mut message = format!("{}\n{}", stdout.trim(), stderr.trim());
+    // We push one ref. Porcelain output marks a refusal with `!`.
+    let refusal = stdout.lines().find(|line| line.starts_with('!'));
+    if refusal.is_some_and(|line| {
+        line.ends_with("\t[rejected] (fetch first)")
+            || line.ends_with("\t[rejected] (non-fast-forward)")
+    }) {
+        message.push_str("\nLand the mirror's edits in Rosen, then run `rosen mirror adopt <mirror-tip>` on the server.");
+    }
+    PushFailure {
+        rejected: refusal.is_some(),
+        message: hide_credentials(remote, &message),
+    }
 }
 
 /// Creates the staging repository on first use, and points its alternates

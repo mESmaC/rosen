@@ -10,8 +10,10 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rosen_core::{ChangeId, LandedCommit, LandedTrailers, ObjectId, Signature};
-use rosen_protocol::{Endpoint, EventKind, Outcome};
+use rosen_core::{
+    ChangeId, FileMode, LandedCommit, LandedTrailers, ObjectId, Signature, Tree, TreeEntry,
+};
+use rosen_protocol::{Endpoint, ErrorCode, EventKind, Outcome, Request, Response};
 use rosen_server::landing::{CasResult, LandRecord, Ledger, Tier};
 use rosen_server::reviews::approvals;
 use rosen_server::{import::service, mirror, ServerConfig, ServerState};
@@ -36,11 +38,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 /// Lands one change on the base as the land path does: the landed commit
 /// goes to the store, the ledger moves the base, and `landed` is published.
-fn land(state: &ServerState, n: u8) -> ObjectId {
+fn land(state: &ServerState, n: u8, tree: Option<ObjectId>) -> ObjectId {
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
     let (name, base) = ledger.project_base().unwrap().unwrap();
-    let tree = store.read_commit(&base).unwrap().tree;
+    let tree = tree.unwrap_or_else(|| store.read_commit(&base).unwrap().tree);
     let change = ChangeId::from_bytes([n; 16]);
     register_change(state, change, base, tree);
     let landed = LandedCommit {
@@ -136,8 +138,8 @@ fn lands_reach_the_mirror_as_fast_forwards_only() {
 
     // Accept when: the mirror's log is the imported history plus one
     // commit per landed change, trailers included.
-    let first = land(&state, 1);
-    let second = land(&state, 2);
+    let first = land(&state, 1, None);
+    let second = land(&state, 2, None);
     let mirror_tip = || git(&mirror_dir, &["rev-parse", "refs/heads/main"]);
     wait_for("both lands on the mirror", || {
         mirror_tip() == second.to_hex()
@@ -149,28 +151,79 @@ fn lands_reach_the_mirror_as_fast_forwards_only() {
     let message = git(&mirror_dir, &["log", "-1", "--format=%B", "main"]);
     assert!(message.contains(&format!("Rosen-Change: {}", ChangeId::from_bytes([2; 16]))));
 
-    // Someone else moves the mirror's branch. The next land is not a
-    // fast-forward of it, so the push must be refused, not forced, and
-    // reported as a mirror event.
-    git(
-        source.path(),
-        &["commit", "--quiet", "--allow-empty", "-m", "outside"],
-    );
-    git(
-        source.path(),
-        &["push", "--quiet", "--force", &mirror_arg, "main"],
-    );
-    let outside = git(source.path(), &["rev-parse", "main"]);
-    land(&state, 3);
-    wait_for("a mirror failure event", || {
+    recover_direct_push(&state, &runtime, source.path(), &mirror_dir);
+    state.request_shutdown();
+    runtime.block_on(worker).unwrap();
+}
+
+fn recover_direct_push(
+    state: &Arc<ServerState>,
+    runtime: &tokio::runtime::Runtime,
+    source: &Path,
+    mirror: &Path,
+) {
+    // R1: a direct push must survive recovery, and its edits must go through
+    // normal landing before the operator can adopt its history.
+    let remote = mirror.to_str().unwrap();
+    let mirror_tip = || git(mirror, &["rev-parse", "refs/heads/main"]);
+    git(source, &["fetch", "--quiet", remote, "main"]);
+    git(source, &["checkout", "--quiet", "-B", "main", "FETCH_HEAD"]);
+    std::fs::write(source.join("a.txt"), "outside\n").unwrap();
+    git(source, &["commit", "--quiet", "-am", "outside"]);
+    git(source, &["push", "--quiet", remote, "main"]);
+    let outside: ObjectId = mirror_tip().parse().unwrap();
+    let before_port = land(state, 3, None);
+    wait_for("mirror rejects the divergent land", || {
         state.events.after(0).iter().any(|event| {
             event.kind == EventKind::Mirror
                 && event.detail["status"] == "failed"
                 && event.detail["rejected"] == true
         })
     });
-    assert_eq!(mirror_tip(), outside);
+    let adopt = |commit| {
+        runtime.block_on(rosen_server::rpc::dispatch(
+            state,
+            Request::MirrorAdopt { commit },
+        ))
+    };
+    assert!(
+        matches!(adopt(before_port), Outcome::Error(err) if err.code == ErrorCode::Refused && err.message.contains("expected"))
+    );
+    assert!(
+        matches!(adopt(outside), Outcome::Error(err) if err.code == ErrorCode::Refused && err.message.contains("not present"))
+    );
+    let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
+    assert_eq!(ledger.base("main").unwrap(), Some(before_port));
+    assert_eq!(mirror_tip(), outside.to_hex());
+    let tree = ported_tree(state);
+    let ported = land(state, 4, Some(tree));
+    let Outcome::Ok(Response::MirrorAdopted(answer)) = adopt(outside) else {
+        panic!("expected mirror adoption to succeed");
+    };
+    assert_eq!(answer.old_base, ported);
+    assert_eq!(ledger.base("main").unwrap(), Some(answer.new_base));
+    wait_for("mirror fast-forwards after adoption", || {
+        mirror_tip() == answer.new_base.to_hex()
+    });
+    assert_eq!(
+        git(mirror, &["log", "-1", "--format=%P"]),
+        format!("{ported} {outside}")
+    );
+    assert_eq!(git(mirror, &["rev-parse", "main^{tree}"]), tree.to_hex());
+    let next = land(state, 5, None);
+    wait_for("later land reaches the mirror", || {
+        mirror_tip() == next.to_hex()
+    });
+}
 
-    state.request_shutdown();
-    runtime.block_on(worker).unwrap();
+fn ported_tree(state: &ServerState) -> ObjectId {
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let outside = store.put_blob(b"outside\n").unwrap();
+    let rosen = store.put_blob(b"Rosen-only change\n").unwrap();
+    let tree = Tree::new(vec![
+        TreeEntry::new(FileMode::Regular, b"a.txt".to_vec(), outside).unwrap(),
+        TreeEntry::new(FileMode::Regular, b"b.txt".to_vec(), rosen).unwrap(),
+    ])
+    .unwrap();
+    store.put_tree(&tree).unwrap()
 }

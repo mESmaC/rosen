@@ -90,6 +90,14 @@ async fn listing(staging: &Path, remote: &str) -> Result<String> {
 }
 
 async fn run(staging: &Path, remote: &str, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8(run_bytes(staging, remote, args).await?)?)
+}
+
+pub(in crate::mirror) async fn run_bytes(
+    staging: &Path,
+    remote: &str,
+    args: &[&str],
+) -> Result<Vec<u8>> {
     let mut command = tokio::process::Command::from(git_command(staging));
     command
         .args(args)
@@ -101,5 +109,5 @@ async fn run(staging: &Path, remote: &str, args: &[&str]) -> Result<String> {
         bail!("cannot verify mirror history: {}. Restore mirror access and retry; no history was moved",
             super::super::hide_credentials(remote, &String::from_utf8_lossy(&output.stderr)));
     }
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(output.stdout)
 }

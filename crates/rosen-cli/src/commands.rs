@@ -763,6 +763,15 @@ pub struct ChangePaths {
 
 #[derive(Debug, Subcommand)]
 pub enum MirrorCommand {
+    /// Adopt the Git mirror branch tip after landing its edits in Rosen.
+    ///
+    /// Run on the authoritative server using its local endpoint. Supply the
+    /// full commit ID of the current mirror tip. Adoption adds a merge commit
+    /// with the existing Rosen tree and retries the fast-forward push.
+    Adopt {
+        #[arg(value_name = "COMMIT")]
+        commit: rosen_core::ObjectId,
+    },
     /// Drop literal files or directories from all commits after the last
     /// successful mirror push. Run locally on the authoritative server.
     /// The server pauses landing and pushes, refuses already-published
@@ -779,6 +788,7 @@ impl Command {
     /// client operation and in error messages.
     pub fn path(&self) -> &'static str {
         match self {
+            Command::Mirror(MirrorCommand::Adopt { .. }) => "mirror adopt",
             Command::Mirror(MirrorCommand::DropPaths { .. }) => "mirror drop-paths",
             Command::Import { .. } => "import",
             Command::Change(sub) => sub.path(),

@@ -20,7 +20,7 @@ pub mod machine;
 pub mod message;
 pub mod mirror;
 pub use machine::*;
-pub use mirror::HistoryRewrite;
+pub use mirror::{HistoryRewrite, MirrorAdoption};
 pub mod objects;
 pub mod pool;
 pub mod post_land;

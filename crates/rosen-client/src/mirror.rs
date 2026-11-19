@@ -1,9 +1,18 @@
 //! Operator-only mirror history repair (SPEC R1).
 use crate::connection::{unexpected, Client};
 use crate::Error;
-use rosen_protocol::{HistoryRewrite, Request, Response};
+use rosen_core::ObjectId;
+use rosen_protocol::{HistoryRewrite, MirrorAdoption, Request, Response};
 
 impl Client {
+    /// Adopt a Git mirror branch tip on the authoritative server's local endpoint.
+    pub async fn mirror_adopt(&self, commit: ObjectId) -> Result<MirrorAdoption, Error> {
+        match self.request(Request::MirrorAdopt { commit }).await? {
+            Response::MirrorAdopted(answer) => Ok(answer),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Run against the authoritative server's local endpoint. The server
     /// pauses landing and pushes until the rewrite commits or is refused.
     pub async fn mirror_drop_paths(&self, paths: Vec<String>) -> Result<HistoryRewrite, Error> {

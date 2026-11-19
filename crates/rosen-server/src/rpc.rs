@@ -17,6 +17,15 @@ pub async fn dispatch_from(
     request: Request,
     origin: crate::receipts::Origin,
 ) -> Outcome {
+    if let Request::MirrorAdopt { commit } = request {
+        return match origin {
+            crate::receipts::Origin::Local => crate::mirror::adopt::handle(state, commit).await,
+            _ => Outcome::Error(ErrorBody::new(
+                ErrorCode::Refused,
+                "mirror adoption is an operator command; run it on the server using its local endpoint",
+            )),
+        };
+    }
     if let Request::MirrorDropPaths { paths } = request {
         return match origin {
             crate::receipts::Origin::Local => crate::mirror::rewrite::handle(state, paths).await,

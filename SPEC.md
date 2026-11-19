@@ -59,7 +59,7 @@ Defaults set during spec writing. These follow from the decisions above, and cha
 
 ---
 ## 2. Concepts
-- **Project.** One repository held by one server. It has one **base** ref (for example `main`), which only a land can move.
+- **Project.** One repository held by one server. Lands and R1 operator mirror maintenance can move its single **base** ref (for example `main`).
 - **Machine.** A computer enrolled in a project (R14). It holds its own revocable machine credential and runs a daemon that caches objects for its workspaces.
 - **Channel.** The project's AIRC channel, served by the server (R13): task claims, events, messages and ledgers.
 - **Change.** One agent's unit of work. Each change has:

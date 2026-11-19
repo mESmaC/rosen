@@ -39,15 +39,18 @@ impl GitSource {
     pub fn open(source: &str, scratch_dir: PathBuf) -> Result<Self, ImportError> {
         let local = Path::new(source);
         if local.exists() {
-            let repository = std::fs::canonicalize(local)?;
-            let opened = Self {
-                repository,
-                temporary_clone: None,
-            };
-            opened.git(["rev-parse", "--git-dir"])?;
-            return Ok(opened);
+            return Self::open_local(local);
         }
         Self::clone_url(source, scratch_dir)
+    }
+
+    pub(crate) fn open_local(path: &Path) -> Result<Self, ImportError> {
+        let opened = Self {
+            repository: std::fs::canonicalize(path)?,
+            temporary_clone: None,
+        };
+        opened.git(["rev-parse", "--git-dir"])?;
+        Ok(opened)
     }
 
     fn clone_url(url: &str, scratch_dir: PathBuf) -> Result<Self, ImportError> {
@@ -111,13 +114,21 @@ impl GitSource {
     /// Ids of every object reachable from `commit`: its commits, trees and
     /// blobs.
     pub fn reachable_objects(&self, commit: &ObjectId) -> Result<Vec<ObjectId>, ImportError> {
+        self.reachable_objects_excluding(commit, None)
+    }
+
+    pub(crate) fn reachable_objects_excluding(
+        &self,
+        commit: &ObjectId,
+        ancestor: Option<&ObjectId>,
+    ) -> Result<Vec<ObjectId>, ImportError> {
         let commit = commit.to_hex();
-        let listing = self.git([
-            "rev-list",
-            "--objects",
-            "--no-object-names",
-            commit.as_str(),
-        ])?;
+        let ancestor = ancestor.map(|id| format!("^{id}"));
+        let mut command = self.command();
+        command
+            .args(["rev-list", "--objects", "--no-object-names", &commit])
+            .args(ancestor.as_deref());
+        let listing = run_to_string(command, "git rev-list")?;
         listing.lines().map(parse_id).collect()
     }
 
