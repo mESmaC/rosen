@@ -85,7 +85,7 @@ fn span(seconds: u64) -> String {
 }
 
 /// `YYYY-MM-DD HH:MM UTC`; R14 reports last contact to the minute.
-fn utc_minute(seconds: u64) -> String {
+pub(crate) fn utc_minute(seconds: u64) -> String {
     let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
     let of_day = seconds.rem_euclid(DAY as i64);
     format!(

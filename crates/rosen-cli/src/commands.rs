@@ -546,6 +546,10 @@ pub enum ReviewCommand {
         #[arg(long)]
         change: Option<String>,
     },
+    /// Show post-land progress without changing it: last built and last
+    /// green, open bisections with each step's state and checker, and
+    /// inverses that wait to land.
+    Status,
     /// Start a review thread on a line of a change, or reply in a thread.
     ///
     /// A new thread anchors to --path and --line at the change's current
@@ -882,6 +886,7 @@ impl ReviewCommand {
             ReviewCommand::Mark { .. } => "review mark",
             ReviewCommand::Landed { .. } => "review landed",
             ReviewCommand::Failures { .. } => "review failures",
+            ReviewCommand::Status => "review status",
             ReviewCommand::Comment { .. } => "review comment",
             ReviewCommand::Approve { .. } => "review approve",
             ReviewCommand::Resolve { .. } => "review resolve",

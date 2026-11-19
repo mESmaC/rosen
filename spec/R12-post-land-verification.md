@@ -49,6 +49,23 @@
     Recovery retries pending inverses independently with backoff, waking when a new land moves the base; one refused inverse never blocks another.
     The inverse land, reopened change and durable failure output commit atomically.
     Repeating a confirmed culprit returns the same revert, and its reopened change can land again under the same change ID after repair.
+- **Who ran each result.**
+  `post_land_passed`, `post_land_failed` and `bisect_submit` record their submitter and time, as receipts do (R8 step 1, R14 "Agents").
+  The request names only the checker's nick, without `@`; the server appends the machine from the connection's credential, or `server` on the local transport.
+  A request with no nick records the machine alone.
+  Last built, last green, each accepted bisection step and each confirmed failure carry it, as do the `built`, `green` and `post-land-failure` events.
+  Results submitted before this was recorded show no submitter.
+- **Status.**
+  `post_land_status` and `review status [--json]` (schema `rosen.post_land_status/v1`) read post-land progress without changing it, on the read-only connections.
+  It never offers a job or moves a session.
+  It returns the base tip, last built and last green with their submitters and times, and the open bisection sessions.
+  A session is open while it searches or confirms, or while it stopped as flaky and its failing batch is still above its kind's checkpoint.
+  Each session gives its kind, lower bound, failing commit, interval length in commits, `planned_steps` (the halving steps for the interval plus the two confirmations) and `flaky`.
+  Its steps are the accepted results (`passed` or `failed`, with submitter and time), the current job as `offered`, and the steps still planned as `waiting`, with no commit yet.
+  It lists each pending inverse, a confirmed culprit whose required inverse has not landed, with its latest attempted base, conflicting paths, overlapping later commits, reason and first refusal time.
+- **Progress events.**
+  Opening a session and each accepted bisection result publish one `bisect` event, staged with the change that causes it so it survives a restart.
+  Its detail holds the session, kind, step, commit, result, submitter and time, and `progress`: `opened`, `step`, `culprit` or `flaky`.
 - A flaky result is the checker's concern: a failure is confirmed only after the culprit fails twice and its parent passes.
   Required build reverts run immediately after confirmation; recovery retries an interrupted inverse.
 - **Accept when:** an after-land test failure is bisected, recorded and left landed; an after-land build failure is recorded and reverted, its change reopens with its work intact, and later independent work is preserved.

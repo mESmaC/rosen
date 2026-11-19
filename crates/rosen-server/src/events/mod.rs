@@ -195,6 +195,9 @@ impl EventLog {
             .and_then(|id| self.with_overlapping_owners(id, concern));
         let audience = |conn: Option<&Connection>| match (&change, &concern, conn) {
             (Some(id), Some(concern), Some(conn)) => audience_or_everyone(conn, id, concern),
+            // Progress reports no agent must act on reach only the project
+            // view, never every subscriber (R9).
+            (None, _, _) if kind == EventKind::Bisect => Some(Default::default()),
             _ => None,
         };
         self.enqueue(kind, change.clone(), detail, audience, outbox)

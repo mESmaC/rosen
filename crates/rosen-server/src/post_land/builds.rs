@@ -1,4 +1,5 @@
 //! Build progress is separate from the full-test green prefix.
+use super::submitter::{self, Submitted};
 use rosen_core::ObjectId;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
@@ -6,7 +7,16 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS post_land_build_green (
         ref_name TEXT PRIMARY KEY, seq INTEGER NOT NULL, commit_id TEXT NOT NULL);",
-    )
+    )?;
+    submitter::add_columns(conn, "post_land_build_green")
+}
+
+/// The build checkpoint with who reported it, for the read-only status.
+pub fn checkpoint(
+    conn: &Connection,
+    name: &str,
+) -> rusqlite::Result<Option<rosen_protocol::Checkpoint>> {
+    super::store::checkpoint_in(conn, "post_land_build_green", name)
 }
 
 pub fn last_green(conn: &Connection, name: &str) -> rusqlite::Result<Option<ObjectId>> {
@@ -45,23 +55,31 @@ pub fn newest(conn: &Connection, name: &str) -> rusqlite::Result<Option<ObjectId
     .transpose()
 }
 
-pub fn passed(conn: &mut Connection, name: &str, commit: &ObjectId) -> rusqlite::Result<bool> {
+pub fn passed(
+    conn: &mut Connection,
+    name: &str,
+    commit: &ObjectId,
+    submitted: Option<&Submitted>,
+) -> rusqlite::Result<bool> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (by, at) = (submitted.map(|s| &s.by), submitted.map(|s| s.at));
     let count = tx.execute(
-        "INSERT INTO post_land_build_green(ref_name,seq,commit_id)
-         SELECT ref_name,seq,commit_id FROM base_history
+        "INSERT INTO post_land_build_green(ref_name,seq,commit_id,submitter,submitted_at)
+         SELECT ref_name,seq,commit_id,?3,?4 FROM base_history
          WHERE ref_name=?1 AND commit_id=?2
-         ON CONFLICT(ref_name) DO UPDATE SET seq=excluded.seq,commit_id=excluded.commit_id
+         ON CONFLICT(ref_name) DO UPDATE SET seq=excluded.seq,commit_id=excluded.commit_id,
+         submitter=excluded.submitter,submitted_at=excluded.submitted_at
          WHERE excluded.seq > post_land_build_green.seq",
-        params![name, commit.to_string()],
+        params![name, commit.to_string(), by, at],
     )?;
     if count > 0 {
+        let (submitter, at) = submitter::detail(submitted);
         crate::events::stage(
             &tx,
             &crate::events::Staged {
                 kind: rosen_protocol::EventKind::Built,
                 change: None,
-                detail: serde_json::json!({ "commit": commit }),
+                detail: serde_json::json!({ "commit": commit, "submitter": submitter, "at": at }),
                 concern: Default::default(),
             },
         )?;

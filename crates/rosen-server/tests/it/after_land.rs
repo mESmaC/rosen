@@ -140,6 +140,7 @@ async fn confirm(
             passed: job.commit != culprit,
             job,
             output: "confirmed failure".into(),
+            submitter: None,
         };
         let Response::Bisection(next) = call(state, Request::BisectSubmit(result)).await else {
             panic!()
@@ -398,6 +399,7 @@ async fn refused_build_inverse_does_not_mask_the_next_culprit() {
     let first_record = failures(&state, &first_id).await.remove(0);
     assert!(first_record.requires_revert && first_record.revert.is_none());
     assert_refusal_details(&state, first, overlap);
+    assert_pending_inverse(&state, first, overlap).await;
     assert_refusal_deduplicated(&state, first_done.id).await;
     let (second_id, _, second) = land(&state, "second.rs").await;
     let session = fail(&state, CheckKind::Build).await;
@@ -444,6 +446,7 @@ async fn confirm_with_known_build_failure(
                 job,
                 passed: false,
                 output: output.into(),
+                submitter: None,
             }),
         )
         .await
@@ -625,4 +628,124 @@ async fn land_with_no_merge_keeps_the_base_line_endings() {
         store.read_blob(&notes.id).unwrap().data,
         b"one\ntwo\nthree\n"
     );
+}
+
+async fn status(state: &Arc<ServerState>) -> PostLandStatus {
+    let Response::PostLandStatus(status) = call(state, Request::PostLandStatus).await else {
+        panic!()
+    };
+    status
+}
+
+/// Risk (#407): a refused inverse that vanishes from the status hides a
+/// broken base from whoever must repair it.
+async fn assert_pending_inverse(state: &Arc<ServerState>, first: ObjectId, overlap: ObjectId) {
+    let status = status(state).await;
+    let pending = &status.pending_inverses[0];
+    assert_eq!(pending.culprit, first);
+    assert_eq!(pending.paths, vec!["bad.rs".to_owned()]);
+    assert_eq!(pending.overlapping_commits, vec![overlap]);
+    assert!(pending.attempted_base.is_some() && pending.first_refused_at.is_some());
+}
+
+/// Risk (#407): a status read that moves a bisection, a lost progress event,
+/// or a submitter's machine taken from the request misleads whoever watches
+/// post-land work (R12, R9, R14 "Agents").
+#[tokio::test(flavor = "multi_thread")]
+async fn bisection_status_events_and_submitters() {
+    use rosen_server::{receipts::Origin, rpc::dispatch_from};
+    let temp = tempfile::tempdir().unwrap();
+    let state = setup(temp.path());
+    let mut landed = Vec::new();
+    for path in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+        landed.push(land(&state, path).await.2);
+    }
+    let (machine, credential) = enroll(temp.path());
+    let remote = |request| dispatch_from(&state, request, Origin::Machine(credential.clone()));
+    let Response::PostLand(work) = call(&state, Request::PostLandNext).await else {
+        panic!()
+    };
+    let mut job = work.job.unwrap();
+    job.submitter = Some(AgentId::new("test-3").unwrap());
+    let request = Request::PostLandFailed {
+        job,
+        output: "first failure".into(),
+    };
+    let Outcome::Ok(Response::Bisection(mut answer)) = remote(request).await else {
+        panic!()
+    };
+    let before = status(&state).await;
+    assert_eq!(
+        before,
+        status(&state).await,
+        "a status read changes nothing"
+    );
+    let session = &before.sessions[0];
+    assert_eq!((session.interval, session.planned_steps), (4, 4));
+    assert_eq!(session.opened_by, Some(format!("test-3@{machine}")));
+    let states: Vec<_> = session.steps.iter().map(|step| step.state).collect();
+    assert_eq!(
+        states,
+        [
+            StepState::Offered,
+            StepState::Waiting,
+            StepState::Waiting,
+            StepState::Waiting
+        ]
+    );
+    let mut accepted = 0;
+    while let Some(job) = answer.job.clone() {
+        let result = BisectResult {
+            passed: !landed[2..].contains(&job.commit),
+            job,
+            output: "confirmed failure".into(),
+            // The request cannot name another machine.
+            submitter: Some(AgentId::new("test-3@elsewhere").unwrap()),
+        };
+        let refused = remote(Request::BisectSubmit(result.clone())).await;
+        assert!(matches!(refused, Outcome::Error(e) if e.code == ErrorCode::InvalidArgument));
+        let result = BisectResult {
+            submitter: Some(AgentId::new("test-3").unwrap()),
+            ..result
+        };
+        let Outcome::Ok(Response::Bisection(next)) = remote(Request::BisectSubmit(result)).await
+        else {
+            panic!()
+        };
+        answer = next;
+        accepted += 1;
+        if accepted == 1 {
+            let step = &status(&state).await.sessions[0].steps[0];
+            assert_eq!(step.submitter, Some(format!("test-3@{machine}")));
+        }
+    }
+    assert_eq!(answer.culprit.unwrap().commit, landed[2]);
+    assert!(status(&state).await.sessions.is_empty());
+    let progress: Vec<String> = state
+        .events
+        .page(0, None, 100)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|event| event.kind == EventKind::Bisect)
+        .map(|event| event.detail["progress"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(progress, ["opened", "step", "step", "step", "culprit"]);
+    let owner = AgentId::new("owner").unwrap();
+    let owned = state.events.page(0, Some(&owner), 100).unwrap().events;
+    assert!(owned.iter().all(|event| event.kind != EventKind::Bisect));
+}
+
+/// Enrolls a checker machine and returns its ID and credential secret.
+fn enroll(dir: &std::path::Path) -> (String, String) {
+    use rosen_server::machines::{credentials, keys};
+    let db = rosen_server::machines::open(dir).unwrap();
+    db.execute(
+        "INSERT INTO join_keys(id,secret_hash,expires_at,remaining,role)
+         VALUES ('k',?1,9999999999,1,'checker')",
+        [keys::digest("join-secret")],
+    )
+    .unwrap();
+    let credential = credentials::enroll(dir, "join-secret", "forge-06", None).unwrap();
+    (credential.machine_id, credential.secret)
 }

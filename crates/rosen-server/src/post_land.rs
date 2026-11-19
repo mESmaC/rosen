@@ -1,7 +1,9 @@
 //! Typed batch verification, separate from R8's post-land housekeeping.
 mod builds;
 pub mod failures;
+pub mod status;
 pub mod store;
+pub mod submitter;
 
 use crate::{landing::Ledger, ServerState};
 use rosen_protocol::{
@@ -11,11 +13,10 @@ use rosen_protocol::{
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex, PoisonError};
 
-pub async fn handle(
-    state: &Arc<ServerState>,
-    passed: Option<PostLandJob>,
-    kind: CheckKind,
-) -> Outcome {
+/// A passing run as the server accepted it, with who reported it.
+pub type Passed = (PostLandJob, submitter::Submitted);
+
+pub async fn handle(state: &Arc<ServerState>, passed: Option<Passed>, kind: CheckKind) -> Outcome {
     let state = Arc::clone(state);
     match tokio::task::spawn_blocking(move || run(&state, passed, kind)).await {
         Ok(Ok(work)) => Outcome::Ok(Response::PostLand(work)),
@@ -35,7 +36,7 @@ fn open(state: &ServerState) -> Result<Connection, ErrorBody> {
 
 fn run(
     state: &ServerState,
-    passed: Option<PostLandJob>,
+    passed: Option<Passed>,
     kind: CheckKind,
 ) -> Result<PostLandWork, ErrorBody> {
     let mut conn = open(state)?;
@@ -46,9 +47,9 @@ fn run(
             last_green: None,
         });
     };
-    if let Some(job) = passed {
+    if let Some((job, submitted)) = passed {
         validate(state, &ledger, &name, &job)?;
-        if !passed_job(&mut conn, &name, &job).map_err(internal)? {
+        if !passed_job(&mut conn, &name, &job, &submitted).map_err(internal)? {
             return Err(ErrorBody::new(
                 ErrorCode::InvalidArgument,
                 "commit is not a land",
@@ -87,6 +88,7 @@ fn job_at(
             CheckKind::Test => config.config.checks.post_land.clone(),
             CheckKind::Build => config.config.checks.pre_land.clone(),
         },
+        submitter: None,
     })
 }
 
@@ -130,16 +132,16 @@ static DELIVERY: Mutex<()> = Mutex::new(());
 fn deliver(state: &ServerState, conn: &Connection) -> Result<(), ErrorBody> {
     // A pass that panicked left no partial state the next pass cannot redo.
     let _turn = DELIVERY.lock().unwrap_or_else(PoisonError::into_inner);
-    for (seq, change, commit) in store::pending(conn).map_err(internal)? {
+    for row in store::pending(conn).map_err(internal)? {
         let published = state.events.publish(
             EventKind::Green,
-            Some(change),
-            serde_json::json!({ "commit": commit }),
+            Some(row.change),
+            serde_json::json!({ "commit": row.commit, "submitter": row.submitter, "at": row.at }),
         );
         if published == 0 {
             break;
         }
-        conn.execute("DELETE FROM post_land_delivery WHERE seq=?1", [seq])
+        conn.execute("DELETE FROM post_land_delivery WHERE seq=?1", [row.seq])
             .map_err(internal)?;
     }
     Ok(())
@@ -149,10 +151,15 @@ fn internal(err: impl std::fmt::Display) -> ErrorBody {
     ErrorBody::new(ErrorCode::Internal, err.to_string())
 }
 
-fn passed_job(conn: &mut Connection, name: &str, job: &PostLandJob) -> rusqlite::Result<bool> {
+fn passed_job(
+    conn: &mut Connection,
+    name: &str,
+    job: &PostLandJob,
+    submitted: &submitter::Submitted,
+) -> rusqlite::Result<bool> {
     match job.kind {
-        CheckKind::Test => store::passed(conn, name, &job.commit),
-        CheckKind::Build => builds::passed(conn, name, &job.commit),
+        CheckKind::Test => store::passed_by(conn, name, &job.commit, Some(submitted)),
+        CheckKind::Build => builds::passed(conn, name, &job.commit, Some(submitted)),
     }
 }
 

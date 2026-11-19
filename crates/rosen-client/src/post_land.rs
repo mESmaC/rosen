@@ -1,7 +1,7 @@
 //! External post-land checker calls (SPEC R12).
 use crate::connection::{unexpected, Client};
 use crate::Error;
-use rosen_protocol::{PostLandJob, PostLandWork, Request, Response};
+use rosen_protocol::{PostLandJob, PostLandStatus, PostLandWork, Request, Response};
 
 impl Client {
     /// Build/lint jobs after landing, independently of the test prefix.
@@ -19,6 +19,15 @@ impl Client {
     ) -> Result<Vec<rosen_protocol::PostLandFailure>, Error> {
         match self.request(Request::PostLandFailures { change }).await? {
             Response::PostLandFailures(failures) => Ok(failures),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Checkpoints, open bisections and pending inverses. Reads only: it
+    /// never offers a job or moves a bisection.
+    pub async fn post_land_status(&self) -> Result<PostLandStatus, Error> {
+        match self.request(Request::PostLandStatus).await? {
+            Response::PostLandStatus(status) => Ok(status),
             other => Err(unexpected(other)),
         }
     }

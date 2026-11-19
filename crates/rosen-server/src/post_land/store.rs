@@ -1,5 +1,7 @@
 //! A monotone green prefix and durable notifications in the metadata store.
+use super::submitter::{self, Submitted};
 use rosen_core::ObjectId;
+use rosen_protocol::Checkpoint;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -10,7 +12,37 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS post_land_delivery (
              seq INTEGER PRIMARY KEY, change_id TEXT NOT NULL, commit_id TEXT NOT NULL
          );",
-    )
+    )?;
+    submitter::add_columns(conn, "post_land_green")?;
+    submitter::add_columns(conn, "post_land_delivery")
+}
+
+/// The test checkpoint with who reported it, for the read-only status.
+pub fn checkpoint(conn: &Connection, name: &str) -> rusqlite::Result<Option<Checkpoint>> {
+    checkpoint_in(conn, "post_land_green", name)
+}
+
+/// Reads `table`'s checkpoint row; `table` is one of the two checkpoint tables.
+pub(super) fn checkpoint_in(
+    conn: &Connection,
+    table: &str,
+    name: &str,
+) -> rusqlite::Result<Option<Checkpoint>> {
+    let row: Option<(String, Option<String>, Option<i64>)> = conn
+        .query_row(
+            &format!("SELECT commit_id,submitter,submitted_at FROM {table} WHERE ref_name=?1"),
+            [name],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    row.map(|(commit, submitter, at)| {
+        Ok(Checkpoint {
+            commit: parse(commit)?,
+            submitter,
+            at,
+        })
+    })
+    .transpose()
 }
 
 pub fn last_green(conn: &Connection, name: &str) -> rusqlite::Result<Option<ObjectId>> {
@@ -44,9 +76,19 @@ pub fn newest(conn: &Connection, name: &str) -> rusqlite::Result<Option<ObjectId
     id.map(parse).transpose()
 }
 
+pub fn passed(conn: &mut Connection, name: &str, commit: &ObjectId) -> rusqlite::Result<bool> {
+    passed_by(conn, name, commit, None)
+}
+
 /// The writer reservation serializes passes with each other and with lands.
 /// The fixed upper bound excludes lands that arrived while tests were running.
-pub fn passed(conn: &mut Connection, name: &str, commit: &ObjectId) -> rusqlite::Result<bool> {
+pub fn passed_by(
+    conn: &mut Connection,
+    name: &str,
+    commit: &ObjectId,
+    submitted: Option<&Submitted>,
+) -> rusqlite::Result<bool> {
+    let (by, at) = (submitted.map(|s| &s.by), submitted.map(|s| s.at));
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let end: Option<i64> = tx
         .query_row(
@@ -64,25 +106,47 @@ pub fn passed(conn: &mut Connection, name: &str, commit: &ObjectId) -> rusqlite:
     )?;
     if end > start {
         tx.execute(
-            "INSERT OR IGNORE INTO post_land_delivery(seq,change_id,commit_id)
-             SELECT seq,change_id,commit_id FROM base_history
+            "INSERT OR IGNORE INTO post_land_delivery
+             (seq,change_id,commit_id,submitter,submitted_at)
+             SELECT seq,change_id,commit_id,?4,?5 FROM base_history
              WHERE ref_name=?1 AND seq>?2 AND seq<=?3 AND change_id IS NOT NULL",
-            params![name, start, end],
+            params![name, start, end, by, at],
         )?;
         tx.execute(
-            "INSERT INTO post_land_green(ref_name,seq,commit_id) VALUES (?1,?2,?3)
-             ON CONFLICT(ref_name) DO UPDATE SET seq=excluded.seq,commit_id=excluded.commit_id",
-            params![name, end, commit.to_string()],
+            "INSERT INTO post_land_green(ref_name,seq,commit_id,submitter,submitted_at)
+             VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(ref_name) DO UPDATE SET seq=excluded.seq,commit_id=excluded.commit_id,
+             submitter=excluded.submitter,submitted_at=excluded.submitted_at",
+            params![name, end, commit.to_string(), by, at],
         )?;
     }
     tx.commit()?;
     Ok(true)
 }
 
-pub fn pending(conn: &Connection) -> rusqlite::Result<Vec<(i64, String, String)>> {
-    let mut stmt =
-        conn.prepare("SELECT seq,change_id,commit_id FROM post_land_delivery ORDER BY seq")?;
-    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+/// One `green` notification still to publish for a landed change.
+pub struct Delivery {
+    pub seq: i64,
+    pub change: String,
+    pub commit: String,
+    pub submitter: Option<String>,
+    pub at: Option<i64>,
+}
+
+pub fn pending(conn: &Connection) -> rusqlite::Result<Vec<Delivery>> {
+    let mut stmt = conn.prepare(
+        "SELECT seq,change_id,commit_id,submitter,submitted_at
+         FROM post_land_delivery ORDER BY seq",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(Delivery {
+            seq: r.get(0)?,
+            change: r.get(1)?,
+            commit: r.get(2)?,
+            submitter: r.get(3)?,
+            at: r.get(4)?,
+        })
+    })?;
     rows.collect()
 }
 

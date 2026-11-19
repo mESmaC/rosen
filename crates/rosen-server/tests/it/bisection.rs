@@ -29,6 +29,7 @@ fn bisection_fixtures() {
             job: state.job.unwrap(),
             passed: true,
             output: "flaky".into(),
+            submitter: None,
         },
     )
     .unwrap();
@@ -50,6 +51,7 @@ fn check_rows(conn: &mut rusqlite::Connection, path: &std::path::Path) {
                 passed: job.commit < oid(v[2]),
                 job,
                 output: "failure".into(),
+                submitter: None,
             };
             state = bisect::submit(conn, &result).unwrap();
             assert_eq!(

@@ -24,7 +24,7 @@ mod readers;
 mod receipt_store;
 mod restack;
 pub mod revert;
-mod revert_refused;
+pub(crate) mod revert_refused;
 mod revert_store;
 mod review_gate;
 pub mod rules;

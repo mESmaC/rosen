@@ -34,6 +34,7 @@ fn main() {
                 job,
                 passed: index < 7,
                 output: "injected failure".into(),
+                submitter: None,
             },
         )
         .unwrap();

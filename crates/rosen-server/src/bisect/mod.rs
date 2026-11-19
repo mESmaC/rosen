@@ -2,9 +2,12 @@
 pub mod failure;
 mod known;
 mod model;
+mod progress;
 mod storage;
 
+use crate::post_land::submitter::Submitted;
 pub use model::midpoint;
+pub use progress::{planned_steps, sessions};
 use rosen_core::ObjectId;
 use rosen_protocol::{BisectCulprit, BisectResult, BisectState, ErrorBody, ErrorCode};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -42,24 +45,21 @@ pub fn begin_in(
     failed: ObjectId,
     output: &str,
 ) -> Result<BisectState> {
-    begin_kind_in(
-        conn,
-        name,
-        green,
-        failed,
-        output,
-        rosen_protocol::CheckKind::Test,
-    )
+    let kind = rosen_protocol::CheckKind::Test;
+    begin_kind_in(conn, name, (green, failed), output, kind, None)
 }
 
+/// Opens or returns the session for the failing batch `range.1` above
+/// `range.0`. A new session records `opened_by` and stages its event.
 pub fn begin_kind_in(
     conn: &Connection,
     name: &str,
-    green: ObjectId,
-    failed: ObjectId,
+    range: (ObjectId, ObjectId),
     output: &str,
     kind: rosen_protocol::CheckKind,
+    opened_by: Option<&Submitted>,
 ) -> Result<BisectState> {
+    let (green, failed) = range;
     storage::ensure_schema(conn).map_err(internal)?;
     if let Some(id) = conn
         .query_row(
@@ -97,7 +97,9 @@ pub fn begin_kind_in(
         ],
     )
     .map_err(internal)?;
-    storage::load(conn, conn.last_insert_rowid())?.state()
+    let session = storage::load(conn, conn.last_insert_rowid())?;
+    progress::opened(conn, &session, failed, opened_by)?;
+    session.state()
 }
 
 fn interval(
@@ -151,8 +153,17 @@ pub fn next(conn: &Connection, id: i64) -> Result<BisectState> {
     storage::load(conn, id)?.state()
 }
 
-/// Reject duplicate/stale results, including concurrent replies to one job.
 pub fn submit(conn: &mut Connection, result: &BisectResult) -> Result<BisectState> {
+    submit_as(conn, result, None)
+}
+
+/// Reject duplicate/stale results, including concurrent replies to one job.
+/// An accepted result is recorded with `by` and stages one `bisect` event.
+pub fn submit_as(
+    conn: &mut Connection,
+    result: &BisectResult,
+    by: Option<&Submitted>,
+) -> Result<BisectState> {
     storage::ensure_schema(conn).map_err(internal)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -164,9 +175,11 @@ pub fn submit(conn: &mut Connection, result: &BisectResult) -> Result<BisectStat
             "stale or mismatched bisection job",
         ));
     }
+    let planned = progress::planned_steps(session.commits.len() - 1);
     session.advance(result.passed, &result.output);
     storage::save(&tx, &session)?;
     let state = session.state()?;
+    progress::accepted(&tx, &result.job, result.passed, by, &state, planned)?;
     tx.commit().map_err(internal)?;
     Ok(state)
 }
@@ -178,16 +191,19 @@ pub fn confirmed(conn: &Connection, id: i64) -> Result<Option<BisectCulprit>> {
 pub async fn handle(
     state: &std::sync::Arc<crate::ServerState>,
     id: i64,
-    result: Option<BisectResult>,
+    result: Option<(BisectResult, Submitted)>,
 ) -> rosen_protocol::Outcome {
     let state = std::sync::Arc::clone(state);
     let path = state.config.metadata_path();
     let work = tokio::task::spawn_blocking(move || {
         let mut conn = crate::metadata::open(&path).map_err(internal)?;
         let answer = match result {
-            Some(result) => submit(&mut conn, &result)?,
+            Some((result, by)) => submit_as(&mut conn, &result, Some(&by))?,
             None => next(&conn, id)?,
         };
+        // The step's event committed with it; a stop before this delivers
+        // it at the next start (R9).
+        state.events.deliver_staged();
         apply_confirmed(&state, &answer)?;
         Ok::<_, ErrorBody>(answer)
     })

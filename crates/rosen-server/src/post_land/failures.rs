@@ -4,7 +4,7 @@ use rosen_core::{ChangeId, ReviewMode};
 use rosen_protocol::{
     BisectCulprit, CheckKind, ErrorBody, ErrorCode, EventKind, Outcome, PostLandFailure, Response,
 };
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, ErrorBody>;
@@ -18,7 +18,10 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         session INTEGER PRIMARY KEY, change_id TEXT NOT NULL, commit_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('build','test')), output TEXT NOT NULL, requires_revert INTEGER NOT NULL, revert TEXT);",
     )?;
-    unique_culprits(conn)
+    unique_culprits(conn)?;
+    super::submitter::add_columns(conn, "post_land_failures")?;
+    // The status read lists refusals on a read-only connection.
+    crate::landing::revert_refused::ensure_schema(conn)
 }
 
 fn unique_culprits(conn: &Connection) -> rusqlite::Result<()> {
@@ -89,6 +92,7 @@ pub fn apply(
     let must_revert = failure_reverts(policy, kind);
     let mut conn = crate::metadata::open(&state.config.metadata_path()).map_err(internal)?;
     ensure_schema(&conn).map_err(internal)?;
+    crate::bisect::ensure_schema(&conn).map_err(internal)?;
     record(&mut conn, session, kind, culprit, must_revert)?;
     state.events.deliver_staged();
     if must_revert {
@@ -114,24 +118,29 @@ fn record(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(internal)?;
+    let (submitter, at) = confirmed_by(&tx, session)?;
     let inserted = tx
         .execute(
             "INSERT OR IGNORE INTO post_land_failures
-        (session,change_id,commit_id,kind,output,requires_revert) VALUES (?1,?2,?3,?4,?5,?6)",
+        (session,change_id,commit_id,kind,output,requires_revert,submitter,submitted_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 session,
                 culprit.change,
                 culprit.commit.to_string(),
                 kind.as_str(),
                 culprit.output,
-                must_revert
+                must_revert,
+                submitter,
+                at
             ],
         )
         .map_err(internal)?;
     if inserted != 0 {
         let change: ChangeId = culprit.change.parse().map_err(internal)?;
         let detail = serde_json::json!({"session":session,"culprit":culprit.commit,
-            "kind":kind,"output":culprit.output,"requires_revert":must_revert});
+            "kind":kind,"output":culprit.output,"requires_revert":must_revert,
+            "submitter":submitter,"at":at});
         crate::events::stage(
             &tx,
             &Staged::about(EventKind::PostLandFailure, change, detail),
@@ -139,6 +148,21 @@ fn record(
         .map_err(internal)?;
     }
     tx.commit().map_err(internal)
+}
+
+/// Who submitted the result that confirmed `session`'s culprit: its last
+/// accepted step. None for sessions confirmed before steps were recorded.
+fn confirmed_by(conn: &Connection, session: i64) -> Result<(Option<String>, Option<i64>)> {
+    let row = conn
+        .query_row(
+            "SELECT submitter,submitted_at FROM bisection_steps
+             WHERE session=?1 ORDER BY step DESC LIMIT 1",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    Ok(row.unwrap_or((None, None)))
 }
 
 pub async fn handle(state: &Arc<ServerState>, change: Option<String>) -> Outcome {
@@ -163,7 +187,8 @@ pub async fn handle(state: &Arc<ServerState>, change: Option<String>) -> Outcome
 fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>> {
     let mut query = conn
         .prepare(
-            "SELECT session,change_id,commit_id,kind,output,revert,requires_revert
+            "SELECT session,change_id,commit_id,kind,output,revert,requires_revert,
+        submitter,submitted_at
         FROM post_land_failures WHERE (?1 IS NULL OR change_id=?1) ORDER BY session",
         )
         .map_err(internal)?;
@@ -177,12 +202,14 @@ fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>>
                 r.get(4)?,
                 r.get::<_, Option<String>>(5)?,
                 r.get::<_, bool>(6)?,
+                (r.get(7)?, r.get(8)?),
             ))
         })
         .map_err(internal)?;
     rows.map(|row| {
-        let (session, change, commit, kind, output, revert, requires_revert) =
+        let (session, change, commit, kind, output, revert, requires_revert, by) =
             row.map_err(internal)?;
+        let (submitter, submitted_at) = by;
         Ok(PostLandFailure {
             session,
             change,
@@ -195,6 +222,8 @@ fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>>
             output,
             requires_revert,
             revert: revert.map(|id| id.parse().map_err(internal)).transpose()?,
+            submitter,
+            submitted_at,
         })
     })
     .collect()

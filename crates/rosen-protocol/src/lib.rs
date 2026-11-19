@@ -7,7 +7,9 @@
 
 pub mod bisect;
 pub mod change;
-pub use bisect::{BisectCulprit, BisectJob, BisectResult, BisectState};
+pub use bisect::{
+    BisectCulprit, BisectJob, BisectResult, BisectSession, BisectState, BisectStep, StepState,
+};
 pub mod channel;
 pub mod claim;
 pub mod config;
@@ -57,7 +59,10 @@ pub use objects::{
     WireObject, OBJECT_CHUNK_BYTES,
 };
 pub use pool::{LandedProseQuery, PooledWorkspace};
-pub use post_land::{CheckKind, CheckPriority, PostLandFailure, PostLandJob, PostLandWork};
+pub use post_land::{
+    CheckKind, CheckPriority, Checkpoint, PendingInverse, PostLandFailure, PostLandJob,
+    PostLandStatus, PostLandWork,
+};
 pub use receipt::{ReceiptRecord, ReceiptSignature, SubmitReceipt};
 pub use review::{
     Approval, ApproveRequest, CommentRequest, CommentTarget, LandedFilter, LandedReview,

@@ -1,13 +1,24 @@
 //! Bind the batch failure to stored history and configuration before bisection.
-use crate::{landing::Ledger, post_land, ServerState};
+use crate::post_land::{self, submitter::Submitted};
+use crate::{landing::Ledger, ServerState};
 use rosen_core::ObjectId;
 use rosen_protocol::{BisectState, ErrorBody, ErrorCode, Outcome, PostLandJob, Response};
 use rusqlite::TransactionBehavior;
 use std::sync::Arc;
 
-pub async fn handle(state: &Arc<ServerState>, job: PostLandJob, output: String) -> Outcome {
+pub async fn handle(
+    state: &Arc<ServerState>,
+    job: PostLandJob,
+    output: String,
+    by: Submitted,
+) -> Outcome {
     let state = Arc::clone(state);
-    match tokio::task::spawn_blocking(move || start(&state, &job, &output)).await {
+    let work = move || {
+        let answer = start(&state, &job, &output, Some(&by));
+        state.events.deliver_staged();
+        answer
+    };
+    match tokio::task::spawn_blocking(work).await {
         Ok(Ok(state)) => Outcome::Ok(Response::Bisection(state)),
         Ok(Err(error)) => Outcome::Error(error),
         Err(error) => Outcome::Error(super::internal(error)),
@@ -18,6 +29,7 @@ pub fn start(
     state: &ServerState,
     job: &PostLandJob,
     output: &str,
+    by: Option<&Submitted>,
 ) -> Result<BisectState, ErrorBody> {
     let ledger = Ledger::open(&state.config.metadata_path()).map_err(super::internal)?;
     let (name, _) = ledger
@@ -31,7 +43,8 @@ pub fn start(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(super::internal)?;
     let boundary = search_boundary(&tx, &name, job)?;
-    let answer = super::begin_kind_in(&tx, &name, boundary, job.commit, output, job.kind)?;
+    let range = (boundary, job.commit);
+    let answer = super::begin_kind_in(&tx, &name, range, output, job.kind, by)?;
     tx.commit().map_err(super::internal)?;
     Ok(answer)
 }

@@ -183,6 +183,9 @@ pub enum Request {
     },
     /// Marks the tested landed prefix green after the full check set passed.
     PostLandPassed(crate::post_land::PostLandJob),
+    /// Last built and last green, open bisections and pending inverses (R12).
+    /// Reads only: it never offers a job or moves a session.
+    PostLandStatus,
     /// Liveness check.
     Ping,
     /// The server's identity, uptime and load.
@@ -367,6 +370,7 @@ pub enum Response {
     MachineCredential(crate::MachineCredential),
     PostLand(crate::post_land::PostLandWork),
     PostLandFailures(Vec<crate::PostLandFailure>),
+    PostLandStatus(crate::PostLandStatus),
     Pong,
     PoolSized,
     /// The handed-over workspace, or None when the pool had none to give.
@@ -560,6 +564,9 @@ pub enum EventKind {
     RevertRefused,
     /// A confirmed post-land failure, including its check kind and culprit.
     PostLandFailure,
+    /// A bisection opened, accepted a step result, confirmed its culprit or
+    /// stopped as flaky (R12). Sent only to the project view.
+    Bisect,
     /// A git mirror push failed or recovered (R1). Sent to every subscriber.
     Mirror,
     /// An AIRC channel line (R13), with its channel-specific payload in detail.

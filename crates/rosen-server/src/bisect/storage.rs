@@ -12,7 +12,8 @@ pub(crate) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         UNIQUE(ref_name,failed));",
     )?;
     migrate_kind(conn)?;
-    migrate_known_output(conn)
+    migrate_known_output(conn)?;
+    super::progress::ensure_schema(conn)
 }
 
 pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {

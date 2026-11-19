@@ -134,6 +134,7 @@ async fn main() {
             passed: job.commit == good,
             job,
             output: "injected culprit failure".into(),
+            submitter: None,
         };
         // Commit the confirmation directly, simulating a crash before inverse land.
         let mut conn = rosen_server::metadata::open(&state.config.metadata_path()).unwrap();

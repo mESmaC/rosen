@@ -20,6 +20,7 @@ enum ReviewCall {
     Mark(rosen_client::protocol::MarkReviewed),
     Landed(Option<rosen_core::ReviewedState>),
     Failures(Option<String>),
+    Status,
     Approve(ApproveRequest),
     Approvals(String),
     Resolve(ResolveRequest),
@@ -53,6 +54,7 @@ pub async fn run(
             "failures",
             &client.post_land_failures(change).await?,
         ),
+        ReviewCall::Status => crate::review_status::print(json, &client.post_land_status().await?),
         ReviewCall::Approve(req) => print_approval(json, &client.review_approve(req).await?),
         ReviewCall::Comment(req) => print_thread(json, &client.review_comment(req).await?),
         ReviewCall::Resolve(req) => print_thread(json, &client.review_resolve(req).await?),
@@ -77,6 +79,7 @@ fn parse(command: &ReviewCommand) -> Result<ReviewCall, Error> {
             ReviewCall::Landed(state.as_deref().map(parse_reviewed).transpose()?)
         }
         ReviewCommand::Failures { change } => ReviewCall::Failures(change.clone()),
+        ReviewCommand::Status => ReviewCall::Status,
         ReviewCommand::Comment {
             change,
             path,

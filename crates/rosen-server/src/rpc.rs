@@ -11,7 +11,8 @@ use rosen_protocol::{
 use std::sync::Arc;
 
 /// Runs one request to completion for a peer that reached the server as
-/// `origin`. Only a receipt depends on who sent it: its machine signs it.
+/// `origin`. A receipt depends on who sent it, since its machine signs it;
+/// changes, approvals and checker results record that machine (R14).
 pub async fn dispatch_from(
     state: &Arc<ServerState>,
     request: Request,
@@ -66,7 +67,48 @@ pub async fn dispatch_from(
                 Err(refused) => Outcome::Error(refused),
             }
         }
+        request @ (Request::PostLandPassed(_)
+        | Request::PostLandFailed { .. }
+        | Request::BisectSubmit(_))
+            if !state.is_shutting_down() =>
+        {
+            match origin_machine(state, origin).await {
+                Ok(machine) => dispatch_result(state, request, &machine).await,
+                Err(refused) => Outcome::Error(refused),
+            }
+        }
         request => dispatch_unpaused(state, request).await,
+    }
+}
+
+/// A checker's post-land or bisection result, recorded with its nick and
+/// the machine it came from (R12, R14 "Agents").
+async fn dispatch_result(state: &Arc<ServerState>, request: Request, machine: &str) -> Outcome {
+    use crate::post_land::submitter::Submitted;
+    let nick = match &request {
+        Request::PostLandPassed(job) | Request::PostLandFailed { job, .. } => {
+            job.submitter.as_ref()
+        }
+        Request::BisectSubmit(result) => result.submitter.as_ref(),
+        _ => None,
+    };
+    let by = match Submitted::new(nick, machine) {
+        Ok(by) => by,
+        Err(refused) => return Outcome::Error(refused),
+    };
+    match request {
+        Request::PostLandPassed(job) => {
+            let kind = job.kind;
+            crate::post_land::handle(state, Some((job, by)), kind).await
+        }
+        Request::PostLandFailed { job, output } => {
+            crate::bisect::failure::handle(state, job, output, by).await
+        }
+        Request::BisectSubmit(result) => {
+            let session = result.job.session;
+            crate::bisect::handle(state, session, Some((result, by))).await
+        }
+        _ => unreachable!("dispatch_from routes only checker results here"),
     }
 }
 
@@ -106,12 +148,7 @@ async fn dispatch_unpaused(state: &Arc<ServerState>, request: Request) -> Outcom
     }
     match request {
         Request::BisectNext { session } => crate::bisect::handle(state, session, None).await,
-        Request::BisectSubmit(result) => {
-            crate::bisect::handle(state, result.job.session, Some(result)).await
-        }
-        Request::PostLandFailed { job, output } => {
-            crate::bisect::failure::handle(state, job, output).await
-        }
+        Request::PostLandStatus => crate::post_land::status::handle(state).await,
         Request::PostLandNext => {
             crate::post_land::handle(state, None, rosen_protocol::CheckKind::Test).await
         }
@@ -121,9 +158,7 @@ async fn dispatch_unpaused(state: &Arc<ServerState>, request: Request) -> Outcom
         Request::PostLandFailures { change } => {
             crate::post_land::failures::handle(state, change).await
         }
-        Request::PostLandPassed(job) => {
-            crate::post_land::handle(state, Some(job.clone()), job.kind).await
-        }
+        // Checker results are dispatched with their origin in dispatch_from.
         request => dispatch_machine_management(state, request).await,
     }
 }

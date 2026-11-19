@@ -1,5 +1,5 @@
 //! External checker jobs for a failing post-land interval (SPEC R12).
-use rosen_core::ObjectId;
+use rosen_core::{AgentId, ObjectId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +17,9 @@ pub struct BisectResult {
     pub job: BisectJob,
     pub passed: bool,
     pub output: String,
+    /// The checker's nick; the server appends the connection's machine (R14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitter: Option<AgentId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,4 +40,47 @@ pub struct BisectState {
     pub culprit: Option<BisectCulprit>,
     /// Contradictory confirmation; checker must investigate/retry the batch.
     pub flaky: bool,
+}
+
+/// Where one bisection step stands. A step is `offered` once its job is the
+/// session's current one, and `waiting` while it is still only planned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepState {
+    Waiting,
+    Offered,
+    Passed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BisectStep {
+    /// The persisted step token, from 0, as [`BisectJob::step`] carries it.
+    pub step: u64,
+    /// Absent for a planned step whose commit the search has not chosen yet.
+    pub commit: Option<ObjectId>,
+    pub state: StepState,
+    /// `nick@machine` of the accepted result; absent before one is accepted.
+    pub submitter: Option<String>,
+    /// Unix milliseconds the result was accepted.
+    pub at: Option<i64>,
+}
+
+/// An unresolved bisection, as `rosen review status` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BisectSession {
+    pub id: i64,
+    pub kind: crate::post_land::CheckKind,
+    /// The green or built commit (or recorded culprit) the search starts after.
+    pub lower: ObjectId,
+    pub failing: ObjectId,
+    /// Candidate commits after `lower`, up to and including `failing`.
+    pub interval: u64,
+    /// The halving steps for the interval plus the two confirmations.
+    pub planned_steps: u64,
+    pub flaky: bool,
+    /// Who reported the failing batch that opened the session, and when.
+    pub opened_by: Option<String>,
+    pub opened_at: Option<i64>,
+    pub steps: Vec<BisectStep>,
 }

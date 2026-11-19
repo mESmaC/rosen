@@ -19,6 +19,7 @@ mod rebase_cmd;
 mod receipt_cmd;
 mod resolve_cmd;
 mod review_cmd;
+mod review_status;
 mod run_cmd;
 mod server;
 mod status_cmd;

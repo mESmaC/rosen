@@ -93,6 +93,7 @@ where
             job,
             passed: failed.is_none(),
             output: failed.unwrap_or_default(),
+            submitter: None,
         };
         state = client.bisect_submit(result).await?;
     }

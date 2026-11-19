@@ -115,6 +115,9 @@
       "$ref": "#/$defs/rosen.post-land-failures~1v1"
     },
     {
+      "$ref": "#/$defs/rosen.post_land_status~1v1"
+    },
+    {
       "$ref": "#/$defs/rosen.claim~1v2"
     },
     {
@@ -214,7 +217,8 @@
         "mirror",
         "channel",
         "post_land_failure",
-        "ledger_push"
+        "ledger_push",
+        "bisect"
       ]
     },
     "ChangeParent": {
@@ -2913,6 +2917,26 @@
         },
         "requires_revert": {
           "type": "boolean"
+        },
+        "submitter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "submitted_at": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2987,6 +3011,306 @@
       "additionalProperties": false,
       "x-commands": [
         "review failures"
+      ]
+    },
+    "PostLandCheckpoint": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "submitter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "at": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "commit",
+        "submitter",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "BisectStep": {
+      "type": "object",
+      "properties": {
+        "step": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "commit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "waiting",
+            "offered",
+            "passed",
+            "failed"
+          ]
+        },
+        "submitter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "at": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "step",
+        "commit",
+        "state",
+        "submitter",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "BisectSession": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "build",
+            "test"
+          ]
+        },
+        "lower": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "failing": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "interval": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planned_steps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "flaky": {
+          "type": "boolean"
+        },
+        "opened_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "opened_at": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BisectStep"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "lower",
+        "failing",
+        "interval",
+        "planned_steps",
+        "flaky",
+        "opened_by",
+        "opened_at",
+        "steps"
+      ],
+      "additionalProperties": false
+    },
+    "PendingInverse": {
+      "type": "object",
+      "properties": {
+        "culprit": {
+          "$ref": "#/$defs/ObjectId"
+        },
+        "change": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "build",
+            "test"
+          ]
+        },
+        "attempted_base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "overlapping_commits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ObjectId"
+          }
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "first_refused_at": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "culprit",
+        "change",
+        "kind",
+        "attempted_base",
+        "paths",
+        "overlapping_commits",
+        "reason",
+        "first_refused_at"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.post_land_status/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.post_land_status/v1"
+        },
+        "status": {
+          "type": "object",
+          "properties": {
+            "base": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ObjectId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "last_built": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PostLandCheckpoint"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "last_green": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PostLandCheckpoint"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sessions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BisectSession"
+              }
+            },
+            "pending_inverses": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PendingInverse"
+              }
+            }
+          },
+          "required": [
+            "base",
+            "last_built",
+            "last_green",
+            "sessions",
+            "pending_inverses"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "status"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "review status"
       ]
     },
     "PathClaimV2": {
