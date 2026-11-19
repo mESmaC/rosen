@@ -716,7 +716,9 @@ pub enum ServerCommand {
     /// with status 1, without starting a server, when none is running.
     Status,
     /// Choose which owner requests the server fetches from the project's
-    /// Collapse endpoint and runs: `approve`, `land` and `mark`, or `none`.
+    /// Collapse endpoint and runs: `approve`, `land`, `mark` and `config`,
+    /// or `none`. `config` opens a change carrying an edited `rosen.toml`;
+    /// it lands under the current policy like any other change.
     ///
     /// Collapse cannot reach a server behind NAT, so the server reads
     /// Collapse's edge doorbell every 20 s and fetches queued requests only
@@ -727,7 +729,7 @@ pub enum ServerCommand {
     /// `rosen machine revoke collapse` also turns the relay off; allowing a
     /// kind again turns it back on.
     Relay {
-        /// Comma-separated kinds to run: approve, land, mark; or `none`.
+        /// Comma-separated kinds to run: approve, land, mark, config; or `none`.
         #[arg(long, value_name = "KINDS", value_delimiter = ',', required = true)]
         allow: Vec<String>,
     },

@@ -34,7 +34,8 @@ pub struct Fetched {
     pub account: String,
     /// Unix milliseconds after which it must not run.
     pub expires_at: i64,
-    /// `change`, `head`, `commit` and `state`, as the kind needs.
+    /// `change`, `head`, `commit` and `state`, or for `config_change`
+    /// `base`, `expected_blob`, `text` and `message`, as the kind needs.
     pub arguments: serde_json::Map<String, Value>,
 }
 

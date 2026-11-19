@@ -34,6 +34,7 @@ mod project_config;
 mod rebase;
 mod receipt_signatures;
 mod recheck;
+mod relay_config;
 mod review_approvals;
 mod review_tiers;
 mod server_workspace;

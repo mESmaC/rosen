@@ -109,6 +109,36 @@ impl ChangeService {
         })
     }
 
+    /// The base's tip a new unstacked change would start from now.
+    pub fn base_tip(&self) -> Result<BaseTip, ChangeError> {
+        let base = self
+            .base
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        base.base_tip().map_err(ChangeError::Base)
+    }
+
+    /// Creates a change for `owner` on `machine` starting at `tip`, a base
+    /// commit the caller read and checked. Starting there rather than at
+    /// the tip on creation means a land in between cannot slip another
+    /// start under what the caller checked; the change rebases as usual.
+    pub fn create_at(
+        &self,
+        owner: &rosen_core::AgentId,
+        machine: &str,
+        tip: BaseTip,
+    ) -> Result<ChangeRecord, ChangeError> {
+        if owner.as_str().contains('@') {
+            return Err(ChangeError::QualifiedOwner(owner.to_string()));
+        }
+        let parent = NewParent::Base {
+            commit: tip.commit,
+            tree: tip.tree,
+        };
+        self.with_conn(|conn| registry::create_on(conn, owner, machine, parent))
+    }
+
     pub fn list(&self, filter: &ChangeFilter) -> Result<Vec<ChangeRecord>, ChangeError> {
         self.with_read(|conn| registry::list(conn, filter))
     }

@@ -4,7 +4,9 @@
 //!
 //! Nothing here adds a way around a gate. An approval goes through R7's
 //! stale-head check, a land through every R8 gate, and a mark through R7's
-//! coverage rules; a refusal goes back to Collapse as Rosen gave it.
+//! coverage rules; a refusal goes back to Collapse as Rosen gave it. A
+//! configuration change only opens a change, which then needs its tier's
+//! approval and receipt like any other.
 
 use std::sync::Arc;
 
@@ -15,6 +17,7 @@ use rosen_protocol::{
 };
 use serde_json::{json, Value};
 
+use super::config_change::{self, ConfigChange};
 use super::remote::{Fetched, MAX_RESULT};
 use crate::reviews::{self, ReviewCall};
 use crate::ServerState;
@@ -33,6 +36,7 @@ pub enum Call {
     Approve(ApproveRequest),
     Land(String),
     Mark(MarkReviewed, ObjectId),
+    Config(ConfigChange),
 }
 
 /// Refuses what must not run: a kind Rosen never relays or the operator
@@ -40,7 +44,7 @@ pub enum Call {
 /// or malformed arguments. `now_ms` is Unix milliseconds.
 pub fn check(action: &Fetched, setting: &RelaySetting, now_ms: i64) -> Result<Call, Done> {
     let refuse = |code: &str, message: String| refusal(&action.kind, code, &message);
-    let Some(kind) = RelayKind::parse(&action.kind) else {
+    let Some(kind) = RelayKind::parse_action(&action.kind) else {
         let message = format!("Rosen does not relay {:?} actions", action.kind);
         return Err(refuse("not_allowed", message));
     };
@@ -84,6 +88,9 @@ fn arguments(
         let value = text(key)?;
         ObjectId::from_hex(value).map_err(|_| format!("{key} {value:?} is not a commit ID"))
     };
+    if kind == RelayKind::Config {
+        return config_change::arguments(account, args).map(Call::Config);
+    }
     let change = text("change")?.to_owned();
     Ok(match kind {
         RelayKind::Approve => Call::Approve(ApproveRequest {
@@ -99,6 +106,7 @@ fn arguments(
                 .map_err(|e| e.to_string())?;
             Call::Mark(MarkReviewed { change, state, by }, commit("commit")?)
         }
+        RelayKind::Config => unreachable!("read above"),
     })
 }
 
@@ -112,6 +120,7 @@ pub async fn run(state: &Arc<ServerState>, call: Call) -> Done {
         }
         Call::Land(change) => crate::landing::service::land(state, change).await,
         Call::Mark(req, commit) => reviews::handle(state, ReviewCall::MarkAt(req, commit)).await,
+        Call::Config(req) => return config_change::run(state, req).await,
     };
     match outcome {
         Outcome::Ok(Response::Land(answer)) => {
@@ -172,6 +181,7 @@ pub async fn recover(state: &Arc<ServerState>, call: &Call, started_at: i64) -> 
                 .map(|review| done(json!(review)))
         }
         Call::Land(_) => None,
+        Call::Config(req) => config_change::recover(state, req, started_at).await,
     }
 }
 
@@ -180,10 +190,11 @@ fn command(call: &Call) -> &'static str {
         Call::Approve(_) => "approve",
         Call::Land(_) => "land",
         Call::Mark(..) => "mark",
+        Call::Config(_) => "config_change",
     }
 }
 
-fn done(result: Value) -> Done {
+pub fn done(result: Value) -> Done {
     Done {
         state: "done",
         result: fit(result),
