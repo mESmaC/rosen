@@ -10,7 +10,8 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::ExitStatusExt;
 use std::path::Path;
 use std::process::ExitStatus;
-use std::{ptr, thread, time::Duration};
+use std::time::{Duration, Instant};
+use std::{ptr, thread};
 
 use windows_sys::Win32::Foundation::{
     DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
@@ -34,6 +35,8 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::process::{command_line, terminated};
+
+const DESCENDANT_GRACE: Duration = Duration::from_secs(3);
 
 /// A launcher and all its descendants, contained before any of them runs.
 /// Dropping it terminates and drains the job before returning to the caller.
@@ -102,13 +105,15 @@ impl ProcessTree {
         Ok((Self { job, process }, reader))
     }
 
-    /// Keeps ownership until the entire tree exits, returning the launcher's
-    /// status. A failed launcher stops its remaining descendants as well.
+    /// Returns the launcher's status after the job drains. Descendants of a
+    /// successful launcher have a short grace period before termination.
     pub fn wait(self) -> io::Result<ExitStatus> {
         let status = self
             .exit_status(INFINITE)?
             .expect("infinite wait cannot time out");
-        self.job.wait_empty()?;
+        if !self.job.wait_empty(Some(DESCENDANT_GRACE))? {
+            self.job.terminate()?;
+        }
         Ok(status)
     }
 
@@ -195,11 +200,19 @@ impl Job {
         Ok(info.ActiveProcesses)
     }
 
-    fn wait_empty(&self) -> io::Result<()> {
+    fn wait_empty(&self, grace: Option<Duration>) -> io::Result<bool> {
+        const POLL: Duration = Duration::from_millis(25);
+        let deadline = grace.map(|grace| Instant::now() + grace);
         while self.active()? != 0 {
-            thread::sleep(Duration::from_millis(25));
+            let delay = deadline.map_or(POLL, |deadline| {
+                POLL.min(deadline.saturating_duration_since(Instant::now()))
+            });
+            if delay.is_zero() {
+                return Ok(false);
+            }
+            thread::sleep(delay);
         }
-        Ok(())
+        Ok(true)
     }
 
     fn terminate(&self) -> io::Result<()> {
@@ -208,7 +221,7 @@ impl Job {
         if unsafe { TerminateJobObject(self.handle.as_raw_handle(), 1) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        self.wait_empty()
+        self.wait_empty(None).map(|_| ())
     }
 }
 
@@ -424,5 +437,21 @@ impl Drop for Attributes<'_> {
     fn drop(&mut self) {
         // SAFETY: this list was initialized and has not been deleted yet.
         unsafe { DeleteProcThreadAttributeList(self.pointer()) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Duration, Instant, ProcessTree};
+
+    // A background helper can hold the machine's turn after the launcher exits.
+    #[test]
+    fn successful_wait_stops_lingering_descendants() {
+        let dir = std::env::current_dir().unwrap();
+        let command = r#"start "" /B "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30""#;
+        let started = Instant::now();
+        let (tree, _output) = ProcessTree::spawn_shell(&dir, command, &[], 512 << 20).unwrap();
+        assert!(tree.wait().unwrap().success());
+        assert!((Duration::from_secs(3)..Duration::from_secs(20)).contains(&started.elapsed()));
     }
 }
