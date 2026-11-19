@@ -7,6 +7,10 @@
 #   default               the settings the repository builds with today
 #   rust-lld              links with the LLD shipped with rustc instead of link.exe
 #   rust-lld-line-tables  rust-lld, plus line-tables-only debug info in dev and test
+#
+# Since #423 the repository builds with both settings (.cargo/config.toml and
+# Cargo.toml's dev profile), so the three variants now build alike. Their
+# spread across one run shows the runner's noise.
 param(
     [Parameter(Mandatory)]
     [ValidateSet('default', 'rust-lld', 'rust-lld-line-tables')]

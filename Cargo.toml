@@ -48,3 +48,12 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# File and line debug info is enough for backtraces and panics in our own
+# crates, and dependencies need none. Full debug info made linking the largest
+# cost of a Windows build (#399, #423).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

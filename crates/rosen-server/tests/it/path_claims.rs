@@ -188,44 +188,68 @@ async fn notices_include_shares_and_edits_and_exclusive_rejects_shared_files() {
         .all(|r| r.exclusive));
 }
 
-#[tokio::test]
-async fn claims_match_the_lean_table() {
-    let (_dir, state, [a, b, c]) = setup("");
-    for row in include_str!("../../../../proofs/fixtures/claims.tsv")
+/// Rows replay on this many servers at once. Every row still runs; one server
+/// per shard keeps their claims apart. Each claim and release commits with an
+/// fsync, so one server replaying the whole table took over 140 s on Windows
+/// (#423).
+const CLAIM_TABLE_SHARDS: usize = 8;
+
+#[test]
+fn claims_match_the_lean_table() {
+    let rows: Vec<&str> = include_str!("../../../../proofs/fixtures/claims.tsv")
         .lines()
         .skip(1)
-    {
-        let cells: Vec<_> = row.split('\t').collect();
-        assert_eq!(cells.len(), 5, "{row}");
-        // R6 risk: overlapping notices must block exclusives just like locks do.
-        for (held_exclusive, holders) in [(true, vec![a]), (false, vec![a, c])] {
-            for (exclusive, expected) in [(true, cells[3]), (false, cells[4])] {
-                for &holder in &holders {
-                    assert!(matches!(
-                        claim(&state, holder, cells[0], held_exclusive).await,
-                        ClaimOutcome::Granted { .. }
-                    ));
-                }
-                let answer = claim(&state, b, cells[1], exclusive).await;
-                assert_eq!(
-                    matches!(answer, ClaimOutcome::Granted { .. }),
-                    expected == "1",
-                    "{row}: exclusive={exclusive}"
-                );
-                if let ClaimOutcome::Granted { overlaps, .. } = answer {
-                    assert_eq!(!overlaps.is_empty(), cells[2] == "1", "{row}");
-                }
-                for id in [a, b, c] {
-                    let release = ClaimRequest {
-                        change: id.to_string(),
-                        paths: vec![],
-                        exclusive: false,
-                    };
-                    assert!(matches!(
-                        dispatch(&state, Request::ReleasePaths(release)).await,
-                        Outcome::Ok(_)
-                    ));
-                }
+        .collect();
+    std::thread::scope(|scope| {
+        for shard in 0..CLAIM_TABLE_SHARDS {
+            let rows = &rows;
+            scope.spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    let (_dir, state, ids) = setup("");
+                    for row in rows.iter().skip(shard).step_by(CLAIM_TABLE_SHARDS) {
+                        check_claim_row(&state, ids, row).await;
+                    }
+                });
+            });
+        }
+    });
+}
+
+async fn check_claim_row(state: &Arc<ServerState>, [a, b, c]: [ChangeId; 3], row: &str) {
+    let cells: Vec<_> = row.split('\t').collect();
+    assert_eq!(cells.len(), 5, "{row}");
+    // R6 risk: overlapping notices must block exclusives just like locks do.
+    for (held_exclusive, holders) in [(true, vec![a]), (false, vec![a, c])] {
+        for (exclusive, expected) in [(true, cells[3]), (false, cells[4])] {
+            for &holder in &holders {
+                assert!(matches!(
+                    claim(state, holder, cells[0], held_exclusive).await,
+                    ClaimOutcome::Granted { .. }
+                ));
+            }
+            let answer = claim(state, b, cells[1], exclusive).await;
+            assert_eq!(
+                matches!(answer, ClaimOutcome::Granted { .. }),
+                expected == "1",
+                "{row}: exclusive={exclusive}"
+            );
+            if let ClaimOutcome::Granted { overlaps, .. } = answer {
+                assert_eq!(!overlaps.is_empty(), cells[2] == "1", "{row}");
+            }
+            for id in [a, b, c] {
+                let release = ClaimRequest {
+                    change: id.to_string(),
+                    paths: vec![],
+                    exclusive: false,
+                };
+                assert!(matches!(
+                    dispatch(state, Request::ReleasePaths(release)).await,
+                    Outcome::Ok(_)
+                ));
             }
         }
     }

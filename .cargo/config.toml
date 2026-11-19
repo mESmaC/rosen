@@ -1,0 +1,6 @@
+# Build settings measured by the timings job (#399, #423). On a windows-latest
+# runner, LLD with line-tables-only debug info cut the cold build from 124 s to
+# 72 s and one-crate edit builds from 9-14 s to 4-6 s. The linker applies to
+# the Windows MSVC target only, so Linux and macOS keep their system linkers.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
