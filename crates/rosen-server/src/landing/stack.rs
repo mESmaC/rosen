@@ -2,6 +2,10 @@
 use super::*;
 use rosen_core::ChangeState;
 
+/// Every clean layer's tree, and the first layer that doesn't merge cleanly with its
+/// index and outcome.
+type LayerPreview = (Vec<TreeId>, Option<(usize, MergeOutcome)>);
+
 impl Landing {
     pub(super) fn stack_facts(&self, top: &ChangeId) -> LandResult<Vec<ChangeFacts>> {
         let mut stack = Vec::new();
@@ -43,7 +47,7 @@ impl Landing {
         &self,
         stack: &[ChangeFacts],
         base: &CommitId,
-    ) -> LandResult<(Vec<TreeId>, Option<(usize, MergeOutcome)>)> {
+    ) -> LandResult<LayerPreview> {
         let mut trees = Vec::new();
         let mut onto = *base;
         for (index, facts) in stack.iter().enumerate() {
