@@ -121,7 +121,12 @@ async fn move_base(
 }
 
 /// How many commits `to` has that `from` lacks.
-async fn count_between(repo: &Path, remote: &str, from: ObjectId, to: ObjectId) -> Result<u64> {
+pub(super) async fn count_between(
+    repo: &Path,
+    remote: &str,
+    from: ObjectId,
+    to: ObjectId,
+) -> Result<u64> {
     let range = format!("{}..{}", from.to_hex(), to.to_hex());
     let output = run_bytes(repo, remote, &["rev-list", "--count", &range]).await?;
     Ok(std::str::from_utf8(&output)?.trim().parse()?)
@@ -241,7 +246,7 @@ async fn diverged(
 
 /// Up to [`LISTED`] commits `to` has that `from` lacks, newest first, one
 /// `  <id> <subject>` line each.
-async fn listing(
+pub(super) async fn listing(
     repo: &Path,
     remote: &str,
     from: ObjectId,

@@ -14,12 +14,19 @@
 //! The task also syncs once at startup, so a land whose push a crash
 //! interrupted reaches the mirror when the server comes back, and after an
 //! import, which sets the base without a land.
+//!
+//! Only the server marked as the mirror owner pushes (#401, [`owner`]).
+//! Before each push it checks the remote's tip (`tip_check`), so a
+//! second writer's commits are named instead of overwritten or hidden
+//! behind git's bare refusal.
 
 pub(crate) mod adopt;
 pub(crate) mod catch_up;
+pub mod owner;
 mod push;
 pub mod rewrite;
 mod state;
+mod tip_check;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,6 +59,9 @@ pub enum Synced {
     UpToDate { branch: String, commit: ObjectId },
     /// The remote accepted the base commit.
     Pushed { branch: String, commit: ObjectId },
+    /// The base is ahead of the mirror, but this server is not the mirror
+    /// owner, so it pushed nothing.
+    NotOwner { branch: String, commit: ObjectId },
 }
 
 /// Why a sync failed. Every failure is retried.
@@ -71,6 +81,7 @@ pub enum SyncError {
 pub async fn run(state: Arc<ServerState>) {
     let mut wake = state.events.watch();
     let mut failures: u32 = 0;
+    let mut told_not_owner = false;
     loop {
         // Lands after this point wake the next sync, even if they arrive
         // while this one is pushing.
@@ -83,6 +94,12 @@ pub async fn run(state: Arc<ServerState>) {
             Ok(synced) => {
                 if failures > 0 {
                     report_recovered(&state, &synced, failures);
+                }
+                if let Synced::NotOwner { branch, commit } = &synced {
+                    // Once per run: every land would otherwise repeat it.
+                    if !std::mem::replace(&mut told_not_owner, true) {
+                        report_not_owner(&state, branch, commit);
+                    }
                 }
                 failures = 0;
                 wait_for_land(&state, &mut wake, seen).await
@@ -103,25 +120,36 @@ pub async fn run(state: Arc<ServerState>) {
 /// Brings the mirror up to the current base once.
 pub async fn sync_once(config: &ServerConfig) -> Result<Synced, SyncError> {
     let reading = config.clone();
-    let found = tokio::task::spawn_blocking(move || read_target(&reading))
-        .await
-        .map_err(|join| SyncError::Store(join.to_string()))??;
-    let Some((target, branch, commit)) = found else {
+    let found = tokio::task::spawn_blocking(move || {
+        Ok::<_, SyncError>((read_target(&reading)?, owner::is_owner(&reading.data_dir)))
+    })
+    .await
+    .map_err(|join| SyncError::Store(join.to_string()))??;
+    let (Some((target, branch, commit)), owns_mirror) = found else {
         return Ok(Synced::NotConfigured);
     };
     if target.pushed == Some(commit) {
         return Ok(Synced::UpToDate { branch, commit });
     }
-    let staging = config.mirror_staging_dir();
-    let objects = config.objects_dir();
-    push::push(&staging, &objects, &target.remote, &branch, &commit)
+    if !owns_mirror {
+        return Ok(Synced::NotOwner { branch, commit });
+    }
+    let failed = |failure: PushFailure| SyncError::Push {
+        remote: hide_credentials(&target.remote, &target.remote),
+        branch: branch.clone(),
+        commit,
+        failure,
+    };
+    let remote_tip = tip_check::check(config, &target, &branch, &commit)
         .await
-        .map_err(|failure| SyncError::Push {
-            remote: hide_credentials(&target.remote, &target.remote),
-            branch: branch.clone(),
-            commit,
-            failure,
-        })?;
+        .map_err(failed)?;
+    if remote_tip == tip_check::RemoteTip::Behind {
+        let staging = config.mirror_staging_dir();
+        let objects = config.objects_dir();
+        push::push(&staging, &objects, &target.remote, &branch, &commit)
+            .await
+            .map_err(failed)?;
+    }
     let metadata = config.metadata_path();
     tokio::task::spawn_blocking(move || {
         MirrorStore::open(&metadata)?.record_pushed(&target.remote, &commit)
@@ -257,6 +285,21 @@ fn report_failure(state: &ServerState, error: &SyncError, attempt: u32, retry_in
             "error": failure.message,
         }),
     };
+    state.events.publish(EventKind::Mirror, None, detail);
+}
+
+/// Publishes a `mirror` event saying the base stays local because this
+/// server is not the mirror owner, so an operator who expected pushes
+/// learns why there are none.
+fn report_not_owner(state: &ServerState, branch: &str, commit: &ObjectId) {
+    eprintln!(
+        "rosen-server: not the mirror owner; base {branch} at {commit} is not pushed.          Start the project's authoritative server with --mirror-owner to push."
+    );
+    let detail = json!({
+        "status": "not_owner",
+        "branch": branch,
+        "commit": commit.to_hex(),
+    });
     state.events.publish(EventKind::Mirror, None, detail);
 }
 

@@ -460,6 +460,10 @@ pub struct ServerStatus {
     /// The server a cache daemon forwards to; absent on the server itself.
     #[serde(default)]
     pub upstream: Option<String>,
+    /// Whether this server pushes the project's mirror (SPEC R1): only the
+    /// server marked as its owner does. Absent on a cache daemon.
+    #[serde(default)]
+    pub mirror_owner: Option<bool>,
 }
 
 /// Why a request failed.

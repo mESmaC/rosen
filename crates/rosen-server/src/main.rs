@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use daemon_log::DaemonLog;
 use rosen_protocol::Endpoint;
+use rosen_server::mirror::owner;
 use rosen_server::network::identity::parse_fingerprint;
 use rosen_server::network::{NetworkOptions, UpstreamConfig, LISTEN_ENV};
 use rosen_server::ServerConfig;
@@ -62,6 +63,18 @@ struct Args {
     /// log a pool worker's wait report or a failed prepare's output is lost.
     #[arg(long, value_name = "FILE")]
     log: Option<PathBuf>,
+
+    /// Mark this server as the project's mirror owner, the only server that
+    /// pushes the base to the `[mirror]` remote (SPEC R1). The mark is kept
+    /// in the data directory, so later starts push without the flag. A
+    /// daemon a client starts is marked when $ROSEN_MIRROR_OWNER names its
+    /// data directory.
+    #[arg(long, conflicts_with = "not_mirror_owner")]
+    mirror_owner: bool,
+
+    /// Remove the mirror owner mark, so this server stops pushing.
+    #[arg(long)]
+    not_mirror_owner: bool,
 }
 
 /// Inherited by a daemon a client starts with no flags, as `ROSEN_LISTEN` is.
@@ -105,6 +118,42 @@ impl Args {
     }
 }
 
+/// Sends this daemon's standard error to the log at `path`.
+fn start_log(path: &Path) {
+    match DaemonLog::open(path) {
+        Ok(log) => {
+            eprintln!(
+                "rosen-server {}: started, process {}",
+                env!("CARGO_PKG_VERSION"),
+                std::process::id()
+            );
+            log.keep_rotating();
+        }
+        Err(err) => eprintln!("rosen-server: cannot log to {}: {err}", path.display()),
+    }
+}
+
+/// Sets or removes the mirror owner mark as the flags or
+/// `$ROSEN_MIRROR_OWNER` say; with neither, the stored mark stands.
+fn apply_mirror_owner(args: &Args, data_dir: &Path) -> std::io::Result<()> {
+    if args.not_mirror_owner {
+        return owner::unmark(data_dir);
+    }
+    let named = match std::env::var_os(owner::OWNER_ENV).filter(|dir| !dir.is_empty()) {
+        Some(dir) => {
+            // Comparing canonical paths needs the directory to exist; the
+            // server creates it on its first start anyway.
+            std::fs::create_dir_all(data_dir)?;
+            owner::names(Path::new(&dir), data_dir)
+        }
+        None => false,
+    };
+    if args.mirror_owner || named {
+        owner::mark(data_dir)?;
+    }
+    Ok(())
+}
+
 /// The exit code when another server already owns the endpoint, distinct from a
 /// failure so a launcher that lost a start race can just connect to the winner.
 const EXIT_ALREADY_RUNNING: u8 = 3;
@@ -118,18 +167,11 @@ async fn main() -> ExitCode {
     // `status` reports (SPEC R3), so it must not depend on the daemon's cwd.
     let data_dir = std::path::absolute(&args.data_dir).unwrap_or_else(|_| args.data_dir.clone());
     if let Some(log) = &args.log {
-        let path = data_dir.join(log);
-        match DaemonLog::open(&path) {
-            Ok(log) => {
-                eprintln!(
-                    "rosen-server {}: started, process {}",
-                    env!("CARGO_PKG_VERSION"),
-                    std::process::id()
-                );
-                log.keep_rotating();
-            }
-            Err(err) => eprintln!("rosen-server: cannot log to {}: {err}", path.display()),
-        }
+        start_log(&data_dir.join(log));
+    }
+    if let Err(err) = apply_mirror_owner(&args, &data_dir) {
+        eprintln!("rosen-server: cannot set the mirror owner mark: {err}");
+        return ExitCode::FAILURE;
     }
     let network = match args.network(&data_dir) {
         Ok(network) => network,

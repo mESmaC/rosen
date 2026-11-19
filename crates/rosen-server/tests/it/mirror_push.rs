@@ -130,6 +130,7 @@ fn lands_reach_the_mirror_as_fast_forwards_only() {
         endpoint: Endpoint::new("rosen-mirror-test-unused"),
         warm_pool_dir: None,
     });
+    mirror::owner::mark(data.path()).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let source_arg = source.path().to_string_lossy().into_owned();
     let imported = service::handle(&state, source_arg, None, Some(mirror_arg.clone()));
@@ -173,11 +174,16 @@ fn recover_direct_push(
     git(source, &["push", "--quiet", remote, "main"]);
     let outside: ObjectId = mirror_tip().parse().unwrap();
     let before_port = land(state, 3, None);
-    wait_for("mirror rejects the divergent land", || {
+    // #401: the refusal names the commit another writer pushed, before git
+    // would answer with a bare `[rejected] (fetch first)`.
+    wait_for("mirror refuses the divergent land", || {
         state.events.after(0).iter().any(|event| {
             event.kind == EventKind::Mirror
                 && event.detail["status"] == "failed"
                 && event.detail["rejected"] == true
+                && event.detail["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains(&format!("  {outside} outside")))
         })
     });
     let adopt = |commit| {
@@ -280,6 +286,7 @@ fn mirrored_server() -> Mirrored {
         endpoint: Endpoint::new("rosen-mirror-catch-up-test-unused"),
         warm_pool_dir: None,
     });
+    mirror::owner::mark(data.path()).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let imported = service::handle(&state, source_arg, None, Some(mirror_arg));
     assert!(matches!(runtime.block_on(imported), Outcome::Ok(_)));
@@ -413,4 +420,32 @@ fn refuse_diverged(
     );
     let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
     assert_eq!(ledger.base("main").unwrap(), Some(here));
+}
+
+#[test]
+fn only_the_mirror_owner_pushes() {
+    // Risk (#401): a second server for the same project, with the same
+    // rosen.toml and credentials, pushed its own land to the shared mirror,
+    // and the authoritative server's lands then stayed local. A server not
+    // marked as the mirror owner must land and push nothing.
+    let Mirrored {
+        mirror: mirror_dir,
+        state,
+        runtime,
+        source: _source,
+        _remote: _remote_dir,
+        _data: data_dir,
+    } = mirrored_server();
+    mirror::owner::unmark(data_dir.path()).unwrap();
+    let mirror_tip = || git(&mirror_dir, &["rev-parse", "refs/heads/main"]);
+    let before = mirror_tip();
+    let landed = land(&state, 9, None);
+    let synced = runtime.block_on(mirror::sync_once(&state.config)).unwrap();
+    assert!(matches!(synced, mirror::Synced::NotOwner { commit, .. } if commit == landed));
+    assert_eq!(mirror_tip(), before);
+
+    mirror::owner::mark(data_dir.path()).unwrap();
+    let synced = runtime.block_on(mirror::sync_once(&state.config)).unwrap();
+    assert!(matches!(synced, mirror::Synced::Pushed { commit, .. } if commit == landed));
+    assert_eq!(mirror_tip(), landed.to_hex());
 }

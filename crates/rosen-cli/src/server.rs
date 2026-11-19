@@ -56,6 +56,7 @@ fn print_status(json: bool, status: &ServerStatus) {
             "listen": status.listen,
             "fingerprint": status.fingerprint,
             "upstream": status.upstream,
+            "mirror_owner": status.mirror_owner,
         });
         println!("{body}");
     } else {
@@ -74,6 +75,11 @@ fn print_status(json: bool, status: &ServerStatus) {
         }
         if let Some(upstream) = &status.upstream {
             println!("cache for: {upstream}");
+        }
+        match status.mirror_owner {
+            Some(true) => println!("mirror: pushes (mirror owner)"),
+            Some(false) => println!("mirror: never pushes (not the mirror owner)"),
+            None => {}
         }
     }
 }

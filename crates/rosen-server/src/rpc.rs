@@ -339,5 +339,6 @@ fn status(state: &ServerState) -> ServerStatus {
         listen: network.as_ref().map(|(address, _)| address.to_string()),
         fingerprint: network.map(|(_, fingerprint)| fingerprint),
         upstream: None,
+        mirror_owner: Some(crate::mirror::owner::is_owner(&state.config.data_dir)),
     }
 }

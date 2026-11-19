@@ -70,6 +70,7 @@ impl CacheState {
             listen: None,
             fingerprint: None,
             upstream: Some(self.upstream.address.clone()),
+            mirror_owner: None,
         }
     }
 

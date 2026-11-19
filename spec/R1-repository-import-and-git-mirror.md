@@ -53,6 +53,17 @@
 - One background task on the server does every push.
   It pushes the base tip, so lands made during a push go out with the next one.
   It also pushes at server start, so a push a crash interrupted still happens.
+- **Mirror owner.**
+  Only the project's authoritative server pushes its mirror.
+  A server pushes only when it is marked as the mirror owner; Velocity marks the one it starts for each project.
+  `rosen-server --mirror-owner` sets the mark, `--not-mirror-owner` removes it, and a daemon a client starts is marked when `ROSEN_MIRROR_OWNER` names its data directory.
+  The mark is kept in the data directory with that directory's own path, so it survives restarts and a copied data directory is not an owner.
+  Any other server, including a second machine's server for the same project or one an agent starts for a test, keeps the mirror setting but never pushes.
+  It publishes one `mirror` event with status `not_owner` per run when its base is ahead of the mirror, and `rosen server status` says whether the server pushes.
+- **Remote tip check.**
+  Before each push, the server reads the mirror branch's tip.
+  The push goes ahead when the branch is missing, is the commit this server last pushed, or is another commit the base holds, such as a push a crash kept it from recording; a tip equal to the base is recorded as pushed without a push.
+  Any other tip means another writer pushed there: the server refuses with a `rejected` failure naming the tip, the commit it last pushed, the base and up to 20 commits the mirror has that the base lacks, and pushes nothing.
 - Each failed push publishes a `mirror` event with the error and the retry delay.
   Retries back off from 1 s to at most 5 min.
   A push the remote refused is marked `rejected`.
