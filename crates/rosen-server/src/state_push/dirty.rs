@@ -148,12 +148,18 @@ impl Pending {
         since.get_or_insert_with(Instant::now);
     }
 
-    /// A relay report: only a new setting changes what Collapse is told.
+    /// A relay report: a new setting changes what Collapse is told, and a
+    /// relayed revoke (#409) the machine list. The owner who revoked from
+    /// Collapse waits on that list, so it goes without the quiet spell.
     fn mark_relay(&mut self, detail: &Value) {
-        if detail.get("status").and_then(Value::as_str) == Some("setting") {
-            self.relay = true;
-            self.urgent_since.get_or_insert_with(Instant::now);
+        let status = detail.get("status").and_then(Value::as_str);
+        let kind = detail.get("kind").and_then(Value::as_str);
+        match (status, kind) {
+            (Some("setting"), _) => self.relay = true,
+            (Some("done"), Some("machine_revoke")) => self.machines = true,
+            _ => return,
         }
+        self.urgent_since.get_or_insert_with(Instant::now);
     }
 
     /// A channel line: presence when membership or a mode changed, and the

@@ -1,7 +1,7 @@
 //! The Collapse action relay (R14 "Collapse action relay"): the server
-//! fetches the owner's approve, land, mark and configuration change
-//! requests from its Collapse endpoint and runs them through its normal
-//! RPCs, under an allow-list only the operator sets.
+//! fetches the owner's approve, land, mark, configuration change and
+//! machine revoke requests from its Collapse endpoint and runs them through
+//! its normal RPCs, under an allow-list only the operator sets.
 //!
 //! Collapse sits behind no NAT but the server does, so the server pulls.
 //! It never polls Collapse's origin: every 20 s it reads the doorbell,
@@ -15,6 +15,7 @@
 
 mod action;
 mod config_change;
+mod machine_revoke;
 mod remote;
 mod store;
 

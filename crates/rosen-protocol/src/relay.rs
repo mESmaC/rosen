@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 pub const COLLAPSE_MACHINE: &str = "collapse";
 
 /// An action kind the operator can allow. Claims, messages, receipts,
-/// abandon, rebase, conflict resolution, machine commands and imports are
-/// never relayed, so they have no kind.
+/// abandon, rebase, conflict resolution, imports and every machine or key
+/// command but revoke are never relayed, so they have no kind.
 ///
 /// Serialized as the word the operator allows (`config`); the action
 /// Collapse queues names it by [`RelayKind::action_name`].
@@ -26,14 +26,19 @@ pub enum RelayKind {
     /// `config_change`: opens a change carrying a new `rosen.toml` (#405).
     /// It never approves or lands it.
     Config,
+    /// `machine_revoke` (#409): `machine revoke` of a lost or stolen
+    /// machine. It only removes access, so a misuse costs a re-enrollment,
+    /// never data. Joining and approval are never relayed.
+    Revoke,
 }
 
 impl RelayKind {
-    pub const ALL: [RelayKind; 4] = [
+    pub const ALL: [RelayKind; 5] = [
         RelayKind::Approve,
         RelayKind::Land,
         RelayKind::Mark,
         RelayKind::Config,
+        RelayKind::Revoke,
     ];
 
     /// The word `rosen server relay --allow` takes and the setting stores.
@@ -43,6 +48,7 @@ impl RelayKind {
             RelayKind::Land => "land",
             RelayKind::Mark => "mark",
             RelayKind::Config => "config",
+            RelayKind::Revoke => "revoke",
         }
     }
 
@@ -50,6 +56,7 @@ impl RelayKind {
     pub fn action_name(self) -> &'static str {
         match self {
             RelayKind::Config => "config_change",
+            RelayKind::Revoke => "machine_revoke",
             other => other.as_str(),
         }
     }

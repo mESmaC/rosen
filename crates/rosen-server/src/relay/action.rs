@@ -6,7 +6,8 @@
 //! stale-head check, a land through every R8 gate, and a mark through R7's
 //! coverage rules; a refusal goes back to Collapse as Rosen gave it. A
 //! configuration change only opens a change, which then needs its tier's
-//! approval and receipt like any other.
+//! approval and receipt like any other. A machine revoke only removes
+//! access; joining and approving machines are never relayed.
 
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use rosen_protocol::{
 use serde_json::{json, Value};
 
 use super::config_change::{self, ConfigChange};
+use super::machine_revoke::{self, MachineRevoke};
 use super::remote::{Fetched, MAX_RESULT};
 use crate::reviews::{self, ReviewCall};
 use crate::ServerState;
@@ -37,6 +39,7 @@ pub enum Call {
     Land(String),
     Mark(MarkReviewed, ObjectId),
     Config(ConfigChange),
+    Revoke(MachineRevoke),
 }
 
 /// Refuses what must not run: a kind Rosen never relays or the operator
@@ -88,8 +91,10 @@ fn arguments(
         let value = text(key)?;
         ObjectId::from_hex(value).map_err(|_| format!("{key} {value:?} is not a commit ID"))
     };
-    if kind == RelayKind::Config {
-        return config_change::arguments(account, args).map(Call::Config);
+    match kind {
+        RelayKind::Config => return config_change::arguments(account, args).map(Call::Config),
+        RelayKind::Revoke => return machine_revoke::arguments(account, args).map(Call::Revoke),
+        _ => {}
     }
     let change = text("change")?.to_owned();
     Ok(match kind {
@@ -106,7 +111,7 @@ fn arguments(
                 .map_err(|e| e.to_string())?;
             Call::Mark(MarkReviewed { change, state, by }, commit("commit")?)
         }
-        RelayKind::Config => unreachable!("read above"),
+        RelayKind::Config | RelayKind::Revoke => unreachable!("read above"),
     })
 }
 
@@ -121,6 +126,7 @@ pub async fn run(state: &Arc<ServerState>, call: Call) -> Done {
         Call::Land(change) => crate::landing::service::land(state, change).await,
         Call::Mark(req, commit) => reviews::handle(state, ReviewCall::MarkAt(req, commit)).await,
         Call::Config(req) => return config_change::run(state, req).await,
+        Call::Revoke(req) => return machine_revoke::run(state, req).await,
     };
     match outcome {
         Outcome::Ok(Response::Land(answer)) => {
@@ -182,6 +188,7 @@ pub async fn recover(state: &Arc<ServerState>, call: &Call, started_at: i64) -> 
         }
         Call::Land(_) => None,
         Call::Config(req) => config_change::recover(state, req, started_at).await,
+        Call::Revoke(req) => machine_revoke::recover(state, req).await,
     }
 }
 
@@ -191,6 +198,7 @@ fn command(call: &Call) -> &'static str {
         Call::Land(_) => "land",
         Call::Mark(..) => "mark",
         Call::Config(_) => "config_change",
+        Call::Revoke(_) => "machine_revoke",
     }
 }
 

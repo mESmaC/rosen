@@ -116,7 +116,8 @@ fn relay_kinds(allow: &[String]) -> Result<Vec<RelayKind>, String> {
         .map(|word| {
             RelayKind::parse(word).ok_or_else(|| {
                 format!(
-                    "unknown relay kind {word:?}; use approve, land, mark, config or none alone"
+                    "unknown relay kind {word:?}; use approve, land, mark, config, revoke \
+                     or none alone"
                 )
             })
         })
