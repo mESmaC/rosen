@@ -2,6 +2,8 @@
 
 - R1–R14 are built and run on Windows 11.
   The Linux build compiles.
+- Each GitHub release provides `rosen` and `rosen-server` with the suffix `-x86_64-pc-windows-msvc.exe` for Windows x86-64 and `-x86_64-unknown-linux-gnu` for Linux x86-64.
+  `SHA256SUMS.txt` lists the four binary hashes, and `rosen-client-commit.txt` contains the full Rosen source commit SHA used to build them.
 - **The stress run passes on at least three Windows 11 machines**, enrolled with one join key and no interactive step, one of them serving the project:
   - 100 concurrent agents spread across the machines, each creating a change (some stacked), editing, claiming, submitting receipts and landing, over at least 1000 lands;
   - a new workspace is ready in under 2 s (p95) with the warm pool filled;
