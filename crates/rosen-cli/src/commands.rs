@@ -783,6 +783,15 @@ pub enum MirrorCommand {
         #[arg(value_name = "COMMIT")]
         commit: rosen_core::ObjectId,
     },
+    /// Fast-forward the base to the mirror branch when another Rosen server
+    /// landed there.
+    ///
+    /// Run on the server using its local endpoint. The server fetches the
+    /// mirror branch, stores its new commits with their git IDs, moves the
+    /// base to its tip and rebases open changes onto it. It refuses when the
+    /// histories have diverged and names the commits on each side. Event
+    /// positions, machines and channel history are kept.
+    CatchUp,
     /// Drop literal files or directories from all commits after the last
     /// successful mirror push. Run locally on the authoritative server.
     /// The server pauses landing and pushes, refuses already-published
@@ -800,6 +809,7 @@ impl Command {
     pub fn path(&self) -> &'static str {
         match self {
             Command::Mirror(MirrorCommand::Adopt { .. }) => "mirror adopt",
+            Command::Mirror(MirrorCommand::CatchUp) => "mirror catch-up",
             Command::Mirror(MirrorCommand::DropPaths { .. }) => "mirror drop-paths",
             Command::Import { .. } => "import",
             Command::Change(sub) => sub.path(),

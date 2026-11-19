@@ -89,7 +89,10 @@ fn reported_failure(remote: &str, output: &Output) -> PushFailure {
         line.ends_with("\t[rejected] (fetch first)")
             || line.ends_with("\t[rejected] (non-fast-forward)")
     }) {
-        message.push_str("\nLand the mirror's edits in Rosen, then run `rosen mirror adopt <mirror-tip>` on the server.");
+        message.push_str(
+            "\nIf another Rosen server landed there, run `rosen mirror catch-up` on this server. \
+             Otherwise land the mirror's edits in Rosen, then run `rosen mirror adopt <mirror-tip>` on the server.",
+        );
     }
     PushFailure {
         rejected: refusal.is_some(),

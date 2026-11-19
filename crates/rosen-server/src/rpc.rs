@@ -26,6 +26,15 @@ pub async fn dispatch_from(
             )),
         };
     }
+    if let Request::MirrorCatchUp = request {
+        return match origin {
+            crate::receipts::Origin::Local => crate::mirror::catch_up::handle(state).await,
+            _ => Outcome::Error(ErrorBody::new(
+                ErrorCode::Refused,
+                "mirror catch-up is an operator command; run it on the server using its local endpoint",
+            )),
+        };
+    }
     if let Request::MirrorDropPaths { paths } = request {
         return match origin {
             crate::receipts::Origin::Local => crate::mirror::rewrite::handle(state, paths).await,

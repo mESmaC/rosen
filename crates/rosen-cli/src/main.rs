@@ -109,6 +109,9 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
         Command::Mirror(commands::MirrorCommand::Adopt { commit }) => {
             block_on(mirror_cmd::adopt(json, &endpoint, *commit))
         }
+        Command::Mirror(commands::MirrorCommand::CatchUp) => {
+            block_on(mirror_cmd::catch_up(json, &endpoint))
+        }
         Command::Mirror(commands::MirrorCommand::DropPaths { paths }) => {
             block_on(mirror_cmd::drop_paths(json, &endpoint, paths))
         }

@@ -75,7 +75,18 @@ async fn adopt(state: &Arc<ServerState>, remote_tip: ObjectId) -> Result<MirrorA
 }
 
 async fn fetch_tip(staging: &Path, remote: &str, branch: &str, expected: ObjectId) -> Result<()> {
-    const FETCHED: &str = "refs/rosen-adopt";
+    let actual = fetch_branch(staging, remote, branch).await?;
+    ensure!(
+        actual == expected,
+        "mirror branch {branch} is at {actual}, expected {expected}; inspect the current tip and retry"
+    );
+    Ok(())
+}
+
+/// Fetches the mirror's `branch` (a full ref name) into the staging
+/// repository and returns its tip.
+pub(super) async fn fetch_branch(staging: &Path, remote: &str, branch: &str) -> Result<ObjectId> {
+    const FETCHED: &str = "refs/rosen-mirror-tip";
     let refspec = format!("{branch}:{FETCHED}");
     run_bytes(
         staging,
@@ -93,12 +104,7 @@ async fn fetch_tip(staging: &Path, remote: &str, branch: &str, expected: ObjectI
     )
     .await?;
     let output = run_bytes(staging, remote, &["rev-parse", "--verify", FETCHED]).await?;
-    let actual: ObjectId = std::str::from_utf8(&output)?.trim().parse()?;
-    ensure!(
-        actual == expected,
-        "mirror branch {branch} is at {actual}, expected {expected}; inspect the current tip and retry"
-    );
-    Ok(())
+    Ok(std::str::from_utf8(&output)?.trim().parse()?)
 }
 
 async fn common_ancestor(

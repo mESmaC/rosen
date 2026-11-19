@@ -124,6 +124,9 @@ pub enum Request {
     MirrorAdopt {
         commit: rosen_core::ObjectId,
     },
+    /// Operator-only: fast-forward the base to the Git mirror tip when the
+    /// mirror gained lands from another server.
+    MirrorCatchUp,
     /// Operator-only: remove literal paths from unmirrored base history.
     MirrorDropPaths {
         paths: Vec<String>,
@@ -344,6 +347,7 @@ pub enum Request {
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Response {
     MirrorAdopted(crate::MirrorAdoption),
+    MirrorCaughtUp(crate::MirrorCatchUp),
     MirrorRewritten(crate::HistoryRewrite),
     Bisection(crate::BisectState),
     Machines(Vec<crate::machine::MachineRecord>),

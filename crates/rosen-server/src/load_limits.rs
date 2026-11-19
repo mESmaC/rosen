@@ -98,6 +98,7 @@ pub(crate) fn large_request(request: &Request) -> bool {
             | Request::Land { .. }
             | Request::Import { .. }
             | Request::MirrorAdopt { .. }
+            | Request::MirrorCatchUp
             | Request::MirrorDropPaths { .. }
     )
 }

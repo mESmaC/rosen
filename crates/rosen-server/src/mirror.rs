@@ -16,6 +16,7 @@
 //! import, which sets the base without a land.
 
 pub(crate) mod adopt;
+pub(crate) mod catch_up;
 mod push;
 pub mod rewrite;
 mod state;

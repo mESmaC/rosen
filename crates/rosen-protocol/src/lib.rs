@@ -20,7 +20,9 @@ pub mod machine;
 pub mod message;
 pub mod mirror;
 pub use machine::*;
-pub use mirror::{HistoryRewrite, MirrorAdoption};
+pub use mirror::{
+    CatchUpRebaseError, CatchUpStatus, HistoryRewrite, MirrorAdoption, MirrorCatchUp,
+};
 pub mod objects;
 pub mod pool;
 pub mod post_land;

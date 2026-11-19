@@ -15,6 +15,16 @@
   The base ref, history entry and `mirror` event are committed atomically.
   This ancestry-only entry is excluded from landed-change checks and bisection.
   The mirror worker wakes and pushes the new base through the ordinary fast-forward path.
+- **Catch up from the mirror.**
+  When another Rosen server for the same project landed on the mirror, the operator runs `rosen mirror catch-up` on the server's local endpoint.
+  The server pauses landing and mirror pushes, fetches the mirror branch and compares its tip with the base.
+  A tip the base already contains changes nothing; the ordinary push sends the rest.
+  When the base is an ancestor of the tip, the server stores the new commits with their git IDs unchanged and moves the base to the tip by compare-and-swap.
+  The same transaction records each commit on the tip's first-parent line in base history as imported (`mirror` tier, no change, post-land work done), records the tip as pushed and stages a `mirror` event with status `caught_up`.
+  Imported commits are excluded from landed-change checks, landed reviews and bisection, because the other server landed and checked them.
+  The server then rebases every open change built on an older base onto the new base, with the usual `rebased` and `conflict` events; a change that cannot move is reported and rebases when it lands.
+  When the base has commits the tip lacks and the tip has commits the base lacks, the server refuses and moves nothing, naming both tips and up to 20 commits on each side, so a person or `rosen mirror adopt` decides.
+  Catching up keeps the server's event sequence, cursors, machines and channel history, so clients do not see a new database.
 - Before landing, every resulting tree (including intermediate stacked layers and server reverts) must contain no file larger than `max_file_size` bytes.
   This root `rosen.toml` setting defaults to 104857600 (100 MiB, GitHub's limit), and applies even without a mirror.
   The setting in the attempt's base governs it; a change cannot raise its own limit.
@@ -46,6 +56,6 @@
 - Each failed push publishes a `mirror` event with the error and the retry delay.
   Retries back off from 1 s to at most 5 min.
   A push the remote refused is marked `rejected`.
-  A non-fast-forward rejection points the operator to `rosen mirror adopt`.
+  A non-fast-forward rejection points the operator to `rosen mirror catch-up` when another server landed there, and otherwise to `rosen mirror adopt`.
   The first push that succeeds after failures publishes a `mirror` event too.
 - **Accept when:** a repo imported and then landed on shows the same history in `git log` on the mirror, with one commit per change and its trailers.

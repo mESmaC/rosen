@@ -227,3 +227,190 @@ fn ported_tree(state: &ServerState) -> ObjectId {
     .unwrap();
     store.put_tree(&tree).unwrap()
 }
+
+/// Commits `contents` to a.txt in `source` on top of the mirror's main and
+/// pushes it, as another Rosen server's land reaches the shared mirror.
+fn land_elsewhere(source: &Path, mirror: &Path, contents: &[&str]) -> ObjectId {
+    let remote = mirror.to_str().unwrap();
+    git(source, &["fetch", "--quiet", remote, "main"]);
+    git(source, &["checkout", "--quiet", "-B", "main", "FETCH_HEAD"]);
+    for text in contents {
+        std::fs::write(source.join("a.txt"), text).unwrap();
+        git(source, &["commit", "--quiet", "-am", text.trim()]);
+    }
+    git(source, &["push", "--quiet", remote, "main"]);
+    git(mirror, &["rev-parse", "refs/heads/main"])
+        .parse()
+        .unwrap()
+}
+
+/// A server that imported a one-commit repository with a bare mirror. The
+/// directories live as long as the server.
+struct Mirrored {
+    source: tempfile::TempDir,
+    _remote: tempfile::TempDir,
+    mirror: std::path::PathBuf,
+    _data: tempfile::TempDir,
+    state: Arc<ServerState>,
+    runtime: tokio::runtime::Runtime,
+}
+
+fn mirrored_server() -> Mirrored {
+    let source = tempfile::tempdir().unwrap();
+    git(source.path(), &["init", "--quiet", "--initial-branch=main"]);
+    std::fs::write(
+        source.path().join("a.txt"),
+        "one
+",
+    )
+    .unwrap();
+    git(source.path(), &["add", "."]);
+    git(source.path(), &["commit", "--quiet", "-m", "first"]);
+    let remote = tempfile::tempdir().unwrap();
+    let mirror = remote.path().join("mirror.git");
+    let mirror_arg = mirror.to_string_lossy().into_owned();
+    let source_arg = source.path().to_string_lossy().into_owned();
+    git(
+        remote.path(),
+        &["clone", "--quiet", "--bare", &source_arg, &mirror_arg],
+    );
+    let data = tempfile::tempdir().unwrap();
+    let state = ServerState::new(ServerConfig {
+        data_dir: data.path().to_path_buf(),
+        endpoint: Endpoint::new("rosen-mirror-catch-up-test-unused"),
+        warm_pool_dir: None,
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let imported = service::handle(&state, source_arg, None, Some(mirror_arg));
+    assert!(matches!(runtime.block_on(imported), Outcome::Ok(_)));
+    Mirrored {
+        source,
+        _remote: remote,
+        mirror,
+        _data: data,
+        state,
+        runtime,
+    }
+}
+
+#[test]
+fn catch_up_fast_forwards_to_another_servers_lands() {
+    // Risk (#416): a server whose mirror gained another server's lands can
+    // never push again. Catching up must move the base only by
+    // fast-forward, keep the event log the clients follow, rebase open
+    // changes, and leave the next land a fast-forward push.
+    let Mirrored {
+        source,
+        mirror: mirror_dir,
+        state,
+        runtime,
+        // Bound, not `..`: an unbound temporary directory is deleted here.
+        _remote: _remote_dir,
+        _data: _data_dir,
+    } = mirrored_server();
+    let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
+    let (_, imported_base) = ledger.project_base().unwrap().unwrap();
+    let change = open_change(&state, imported_base);
+
+    let elsewhere = land_elsewhere(source.path(), &mirror_dir, &["two\n", "three\n"]);
+    let seen = state.events.announced_seq();
+    let catch_up = || runtime.block_on(rosen_server::rpc::dispatch(&state, Request::MirrorCatchUp));
+    let Outcome::Ok(Response::MirrorCaughtUp(answer)) = catch_up() else {
+        panic!("expected the catch-up to succeed");
+    };
+    assert_eq!(answer.status, rosen_protocol::CatchUpStatus::FastForwarded);
+    assert_eq!(
+        (answer.old_base, answer.new_base),
+        (imported_base, elsewhere)
+    );
+    assert_eq!(answer.commits.len(), 2);
+    assert_eq!(answer.rebased, vec![change.to_string()]);
+    assert_eq!(ledger.base("main").unwrap(), Some(elsewhere));
+    let events = state.events.after(seen);
+    assert!(events.first().is_some_and(|event| event.seq == seen + 1));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == EventKind::Mirror && event.detail["status"] == "caught_up"));
+    assert!(events.iter().any(|event| event.kind == EventKind::Rebased
+        && event.change.as_deref() == Some(&change.to_string())));
+    assert_rebased_head(&state, change);
+
+    let again = catch_up();
+    assert!(
+        matches!(again, Outcome::Ok(Response::MirrorCaughtUp(a)) if a.status == rosen_protocol::CatchUpStatus::UpToDate)
+    );
+    let worker = runtime.spawn(mirror::run(Arc::clone(&state)));
+    let next = land(&state, 7, None);
+    let mirror_tip = || git(&mirror_dir, &["rev-parse", "refs/heads/main"]);
+    wait_for("the next land pushes fast-forward", || {
+        mirror_tip() == next.to_hex()
+    });
+    refuse_diverged(&state, &runtime, source.path(), &mirror_dir);
+    state.request_shutdown();
+    runtime.block_on(worker).unwrap();
+}
+
+/// An open change on the imported base that adds b.txt.
+fn open_change(state: &ServerState, base: ObjectId) -> ChangeId {
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let one = store.put_blob(b"one\n").unwrap();
+    let mine = store.put_blob(b"mine\n").unwrap();
+    let tree = Tree::new(vec![
+        TreeEntry::new(FileMode::Regular, b"a.txt".to_vec(), one).unwrap(),
+        TreeEntry::new(FileMode::Regular, b"b.txt".to_vec(), mine).unwrap(),
+    ])
+    .unwrap();
+    let head = store.put_tree(&tree).unwrap();
+    let change = ChangeId::from_bytes([6; 16]);
+    state
+        .changes
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO changes (id, owner, parent_base, state, head, created_at, updated_at)
+             VALUES (?1, 'agent', ?2, 'open', ?3, 0, 0)",
+                rusqlite::params![change.to_string(), base.to_hex(), head.to_hex()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    change
+}
+
+/// The rebased head keeps the change's file and takes the mirror's edit.
+fn assert_rebased_head(state: &ServerState, change: ChangeId) {
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let record = state.changes.show(&change.to_string()).unwrap();
+    let tree = store.read_tree(&record.change.head).unwrap();
+    let text = |name: &[u8]| {
+        let entry = tree.entries().iter().find(|e| e.name == name).unwrap();
+        store.read_blob(&entry.id).unwrap().data
+    };
+    assert_eq!(text(b"a.txt"), b"three\n");
+    assert_eq!(text(b"b.txt"), b"mine\n");
+}
+
+/// Histories that diverged are refused, naming both tips, and the base
+/// stays where it was.
+fn refuse_diverged(
+    state: &Arc<ServerState>,
+    runtime: &tokio::runtime::Runtime,
+    source: &Path,
+    mirror: &Path,
+) {
+    let elsewhere = land_elsewhere(source, mirror, &["four\n"]);
+    let here = land(state, 8, None);
+    let refused = runtime.block_on(rosen_server::rpc::dispatch(state, Request::MirrorCatchUp));
+    let Outcome::Error(error) = refused else {
+        panic!("expected diverged histories to be refused");
+    };
+    assert_eq!(error.code, ErrorCode::Refused);
+    assert!(error.message.contains("diverged"), "{}", error.message);
+    assert!(error.message.contains(&here.to_hex()), "{}", error.message);
+    assert!(
+        error.message.contains(&elsewhere.to_hex()),
+        "{}",
+        error.message
+    );
+    let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
+    assert_eq!(ledger.base("main").unwrap(), Some(here));
+}
