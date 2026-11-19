@@ -5,4 +5,5 @@
   A forced supervisor exit closes the non-inherited, kill-on-close job handle and stops descendants.
   If containment cannot be established, the command does not start.
   Nested runs stay inside their ancestor's job.
-  When using `rosen run`, standard input and output stay attached to the caller without requiring a PTY.
+  When using `rosen run`, standard input stays attached to the caller without requiring a PTY.
+  With `--full` or `--json`, the output streams also stay attached to the caller.

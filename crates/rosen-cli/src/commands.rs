@@ -318,9 +318,10 @@ pub enum Command {
     /// Builds and tests on one machine take turns: each then has the cores
     /// to itself and finishes sooner than many running side by side. Put a
     /// heavy command behind it, such as `rosen run -- cargo build -p
-    /// my-crate`. It waits for the turn, runs the command with this
-    /// terminal's input and output, and exits with the command's status.
-    /// While it waits it says, on standard error, what is running.
+    /// my-crate`. It waits for the turn and exits with the command's status.
+    /// It saves the command's output to a log and prints a summary with the
+    /// log path. Use `--full` to stream output directly to this terminal.
+    /// While it waits it reports queue changes on standard error.
     ///
     /// The checks a land waits on go first, then agents' own runs, then the
     /// tests after a land, then the warm pool's prepares. Nothing waits for
@@ -341,6 +342,9 @@ pub struct RunArgs {
     /// `reserve-gib=default` restores 20% of RAM. Runs no command.
     #[arg(long, num_args = 0.., value_delimiter = ',', value_name = "CLASS=N")]
     pub slots: Option<Vec<String>>,
+    /// Stream the command's output directly to the caller.
+    #[arg(long, conflicts_with = "slots")]
+    pub full: bool,
     /// The command and its arguments, after `--`.
     #[arg(
         last = true,

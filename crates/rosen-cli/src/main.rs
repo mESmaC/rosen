@@ -75,7 +75,7 @@ fn run_in_turn(json: bool, args: &commands::RunArgs) -> ExitCode {
             }
         };
     }
-    match run_cmd::run(json, &args.class, &args.command) {
+    match run_cmd::run(json, args) {
         Ok(status) if status.success() => ExitCode::SUCCESS,
         Ok(status) => match status.code().map(u8::try_from) {
             Some(Ok(code)) => ExitCode::from(code),

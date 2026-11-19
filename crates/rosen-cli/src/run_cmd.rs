@@ -1,49 +1,66 @@
 //! `rosen run`: one command, run in its turn in the machine's run queue
 //! (SPEC R3 "Run queue").
 
+mod log;
+
+use std::fs::File;
 use std::io;
-use std::process::{Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::process::{Command, ExitStatus};
+use std::time::Instant;
 
 use rosen_client::run_queue::{
-    self, Entry, RunBudget, RunClass, RunQueue, Turn, Waiter, HELD_ENV, POLL, THREAD_VARIABLES,
+    self, RunBudget, RunClass, RunQueue, Turn, Waiter, HELD_ENV, POLL, THREAD_VARIABLES,
 };
 
-/// How often a waiting run says what it is waiting for.
-const SAY_EVERY: Duration = Duration::from_secs(30);
+use crate::commands::RunArgs;
+use log::RunLog;
 
-/// Waits for the turn, runs `command` with this process's input and output,
-/// and gives its exit status.
+/// Waits for the turn, runs the command, and gives its exit status.
 /// Beneath a run that already holds a turn, the command runs at once, in it.
-pub fn run(json: bool, class: &str, command: &[String]) -> io::Result<ExitStatus> {
-    let class = RunClass::parse(class).ok_or_else(|| {
+pub fn run(json: bool, args: &RunArgs) -> io::Result<ExitStatus> {
+    let class = RunClass::parse(&args.class).ok_or_else(|| {
         io::Error::other(format!(
-            "unknown class `{class}`: use landing, build, verify or prepare"
+            "unknown class `{}`: use landing, build, verify or prepare",
+            args.class
         ))
     })?;
-    let (program, arguments) = command
+    let (program, arguments) = args
+        .command
         .split_first()
         .ok_or_else(|| io::Error::other("a command is required after `--`"))?;
+    #[cfg(windows)]
+    if let Some(output) = std::env::var_os(WORKER_ENV) {
+        let log = (output != "1").then(|| Path::new(&output));
+        return spawn(program, arguments, class, None, log)?.wait();
+    }
     let (turn, holding) = match run_queue::held() {
         Some(held) => (None, held),
         None => {
-            let note = format!("{} in {}", command.join(" "), current_dir());
+            let note = format!("{} in {}", args.command.join(" "), current_dir());
             (Some(turn(class, &note)?), class)
         }
     };
     let budget = turn.as_ref().map(Turn::budget);
+    let log = (!args.full && !json).then(RunLog::create).transpose()?;
+    let output = log.as_ref().map(RunLog::path);
+    let started = Instant::now();
     #[cfg(windows)]
-    if std::env::var_os(WORKER_ENV).is_none() {
-        return run_tree(json, command, holding, budget);
-    }
+    let result = run_tree(json, &args.command, holding, budget, output);
     #[cfg(not(windows))]
-    let _ = json;
-    spawn(program, arguments, holding, budget)?.wait()
+    let result =
+        spawn(program, arguments, holding, budget, output).and_then(|mut child| child.wait());
+    drop(turn);
+    if let Some(log) = log {
+        log.report(&args.command, &result, started.elapsed());
+    }
+    result
 }
 
 // The job owns a small launcher so Rust can keep doing executable lookup
 // and batch-file escaping. Only that launcher skips creating another job;
 // its command never inherits this private marker, including nested runs.
+// The marker carries the log path, or `1` when output is inherited.
 #[cfg(windows)]
 const WORKER_ENV: &str = "ROSEN_RUN_TREE_WORKER";
 
@@ -53,6 +70,7 @@ fn run_tree(
     command: &[String],
     holding: RunClass,
     budget: Option<RunBudget>,
+    log: Option<&Path>,
 ) -> io::Result<ExitStatus> {
     use rosen_platform::run_tree::ProcessTree;
     use std::ffi::OsStr;
@@ -69,7 +87,10 @@ fn run_tree(
     ]);
     args.extend(command.iter().map(OsStr::new));
     let mut environment = vec![
-        (OsStr::new(WORKER_ENV), OsStr::new("1")),
+        (
+            OsStr::new(WORKER_ENV),
+            log.map_or(OsStr::new("1"), Path::as_os_str),
+        ),
         (OsStr::new(HELD_ENV), OsStr::new(holding.name())),
     ];
     let threads = budget.map(|budget| budget.jobs.to_string());
@@ -83,47 +104,62 @@ fn run_tree(
 }
 
 fn turn(class: RunClass, note: &str) -> io::Result<Turn> {
-    let waiter = RunQueue::machine()?.wait(class, note)?;
-    let (started, mut said) = (Instant::now(), None::<Instant>);
+    let queue = RunQueue::machine()?;
+    let waiter = queue.wait(class, note)?;
+    let started = Instant::now();
+    let mut next_report = started + POLL * 20;
+    let mut previous = None;
     loop {
         if let Some(turn) = waiter.try_start()? {
             return Ok(turn);
         }
-        if said.is_none_or(|said| said.elapsed() >= SAY_EVERY) && started.elapsed() >= POLL * 20 {
-            say_waiting(&waiter, class, started.elapsed());
-            said = Some(Instant::now());
+        if Instant::now() >= next_report {
+            next_report = Instant::now() + POLL * 10;
+            if let Ok(progress) = WaitProgress::read(&waiter) {
+                if previous.as_ref() != Some(&progress) {
+                    progress.print(&queue, class, started);
+                    previous = Some(progress);
+                }
+            }
         }
         std::thread::sleep(POLL);
     }
 }
 
-/// On standard error, so a waiting run's output stays the command's own.
-fn say_waiting(waiter: &Waiter, class: RunClass, waited: Duration) {
-    let ahead = waiter.ahead().unwrap_or_default();
-    let running: Vec<String> = ahead
-        .iter()
-        .filter(|entry| entry.running)
-        .map(describe)
-        .collect();
-    let waiting = ahead.iter().filter(|entry| !entry.running).count();
-    eprintln!(
-        "rosen run: waited {}s for a turn ({}; {}); running now: {}; {waiting} ahead in line",
-        waited.as_secs(),
-        class.name(),
-        resources(class),
-        if running.is_empty() {
-            "nothing".to_owned()
-        } else {
-            running.join(", ")
-        }
-    );
-    if let Ok(queue) = RunQueue::machine() {
-        eprintln!("rosen run: {}", memory_resources(&queue, Some(class)));
-    }
+#[derive(PartialEq, Eq)]
+struct WaitProgress {
+    running: Vec<String>,
+    waiting: usize,
 }
 
-fn describe(entry: &Entry) -> String {
-    format!("{} ({})", entry.note, entry.class.name())
+impl WaitProgress {
+    fn read(waiter: &Waiter) -> io::Result<Self> {
+        let ahead = waiter.ahead()?;
+        let mut running: Vec<_> = ahead
+            .iter()
+            .filter(|entry| entry.running)
+            .map(|entry| format!("{} ({})", entry.note, entry.class.name()))
+            .collect();
+        running.sort_unstable();
+        let waiting = ahead.len() - running.len();
+        Ok(Self { running, waiting })
+    }
+
+    fn print(&self, queue: &RunQueue, class: RunClass, started: Instant) {
+        let running = if self.running.is_empty() {
+            "nothing".to_owned()
+        } else {
+            self.running.join(", ")
+        };
+        eprintln!(
+            "rosen run: waited {}s for a turn ({}; {}); running now: {running}; {} ahead in line; {}",
+            started.elapsed().as_secs(),
+            class.name(),
+            resources(class),
+            self.waiting,
+            memory_resources(queue, Some(class)),
+        );
+    }
 }
 
 fn current_dir() -> String {
@@ -139,7 +175,12 @@ fn spawn(
     arguments: &[String],
     holding: RunClass,
     budget: Option<RunBudget>,
+    log: Option<&Path>,
 ) -> io::Result<std::process::Child> {
+    // Both handles append to the same file so neither stream can overwrite the other.
+    let log = log
+        .map(|path| File::options().append(true).open(path))
+        .transpose()?;
     let start = |name: &str| {
         let mut child = prioritized_command(name, holding);
         #[cfg(windows)]
@@ -150,13 +191,11 @@ fn spawn(
                 child.env(variable, &threads);
             }
         }
-        child
-            .args(arguments)
-            .env(HELD_ENV, holding.name())
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
+        child.args(arguments).env(HELD_ENV, holding.name());
+        if let Some(file) = &log {
+            child.stdout(file.try_clone()?).stderr(file.try_clone()?);
+        }
+        child.spawn()
     };
     match start(program) {
         Err(error) if cfg!(windows) && error.kind() == io::ErrorKind::NotFound => {
