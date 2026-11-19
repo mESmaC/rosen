@@ -97,7 +97,8 @@ async fn run_shell(
         OsStr::new(RunClass::Prepare.name()),
     )];
     environment.extend(THREAD_VARIABLES.map(|name| (OsStr::new(name), OsStr::new(&jobs))));
-    let (tree, mut pipe) = ProcessTree::spawn_shell(root, command, &environment, budget.memory)?;
+    let (mut tree, mut pipe) =
+        ProcessTree::spawn_shell(root, command, &environment, budget.memory)?;
     let output = tokio::task::spawn_blocking(move || {
         let mut tail = Vec::new();
         let mut buffer = [0; OUTPUT_TAIL];

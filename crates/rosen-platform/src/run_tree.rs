@@ -46,6 +46,9 @@ const DESCENDANT_GRACE: Duration = Duration::from_secs(3);
 pub struct ProcessTree {
     job: Job,
     process: OwnedHandle,
+    /// When `try_wait` first saw the launcher exited with members left,
+    /// which starts their grace period.
+    launcher_exited: Option<Instant>,
 }
 
 impl ProcessTree {
@@ -66,7 +69,7 @@ impl ProcessTree {
             flags: 0,
         };
         let process = create_process(&job.handle, &mut line, &settings, standard_handles()?)?;
-        Ok(Self { job, process })
+        Ok(Self::contain(job, process))
     }
 
     /// Runs a prepare script through cmd.exe with a bounded job and a pipe
@@ -102,7 +105,15 @@ impl ProcessTree {
         ];
         let job = Job::new(memory_limit)?;
         let process = create_process(&job.handle, &mut line, &settings, handles)?;
-        Ok((Self { job, process }, reader))
+        Ok((Self::contain(job, process), reader))
+    }
+
+    fn contain(job: Job, process: OwnedHandle) -> Self {
+        Self {
+            job,
+            process,
+            launcher_exited: None,
+        }
     }
 
     /// Returns the launcher's status after the job drains. Descendants of a
@@ -117,12 +128,22 @@ impl ProcessTree {
         Ok(status)
     }
 
-    /// Returns the status once the entire tree has stopped.
-    pub fn try_wait(&self) -> io::Result<Option<ExitStatus>> {
-        match self.exit_status(0)? {
-            Some(status) if self.job.active()? == 0 => Ok(Some(status)),
-            _ => Ok(None),
+    /// Returns the status once the entire tree has stopped. Like `wait`, it
+    /// terminates members that outlive the launcher by the grace period, so a
+    /// helper such as MSVC's vctip.exe cannot keep a polled turn forever.
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        let Some(status) = self.exit_status(0)? else {
+            return Ok(None);
+        };
+        if self.job.active()? == 0 {
+            return Ok(Some(status));
         }
+        let exited = *self.launcher_exited.get_or_insert_with(Instant::now);
+        if exited.elapsed() < DESCENDANT_GRACE {
+            return Ok(None);
+        }
+        self.job.terminate()?;
+        Ok(Some(status))
     }
 
     fn exit_status(&self, timeout: u32) -> io::Result<Option<ExitStatus>> {
@@ -444,14 +465,32 @@ impl Drop for Attributes<'_> {
 mod tests {
     use super::{Duration, Instant, ProcessTree};
 
+    const LINGERING: &str = r#"start "" /B "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30""#;
+
     // A background helper can hold the machine's turn after the launcher exits.
     #[test]
     fn successful_wait_stops_lingering_descendants() {
         let dir = std::env::current_dir().unwrap();
-        let command = r#"start "" /B "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30""#;
         let started = Instant::now();
-        let (tree, _output) = ProcessTree::spawn_shell(&dir, command, &[], 512 << 20).unwrap();
+        let (tree, _output) = ProcessTree::spawn_shell(&dir, LINGERING, &[], 512 << 20).unwrap();
         assert!(tree.wait().unwrap().success());
+        assert!((Duration::from_secs(3)..Duration::from_secs(20)).contains(&started.elapsed()));
+    }
+
+    // Workspace prepare polls; a lingering helper would hold its Prepare turn.
+    #[test]
+    fn polled_wait_stops_lingering_descendants() {
+        let dir = std::env::current_dir().unwrap();
+        let started = Instant::now();
+        let (mut tree, _output) =
+            ProcessTree::spawn_shell(&dir, LINGERING, &[], 512 << 20).unwrap();
+        let status = loop {
+            if let Some(status) = tree.try_wait().unwrap() {
+                break status;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(status.success());
         assert!((Duration::from_secs(3)..Duration::from_secs(20)).contains(&started.elapsed()));
     }
 }
