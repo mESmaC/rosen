@@ -33,7 +33,7 @@ impl Client {
         }
         let change = change.to_owned();
         let record = expect_change(self.request(Request::ChangeAbandon { change }).await?)?;
-        for report in self.cleanup_workspaces().await? {
+        for report in self.cleanup_change_workspaces(record.change.id).await? {
             if let Some(error) = report.error {
                 eprintln!("workspace kept at {}: {error}", report.path.display());
             }

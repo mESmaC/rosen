@@ -2,7 +2,7 @@
 
 use super::ignore::{always_ignored, IgnoreRules};
 use super::index::Index;
-use super::{upload, SnapshotError, Snapshotter, WorkspaceMarker};
+use super::{scan, upload, SnapshotError, Snapshotter, WorkspaceMarker};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -127,13 +127,12 @@ fn relevant_files(
             let kind = entry
                 .file_type()
                 .map_err(|err| SnapshotError::io(&entry.path(), err))?;
-            let ignored = ignore.is_ignored(&rel, kind.is_dir());
             if kind.is_dir() {
                 check_nested_workspace(&entry.path())?;
-                if !ignored || index.tracks_under(&rel) {
+                if scan::walks_into(&rel, &mut ignore, index) {
                     pending.push(rel);
                 }
-            } else if index.tracks(&rel) || !ignored {
+            } else if scan::keeps_file(&rel, &mut ignore, index) {
                 if !kind.is_file() && !kind.is_symlink() {
                     return Err(invalid(
                         &entry.path(),
@@ -201,10 +200,13 @@ impl Snapshotter {
             .collect();
         let mut ignore = IgnoreRules::new(self.root.clone(), &self.marker.ignore);
         crate::workspace::delete::remove_verified(&self.root, &expected, |rel, is_dir| {
-            always_ignored(rel)
-                || (!self.index.tracks(rel)
-                    && !self.index.tracks_under(rel)
-                    && ignore.is_ignored(rel, is_dir))
+            if is_dir {
+                !scan::walks_into(rel, &mut ignore, &self.index)
+            } else {
+                always_ignored(rel)
+                    || (!self.index.tracks_under(rel)
+                        && !scan::keeps_file(rel, &mut ignore, &self.index))
+            }
         })
         .map_err(|err| SnapshotError::io(&self.root, err))
     }

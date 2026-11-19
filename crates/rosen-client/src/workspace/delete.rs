@@ -1,8 +1,18 @@
 //! Platform-specific removal of verified workspace objects.
+#[cfg(any(windows, unix))]
+use crate::snapshot::is_ignore_file;
 use rosen_core::ObjectId;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
+
+pub(super) fn path_summary(label: &str, paths: &[String]) -> String {
+    const LIMIT: usize = 5;
+    let count = paths.len();
+    let prefix = if count > LIMIT { "e.g. " } else { "" };
+    let sample = paths[..count.min(LIMIT)].join(", ");
+    format!("{label} ({count}): {prefix}{sample}")
+}
 
 #[cfg(not(any(windows, unix)))]
 pub(crate) fn remove_verified(
@@ -66,10 +76,12 @@ mod windows {
         mut ignored: impl FnMut(&str, bool) -> bool,
     ) -> io::Result<()> {
         let mut plan = plan(root, expected, &mut ignored)?;
-        let (state, user): (Vec<_>, Vec<_>) = plan
+        let (state, mut user): (Vec<_>, Vec<_>) = plan
             .files
             .drain(..)
             .partition(|entry| entry.rel.starts_with(".rosen/"));
+        // Keep the rules available if removing build output is interrupted.
+        user.sort_by_key(|entry| is_ignore_file(&entry.rel));
         for entry in user {
             delete_checked(entry)?;
         }
@@ -89,10 +101,8 @@ mod windows {
             .filter(|name| name != ".rosen")
             .collect();
         if !remaining.is_empty() {
-            return Err(io::Error::other(format!(
-                "workspace kept; new files appeared during deletion: {}",
-                remaining.join(", ")
-            )));
+            let summary = path_summary("new files appeared during deletion", &remaining);
+            return Err(io::Error::other(format!("workspace kept; {summary}")));
         }
         let mut state = state;
         state.sort_by_key(|entry| entry.rel == ".rosen/workspace.json");
@@ -108,13 +118,13 @@ mod windows {
     fn delete_directory(root: &Path, path: &Path, handle: File) -> io::Result<()> {
         if let Err(err) = rosen_platform::delete_on_close(&handle) {
             let names = match remaining_names(root, path) {
-                Ok(names) => names.join(", "),
+                Ok(names) => path_summary("remaining entries", &names),
                 Err(listing) => format!("could not list remaining entries: {listing}"),
             };
             return Err(named(
                 root,
                 path,
-                io::Error::new(err.kind(), format!("{err}; remaining entries: {names}")),
+                io::Error::new(err.kind(), format!("{err}; {names}")),
             ));
         }
         drop(handle);

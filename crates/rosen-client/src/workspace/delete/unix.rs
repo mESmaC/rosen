@@ -67,12 +67,14 @@ pub(crate) fn remove_verified(
 
 fn remove_plan(directory: &Directory, files: Vec<Entry>, mut dirs: Vec<Entry>) -> io::Result<()> {
     dirs.sort_by_key(|entry| std::cmp::Reverse(entry.rel.matches('/').count()));
-    let (state, user): (Vec<_>, Vec<_>) = files
+    let (state, mut user): (Vec<_>, Vec<_>) = files
         .into_iter()
         .partition(|e| e.rel.starts_with(".rosen/"));
     let (state_dirs, user_dirs): (Vec<_>, Vec<_>) = dirs
         .into_iter()
         .partition(|e| e.rel == ".rosen" || e.rel.starts_with(".rosen/"));
+    // Keep the rules available if removing build output is interrupted.
+    user.sort_by_key(|entry| is_ignore_file(&entry.rel));
     for entry in user.into_iter().chain(user_dirs) {
         entry.remove()?;
     }
@@ -85,10 +87,7 @@ fn remove_plan(directory: &Directory, files: Vec<Entry>, mut dirs: Vec<Entry>) -
     if !remaining.is_empty() {
         return Err(kept(
             "",
-            format!(
-                "new files appeared during deletion: {}",
-                remaining.join(", ")
-            ),
+            path_summary("new files appeared during deletion", &remaining),
         ));
     }
     // Recovery information goes only after all user directories are empty.

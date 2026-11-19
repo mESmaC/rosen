@@ -143,14 +143,14 @@ impl View<'_> {
 
 /// An ignored directory is still walked when it holds tracked files, but
 /// only those files are kept from it.
-fn walks_into(rel: &str, ignore: &mut IgnoreRules, index: &Index) -> bool {
+pub(super) fn walks_into(rel: &str, ignore: &mut IgnoreRules, index: &Index) -> bool {
     if always_ignored(rel) || index.in_gitlink(rel) {
         return false;
     }
     !ignore.is_ignored(rel, true) || index.tracks_under(rel)
 }
 
-fn keeps_file(rel: &str, ignore: &mut IgnoreRules, index: &Index) -> bool {
+pub(super) fn keeps_file(rel: &str, ignore: &mut IgnoreRules, index: &Index) -> bool {
     !always_ignored(rel) && (index.tracks(rel) || !ignore.is_ignored(rel, false))
 }
 

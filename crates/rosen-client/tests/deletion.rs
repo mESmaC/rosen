@@ -6,12 +6,11 @@ use rosen_client::protocol::{ChangeRecord, Listener, NewChange, Request};
 use rosen_client::snapshot::{journal_snapshot, pending_journal, Dirty, Snapshotter};
 use rosen_client::workspace::{deletion_permitted, pool::WarmPool, Options};
 use rosen_client::{Client, Endpoint, Error};
-use rosen_core::{AgentId, FileMode, ObjectId, Tree, TreeEntry};
-use rosen_server::changes::{BaseSource, BaseTip};
+use rosen_core::{AgentId, Commit, FileMode, ObjectId, Signature, Tree, TreeEntry};
+use rosen_server::landing::Ledger;
 use rosen_server::{ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -22,6 +21,7 @@ async fn deletion_stores_edits_or_keeps_and_names_them() {
     let store = LooseObjectStore::open(data.join("objects")).unwrap();
     let endpoint = start_server(&data, &store);
     let client = Client::connect(&endpoint).await.unwrap();
+    ignored_build_output_does_not_block_cleanup(&client, dir.path()).await;
     abandon_stores_edits(&client, &store, &dir.path().join("workspace")).await;
     closed_edits_survive(&client, dir.path()).await;
     active_lease_keeps_workspace(&client, &dir.path().join("leased")).await;
@@ -33,6 +33,49 @@ async fn deletion_stores_edits_or_keeps_and_names_them() {
     #[cfg(any(windows, unix))]
     interrupted_cleanup_finishes(&client, &data, &dir.path().join("interrupted")).await;
     daemon_cleans_closed_workspace(&client, &endpoint, &data, &dir.path().join("automatic")).await;
+}
+
+async fn ignored_build_output_does_not_block_cleanup(client: &Client, root: &Path) {
+    // R4 / #413: ignored caches are disposable, while genuinely unstored
+    // scratch keeps the closed workspace with a bounded diagnostic.
+    let path = root.join("build-output");
+    let change = new_workspace(client, &path).await;
+    for cache in ["proofs/.lake", "configured-cache"] {
+        std::fs::create_dir_all(path.join(cache)).unwrap();
+        std::fs::write(path.join(cache).join("output.bin"), b"build output").unwrap();
+    }
+    let snapshot = client.snapshot_workspace(&path, None).await.unwrap();
+    assert_eq!(snapshot.tree, change.change.head, "build output was stored");
+
+    let scratch = path.join("scratch");
+    std::fs::create_dir(&scratch).unwrap();
+    for i in 0..12 {
+        std::fs::write(scratch.join(format!("edit-{i:02}")), b"unstored").unwrap();
+    }
+    close_without_snapshot(client, &change).await;
+    let refusal = client
+        .workspace_delete(&path)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refusal.contains("unstored files (12): e.g. scratch/edit-00"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("scratch/edit-04"), "{refusal}");
+    assert!(!refusal.contains("scratch/edit-05"), "{refusal}");
+    for i in 0..12 {
+        let edit = scratch.join(format!("edit-{i:02}"));
+        assert_eq!(std::fs::read(&edit).unwrap(), b"unstored");
+        std::fs::remove_file(edit).unwrap();
+    }
+    let reports = client.cleanup_workspaces().await.unwrap();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].error.is_none(), "{reports:?}");
+    assert!(
+        !path.exists(),
+        "the ignored build output kept the workspace"
+    );
 }
 
 #[cfg(windows)]
@@ -302,17 +345,15 @@ async fn new_workspace(client: &Client, path: &Path) -> ChangeRecord {
     change
 }
 
-struct FixedBase(BaseTip);
-impl BaseSource for FixedBase {
-    fn base_tip(&self) -> Result<BaseTip, String> {
-        Ok(self.0)
-    }
-}
-
 fn start_server(data: &Path, store: &dyn ObjectStore) -> Endpoint {
     let entries = vec![
-        file(store, ".gitignore", b"build/\nnode_modules/\n"),
+        file(
+            store,
+            ".gitignore",
+            b"build/\nnode_modules/\n/proofs/.lake/\n",
+        ),
         file(store, "main.rs", b"fn main() {}\n"),
+        file(store, "rosen.toml", b"ignore = [\"/configured-cache/\"]\n"),
     ];
     let tree = store.put_tree(&Tree::new(entries).unwrap()).unwrap();
     let endpoint = if cfg!(windows) {
@@ -326,10 +367,19 @@ fn start_server(data: &Path, store: &dyn ObjectStore) -> Endpoint {
         endpoint: endpoint.clone(),
         warm_pool_dir: None,
     });
-    let commit = ObjectId::hash_object("commit", b"base");
-    state
-        .changes
-        .set_base_source(Arc::new(FixedBase(BaseTip { commit, tree })));
+    let author = Signature::new("test", "test@test", 0);
+    let commit = store
+        .put_commit(&Commit {
+            tree,
+            parents: vec![],
+            author: author.clone(),
+            committer: author,
+            extra_headers: vec![],
+            message: b"base\n".to_vec(),
+        })
+        .unwrap();
+    let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
+    ledger.init_base("main", &commit).unwrap();
     tokio::spawn(rosen_server::listener::serve(listener, state));
     endpoint
 }

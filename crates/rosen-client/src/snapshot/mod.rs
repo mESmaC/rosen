@@ -22,6 +22,8 @@ mod stat_cache;
 mod upload;
 pub mod watch;
 
+#[cfg(any(windows, unix))]
+pub(crate) use ignore::is_ignore_file;
 pub use journal::pending_journal;
 pub use marker::{WorkspaceMarker, STATE_DIR};
 pub use seed::seed_tree_cache;

@@ -1,5 +1,6 @@
 //! Event-driven refill; one worker per daemon serializes refresh work and
 //! runs at most one prepare at a time (SPEC R3).
+use super::lifecycle::CleanupRetries;
 use super::pool::{refresh, restore_tracked, seed_slot, Prep, Slot, WarmPool};
 use super::MaterialiseError;
 use super::{prepare, template, Method, Options};
@@ -13,10 +14,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
-
-/// Bounds on the delay before a refused workspace cleanup is retried.
-const CLEANUP_RETRY_MIN: Duration = Duration::from_secs(1);
-const CLEANUP_RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// The base tip a refill pass brought the pool to.
 struct Base {
@@ -42,8 +39,9 @@ pub(super) async fn run(pool: Arc<WarmPool>, endpoint: Endpoint) {
         .unwrap_or(false);
     pool.state.lock().await.block_clones = block_clones;
     let mut linking = LinkingPrepare::default();
+    let mut retries = CleanupRetries::default();
     loop {
-        if let Err(error) = connected(&pool, &endpoint, &mut linking).await {
+        if let Err(error) = connected(&pool, &endpoint, &mut linking, &mut retries).await {
             eprintln!("rosen warm pool: {error}");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -54,6 +52,7 @@ async fn connected(
     pool: &Arc<WarmPool>,
     endpoint: &Endpoint,
     linking: &mut LinkingPrepare,
+    retries: &mut CleanupRetries,
 ) -> Result<(), Error> {
     let client = Client::connect(endpoint).await?;
     // Subscribe before reading base: a concurrent land is either reflected
@@ -68,11 +67,18 @@ async fn connected(
     reader.spawn(read_events(events, Arc::clone(&flags)));
     // Clean up at every (re)connect: events missed while disconnected are
     // covered by reading each registration's current change state.
-    let mut schedule = CleanupSchedule::default();
+    let mut cleanup_due = true;
     loop {
-        schedule.take_queued(&flags)?;
-        if schedule.due {
-            schedule.ran(cleanup(&client).await?);
+        cleanup_due |= flags.take().closes;
+        if flags.ended.load(SeqCst) {
+            return Err(Error::Disconnected);
+        }
+        let retry_due = retries
+            .next_attempt()
+            .is_some_and(|at| at <= Instant::now());
+        if cleanup_due || retry_due {
+            cleanup(&client, retries).await?;
+            cleanup_due = false;
         }
         let base = match refill(pool, &client).await {
             Ok(base) => base,
@@ -99,7 +105,7 @@ async fn connected(
         // A pool that is off waits like one that knows its base: a land
         // or a resize, which wakes it, is what can turn it on.
         let settled = base.is_some() || pool.state.lock().await.size == 0;
-        wait_for_work(pool, &flags, &mut schedule, settled).await?;
+        cleanup_due = wait_for_work(pool, &flags, retries.next_attempt(), settled).await?;
     }
 }
 
@@ -112,26 +118,21 @@ async fn connected(
 async fn wait_for_work(
     pool: &WarmPool,
     flags: &EventFlags,
-    schedule: &mut CleanupSchedule,
+    retry_at: Option<Instant>,
     settled: bool,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     loop {
         let arrived = flags.take();
-        schedule.due |= arrived.closes;
         if arrived.closes || arrived.moves || (arrived.any && !settled) {
-            return Ok(());
+            return Ok(arrived.closes);
         }
         if flags.ended.load(SeqCst) {
             return Err(Error::Disconnected);
         }
-        let retry_at = schedule.retry_at;
         tokio::select! {
             _ = flags.arrived.notified() => {}
-            _ = pool.wake.notified() => return Ok(()),
-            _ = sleep_until(retry_at), if retry_at.is_some() => {
-                schedule.due = true;
-                return Ok(());
-            }
+            _ = pool.wake.notified() => return Ok(false),
+            _ = sleep_until(retry_at), if retry_at.is_some() => return Ok(true),
         }
     }
 }
@@ -187,55 +188,6 @@ fn moves_base(kind: EventKind) -> bool {
         kind,
         EventKind::Landed | EventKind::Reverted | EventKind::Built
     )
-}
-
-/// When the daemon next runs guarded cleanup of landed and abandoned
-/// workspaces (R4).
-struct CleanupSchedule {
-    due: bool,
-    retry_at: Option<Instant>,
-    delay: Duration,
-}
-
-impl Default for CleanupSchedule {
-    fn default() -> Self {
-        Self {
-            due: true,
-            retry_at: None,
-            delay: CLEANUP_RETRY_MIN,
-        }
-    }
-}
-
-impl CleanupSchedule {
-    /// A refusal on a closed change usually needs a person, and each retry
-    /// rehashes the kept workspace, so retries back off. A pass with no
-    /// refusal resets the delay. The retry is a fixed deadline: frequent
-    /// unrelated events must not keep postponing it.
-    fn ran(&mut self, refused: bool) {
-        self.due = false;
-        if refused {
-            self.retry_at = Some(Instant::now() + self.delay);
-            self.delay = (self.delay * 2).min(CLEANUP_RETRY_MAX);
-        } else {
-            self.retry_at = None;
-            self.delay = CLEANUP_RETRY_MIN;
-        }
-    }
-
-    /// Notes events that arrived while the worker was busy, without
-    /// waiting. A pass that ran a prepare skips the wait below, so without
-    /// this a steady run of prepares postpones cleanup after every land (R4).
-    fn take_queued(&mut self, flags: &EventFlags) -> Result<(), Error> {
-        self.due |= flags.take().closes;
-        if flags.ended.load(SeqCst) {
-            return Err(Error::Disconnected);
-        }
-        if self.retry_at.is_some_and(|at| at <= Instant::now()) {
-            self.due = true;
-        }
-        Ok(())
-    }
 }
 
 /// Events that can move a change into or out of `landed` or `abandoned`.
@@ -736,13 +688,11 @@ async fn reset_ready_root(pool: &WarmPool) -> Result<(), Error> {
     Ok(())
 }
 
-async fn cleanup(client: &Client) -> Result<bool, Error> {
-    let mut pending = false;
-    for report in client.cleanup_workspaces().await? {
+async fn cleanup(client: &Client, retries: &mut CleanupRetries) -> Result<(), Error> {
+    for report in client.cleanup_workspaces_with(retries, None).await? {
         if let Some(error) = report.error {
-            pending = true;
             eprintln!("rosen workspace cleanup {}: {error}", report.path.display());
         }
     }
-    Ok(pending)
+    Ok(())
 }

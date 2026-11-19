@@ -21,6 +21,9 @@ def table : String :=
     "#375 regression: a durable Unix workspace (0 0 0 0) must be removable\n" ++
     "#388 regression: ignored junction output never requires storing its target\n" ++
     row false false true true ++ "\n" ++
+    "#413 regression: ignored build output and unignored scratch have different durability requirements\n" ++
+    row false false true true ++ "\n" ++
+    row false false true false ++ "\n" ++
     String.join ([false, true].flatMap fun d => [false, true].flatMap fun j =>
       [false, true].flatMap fun m => [false, true].map fun i => row d j m i ++ "\n")
 
