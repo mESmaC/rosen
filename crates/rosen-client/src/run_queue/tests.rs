@@ -1,5 +1,7 @@
 //! The machine's run queue (SPEC R3 "Run queue").
 
+use std::time::Instant;
+
 use super::{MemoryHeadroom, RunBudget, RunClass, RunQueue, Turn, Waiter, GIB, MEMORY_FLOOR};
 
 fn admit(waiter: &Waiter, cores: usize, available: u64) -> Option<Turn> {
@@ -133,4 +135,43 @@ fn a_caller_set_budget_is_admitted_and_counted_on_what_it_asked_for() {
         (greedy.budget_on(16).jobs, greedy.budget_on(16).memory),
         (cap.jobs, cap.memory)
     );
+}
+
+// Risk: a big turn blocked only on memory starves while smaller, later or
+// less important turns keep filling the room it needs (mESmaC/rosen#421):
+// the tests after a land then never run and every land queues behind them.
+#[test]
+fn a_waiter_blocked_on_memory_keeps_its_room_from_later_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let queue = RunQueue::at(dir.path());
+    queue.set_slots(RunClass::Prepare, Some(2)).unwrap();
+    let preparing = start(&queue.wait(RunClass::Prepare, "prepare").unwrap()).unwrap();
+    // 3 GiB is held, so the 6 GiB verify turn needs 9 of the 8 GiB above the
+    // reserve, and fits once the prepare ends.
+    let available = MEMORY_FLOOR + 8 * GIB;
+    let verify = queue.wait(RunClass::Verify, "verify").unwrap();
+    assert!(admit(&verify, 16, available).is_none());
+
+    // The incident's prepare: past its patience, so it no longer yields.
+    let mut small = queue
+        .wait_with(RunClass::Prepare, RunBudget::new(1, 1), "small prepare")
+        .unwrap();
+    small.since = Instant::now()
+        .checked_sub(RunClass::Prepare.patience())
+        .unwrap();
+    assert!(
+        admit(&small, 16, available).is_none(),
+        "a later 1 GiB turn would push the verify turn out of reach"
+    );
+    let reason = small.waiting_for().unwrap();
+    assert!(
+        reason.contains("keeping room for verify (6.0 GiB)"),
+        "{reason}"
+    );
+
+    drop(preparing);
+    let verifying = admit(&verify, 16, available).expect("verify, once the prepare drains");
+    drop(verify);
+    let _small = admit(&small, 16, available).expect("the small turn fits beside verify");
+    drop(verifying);
 }

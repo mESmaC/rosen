@@ -33,6 +33,7 @@
   - [Command thread defaults](command-thread-defaults.md)
   - [Process priorities](process-priorities.md)
   - [Queue aging](queue-aging.md)
+  - [Head-of-line reservation](head-of-line-reservation.md)
   - [Run command and status](run-command-and-status.md)
   - [Windows process containment](windows-process-containment.md)
   - [Nested runs](nested-runs.md)

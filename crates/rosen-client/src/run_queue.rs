@@ -26,6 +26,10 @@
 //!   A stuck landing check then cannot hold every agent's build, and steady
 //!   agent builds cannot keep the tests after a land from running when memory
 //!   permits.
+//! - A run keeps room for the first waiter that precedes it and has a free
+//!   slot of its class: it starts only if it fits beside that waiter. A big
+//!   turn blocked on memory then sees running turns drain instead of small
+//!   ones filling every gap. An aged waiter precedes every later arrival.
 //!
 //! The queue is files in one folder per machine and user, with operating
 //! system file locks, so it needs no daemon and survives any crash: a
@@ -36,10 +40,17 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How often a waiter looks at the line again.
 pub const POLL: Duration = Duration::from_millis(50);
+/// How long a waiter waits before it says what holds it, beside its ticket
+/// and in `rosen run`'s wait line.
+pub const STARVING: Duration = Duration::from_secs(5 * 60);
+/// How often a starving waiter rewrites what holds it; memory readings change
+/// on every poll.
+const REPOST: Duration = Duration::from_secs(5);
 /// Counts this process's tickets.
 static TICKETS: AtomicU64 = AtomicU64::new(0);
 /// Whether this process's pool worker waits in the machine's queue.
@@ -198,6 +209,8 @@ pub struct Entry {
     /// What the run is, as its owner described it.
     pub note: String,
     pub running: bool,
+    /// What a waiter blocked for [`STARVING`] or longer waits for.
+    pub waiting_for: Option<String>,
 }
 
 /// A current sample of the memory gate, in bytes. With no reading the
@@ -213,6 +226,15 @@ impl MemoryHeadroom {
         self.available.is_some_and(|available| {
             available >= self.reserve.unwrap_or(MEMORY_FLOOR).saturating_add(bytes)
         })
+    }
+
+    /// Whether `bytes` would fit once live turns charged `running` end and
+    /// give back at most what they were charged.
+    fn fits_once_drained(self, running: u64, bytes: u64) -> bool {
+        let available = self
+            .available
+            .map(|available| available.saturating_add(running));
+        Self { available, ..self }.fits(bytes)
     }
 }
 
@@ -274,10 +296,15 @@ impl RunQueue {
             .create_new(true)
             .open(&unlisted)?;
         ticket.lock()?;
-        // Sorts into queue order: class, then arrival, then process.
-        let path = self
-            .dir
-            .join(format!("{}-{arrived:030}-{process}.wait", class.rank()));
+        // Sorts into queue order: class, then arrival, then process. A
+        // requested budget follows, so waiters behind can keep room for it.
+        let requested_suffix = requested.map_or_else(String::new, |budget| {
+            format!("~{}x{}", budget.jobs, budget.memory)
+        });
+        let path = self.dir.join(format!(
+            "{}-{arrived:030}-{process}{requested_suffix}.wait",
+            class.rank()
+        ));
         if let Err(error) = std::fs::rename(&unlisted, &path) {
             let _ = std::fs::remove_file(&unlisted);
             return Err(error);
@@ -290,6 +317,7 @@ impl RunQueue {
             path,
             _ticket: ticket,
             since: Instant::now(),
+            report: Mutex::default(),
         })
     }
 
@@ -324,15 +352,20 @@ impl RunQueue {
                 class,
                 note,
                 running: true,
+                waiting_for: None,
             });
         }
-        for (_, class) in self.waiting()? {
+        for (name, class) in self.waiting()? {
             // A waiter's note is known only once it runs: its ticket is
             // locked, and a locked file can't be read on Windows.
+            let waiting_for = std::fs::read_to_string(self.dir.join(reason_name(&name)))
+                .ok()
+                .filter(|reason| !reason.is_empty());
             line.push(Entry {
                 class,
                 note: String::new(),
                 running: false,
+                waiting_for,
             });
         }
         Ok(line)
@@ -350,6 +383,7 @@ impl RunQueue {
             };
             if owner_is_gone(&self.dir.join(&name)) {
                 let _ = std::fs::remove_file(self.dir.join(&name));
+                let _ = std::fs::remove_file(self.dir.join(reason_name(&name)));
                 continue;
             }
             tickets.push((name, class));
@@ -362,6 +396,14 @@ impl RunQueue {
     /// first. One being made right now is unlocked for an instant, so only
     /// an old one is taken for abandoned.
     fn remove_abandoned(&self, name: &str) {
+        // A waiter writes its reason only while its ticket is in line, and
+        // removes the ticket first when it leaves.
+        if let Some(stem) = name.strip_suffix(REASON_SUFFIX) {
+            if !self.dir.join(format!("{stem}.wait")).exists() {
+                let _ = std::fs::remove_file(self.dir.join(name));
+            }
+            return;
+        }
         let path = self.dir.join(name);
         let old = std::fs::metadata(&path)
             .and_then(|data| data.modified())
@@ -519,19 +561,44 @@ impl RunQueue {
     fn budget_for(&self, slots: &[(RunClass, u32)]) -> RunBudget {
         let mut total = RunBudget::default();
         for &(class, slot) in slots {
-            let budget = std::fs::read_to_string(self.budget_path(class, slot))
-                .ok()
-                .and_then(|text| {
-                    let (jobs, memory) = text.split_once(' ')?;
-                    Some(RunBudget {
-                        jobs: jobs.parse().ok()?,
-                        memory: memory.parse().ok()?,
-                    })
-                })
-                .unwrap_or_else(|| class.budget());
-            total.charge(budget);
+            total.charge(self.slot_budget(class, slot));
         }
         total
+    }
+
+    /// The budget a live turn recorded, or its class's cap.
+    fn slot_budget(&self, class: RunClass, slot: u32) -> RunBudget {
+        std::fs::read_to_string(self.budget_path(class, slot))
+            .ok()
+            .and_then(|text| {
+                let (jobs, memory) = text.split_once(' ')?;
+                Some(RunBudget {
+                    jobs: jobs.parse().ok()?,
+                    memory: memory.parse().ok()?,
+                })
+            })
+            .unwrap_or_else(|| class.budget())
+    }
+
+    /// Whether the waiter `name` of `class` has a slot of its class left
+    /// after the earlier waiters of its class take theirs.
+    fn has_free_slot(
+        &self,
+        name: &str,
+        class: RunClass,
+        waiting: &[(String, RunClass)],
+        running: &[(RunClass, u32)],
+    ) -> bool {
+        let earlier_of_class = waiting
+            .iter()
+            .take_while(|(other, _)| other.as_str() < name)
+            .filter(|(_, other)| *other == class)
+            .count();
+        let in_class = running.iter().filter(|(other, _)| *other == class).count();
+        let free = usize::try_from(self.slots(class))
+            .unwrap_or(usize::MAX)
+            .saturating_sub(in_class);
+        earlier_of_class < free
     }
 
     /// Beside the lock, not in it: a locked file's bytes can't be read by
@@ -545,6 +612,14 @@ impl RunQueue {
 const SLOTS_FILE: &str = "slots";
 /// The machine-wide override, in bytes; kept separate from class slot counts.
 const RESERVE_FILE: &str = "memory-reserve";
+/// Beside a starving waiter's ticket: what it waits for. The ticket itself is
+/// locked, and a locked file can't be read on Windows.
+const REASON_SUFFIX: &str = ".why";
+
+fn reason_name(ticket: &str) -> String {
+    let stem = ticket.strip_suffix(".wait").unwrap_or(ticket);
+    format!("{stem}{REASON_SUFFIX}")
+}
 
 fn slot_stem(class: RunClass, slot: u32) -> String {
     match slot {
@@ -591,6 +666,15 @@ pub struct Waiter {
     /// Held locked for as long as this waiter lives.
     _ticket: File,
     since: Instant,
+    /// What held this waiter at its last look, and what it last wrote
+    /// beside its ticket.
+    report: Mutex<WaitReport>,
+}
+
+#[derive(Debug, Default)]
+struct WaitReport {
+    reason: Option<String>,
+    written: Option<(String, Instant)>,
 }
 
 impl Waiter {
@@ -612,15 +696,14 @@ impl Waiter {
         let yielding = self.since.elapsed() < self.class.patience();
         let slots = self.queue.slots(self.class);
         let running = self.queue.running()?;
-        if !self.is_next(yielding, slots, &running)? {
+        let waiting = self.queue.waiting()?;
+        if let Some(reason) = self.not_next(&waiting, yielding, slots, &running) {
+            self.report(reason);
             return Ok(None);
         }
         let budget = self.budget_on(cores);
-        let mut reserved = self.queue.budget_for(&running);
-        reserved.charge(budget);
-        // Live turns can still grow to their caps. Charging the full caps
-        // also covers a just-admitted command that has not started yet.
-        if reserved.jobs > cores || !read_memory().fits(reserved.memory) {
+        if let Err(reason) = self.room(budget, cores, &waiting, &running, read_memory()) {
+            self.report(reason);
             return Ok(None);
         }
         for slot in 0..slots {
@@ -636,7 +719,115 @@ impl Waiter {
                 path,
             }));
         }
+        self.report(format!("waiting for a free {} slot", self.class.name()));
         Ok(None)
+    }
+
+    /// `Ok` when this waiter's budget fits the cores and memory left after
+    /// every live turn and the waiter it keeps room for; otherwise what it
+    /// waits for.
+    fn room(
+        &self,
+        budget: RunBudget,
+        cores: usize,
+        waiting: &[(String, RunClass)],
+        running: &[(RunClass, u32)],
+        memory: MemoryHeadroom,
+    ) -> Result<(), String> {
+        let holders: Vec<_> = running
+            .iter()
+            .map(|&(class, slot)| (class, self.queue.slot_budget(class, slot)))
+            .collect();
+        let mut reserved = RunBudget::default();
+        for (_, held) in &holders {
+            reserved.charge(*held);
+        }
+        // Room is kept only for a waiter that fits once live turns drain:
+        // memory other programs hold is not the queue's to wait out.
+        let ahead = self
+            .kept_for(waiting, running, cores)
+            .filter(|(_, wanted)| memory.fits_once_drained(reserved.memory, wanted.memory));
+        if let Some((_, wanted)) = ahead {
+            reserved.charge(wanted);
+        }
+        reserved.charge(budget);
+        // Live turns can still grow to their caps. Charging the full caps
+        // also covers a just-admitted command that has not started yet.
+        let short = if reserved.jobs > cores {
+            format!(
+                "waiting for {} cores, {cores} on this machine",
+                reserved.jobs
+            )
+        } else if !memory.fits(reserved.memory) {
+            let needed = memory
+                .reserve
+                .unwrap_or(MEMORY_FLOOR)
+                .saturating_add(reserved.memory);
+            let available = memory.available.map_or_else(
+                || "no reading available".to_owned(),
+                |bytes| format!("{} available", gib(bytes)),
+            );
+            format!("waiting for {}, {available}", gib(needed))
+        } else {
+            return Ok(());
+        };
+        Err(format!(
+            "{short}; {}{}",
+            holding(&holders),
+            keeping_room(ahead)
+        ))
+    }
+
+    /// The waiter this one keeps room for: the first that precedes it and
+    /// has a free slot of its class, with the budget it would be charged.
+    fn kept_for(
+        &self,
+        waiting: &[(String, RunClass)],
+        running: &[(RunClass, u32)],
+        cores: usize,
+    ) -> Option<(RunClass, RunBudget)> {
+        let now = now_nanos();
+        let mine = Ticket::parse(&self.file_name())?.precedence(now);
+        let mut ahead: Vec<_> = waiting
+            .iter()
+            .filter_map(|(name, _)| Some((Ticket::parse(name)?, name)))
+            .filter(|(ticket, _)| ticket.precedence(now) < mine)
+            .collect();
+        ahead.sort_by_key(|(ticket, _)| ticket.precedence(now));
+        ahead
+            .into_iter()
+            .find(|(ticket, name)| {
+                self.queue
+                    .has_free_slot(name, ticket.class, waiting, running)
+            })
+            .map(|(ticket, _)| {
+                let budget = admitted_budget(ticket.class, ticket.requested, cores);
+                (ticket.class, budget)
+            })
+    }
+
+    /// Records what holds this waiter. Past [`STARVING`] it also writes it
+    /// beside its ticket for `rosen run --slots`, at most every [`REPOST`].
+    fn report(&self, reason: String) {
+        let Ok(mut report) = self.report.lock() else {
+            return;
+        };
+        let due = report
+            .written
+            .as_ref()
+            .is_none_or(|(written, at)| *written != reason && at.elapsed() >= REPOST);
+        if self.since.elapsed() >= STARVING && due {
+            let path = self.queue.dir.join(reason_name(&self.file_name()));
+            if std::fs::write(path, &reason).is_ok() {
+                report.written = Some((reason.clone(), Instant::now()));
+            }
+        }
+        report.reason = Some(reason);
+    }
+
+    /// What held this waiter at its last look, if it had to wait.
+    pub fn waiting_for(&self) -> Option<String> {
+        self.report.lock().ok()?.reason.clone()
     }
 
     /// The budget this waiter is admitted and charged on: what its caller
@@ -646,9 +837,7 @@ impl Waiter {
     }
 
     fn budget_on(&self, cores: usize) -> RunBudget {
-        let cap = self.class.budget_on(cores);
-        self.requested
-            .map_or(cap, |requested| requested.within(cap))
+        admitted_budget(self.class, self.requested, cores)
     }
 
     /// All current runs, then the waiters ahead in line.
@@ -665,22 +854,24 @@ impl Waiter {
             .collect())
     }
 
-    /// Whether this waiter's class has a free slot left after the earlier
-    /// waiters of its class take theirs and, while this waiter still yields,
-    /// no more important run is waiting or going.
-    fn is_next(&self, yielding: bool, slots: u32, running: &[(RunClass, u32)]) -> io::Result<bool> {
+    /// `None` when this waiter's class has a free slot left after the
+    /// earlier waiters of its class take theirs and, while this waiter still
+    /// yields, no more important run is waiting or going; otherwise why not.
+    fn not_next(
+        &self,
+        waiting: &[(String, RunClass)],
+        yielding: bool,
+        slots: u32,
+        running: &[(RunClass, u32)],
+    ) -> Option<String> {
         let mine = self.file_name();
-        let mut earlier_of_class = 0;
-        for (name, class) in self.queue.waiting()? {
-            if name >= mine {
-                break;
-            }
-            if class == self.class {
-                earlier_of_class += 1;
-            } else if yielding {
-                return Ok(false);
-            }
-        }
+        let ahead = waiting.iter().take_while(|(name, _)| *name < mine);
+        let earlier_of_class = ahead
+            .clone()
+            .filter(|(_, class)| *class == self.class)
+            .count();
+        let yields_to_waiter = yielding && ahead.clone().any(|(_, class)| *class != self.class);
+        let yields_to_run = yielding && running.iter().any(|(class, _)| *class < self.class);
         let in_class = running
             .iter()
             .filter(|(class, _)| *class == self.class)
@@ -688,10 +879,13 @@ impl Waiter {
         let free = usize::try_from(slots)
             .unwrap_or(usize::MAX)
             .saturating_sub(in_class);
-        if earlier_of_class >= free {
-            return Ok(false);
+        if yields_to_waiter || yields_to_run {
+            Some("yielding to more important runs".to_owned())
+        } else if earlier_of_class >= free {
+            Some(format!("waiting for a free {} slot", self.class.name()))
+        } else {
+            None
         }
-        Ok(!yielding || !running.iter().any(|(class, _)| *class < self.class))
     }
 
     fn file_name(&self) -> String {
@@ -704,8 +898,100 @@ impl Waiter {
 
 impl Drop for Waiter {
     fn drop(&mut self) {
+        // The ticket goes first: a reason file without its ticket is taken
+        // for a leftover and removed.
         let _ = std::fs::remove_file(&self.path);
+        let reason = self.queue.dir.join(reason_name(&self.file_name()));
+        let _ = std::fs::remove_file(reason);
     }
+}
+
+/// What a waiter's ticket name says about it, for the waiters behind it.
+struct Ticket {
+    class: RunClass,
+    /// Nanoseconds since the Unix epoch.
+    arrived: u128,
+    requested: Option<RunBudget>,
+}
+
+impl Ticket {
+    /// Reads `<rank>-<arrival>-<process>[~<jobs>x<memory>].wait`. A ticket
+    /// an older `rosen` made has no budget and is charged its class's cap.
+    fn parse(name: &str) -> Option<Self> {
+        let class = ticket_class(name)?;
+        let stem = name.strip_suffix(".wait")?;
+        let (stem, requested) = match stem.split_once('~') {
+            Some((stem, budget)) => {
+                let (jobs, memory) = budget.split_once('x')?;
+                let requested = RunBudget {
+                    jobs: jobs.parse().ok()?,
+                    memory: memory.parse().ok()?,
+                };
+                (stem, Some(requested))
+            }
+            None => (stem, None),
+        };
+        let arrived = stem.split('-').nth(1)?.parse().ok()?;
+        Some(Self {
+            class,
+            arrived,
+            requested,
+        })
+    }
+
+    /// Admission order across the line: class, then arrival. An aged waiter
+    /// no longer yields to more important classes, so it ranks with the most
+    /// important and only earlier arrivals precede it. One total order keeps
+    /// two waiters from each keeping room for the other.
+    fn precedence(&self, now: u128) -> (u8, u128) {
+        let waited = now.saturating_sub(self.arrived);
+        let rank = if waited >= self.class.patience().as_nanos() {
+            RunClass::Landing.rank()
+        } else {
+            self.class.rank()
+        };
+        (rank, self.arrived)
+    }
+}
+
+fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos())
+}
+
+/// The budget a waiter is admitted and charged on: what its caller asked
+/// for within the class's cap, or the cap.
+fn admitted_budget(class: RunClass, requested: Option<RunBudget>, cores: usize) -> RunBudget {
+    let cap = class.budget_on(cores);
+    requested.map_or(cap, |requested| requested.within(cap))
+}
+
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / GIB as f64)
+}
+
+/// The live turns, as a wait reason names them.
+fn holding(holders: &[(RunClass, RunBudget)]) -> String {
+    let turns: Vec<_> = holders
+        .iter()
+        .map(|(class, budget)| format!("{} ({})", class.name(), gib(budget.memory)))
+        .collect();
+    match turns.as_slice() {
+        [] => "no turn is running".to_owned(),
+        [turn] => format!("{turn} holds a turn"),
+        turns => format!("{} hold turns", turns.join(", ")),
+    }
+}
+
+fn keeping_room(ahead: Option<(RunClass, RunBudget)>) -> String {
+    ahead.map_or_else(String::new, |(class, budget)| {
+        format!(
+            "; keeping room for {} ({}) ahead in line",
+            class.name(),
+            gib(budget.memory)
+        )
+    })
 }
 
 /// A run's turn, holding one slot of its class. The next run of its class

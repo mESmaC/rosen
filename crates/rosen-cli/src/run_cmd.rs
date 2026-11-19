@@ -10,7 +10,7 @@ use std::process::{Command, ExitStatus};
 use std::time::Instant;
 
 use rosen_client::run_queue::{
-    self, RunBudget, RunClass, RunQueue, Turn, Waiter, HELD_ENV, POLL, THREAD_VARIABLES,
+    self, RunBudget, RunClass, RunQueue, Turn, Waiter, HELD_ENV, POLL, STARVING, THREAD_VARIABLES,
 };
 
 use crate::commands::RunArgs;
@@ -130,10 +130,22 @@ fn turn(class: RunClass, requested: Option<RunBudget>, note: &str) -> io::Result
     };
     let started = Instant::now();
     let mut next_report = started + POLL * 20;
+    let mut next_starving_report = started + STARVING;
     let mut previous = None;
     loop {
         if let Some(turn) = waiter.try_start()? {
             return Ok(turn);
+        }
+        // A long wait says what holds it, since the runs ahead may not change.
+        if Instant::now() >= next_starving_report {
+            next_starving_report = Instant::now() + STARVING;
+            if let Some(reason) = waiter.waiting_for() {
+                eprintln!(
+                    "rosen run: waited {}s; {}: {reason}",
+                    started.elapsed().as_secs(),
+                    class.name()
+                );
+            }
         }
         if Instant::now() >= next_report {
             next_report = Instant::now() + POLL * 10;
@@ -310,6 +322,12 @@ pub fn slots(settings: &[String]) -> io::Result<()> {
         );
     }
     println!("{}", memory_resources(&queue, None));
+    // Waiters held past `STARVING` say what they wait for.
+    for entry in queue.line().unwrap_or_default() {
+        if let Some(reason) = entry.waiting_for {
+            println!("{}: {reason}", entry.class.name());
+        }
+    }
     Ok(())
 }
 
