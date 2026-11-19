@@ -2,20 +2,16 @@
 #   lake build in proofs/, with warnings as errors so `sorry` cannot pass
 #   an axiom audit of every declaration: only propext, Classical.choice and Quot.sound
 # Lean output does not depend on the host, so one Linux job covers both platforms.
+# It runs on every PR and every push to main, not only when proofs/ changes
+# (task #33): a path filter leaves a required check pending on PRs it skips,
+# and §5 asks for the proof list to be checked on every PR. The Lake cache
+# below keeps a run that changes no proof to a replay of the last build.
 name: Proofs
 
 on:
   push:
     branches: [main]
-    paths:
-      - "proofs/**"
-      - ".github/scripts/audit_axioms.lean"
-      - ".github/workflows/proofs.yml"
   pull_request:
-    paths:
-      - "proofs/**"
-      - ".github/scripts/audit_axioms.lean"
-      - ".github/workflows/proofs.yml"
   workflow_dispatch:
 
 permissions:
@@ -65,6 +61,18 @@ jobs:
             "$RUNNER_TEMP/elan-init" -y --default-toolchain none --no-modify-path
           fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      # Lake rebuilds a module only when its source, imports or toolchain
+      # change, so restoring the last build makes a run that touches no proof
+      # a quick check. A cache is saved only after every step passed, so a
+      # restored module never hides a warning: one with a warning failed
+      # `--wfail` and was never saved.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: proofs/.lake
+          key: lake-${{ runner.os }}-${{ hashFiles('proofs/lean-toolchain', 'proofs/lakefile.toml', 'proofs/lake-manifest.json') }}-${{ hashFiles('proofs/**/*.lean') }}
+          restore-keys: |
+            lake-${{ runner.os }}-${{ hashFiles('proofs/lean-toolchain', 'proofs/lakefile.toml', 'proofs/lake-manifest.json') }}-
 
       - name: lake build (warnings are errors)
         run: lake build --wfail
