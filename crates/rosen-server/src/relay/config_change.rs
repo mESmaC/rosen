@@ -179,6 +179,9 @@ fn answer(change: ChangeId, head: ObjectId, commit: ObjectId, req: &ConfigChange
         "change": change,
         "head": head,
         "commit": commit,
+        // The commit whose rosen.toml the owner edited, so Collapse can show what
+        // the change was made against (#405).
+        "base": req.base,
         "owner": format!("{}@{COLLAPSE_MACHINE}", req.owner),
         "message": req.message,
     }))
