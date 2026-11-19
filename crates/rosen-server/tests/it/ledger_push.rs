@@ -211,7 +211,10 @@ fn ledger_push_sends_only_ordinary_entries_and_catches_up_after_an_outage() {
     }
     let mut session = Session::default();
     push(&mut session).unwrap();
-    let held: Vec<u64> = intake.lock().unwrap().held.keys().map(|k| k.1).collect();
+    // The intake keys entries by (ledger, sequence), so its keys come grouped by
+    // ledger; the endpoint must hold these sequences, in whatever ledger.
+    let mut held: Vec<u64> = intake.lock().unwrap().held.keys().map(|k| k.1).collect();
+    held.sort_unstable();
     assert_eq!(held, [1, 3, 4, 6]);
 
     // An archived repository stops the push instead of being retried.
