@@ -551,18 +551,17 @@ fn install(
         "DELETE FROM stack_bases WHERE change_id = ?1",
         [id.to_string()],
     )?;
-    if !merged.regenerate.is_empty() {
-        // A crash after installing the head must not lose the owner's repair
-        // notice: its base artifacts have not been regenerated yet (R5).
-        crate::events::stage(
-            &tx,
-            &Staged::about(
-                EventKind::Rebased,
-                id,
-                serde_json::json!({"onto":onto,"tree":tree,"regenerate":merged.regenerate}),
-            ),
-        )?;
-    }
+    // Staged with the installed head, so a stop after this commit cannot lose
+    // the `rebased` event (R9): a replayed land finds the child already moved
+    // and announces nothing. It also carries any regeneration notice (R5).
+    crate::events::stage(
+        &tx,
+        &Staged::about(
+            EventKind::Rebased,
+            id,
+            serde_json::json!({"onto":onto,"tree":tree,"regenerate":merged.regenerate}),
+        ),
+    )?;
     tx.commit()?;
     Ok(Some(LandRebase::Moved))
 }

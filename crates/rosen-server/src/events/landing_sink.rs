@@ -13,10 +13,14 @@ pub struct LandingEvents(pub Arc<ServerState>);
 
 impl EventSink for LandingEvents {
     fn emit(&self, event: LandingEvent) {
-        // Conflict routing staged this event with the conflicts it stored
-        // (`conflict_routes::record`), so a stop after that commit cannot
-        // lose it (R9). Only its delivery is left.
-        if matches!(event, LandingEvent::Conflict { .. }) {
+        // Conflict routing staged a `conflict` with the conflicts it stored
+        // (`conflict_routes::record`), and a land's rebase staged `rebased`
+        // with the head it installed (`stacks::land_rebase`), so a stop after
+        // either commit cannot lose the event (R9). Only delivery is left.
+        if matches!(
+            event,
+            LandingEvent::Conflict { .. } | LandingEvent::Rebased { .. }
+        ) {
             self.0.events.deliver_staged();
             return;
         }
