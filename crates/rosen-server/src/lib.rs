@@ -37,6 +37,7 @@ pub mod reviews;
 pub mod rpc;
 pub mod snapshots;
 pub mod stacks;
+pub mod state_push;
 pub mod uploads;
 pub mod workspaces;
 
@@ -346,6 +347,7 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     });
     let mirror = tokio::spawn(mirror::run(Arc::clone(&state)));
     let ledger_push = tokio::spawn(ledger_push::run(Arc::clone(&state)));
+    let state_push = tokio::spawn(state_push::run(Arc::clone(&state)));
     let network_task = network.map(|(tcp, acceptor, identity, address)| {
         state.set_network(identity, address);
         tokio::spawn(network::serve(tcp, acceptor, Arc::clone(&state)))
@@ -361,6 +363,9 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     // A send cut short here is resent at the next start: the cursor only
     // moves once the endpoint acknowledges a batch.
     ledger_push.abort();
+    // Likewise for the state feed: its cursor moves only on acknowledgement,
+    // and the next start resends everything live anyway.
+    state_push.abort();
     landing_recovery.abort();
     pool_worker.abort();
     Ok(())

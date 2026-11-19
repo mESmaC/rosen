@@ -105,6 +105,34 @@ pub async fn post(
     body: &[u8],
     credential: Option<&Credential>,
 ) -> Result<Held, SendFailure> {
+    let accepted = post_json(scratch, endpoint, body, credential).await?;
+    held(&accepted)
+}
+
+/// A 2xx answer from the endpoint.
+pub struct Accepted {
+    pub status: u16,
+    pub body: String,
+}
+
+impl Accepted {
+    /// A failure for an answer the caller cannot read.
+    pub fn unreadable(&self, why: &str) -> SendFailure {
+        SendFailure::Failed {
+            status: Some(self.status),
+            message: format!("{why}: {}", shown(&self.body)),
+        }
+    }
+}
+
+/// POSTs a JSON `body` to `endpoint`. Shared by the ledger push and the
+/// state feed: the same credential, curl settings and status handling.
+pub async fn post_json(
+    scratch: &Path,
+    endpoint: &str,
+    body: &[u8],
+    credential: Option<&Credential>,
+) -> Result<Accepted, SendFailure> {
     let fail = |message: String| SendFailure::Failed {
         status: None,
         message,
@@ -194,8 +222,8 @@ async fn run_curl(body: &Path, config: &str) -> Result<std::process::Output, Sen
         .map_err(|error| fail(format!("curl: {error}")))
 }
 
-/// Reads the endpoint's answer: what it holds, or why it refused.
-fn answer(status: u16, response: &str) -> Result<Held, SendFailure> {
+/// Reads the endpoint's status: its answer when it accepted, or why not.
+fn answer(status: u16, response: &str) -> Result<Accepted, SendFailure> {
     if status == 410 {
         return Err(SendFailure::Gone);
     }
@@ -211,19 +239,22 @@ fn answer(status: u16, response: &str) -> Result<Held, SendFailure> {
         };
         return Err(refuse(format!("HTTP {status}: {}{hint}", shown(response))));
     }
+    Ok(Accepted {
+        status,
+        body: response.to_owned(),
+    })
+}
+
+/// What the ledger endpoint holds, from its answer.
+fn held(accepted: &Accepted) -> Result<Held, SendFailure> {
     // `{"highest_sequence":{"discovery":N,"past_work":M}}`; a ledger it
     // leaves out holds nothing.
-    let receipt: serde_json::Value = serde_json::from_str(response)
-        .map_err(|error| refuse(format!("unreadable answer ({error}): {}", shown(response))))?;
+    let receipt: serde_json::Value = serde_json::from_str(&accepted.body)
+        .map_err(|error| accepted.unreadable(&format!("unreadable answer ({error})")))?;
     let highest = receipt
         .get("highest_sequence")
         .filter(|highest| highest.is_object())
-        .ok_or_else(|| {
-            refuse(format!(
-                "answer names no highest_sequence: {}",
-                shown(response)
-            ))
-        })?;
+        .ok_or_else(|| accepted.unreadable("answer names no highest_sequence"))?;
     let held = |ledger: &str| highest.get(ledger).and_then(serde_json::Value::as_u64);
     Ok(Held {
         discovery: held("discovery").unwrap_or(0),

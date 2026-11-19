@@ -46,6 +46,7 @@ Rosen is its store and its authority.
   It is never answered from a local copy.
 - **Ledger push.**
   When the base's `rosen.toml` names a root `ledger_endpoint`, the server sends new Discoveries and Past work entries there, such as Collapse's `https://api.collapse.sh/<owner>/<name>/ledgers`.
+  Without `ledger_endpoint`, a root `collapse` URL (R9 state feed) sends them to `<collapse>/ledgers`, so one setting serves both feeds.
   The URL is `https` with no credentials in it; plain `http` is accepted only for a loopback host.
   The token comes from git's credential helper on the server, the one the mirror push uses (R1), and goes as HTTPS basic auth.
   - One background task sends, off the append path, as the mirror push runs after a land.
@@ -59,6 +60,6 @@ Rosen is its store and its authority.
     The server stores how far each ledger has reached each endpoint, so a restart resumes there.
     On start and after a failure it first sends an empty batch to read what the endpoint holds, and resends from there when that is less than it delivered.
   - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `ledger_push` event (R9); the first success after failures publishes one too.
-    HTTP 410 (the endpoint's repository is archived) stops sending until `ledger_endpoint` changes or the server restarts.
-  - Without `ledger_endpoint`, nothing is sent.
+    HTTP 410 (the endpoint's repository is archived) stops sending until the endpoint changes or the server restarts.
+  - Without `ledger_endpoint` or `collapse`, nothing is sent.
 - **Accept when:** two agents on different machines that claim the same piece or an exclusive path at the same moment never both succeed; an event or message reaches its recipient on another machine within 1 s while both machines reach the server; and no two machines ever see different claim holders.

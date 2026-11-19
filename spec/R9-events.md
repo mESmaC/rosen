@@ -9,10 +9,10 @@
 - A `rebased` event reports an installed rebase, including a stack restack or an owner-requested rebase.
   A clean overlap probe emits none.
   Claim-only overlaps receive the `landed` notice.
-- The event types are `snapshot`, `landed`, `rebased`, `conflict`, `updated`, `review`, `claim`, `released`, `green`, `built`, `reverted`, `revert_refused`, `post_land_failure`, `bisect`, `mirror` and `ledger_push` (R13).
+- The event types are `snapshot`, `landed`, `rebased`, `conflict`, `updated`, `review`, `claim`, `released`, `green`, `built`, `reverted`, `revert_refused`, `post_land_failure`, `bisect`, `mirror`, `ledger_push` (R13) and `state_push`.
 - Each event is delivered only to subscribers it concerns: the change's owner, its reviewers, changes stacked on it, and the holders of overlapping changes or claims.
 - An event's audience is fixed when it is published.
-  An event about no change, such as `mirror` or `ledger_push`, goes to every subscriber.
+  An event about no change, such as `mirror`, `ledger_push` or `state_push`, goes to every subscriber.
   A `bisect` event concerns no agent and goes only to the project view.
 - A subscriber names its agent.
   A subscription that names no agent is the project view: it gets every event and stores no cursor.
@@ -23,3 +23,31 @@
     A subscription with no explicit cursor resumes after the stored one.
 - Rosen's events and the channel's events (R13) share one log, one sequence and one cursor per subscriber.
   A claim release and the land that caused it are always delivered in order, to subscribers on any machine.
+- **State feed.**
+  When the base's `rosen.toml` names a root `collapse` URL, such as `https://api.collapse.sh/<owner>/<name>`, the server sends its live state to `<collapse>/rosen/state`.
+  The URL follows the ledger push's rules (R13): `https` with no credentials, and the token from git's credential helper as HTTPS basic auth.
+  - One background task sends, with the ledger push's sender and backoff, so a land, snapshot or review call never waits for it and never fails because of it.
+  - A cursor over this event log, stored in the metadata store, says what is dirty.
+    An event naming a change makes that change dirty, and a `claim` also the changes it overlaps.
+    `landed`, `review`, `green` and `reverted` make review coverage dirty, and `landed` the configuration in force.
+    Channel lines and push reports make nothing dirty.
+  - Nothing is sent on a timer, so an idle project wakes no endpoint.
+    Sends start at most once every 10 s, about 2 s after the first dirtying event; one holding only snapshots waits up to 60 s.
+  - A request is a JSON batch `{"format":1,"through":N,"changes":[...],"conflicts":[...],"threads":[...],"coverage":[...],"config":[...]}` of at most 2 MB.
+    Each item is the whole current document, not a delta, and carries `seq`, the event sequence it reflects.
+    A change's conflicts and threads are items of their own, so a large change splits across batches; an item too large for any batch is sent as a `too_large` marker.
+    `through` is the sequence the endpoint holds everything through once it stores the batch, and only a pass's last batch raises it.
+  - A change document holds its ID, `owner@machine`, state, parent, head, title (the newest named snapshot's message), creation and update times, the land check (R8) with its verdicts, tier and reach, conflict and thread IDs, approvals including void ones, the latest receipt without its signature and `base_current`, edit regions per path with lines added and removed against the parent (R6, R11), its path claims as `notice`, `exclusive`, `share` or `wait`, the changes overlapping it with their paths, and its newest 20 named snapshots with the total snapshot count.
+    A part that cannot be read is named in `unavailable`.
+  - A conflict item holds its path, start line, open or resolved state, and base, ours and theirs each cut to 64 KiB with a `truncated` flag, with the base merged in and the time the `conflict` event that stored it was published.
+    A `conflict` event names that base in `detail.onto` when a land or a rebase stored it; otherwise it is the base the preceding `rebased` event named.
+  - A landed or abandoned change is sent once, with its landed commit, and then only again if it reopens.
+  - Coverage sends each landed change's reviewed state (R7) when it changed, and a removal when a revert takes a change off the list.
+    The configuration item holds the base commit, source, error and parsed configuration, and is sent again only when what is in force changes.
+  - The server keeps a fingerprint of each document it delivered and skips a dirty document the endpoint already holds.
+  - The endpoint keeps the newer of two copies by `seq`, so a repeated batch changes nothing, and answers `{"highest_sequence":N}`.
+    On start and after a failure the server first sends an empty batch to read that, resumes from it when it is less than was delivered, and then resends every live document.
+  - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `state_push` event; the first success after failures publishes one too.
+    HTTP 410 stops sending until `collapse` changes or the server restarts.
+  - Piece claims, messages, presence, channel lines, receipt signatures, machine credentials and join keys are never sent.
+  - Without `collapse`, nothing is sent.

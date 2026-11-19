@@ -72,7 +72,7 @@ pub fn rebase(state: &ServerState, change: &str) -> HistoryResult<ChangeRecord> 
         }),
     )];
     if !paths.is_empty() {
-        let detail = serde_json::json!({ "paths": paths });
+        let detail = serde_json::json!({ "paths": paths, "onto": merged.base });
         events.push(Staged::about(EventKind::Conflict, id, detail));
     }
     let record = state.changes.with_conn(|conn| {

@@ -1,7 +1,7 @@
 //! The ledger push (SPEC R13): after a Discoveries or Past work entry is
 //! appended, the server sends it to the endpoint the base's `rosen.toml`
-//! names in `ledger_endpoint`, such as Collapse's read-only copy of the
-//! ledgers.
+//! names in `ledger_endpoint`, or else under its `collapse` root, such as
+//! Collapse's read-only copy of the ledgers.
 //!
 //! It runs like the mirror push: one background task per server, off the
 //! append path. An append only commits its row and channel line, which
@@ -18,12 +18,13 @@
 
 mod cursor;
 mod entries;
-mod send;
+pub(crate) mod send;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rosen_core::ProjectConfig;
 use rosen_protocol::EventKind;
 use rosen_store::LooseObjectStore;
 use serde_json::json;
@@ -292,8 +293,15 @@ fn lost_batch(extent: &cursor::Extent, held: &Held) -> String {
 /// The endpoint the base's configuration names, if any. Read on every
 /// pass, so a land that sets or changes it takes effect at once.
 async fn configured_endpoint(config: &ServerConfig) -> Result<Option<String>, PushError> {
+    let in_force = in_force(config).await.map_err(PushError::Store)?;
+    Ok(in_force.and_then(|config| config.ledger_push_url()))
+}
+
+/// The configuration in force at the base, or `None` before an import.
+/// Shared with the state feed, which reads its endpoint the same way.
+pub(crate) async fn in_force(config: &ServerConfig) -> Result<Option<Arc<ProjectConfig>>, String> {
     let (metadata, objects) = (config.metadata_path(), config.objects_dir());
-    let found = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+    let found = tokio::task::spawn_blocking(move || -> Result<_, String> {
         // A server that has never imported has no database; opening one
         // here would create it.
         if !metadata.is_file() {
@@ -307,11 +315,11 @@ async fn configured_endpoint(config: &ServerConfig) -> Result<Option<String>, Pu
         };
         let store = LooseObjectStore::open(objects).map_err(|e| e.to_string())?;
         let in_force = project_config::resolve(&store, &commit).map_err(|e| e.to_string())?;
-        Ok(in_force.config.ledger_endpoint.clone())
+        Ok(Some(in_force.config))
     })
     .await
-    .map_err(|join| PushError::Store(join.to_string()))?;
-    found.map_err(PushError::Store)
+    .map_err(|join| join.to_string())?;
+    found
 }
 
 /// Waits until an event after `seen` can change what a pass would do: a
@@ -357,14 +365,14 @@ async fn news_after(state: &Arc<ServerState>, seen: u64, sending: bool) -> Resul
     .map_err(|err: crate::events::EventError| err.to_string())
 }
 
-async fn sleep_unless_shutdown(state: &ServerState, delay: Duration) -> bool {
+pub(crate) async fn sleep_unless_shutdown(state: &ServerState, delay: Duration) -> bool {
     tokio::select! {
         () = tokio::time::sleep(delay) => true,
         () = state.shutdown_requested() => false,
     }
 }
 
-fn retry_delay(failures: u32) -> Duration {
+pub(crate) fn retry_delay(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(16);
     RETRY_START.saturating_mul(1 << doublings).min(RETRY_CAP)
 }

@@ -44,8 +44,9 @@ pub(super) fn record(
             conflicts::save(&tx, &id.to_string(), &set)
                 .map_err(|e| changes::ChangeError::Corrupt(e.to_string()))?;
             // The conflict event commits with the conflicts, so a stop before
-            // it is stored cannot lose it (R9); the sink delivers it.
-            let detail = serde_json::json!({ "paths": paths });
+            // it is stored cannot lose it (R9); the sink delivers it. `onto`
+            // names the base merged in, which the conflicts table does not.
+            let detail = serde_json::json!({ "paths": paths, "onto": onto.to_hex() });
             crate::events::stage(&tx, &Staged::about(EventKind::Conflict, id, detail))?;
             tx.commit()?;
             Ok(Routing::Stored)

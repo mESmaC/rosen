@@ -543,7 +543,8 @@ pub enum EventKind {
     Landed,
     /// The server rebased the change; `detail.onto` is its new parent commit.
     Rebased,
-    /// A merge left stored conflicts; `detail.paths` names the files (R5).
+    /// A merge left stored conflicts; `detail.paths` names the files (R5),
+    /// and `detail.onto`, when present, the base commit merged in.
     Conflict,
     /// The change's state changed other than by landing; `detail.state`.
     Updated,
@@ -575,6 +576,9 @@ pub enum EventKind {
     /// A ledger push to the configured endpoint failed or recovered (R13).
     /// Sent to every subscriber.
     LedgerPush,
+    /// The state feed to the project's Collapse endpoint failed, stopped or
+    /// recovered (R9). Sent to every subscriber.
+    StatePush,
 }
 
 /// One event. `seq` is the cursor a client resumes from after a reconnect.

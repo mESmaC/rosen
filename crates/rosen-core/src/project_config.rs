@@ -69,6 +69,14 @@ pub struct ProjectConfig {
     /// nothing. Like `mirror.remote`, it never holds a credential.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ledger_endpoint: Option<String>,
+    /// The project's Collapse root, such as
+    /// `https://api.collapse.sh/<owner>/<name>`. The server sends ledger
+    /// entries to `<collapse>/ledgers` when `ledger_endpoint` is unset, and
+    /// its live state (open changes, review, coverage and this
+    /// configuration) to `<collapse>/rosen/state`. `None` sends no state.
+    /// It never holds a credential either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collapse: Option<String>,
 }
 
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
@@ -97,6 +105,7 @@ impl Default for ProjectConfig {
             mirror: Default::default(),
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             ledger_endpoint: None,
+            collapse: None,
         }
     }
 }
@@ -368,10 +377,32 @@ impl ProjectConfig {
         if let Some(remote) = &self.mirror.remote {
             mirror_remote(remote)?;
         }
-        match &self.ledger_endpoint {
-            Some(url) => ledger_endpoint(url),
+        if let Some(url) = &self.ledger_endpoint {
+            endpoint_url("ledger_endpoint", url)?;
+        }
+        match &self.collapse {
+            Some(url) => endpoint_url("collapse", url),
             None => Ok(()),
         }
+    }
+
+    /// Where the ledger push sends entries (R13): `ledger_endpoint`, or
+    /// else the `ledgers` endpoint under `collapse`.
+    pub fn ledger_push_url(&self) -> Option<String> {
+        self.ledger_endpoint
+            .clone()
+            .or_else(|| self.collapse_url("ledgers"))
+    }
+
+    /// Where the state feed sends live state (R9): `rosen/state` under
+    /// `collapse`, or `None` when the project names no Collapse root.
+    pub fn state_feed_url(&self) -> Option<String> {
+        self.collapse_url("rosen/state")
+    }
+
+    fn collapse_url(&self, path: &str) -> Option<String> {
+        let root = self.collapse.as_deref()?;
+        Some(format!("{}/{path}", root.trim_end_matches('/')))
     }
 }
 
@@ -548,16 +579,16 @@ fn split_port(host_port: &str) -> (&str, &str) {
     }
 }
 
-/// The server POSTs ledger entries to this URL with the push token from its
-/// credential helper, and the text is repository content any approved change
+/// The server POSTs ledger entries or live state to this URL with the push
+/// token from its credential helper, and the text is repository content any approved change
 /// can edit. So it must be `https`, where the token is never sent in the
 /// clear, and carry no credentials of its own. Plain `http` is accepted only
 /// for a loopback host, which never leaves the server machine, so a local
 /// endpoint can be tried out.
-fn ledger_endpoint(url: &str) -> Result<(), ConfigError> {
+fn endpoint_url(key: &str, url: &str) -> Result<(), ConfigError> {
     let refuse = |why: &str| {
         let shown = without_userinfo(url);
-        Err(ConfigError(format!("ledger_endpoint {shown:?} {why}")))
+        Err(ConfigError(format!("{key} {shown:?} {why}")))
     };
     // The URL reaches curl inside a quoted config line; these characters
     // could end that quoting, and none belongs in a URL.
@@ -669,5 +700,10 @@ mod tests {
         }
         let refusal = parsed("https://tok@api.collapse.sh/o/r/ledgers").unwrap_err();
         assert!(!refusal.to_string().contains("tok@"), "{refusal}");
+        let collapse = ProjectConfig::parse(
+            "collapse = \"https://tok@api.collapse.sh/o/r\"
+",
+        );
+        assert!(collapse.is_err(), "accepted a collapse root with a token");
     }
 }

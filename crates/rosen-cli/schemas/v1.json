@@ -218,7 +218,8 @@
         "channel",
         "post_land_failure",
         "ledger_push",
-        "bisect"
+        "bisect",
+        "state_push"
       ]
     },
     "ChangeParent": {
