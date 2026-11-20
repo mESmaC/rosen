@@ -235,7 +235,7 @@ async fn dispatch_project(state: &Arc<ServerState>, request: Request) -> Outcome
         Request::Ping => Outcome::Ok(Response::Pong),
         Request::Status => {
             let relay = crate::relay::setting(state).await;
-            Outcome::Ok(Response::Status(status(state, relay)))
+            Outcome::Ok(Response::Status(Box::new(status(state, relay))))
         }
         Request::Shutdown => {
             state.request_shutdown();

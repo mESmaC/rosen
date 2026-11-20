@@ -210,7 +210,7 @@ impl Session {
             }
             Request::Ping => self.reply(id, Outcome::Ok(Response::Pong)).await,
             Request::Status => {
-                let status = Response::Status(self.state.status());
+                let status = Response::Status(Box::new(self.state.status()));
                 self.reply(id, Outcome::Ok(status)).await;
             }
             Request::Shutdown => {

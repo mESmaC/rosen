@@ -388,7 +388,8 @@ pub enum Response {
     /// The answer to `landed_prose`: false when either commit is not in the
     /// base's landed history.
     LandedProse(bool),
-    Status(ServerStatus),
+    /// Boxed: `ServerStatus` is far larger than every other answer (clippy::large_enum_variant).
+    Status(Box<ServerStatus>),
     ShuttingDown,
     /// The answer to `change_new`, `change_show` and `change_abandon`.
     Change(ChangeRecord),

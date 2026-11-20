@@ -137,7 +137,7 @@ impl Client {
 
     pub async fn status(&self) -> Result<ServerStatus, Error> {
         match self.request(Request::Status).await? {
-            Response::Status(status) => Ok(status),
+            Response::Status(status) => Ok(*status),
             other => Err(unexpected(other)),
         }
     }
