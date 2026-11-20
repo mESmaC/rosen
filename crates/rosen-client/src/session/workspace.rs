@@ -18,6 +18,8 @@ pub struct WorkspaceSpec {
     /// Which paths to hold. A sparse workspace is never taken from the warm
     /// pool, which holds only whole trees.
     pub sparse: Sparse,
+    /// Write the files from the object store without asking the warm pool.
+    pub skip_pool: bool,
 }
 
 impl WorkspaceSpec {
@@ -27,7 +29,16 @@ impl WorkspaceSpec {
             dir: dir.into(),
             on: None,
             sparse: Sparse::all(),
+            skip_pool: false,
         }
+    }
+
+    /// Never asks the daemon's warm pool: the files are written from the
+    /// object store. The workspace then cannot wait on a busy pool, and it
+    /// is never a prepared one.
+    pub fn without_pool(mut self) -> Self {
+        self.skip_pool = true;
+        self
     }
 
     pub fn on(mut self, change: impl Into<String>) -> Self {
@@ -63,6 +74,7 @@ impl Session {
         let options = Options {
             sparse: spec.sparse,
             source: None,
+            skip_pool: spec.skip_pool,
         };
         match self
             .client
@@ -90,11 +102,24 @@ impl Session {
         dir: &Path,
         sparse: Sparse,
     ) -> Result<Report, Error> {
-        let record = self.client.change_show(change).await?;
         let options = Options {
             sparse,
-            source: None,
+            ..Options::default()
         };
+        self.open_workspace_with(change, dir, options).await
+    }
+
+    /// [`Session::open_workspace`] with every materialisation option. With
+    /// [`Options::skip_pool`] it is the retry for a workspace that waited
+    /// too long on the warm pool: give it a new `dir`, because the take
+    /// left waiting may still publish into the old one.
+    pub async fn open_workspace_with(
+        &self,
+        change: &str,
+        dir: &Path,
+        options: Options,
+    ) -> Result<Report, Error> {
+        let record = self.client.change_show(change).await?;
         self.client.materialise_change(&record, dir, options).await
     }
 

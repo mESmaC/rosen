@@ -53,6 +53,7 @@ impl ChangeCall {
                 owner,
                 workspace,
                 sparse,
+                no_pool,
             } => ChangeCall::New(
                 NewChange {
                     owner: resolve_owner(owner.as_deref())?,
@@ -60,7 +61,7 @@ impl ChangeCall {
                 },
                 workspace
                     .as_ref()
-                    .map(|dir| WorkspaceCall::parse(dir, sparse))
+                    .map(|dir| WorkspaceCall::parse(dir, sparse, *no_pool))
                     .transpose()?,
             ),
             ChangeCommand::List { owner, state } => ChangeCall::List(ChangeFilter {
@@ -86,7 +87,7 @@ struct WorkspaceCall {
 }
 
 impl WorkspaceCall {
-    fn parse(dir: &Path, sparse: &[String]) -> Result<Self, Error> {
+    fn parse(dir: &Path, sparse: &[String], skip_pool: bool) -> Result<Self, Error> {
         let sparse =
             Sparse::paths(sparse).map_err(|err| Error::InvalidArgument(err.to_string()))?;
         Ok(Self {
@@ -94,6 +95,7 @@ impl WorkspaceCall {
             options: Options {
                 sparse,
                 source: None,
+                skip_pool,
             },
         })
     }

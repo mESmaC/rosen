@@ -491,6 +491,11 @@ pub enum ChangeCommand {
         /// Repeat for several paths. Default: the whole tree.
         #[arg(long, value_name = "PATH", requires = "workspace")]
         sparse: Vec<String>,
+        /// With --workspace, write the files from the object store without
+        /// asking the daemon's warm pool. Use it when a workspace has waited
+        /// too long on a busy pool. The workspace is never a prepared one.
+        #[arg(long, requires = "workspace")]
+        no_pool: bool,
     },
     /// List changes and their states (open, ready, landed, abandoned),
     /// oldest first.

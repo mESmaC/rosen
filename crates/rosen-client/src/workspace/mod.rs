@@ -55,6 +55,10 @@ pub struct Options {
     /// A workspace already on disk to block clone from, such as the warm
     /// pool's prepared template. Ignored when its volume cannot block clone.
     pub source: Option<SourceWorkspace>,
+    /// Never ask the daemon's warm pool for a change's workspace: write its
+    /// files from the object store. For a caller whose take has waited too
+    /// long, since a take queues behind whatever holds the pool (#426).
+    pub skip_pool: bool,
 }
 
 /// A materialised workspace and the tree its tracked files hold. Rosen owns

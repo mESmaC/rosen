@@ -7,6 +7,7 @@
 //! thread Velocity launches is affected at once.
 
 use rosen_client::protocol::{ClaimOutcome, Listener};
+use rosen_client::workspace::{Method, Options};
 use rosen_client::{AgentId, Endpoint, Error, Session, WatchEvent, WorkspaceSpec};
 use rosen_core::{FileMode, ObjectId, Tree, TreeEntry};
 use rosen_server::changes::{BaseSource, BaseTip};
@@ -20,7 +21,7 @@ use std::time::Duration;
 async fn a_session_runs_a_workspace_from_creation_to_deletion() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
-    let endpoint = start_server(&data);
+    let endpoint = start_server(&data, "lifecycle");
     let agent = AgentId::new("session-test").unwrap();
     let session = Session::builder()
         .endpoint(endpoint)
@@ -60,6 +61,46 @@ async fn a_session_runs_a_workspace_from_creation_to_deletion() {
     assert!(!root.exists());
 }
 
+/// Risk (spec/R3-workspaces/warm-pool.md): a caller that gave up on a busy
+/// pool asks for its workspace without it. If the client still sent a take,
+/// that retry would queue behind the pool again (#426).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workspace_without_the_pool_sends_no_take() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let session = Session::builder()
+        .endpoint(start_server(&data, "no-pool"))
+        .agent(AgentId::new("session-test").unwrap())
+        .start_daemon(false)
+        .open()
+        .await
+        .unwrap();
+    // The pool refuses every take into its own ready root, so a refusal
+    // shows a take was sent and a workspace there shows none was.
+    let ready_root = data.join("warm-pool");
+    std::fs::create_dir_all(&ready_root).unwrap();
+    let asked = WorkspaceSpec::new(ready_root.join("asked"));
+    let Err(Error::WorkspaceNotCreated { change, .. }) = session.create_workspace(asked).await
+    else {
+        panic!("the pool did not refuse a take into its ready root");
+    };
+
+    let (retried, created) = (ready_root.join("retried"), ready_root.join("created"));
+    let options = Options {
+        skip_pool: true,
+        ..Options::default()
+    };
+    let report = session
+        .open_workspace_with(&change.to_string(), &retried, options)
+        .await
+        .unwrap();
+    assert_eq!(report.method, Method::PlainCopy);
+    assert!(retried.join("main.rs").is_file());
+    let spec = WorkspaceSpec::new(&created).without_pool();
+    session.create_workspace(spec).await.unwrap();
+    assert!(created.join("main.rs").is_file());
+}
+
 /// The tree of the first snapshot that carried `path`.
 async fn wait_for_snapshot(watch: &mut rosen_client::WorkspaceWatch, path: &str) -> ObjectId {
     let deadline = Duration::from_secs(20);
@@ -84,13 +125,14 @@ impl BaseSource for FixedBase {
     }
 }
 
-fn start_server(data: &Path) -> Endpoint {
+/// `name` keeps this file's tests, which share a process, on separate pipes.
+fn start_server(data: &Path, name: &str) -> Endpoint {
     let store = LooseObjectStore::open(data.join("objects")).unwrap();
     let blob = store.put_blob(b"fn main() {}\n").unwrap();
     let entry = TreeEntry::new(FileMode::Regular, "main.rs", blob).unwrap();
     let tree = store.put_tree(&Tree::new(vec![entry]).unwrap()).unwrap();
     let endpoint = if cfg!(windows) {
-        Endpoint::new(format!("rosen-session-test-{}", std::process::id()))
+        Endpoint::new(format!("rosen-session-test-{name}-{}", std::process::id()))
     } else {
         Endpoint::new(data.join("s.sock").to_string_lossy())
     };

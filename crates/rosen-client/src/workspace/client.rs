@@ -49,6 +49,10 @@ impl Client {
 
     /// Materialises `change`'s head tree into the new directory `dest`, and
     /// marks it as the change's workspace so its writes become snapshots.
+    ///
+    /// A whole workspace with no source is taken from the daemon's warm pool
+    /// when it has one to give. [`Options::skip_pool`] sends no take at all,
+    /// so the workspace never waits on the pool.
     pub async fn materialise_change(
         &self,
         change: &ChangeRecord,
@@ -56,7 +60,8 @@ impl Client {
         options: Options,
     ) -> Result<Report, Error> {
         let sparse = options.sparse.chosen();
-        let pooled = if options.sparse.is_all() && options.source.is_none() {
+        let ask_pool = options.sparse.is_all() && options.source.is_none() && !options.skip_pool;
+        let pooled = if ask_pool {
             // A daemon may bring a ready workspace from another tree to the
             // head, which needs the head's objects in its store (D8).
             self.ensure_local(change.change.head).await?;

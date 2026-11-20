@@ -7,3 +7,4 @@
   A take prefers a prepared workspace and reports whether it is prepared.
   When no ready workspace or template holds the change's tree yet, as when lands outpace the daemon, the take brings another ready workspace to that tree by rewriting only the files that differ, and reports it unprepared.
   Each ready workspace already holds its tree and stat caches (R2), so a take only renames, marks and registers it, whatever the tree's size, and its first snapshot rereads only files written since.
+  A caller can ask for a workspace without the pool (`rosen change new --workspace <DIR> --no-pool`): the client sends no take and writes the files from the object store, so a busy pool never holds that workspace up.
