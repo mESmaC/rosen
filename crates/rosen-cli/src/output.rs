@@ -35,6 +35,7 @@ pub const REVIEW_LIST_SCHEMA: &str = "rosen.review.list/v1";
 pub const REVIEW_THREAD_SCHEMA: &str = "rosen.review.thread/v1";
 pub const SERVER_STATUS_SCHEMA: &str = "rosen.server.status/v1";
 pub const SERVER_RELAY_SCHEMA: &str = "rosen.server.relay/v1";
+pub const SERVER_STOP_SCHEMA: &str = "rosen.server.stop/v1";
 pub const SHARE_SCHEMA: &str = "rosen.share/v2";
 pub const SNAPSHOT_SCHEMA: &str = "rosen.snapshot/v1";
 pub const STATUS_SCHEMA: &str = "rosen.status/v2";

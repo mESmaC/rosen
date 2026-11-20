@@ -2380,6 +2380,28 @@
                   "type": "null"
                 }
               ]
+            },
+            "commit": {
+              "description": "The git commit the server was built from; null when its build could not tell.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "executable": {
+              "description": "The path of the server's executable on its own machine.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -2395,7 +2417,9 @@
             "last_event",
             "listen",
             "fingerprint",
-            "upstream"
+            "upstream",
+            "commit",
+            "executable"
           ],
           "additionalProperties": false
         }
@@ -2403,6 +2427,65 @@
       "x-commands": [
         "server start",
         "server status"
+      ]
+    },
+    "rosen.server.stop/v1": {
+      "description": "Printed once the server's process has exited, or at once when none was running.",
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.server.stop/v1"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "was_running": {
+          "type": "boolean"
+        },
+        "pid": {
+          "description": "The stopped server's process; null when none was running.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "server": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "endpoint",
+        "was_running",
+        "pid",
+        "server",
+        "commit"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "server stop"
       ]
     },
     "ProjectConfigV1": {

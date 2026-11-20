@@ -2,7 +2,7 @@
 //! in the background when none is running.
 
 use crate::{Client, Error};
-use rosen_protocol::Endpoint;
+use rosen_protocol::{Endpoint, ErrorCode, ServerStatus};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -24,6 +24,45 @@ pub async fn connect_or_start(endpoint: &Endpoint) -> Result<Client, Error> {
     }
     let mut daemon = spawn_daemon(endpoint)?;
     wait_until_ready(endpoint, &mut daemon).await
+}
+
+/// Stops the daemon on `endpoint` and returns once its process has exited,
+/// with the status it reported just before; `None` when none was running.
+/// Never starts one.
+///
+/// The endpoint closes as soon as the daemon begins to stop, while it still
+/// answers the requests it is running and finishes its writes. So only the
+/// process's exit says the data directory is free for the next daemon: a
+/// caller that waited for the endpoint alone could start one beside a daemon
+/// that was still writing (#425).
+pub async fn stop(endpoint: &Endpoint) -> Result<Option<ServerStatus>, Error> {
+    let client = match Client::connect(endpoint).await {
+        Ok(client) => client,
+        Err(Error::NotRunning(_)) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    // Asked on the connection that stops it, so the process id is that
+    // daemon's even if another one takes the endpoint afterwards.
+    let status = client.status().await?;
+    match client.shutdown().await {
+        Ok(()) | Err(Error::Disconnected) => {}
+        // Another client's stop got there first; wait for the same exit.
+        Err(Error::Server(refused)) if refused.code == ErrorCode::ShuttingDown => {}
+        Err(err) => return Err(err),
+    }
+    drop(client);
+    wait_for_exit(status.pid).await;
+    Ok(Some(status))
+}
+
+/// Polls until no running process has id `pid`. An id the system reused
+/// reads as running, which only makes the wait longer, never shorter.
+async fn wait_for_exit(pid: u32) {
+    let mut delay = Duration::from_millis(10);
+    while rosen_platform::process_may_be_running(pid) {
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_millis(200));
+    }
 }
 
 /// The `rosen-server` binary: `$ROSEN_SERVER`, else the one installed next to the

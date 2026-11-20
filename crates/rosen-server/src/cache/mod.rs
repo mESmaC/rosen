@@ -72,6 +72,8 @@ impl CacheState {
             upstream: Some(self.upstream.address.clone()),
             mirror_owner: None,
             relay: None,
+            commit: crate::BUILD_COMMIT.map(str::to_owned),
+            executable: crate::executable(),
         }
     }
 

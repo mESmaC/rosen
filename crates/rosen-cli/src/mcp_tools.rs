@@ -15,11 +15,12 @@ use crate::commands::Cli;
 ///   elsewhere, and a tool call has to return.
 /// - `run` runs another program with the caller's terminal, for as long as
 ///   that takes.
-/// - `import` and `server start` are the operator's: the host that starts
-///   this server has already started the project's server.
+/// - `import`, `server start` and `server stop` are the operator's: the host
+///   that starts this server has already started the project's server, and
+///   an agent that stopped it would stop every other agent's work.
 /// - `server relay` grants Collapse's owner authority on this server, and
 ///   only the operator may (R14).
-const NOT_TOOLS: [&str; 11] = [
+const NOT_TOOLS: [&str; 12] = [
     "mcp",
     "wait",
     "events",
@@ -27,6 +28,7 @@ const NOT_TOOLS: [&str; 11] = [
     "run",
     "import",
     "server start",
+    "server stop",
     "server relay",
     "mirror drop-paths",
     "mirror adopt",

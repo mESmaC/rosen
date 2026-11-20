@@ -1,4 +1,4 @@
-//! `rosen server start|status|relay` and `rosen events`: the commands that
+//! `rosen server start|stop|status|relay` and `rosen events`: the commands that
 //! talk to the daemon directly rather than through a project operation.
 
 use rosen_client::protocol::{Event, RelayKind, RelaySetting, ServerStatus};
@@ -40,6 +40,43 @@ pub async fn status(json: bool, endpoint: &Endpoint) -> Result<Succeeded, Error>
     }
 }
 
+/// How long `stop` waits quietly before saying what it is waiting for.
+const QUIET_STOP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Stops the running daemon and returns once its process has exited. Never
+/// starts one: with none running there is nothing left to do, so that
+/// succeeds too.
+pub async fn stop(json: bool, endpoint: &Endpoint) -> Result<Succeeded, Error> {
+    let stopping = rosen_client::stop_server(endpoint);
+    tokio::pin!(stopping);
+    let stopped = tokio::select! {
+        stopped = &mut stopping => stopped?,
+        () = tokio::time::sleep(QUIET_STOP) => {
+            // Standard error stays empty with --json (R10).
+            if !json {
+                eprintln!("waiting for the server to answer its running requests and exit");
+            }
+            stopping.await?
+        }
+    };
+    if json {
+        let body = json!({
+            "schema": crate::output::SERVER_STOP_SCHEMA,
+            "endpoint": endpoint.as_str(),
+            "was_running": stopped.is_some(),
+            "pid": stopped.as_ref().map(|status| status.pid),
+            "server": stopped.as_ref().map(|status| &status.server),
+            "commit": stopped.as_ref().and_then(|status| status.commit.as_ref()),
+        });
+        println!("{body}");
+    } else if let Some(status) = &stopped {
+        println!("stopped: {} (pid {})", status.server, status.pid);
+    } else {
+        println!("not running ({endpoint})");
+    }
+    Ok(true)
+}
+
 fn print_status(json: bool, status: &ServerStatus) {
     if json {
         let body = json!({
@@ -58,10 +95,18 @@ fn print_status(json: bool, status: &ServerStatus) {
             "upstream": status.upstream,
             "mirror_owner": status.mirror_owner,
             "relay": status.relay,
+            "commit": status.commit,
+            "executable": status.executable,
         });
         println!("{body}");
     } else {
         println!("running: {} (pid {})", status.server, status.pid);
+        if let Some(commit) = &status.commit {
+            println!("commit: {commit}");
+        }
+        if let Some(executable) = &status.executable {
+            println!("executable: {executable}");
+        }
         println!("endpoint: {}", status.endpoint);
         println!("data dir: {}", status.data_dir);
         println!("protocol: v{}", status.protocol_version);

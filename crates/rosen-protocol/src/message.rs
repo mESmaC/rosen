@@ -487,6 +487,14 @@ pub struct ServerStatus {
     /// The Collapse action relay's setting (R14). Absent on a cache daemon.
     #[serde(default)]
     pub relay: Option<crate::RelaySetting>,
+    /// The git commit the daemon was built from, lowercase hex. `server`
+    /// carries the crate version, which every commit shares, so this is what
+    /// tells one build from another. Absent when the build could not tell.
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// The path of the daemon's executable on its own machine.
+    #[serde(default)]
+    pub executable: Option<String>,
 }
 
 /// Why a request failed.

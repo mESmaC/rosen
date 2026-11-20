@@ -387,5 +387,7 @@ fn status(state: &ServerState, relay: Option<rosen_protocol::RelaySetting>) -> S
         upstream: None,
         mirror_owner: Some(crate::mirror::owner::is_owner(&state.config.data_dir)),
         relay,
+        commit: crate::BUILD_COMMIT.map(str::to_owned),
+        executable: crate::executable(),
     }
 }

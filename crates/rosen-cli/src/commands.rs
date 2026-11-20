@@ -268,7 +268,7 @@ pub enum Command {
     /// List or delete workspaces.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
-    /// Start or inspect this machine's Rosen server.
+    /// Start, stop or inspect this machine's Rosen server.
     #[command(subcommand)]
     Server(ServerCommand),
     /// Read the project configuration: the `rosen.toml` file at the
@@ -713,8 +713,19 @@ pub enum ServerCommand {
     /// running, then show its status. Safe to run when it is already up.
     Start,
     /// Show whether the server is running and which project it holds. Exits
-    /// with status 1, without starting a server, when none is running.
+    /// with status 1, without starting a server, when none is running. It
+    /// names the git commit the server was built from and its executable,
+    /// which tell one build from another when the version does not.
     Status,
+    /// Stop this machine's server and wait until its process has exited.
+    ///
+    /// The server refuses new work at once, answers the requests it is
+    /// already running, such as a land, and then exits, so this takes as
+    /// long as they do. Only once it returns is the data directory free for
+    /// another server: the endpoint closes earlier, while the old server may
+    /// still be writing. It never starts a server; when none is running it
+    /// says so and exits with status 0.
+    Stop,
     /// Choose which owner requests the server fetches from the project's
     /// Collapse endpoint and runs: `approve`, `land`, `mark`, `config` and
     /// `revoke`, or `none`. `config` opens a change carrying an edited
@@ -865,6 +876,7 @@ impl Command {
             Command::Workspace(WorkspaceCommand::Limits { .. }) => "workspace limits",
             Command::Server(ServerCommand::Start) => "server start",
             Command::Server(ServerCommand::Status) => "server status",
+            Command::Server(ServerCommand::Stop) => "server stop",
             Command::Server(ServerCommand::Relay { .. }) => "server relay",
             Command::Config(ConfigCommand::Show { .. }) => "config show",
             Command::Events { .. } => "events",

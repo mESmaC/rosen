@@ -305,6 +305,9 @@ impl Session {
         let credential = self.credential.clone();
         let network = self.access == Access::Network;
         let pending_source = self.pending_source.clone();
+        // Counted before the hand-off, so a server asked to stop right now
+        // still sees this request and waits for its answer (#425).
+        let in_flight = self.state.track_request();
         tokio::spawn(async move {
             let allowed = !network
                 || match &request {
@@ -331,6 +334,7 @@ impl Session {
             // Freed only once the answer is queued, so a request blocked on a
             // full outbox still counts against the connection.
             drop(permit);
+            drop(in_flight);
         });
     }
 

@@ -55,6 +55,22 @@ use tokio::sync::watch;
 /// The server build name reported in handshakes and status.
 pub const SERVER_NAME: &str = concat!("rosen-server ", env!("CARGO_PKG_VERSION"));
 
+/// The git commit this server was built from, which `build.rs` reads from
+/// `$ROSEN_BUILD_COMMIT` or the source checkout. `None` when neither told
+/// it. [`SERVER_NAME`] is the same for every commit, so this is what tells a
+/// client which build is running (#425).
+pub const BUILD_COMMIT: Option<&str> = option_env!("ROSEN_SERVER_BUILD_COMMIT");
+
+/// The path of this process's executable, for `status`.
+pub(crate) fn executable() -> Option<String> {
+    let path = std::env::current_exe().ok()?;
+    Some(path.display().to_string())
+}
+
+/// How long a stopping server waits for answers already queued to reach
+/// their clients, once no request is still running.
+const FLUSH_LIMIT: Duration = Duration::from_secs(2);
+
 /// State shared by every connection.
 pub struct ServerState {
     pub machine_agents: std::sync::Mutex<machines::manage::Presence>,
@@ -84,6 +100,8 @@ pub struct ServerState {
     /// exclusive access so no operation can retain an obsolete base view.
     pub maintenance: tokio::sync::RwLock<()>,
     open_connections: AtomicU64,
+    /// Requests admitted and not yet answered, which shutdown waits for.
+    requests_in_flight: AtomicU64,
     shutdown: watch::Sender<bool>,
 }
 
@@ -118,6 +136,7 @@ impl ServerState {
             relay_wake: Arc::default(),
             maintenance: tokio::sync::RwLock::new(()),
             open_connections: AtomicU64::new(0),
+            requests_in_flight: AtomicU64::new(0),
             shutdown: watch::Sender::new(false),
         });
         let base = import::base::LedgerBase::new(state.config.clone());
@@ -186,6 +205,42 @@ impl ServerState {
         while self.open_connections() > 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    pub fn requests_in_flight(&self) -> u64 {
+        self.requests_in_flight.load(Ordering::SeqCst)
+    }
+
+    /// Counts a request as in flight until the returned guard drops.
+    pub(crate) fn track_request(self: &Arc<Self>) -> RequestGuard {
+        self.requests_in_flight.fetch_add(1, Ordering::SeqCst);
+        RequestGuard(Arc::clone(self))
+    }
+
+    /// Waits until every request the server is running has its answer
+    /// queued. A stopping server reads no more frames, and a request it had
+    /// read but not started is refused at once, so nothing new runs for long.
+    /// There is no limit: a land cut off part-way leaves its client unable
+    /// to tell whether the base moved (#425), and every request ends on its
+    /// own.
+    pub async fn drain_requests(&self) {
+        let running = self.requests_in_flight();
+        if running > 0 {
+            eprintln!("rosen-server: stopping once {running} running request(s) are answered");
+        }
+        while self.requests_in_flight() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+/// Counts one request as in flight until dropped: when it is answered, or
+/// its task ends any other way.
+pub(crate) struct RequestGuard(Arc<ServerState>);
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.0.requests_in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -362,7 +417,10 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     if let Some(task) = network_task {
         let _ = task.await;
     }
-    state.drain_connections(Duration::from_secs(2)).await;
+    // Both listeners are closed, so nothing new arrives. What was already
+    // running is answered before the process goes (#425).
+    state.drain_requests().await;
+    state.drain_connections(FLUSH_LIMIT).await;
     // A push cut short here is retried at the next start: the mirror's
     // pushed commit is only recorded once the remote accepts it.
     mirror.abort();

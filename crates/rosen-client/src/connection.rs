@@ -142,7 +142,9 @@ impl Client {
         }
     }
 
-    /// Asks the daemon to exit. It finishes answering open connections first.
+    /// Asks the daemon to exit. It refuses new work at once, then answers
+    /// the requests it is already running before its process ends, which can
+    /// be well after this returns: [`crate::stop_server`] waits for that.
     pub async fn shutdown(&self) -> Result<(), Error> {
         match self.request(Request::Shutdown).await? {
             Response::ShuttingDown => Ok(()),
