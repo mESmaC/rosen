@@ -170,10 +170,10 @@ AGENTS.md lists the commands for each.
 
 ## Status
 
-Rosen v1 is in active development. As of 2026-11-13:
+Rosen v1 is in active development. As of 2026-11-19:
 
 - **Built:** R1–R14 in SPEC.md, covering import and mirror, snapshots and the offline journal, local and server-side workspaces with the prepared warm pool, guarded deletion, merge and stored conflicts cleared by `rosen resolve`, claims and overlaps, review, optimistic landing with receipt reuse, events, the CLI, history queries, post-land bisection and auto-revert, the server-side AIRC channel, and network enrollment. Velocity runs its whole agent flow through a `rosen-client` session.
-- **In progress:** the multi-machine §5 stress run.
+- **In progress:** the §5 stress run. On three isolated machines on one computer it holds every guarantee, clean and with faults, and still misses the workspace start and land latency targets (#193).
 
 This list names only milestones. For current work and open fixes, read the project Task List and the repository's open issues; they stay current where this section does not.
 
