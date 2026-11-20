@@ -52,7 +52,10 @@ jobs:
           env-mapping: |
             CARGO_TARGET_DIR,{{ DEV_DRIVE }}/target
 
-      # A rust-toolchain.toml in the repository, if any, overrides this default.
+      # This action only sets up rustup and its default. rust-toolchain.toml
+      # overrides that default with the exact compiler, clippy and rustfmt that
+      # agents and the land checks also use (#427), so `toolchain` and
+      # `components` here choose nothing a later step runs.
       # The action is pinned to a commit on its `stable` branch, so the ref no
       # longer names the toolchain; `toolchain` names it instead. Dependabot
       # follows tags, not branches, so it skips this pin (see dependabot.yml).
@@ -62,6 +65,12 @@ jobs:
         with:
           toolchain: stable
           components: clippy, rustfmt
+
+      # Without a name, rustup installs what rust-toolchain.toml pins. Every job
+      # does this itself, so none depends on rustup installing on first use,
+      # and prints the version its log can be compared by.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update && rustc -V
 
       - run: cargo fmt --all -- --check
 
@@ -111,6 +120,9 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update && rustc -V
+
       - name: Time the check sets
         shell: pwsh
         run: ./.github/scripts/build_timings.ps1 -Variant ${{ matrix.variant }}
@@ -138,6 +150,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update && rustc -V
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
@@ -176,6 +191,9 @@ jobs:
           toolchain: stable
           components: clippy
 
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update && rustc -V
+
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: cargo build
@@ -197,6 +215,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update && rustc -V
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 

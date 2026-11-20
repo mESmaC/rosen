@@ -36,6 +36,12 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # Release binaries come from the compiler rust-toolchain.toml pins, the one
+      # CI checked the commit with (#427). Each target is its runner's host, so
+      # the pinned toolchain already holds its standard library.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update && rustc -V
+
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-workspace-crates: true

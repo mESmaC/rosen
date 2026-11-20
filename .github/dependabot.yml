@@ -14,7 +14,15 @@ updates:
         patterns: ["*"]
     # Pinned to its `stable` branch head, which no version tag marks, so
     # Dependabot cannot track it and could retarget it to the older `v1` tag
-    # (issue #238). ci.yml says how to bump it by hand. The toolchain itself
-    # stays current regardless: each use passes `toolchain: stable`.
+    # (issue #238). ci.yml says how to bump it by hand. The action does not
+    # choose the compiler: rust-toolchain.toml pins it.
     ignore:
       - dependency-name: dtolnay/rust-toolchain
+
+  # rust-toolchain.toml pins one exact Rust for CI, agents and the land checks
+  # (issue #427). Each new stable arrives as a PR whose CI run shows the lints
+  # the new clippy adds; the bump lands as its own change, with their fixes.
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
