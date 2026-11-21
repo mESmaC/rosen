@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use super::config_change::{self, ConfigChange};
 use super::machine_revoke::{self, MachineRevoke};
-use super::remote::{Fetched, MAX_RESULT};
+use super::remote::{result_body, result_too_large, Fetched, MAX_RESULT};
 use crate::reviews::{self, ReviewCall};
 use crate::ServerState;
 
@@ -134,7 +134,7 @@ pub async fn run(state: &Arc<ServerState>, call: Call) -> Done {
             let state = if refused { "refused" } else { "done" };
             Done {
                 state,
-                result: fit(json!(answer)),
+                result: fit(state, json!(answer)),
             }
         }
         Outcome::Ok(Response::Approval(approval)) => done(json!(approval)),
@@ -205,37 +205,163 @@ fn command(call: &Call) -> &'static str {
 pub fn done(result: Value) -> Done {
     Done {
         state: "done",
-        result: fit(result),
+        result: fit("done", result),
     }
 }
 
 /// A refusal shaped like the CLI's `rosen.error/v1` object, with the code
 /// Collapse can branch on.
 pub fn refusal(command: &str, code: &str, message: &str) -> Done {
+    let result = json!({
+        "schema": "rosen.error/v1",
+        "command": command,
+        "code": code,
+        "error": message,
+    });
     Done {
         state: "refused",
-        result: json!({
-            "schema": "rosen.error/v1",
-            "command": command,
-            "code": code,
-            "error": message,
-        }),
+        result: fit("refused", result),
     }
 }
 
-/// Keeps a result under Collapse's limit: a land naming thousands of
-/// conflicted paths drops the lists and says so, keeping its status.
-fn fit(mut result: Value) -> Value {
-    let size = |value: &Value| serde_json::to_vec(value).map_or(0, |bytes| bytes.len());
-    if size(&result) < MAX_RESULT {
+const MAX_COMMAND: usize = 128;
+
+fn body_fits(state: &str, result: &Value) -> bool {
+    result_body(state, result).len() <= MAX_RESULT
+}
+
+/// Keeps the whole serialized `{"state","result"}` POST body within Collapse's
+/// limit (#443): land answers drop lists, logs and maps before trimming their
+/// message; refusals shorten `error` (and oversized `command`).
+fn fit(state: &str, mut result: Value) -> Value {
+    if body_fits(state, &result) {
         return result;
     }
-    if let Some(outcome) = result.get_mut("outcome").and_then(Value::as_object_mut) {
-        outcome.retain(|_, value| !value.is_array());
-        outcome.insert("truncated".into(), Value::Bool(true));
-    }
-    if size(&result) < MAX_RESULT {
+    if fit_outcome(state, &mut result) || fit_fields(state, &mut result) {
         return result;
+    }
+    if result.get("schema").and_then(Value::as_str) == Some("rosen.error/v1") {
+        let command = result
+            .get("command")
+            .and_then(Value::as_str)
+            .filter(|command| command.len() <= MAX_COMMAND)
+            .unwrap_or("");
+        return result_too_large(command);
     }
     json!({ "truncated": true })
+}
+
+fn fit_outcome(state: &str, result: &mut Value) -> bool {
+    let Some(outcome) = result.get_mut("outcome").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    outcome.retain(|_, value| !value.is_array());
+    outcome.insert("truncated".into(), Value::Bool(true));
+    if body_fits(state, result) {
+        return true;
+    }
+    if let Some(outcome) = result.get_mut("outcome").and_then(Value::as_object_mut) {
+        outcome.remove("log");
+        outcome.retain(|_, value| !value.is_object());
+    }
+    if body_fits(state, result) {
+        return true;
+    }
+    shorten_nested(state, result, "outcome", "message");
+    body_fits(state, result)
+}
+
+fn fit_fields(state: &str, result: &mut Value) -> bool {
+    if let Some(command) = result
+        .get("command")
+        .and_then(Value::as_str)
+        .filter(|command| command.len() > MAX_COMMAND)
+        .map(str::to_owned)
+    {
+        let short = shorten_text(&command, |candidate| candidate.len() <= MAX_COMMAND);
+        if let Some(map) = result.as_object_mut() {
+            map.insert("command".into(), Value::String(short));
+        }
+        if body_fits(state, result) {
+            return true;
+        }
+    }
+    for key in ["error", "message"] {
+        shorten_top(state, result, key);
+        if body_fits(state, result) {
+            return true;
+        }
+    }
+    false
+}
+
+fn shorten_top(state: &str, result: &mut Value, key: &str) {
+    let Some(original) = result.get(key).and_then(Value::as_str).map(str::to_owned) else {
+        return;
+    };
+    let short = shorten_text(&original, |candidate| {
+        if let Some(map) = result.as_object_mut() {
+            map.insert(key.into(), Value::String(candidate.to_owned()));
+        }
+        body_fits(state, result)
+    });
+    if let Some(map) = result.as_object_mut() {
+        map.insert(key.into(), Value::String(short));
+    }
+}
+
+fn shorten_nested(state: &str, result: &mut Value, parent: &str, key: &str) {
+    let Some(original) = result
+        .get(parent)
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let short = shorten_text(&original, |candidate| {
+        if let Some(map) = result.get_mut(parent).and_then(Value::as_object_mut) {
+            map.insert(key.into(), Value::String(candidate.to_owned()));
+        }
+        body_fits(state, result)
+    });
+    if let Some(map) = result.get_mut(parent).and_then(Value::as_object_mut) {
+        map.insert(key.into(), Value::String(short));
+    }
+}
+
+/// Longest UTF-8 prefix of `text`, suffixed with `"..."`, accepted by `fits`.
+fn shorten_text(text: &str, mut fits: impl FnMut(&str) -> bool) -> String {
+    const ELLIPSIS: &str = "...";
+    if !fits(ELLIPSIS) {
+        return String::new();
+    }
+    let mut end = text.len().min(MAX_RESULT);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let prefix = &text[..end];
+    let cuts: Vec<usize> = prefix
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(prefix.len()))
+        .collect();
+    let mut lo = 0usize;
+    let mut hi = cuts.len() - 1;
+    let mut candidate = String::new();
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        candidate.clear();
+        candidate.push_str(&prefix[..cuts[mid]]);
+        candidate.push_str(ELLIPSIS);
+        if fits(&candidate) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    candidate.clear();
+    candidate.push_str(&prefix[..cuts[lo]]);
+    candidate.push_str(ELLIPSIS);
+    candidate
 }

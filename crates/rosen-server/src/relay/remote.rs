@@ -14,8 +14,32 @@ use serde_json::Value;
 use super::RelayError;
 use crate::ledger_push::send::{self, Accepted, Credential, SendFailure};
 
-/// Collapse refuses a result larger than this.
+/// Collapse limits the whole serialized result POST body to this many bytes.
 pub const MAX_RESULT: usize = 16 << 10;
+
+/// Serializes the JSON body sent to `POST /rosen/actions/<id>/result`.
+pub fn result_body(state: &str, result: &Value) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({ "state": state, "result": result })).unwrap_or_default()
+}
+
+/// Minimal `rosen.error/v1` object posted when an outcome exceeds Collapse's
+/// body limit or is rejected with HTTP 400 or 413 (#443).
+pub fn result_too_large(command: &str) -> Value {
+    serde_json::json!({
+        "schema": "rosen.error/v1",
+        "command": command,
+        "code": "result_too_large",
+        "error": "action outcome exceeded Collapse's result size limit",
+    })
+}
+
+fn command_of(result: &Value) -> &str {
+    result
+        .get("command")
+        .and_then(Value::as_str)
+        .filter(|command| command.len() <= 64)
+        .unwrap_or("")
+}
 
 /// One endpoint and what reaching it needs.
 pub struct Remote {
@@ -96,8 +120,7 @@ impl Remote {
     ) -> Result<bool, RelayError> {
         let url = self.url(&format!("rosen/actions/{id}/result"));
         let result: Value = serde_json::from_str(result).unwrap_or(Value::Null);
-        let body = serde_json::json!({ "state": state, "result": result });
-        let body = serde_json::to_vec(&body).unwrap_or_default();
+        let body = result_body(state, &result);
         match send::post_json(&self.scratch, &url, &body, self.credential.as_ref()).await {
             Ok(_) => Ok(true),
             // Unknown, or never handed out (`not_sent`): no retry can land it.
@@ -105,7 +128,25 @@ impl Remote {
                 status: Some(404 | 409),
                 ..
             }) => Ok(false),
+            // Oversized or permanently rejected body: post a minimal error so
+            // one stuck outcome never blocks later actions (#443).
+            Err(SendFailure::Failed {
+                status: Some(400 | 413),
+                ..
+            }) => self.post_too_large(&url, command_of(&result)).await,
             Err(failure) => Err(self.failure(&url, failure)),
+        }
+    }
+
+    async fn post_too_large(&self, url: &str, command: &str) -> Result<bool, RelayError> {
+        let body = result_body("refused", &result_too_large(command));
+        match send::post_json(&self.scratch, url, &body, self.credential.as_ref()).await {
+            Ok(_) => Ok(true),
+            Err(SendFailure::Failed {
+                status: Some(400 | 404 | 409 | 413),
+                ..
+            }) => Ok(false),
+            Err(failure) => Err(self.failure(url, failure)),
         }
     }
 

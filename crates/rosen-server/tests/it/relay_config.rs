@@ -6,7 +6,7 @@
 //! open a change that lowers its own gates, would hand policy to anyone
 //! holding the owner's browser session.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,27 +22,43 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 struct Queue {
     actions: Vec<Value>,
     results: BTreeMap<i64, Value>,
+    status_413: BTreeSet<i64>,
+    rejected: BTreeMap<i64, Vec<u16>>,
 }
 
 impl Queue {
-    fn answer(&mut self, path: &str, body: &[u8]) -> String {
+    fn answer(&mut self, path: &str, body: &[u8]) -> (u16, String) {
         if path.ends_with("/rosen/doorbell") {
-            return json!({ "generation": self.actions.len() }).to_string();
+            return (200, json!({ "generation": self.actions.len() }).to_string());
         }
         if let Some(after) = path.split("after=").nth(1) {
             let after: i64 = after.parse().unwrap();
             // Action 1 is handed out again however far the server read,
             // as a repeat Collapse sends before it holds a result.
-            let due = self.actions.iter().filter(|a| {
-                let id = a["id"].as_i64().unwrap();
-                id > after || id == 1
-            });
-            return json!({ "actions": due.cloned().collect::<Vec<_>>() }).to_string();
+            let due: Vec<_> = self
+                .actions
+                .iter()
+                .filter(|a| {
+                    let id = a["id"].as_i64().unwrap();
+                    id > after || id == 1
+                })
+                .cloned()
+                .collect();
+            return (200, json!({ "actions": due }).to_string());
         }
         let id = path.split('/').rev().nth(1).unwrap().parse().unwrap();
+        if body.len() > 16 << 10 {
+            let status = if self.status_413.contains(&id) {
+                413
+            } else {
+                400
+            };
+            self.rejected.entry(id).or_default().push(status);
+            return (status, r#"{"error":"body too large"}"#.into());
+        }
         self.results
             .insert(id, serde_json::from_slice(body).unwrap());
-        "{}".into()
+        (200, "{}".into())
     }
 }
 
@@ -69,9 +85,15 @@ async fn serve(listener: tokio::net::TcpListener, queue: Arc<Mutex<Queue>>) {
         }
         let head = String::from_utf8_lossy(&request[..head_end]).into_owned();
         let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
-        let body = queue.lock().unwrap().answer(&path, &request[head_end..]);
+        let (status, body) = queue.lock().unwrap().answer(&path, &request[head_end..]);
+        let reason = match status {
+            200 => "OK",
+            400 => "Bad Request",
+            413 => "Payload Too Large",
+            _ => "Error",
+        };
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();
@@ -79,8 +101,12 @@ async fn serve(listener: tokio::net::TcpListener, queue: Arc<Mutex<Queue>>) {
     }
 }
 
-/// A before-land project whose base holds `config` and one other file.
-fn setup(path: &std::path::Path, config: &str) -> (Arc<ServerState>, ObjectId, ObjectId) {
+/// A project whose base holds `config` and `files` (each with `b"kept\n"`).
+fn setup_files(
+    path: &std::path::Path,
+    config: &str,
+    files: &[String],
+) -> (Arc<ServerState>, ObjectId, ObjectId) {
     let state = ServerState::new(ServerConfig {
         data_dir: path.into(),
         endpoint: Endpoint::new("relay-config-contract"),
@@ -89,27 +115,34 @@ fn setup(path: &std::path::Path, config: &str) -> (Arc<ServerState>, ObjectId, O
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let blob = store.put_blob(config.as_bytes()).unwrap();
     let other = store.put_blob(b"kept\n").unwrap();
-    let entries = vec![
-        TreeEntry::new(FileMode::Regular, "rosen.toml", blob).unwrap(),
-        TreeEntry::new(FileMode::Regular, "a.txt", other).unwrap(),
-    ];
+    let mut entries = vec![TreeEntry::new(FileMode::Regular, "rosen.toml", blob).unwrap()];
+    entries.extend(
+        files
+            .iter()
+            .map(|name| TreeEntry::new(FileMode::Regular, name.as_str(), other).unwrap()),
+    );
     let tree = store.put_tree(&Tree::new(entries).unwrap()).unwrap();
     let who = Signature::new("test", "test@test", 0);
-    let commit = Commit {
-        tree,
-        parents: vec![],
-        author: who.clone(),
-        committer: who,
-        extra_headers: vec![],
-        message: b"base\n".to_vec(),
-    };
-    let base = store.put_commit(&commit).unwrap();
+    let base = store
+        .put_commit(&Commit {
+            tree,
+            parents: vec![],
+            author: who.clone(),
+            committer: who,
+            extra_headers: vec![],
+            message: b"base\n".to_vec(),
+        })
+        .unwrap();
     Ledger::open(&state.config.metadata_path())
         .unwrap()
         .init_base("main", &base)
         .unwrap();
     rosen_server::mirror::owner::mark(path).unwrap();
     (state, base, blob)
+}
+
+fn setup(path: &std::path::Path, config: &str) -> (Arc<ServerState>, ObjectId, ObjectId) {
+    setup_files(path, config, &["a.txt".to_owned()])
 }
 
 fn action(id: i64, base: ObjectId, expected: Value, text: &str) -> Value {
@@ -211,4 +244,148 @@ async fn config_change_opens_one_gated_change_and_refuses_bad_or_stale_files() {
         matches!(&answer.outcome, LandStatus::Refused { reason, .. } if reason == "unapproved"),
         "{answer:?}"
     );
+}
+
+/// Builds a change whose `conflicts` `LandAnswer` is 16,370 bytes: under
+/// 16,384 alone, over 16,384 once wrapped in `{"result","state"}`.
+async fn conflicting_change_16370(
+    state: &Arc<ServerState>,
+    config_blob: ObjectId,
+    paths: &[String],
+) -> String {
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let owner = AgentId::new("owner").unwrap();
+    let mut ids = Vec::new();
+    for data in [b"ours\n".as_slice(), b"theirs\n".as_slice()] {
+        let blob = store.put_blob(data).unwrap();
+        let mut entries =
+            vec![TreeEntry::new(FileMode::Regular, "rosen.toml", config_blob).unwrap()];
+        entries.extend(
+            paths
+                .iter()
+                .map(|p| TreeEntry::new(FileMode::Regular, p.as_str(), blob).unwrap()),
+        );
+        let tree = store.put_tree(&Tree::new(entries).unwrap()).unwrap();
+        let create = Request::ChangeNew(NewChange {
+            owner: owner.clone(),
+            on: None,
+        });
+        let Response::Change(rec) = call(state, create).await else {
+            panic!()
+        };
+        let snap = SnapshotRequest {
+            change: rec.change.id.to_string(),
+            tree,
+            from: None,
+            message: None,
+        };
+        call(state, Request::Snapshot(snap)).await;
+        ids.push(rec.change.id);
+    }
+    let land = |id: rosen_core::ChangeId| Request::Land {
+        change: id.to_string(),
+    };
+    let Response::Land(landed) = call(state, land(ids[1])).await else {
+        panic!()
+    };
+    assert!(matches!(landed.outcome, LandStatus::Landed { .. }));
+    state.landing.settle();
+    let Response::Land(raw) = call(state, land(ids[0])).await else {
+        panic!()
+    };
+    assert_eq!(serde_json::to_vec(&raw).unwrap().len(), 16_370);
+    ids[0].to_string()
+}
+
+fn seed_legacy_oversized(state: &ServerState, root: &str) {
+    let conn = rusqlite::Connection::open(state.config.metadata_path()).unwrap();
+    conn.execute(
+        "INSERT INTO machines (id, name, role, status, last_contact, credential_hash, expires_at) \
+         VALUES ('lost', 'laptop', 'agent', 'active', 0, 'x', 0)",
+        [],
+    )
+    .unwrap();
+    let big = json!({
+        "schema": "rosen.error/v1", "command": "land", "code": "internal", "error": "x".repeat(20 << 10)
+    })
+    .to_string();
+    for id in [1i64, 2i64] {
+        conn.execute(
+            "INSERT INTO relay_actions (endpoint, id, action, state, result, posted, started_at) \
+             VALUES (?1, ?2, '{}', 'refused', ?3, 0, 0)",
+            rusqlite::params![root, id, &big],
+        )
+        .unwrap();
+    }
+}
+
+fn assert_oversized_results(q: &Queue, state: &ServerState) {
+    assert_eq!(q.rejected.get(&1).map(Vec::as_slice), Some(&[400][..]));
+    assert_eq!(q.rejected.get(&2).map(Vec::as_slice), Some(&[413][..]));
+    for id in [1i64, 2i64] {
+        assert_eq!(q.results[&id]["state"], "refused");
+        assert_eq!(q.results[&id]["result"]["schema"], "rosen.error/v1");
+        assert_eq!(q.results[&id]["result"]["code"], "result_too_large");
+    }
+    assert!(!q.rejected.contains_key(&3) && !q.rejected.contains_key(&4));
+    assert_eq!(q.results[&3]["result"]["outcome"]["reason"], "conflicts");
+    assert_eq!(q.results[&3]["result"]["outcome"]["truncated"], true);
+    assert_eq!(q.results[&4]["result"]["code"], "not_found");
+    assert!(q.results[&4]["result"]["error"]
+        .as_str()
+        .unwrap()
+        .ends_with("..."));
+    assert_eq!(q.results[&5]["state"], "done");
+    assert_eq!(q.results[&5]["result"]["status"], "revoked");
+    let conn = rusqlite::Connection::open(state.config.metadata_path()).unwrap();
+    let unposted: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM relay_actions WHERE posted = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(unposted, 0);
+}
+
+// Risk (R14, #443): Collapse rejects result POST bodies over 16,384 bytes with
+// 400, and the relay re-posts every unposted outcome before fetching new ones,
+// so one oversized outcome used to block every later action forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_outcomes_and_400_413_never_block_later_actions() {
+    let data = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!("http://{}/o/r", listener.local_addr().unwrap());
+    let paths: Vec<String> = (0..200)
+        .map(|i| format!("f{i:03}_{}.txt", "a".repeat(if i < 24 { 69 } else { 68 })))
+        .collect();
+    let config = format!("review = \"after-land\"\ncollapse = \"{root}\"\n");
+    let (state, _, blob) = setup_files(data.path(), &config, &paths);
+    let change_id = conflicting_change_16370(&state, blob, &paths).await;
+    rosen_server::relay::set(&state, vec![RelayKind::Land, RelayKind::Revoke]).await;
+    seed_legacy_oversized(&state, &root);
+
+    let act = |id: i64, kind: &str, arguments: Value| json!({ "id": id, "kind": kind, "account": "owner", "expires_at": i64::MAX, "arguments": arguments });
+    let queue = Arc::new(Mutex::new(Queue {
+        actions: vec![
+            act(3, "land", json!({ "change": change_id })),
+            act(
+                4,
+                "machine_revoke",
+                json!({ "machine": "m".repeat(20 << 10) }),
+            ),
+            act(5, "machine_revoke", json!({ "machine": "lost" })),
+        ],
+        status_413: BTreeSet::from([2]),
+        ..Queue::default()
+    }));
+    tokio::spawn(serve(listener, Arc::clone(&queue)));
+    let relay = tokio::spawn(rosen_server::relay::run(Arc::clone(&state)));
+    let start = Instant::now();
+    while queue.lock().unwrap().results.len() < 5 {
+        assert!(start.elapsed() < Duration::from_secs(60), "no results");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    relay.abort();
+    assert_oversized_results(&queue.lock().unwrap(), &state);
 }

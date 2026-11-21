@@ -81,6 +81,7 @@ Machines join a project with no login, monitor or remote desktop on the joining 
   - A kind not allowed, an action past its `expires_at` and a malformed one are refused and run nothing.
     The server stores each action ID it takes up, marked running before it runs, so a repeated ID runs nothing.
   - The outcome is stored, then posted to `<collapse>/rosen/actions/<id>/result` as `done` or `refused`: the `Approval`, the `LandAnswer` or the `LandedReview`, or a `rosen.error/v1` object with a `code`.
+    Each serialized result body is fitted to 16 KiB, and HTTP 400 or 413 on a result post is treated as permanent by posting a minimal `rosen.error/v1` `result_too_large` result and marking the action posted so one oversized outcome never blocks later actions.
     A failed post is retried with the state feed's backoff, and a restarted server re-posts stored outcomes.
     An action a stopped server left running is settled at the next start: by the approval or mark it stored, if any, and otherwise by one run.
   - Each outcome, setting change and failure to reach Collapse publishes a `relay` event to every subscriber.
