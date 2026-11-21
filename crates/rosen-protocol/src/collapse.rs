@@ -56,6 +56,20 @@ pub struct FeedError {
     pub at: i64,
 }
 
+/// One document or entry the endpoint refused (HTTP 400, 413 or 422) and the
+/// feed skipped so the rest of the batch could be delivered (#444).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusedItem {
+    /// Document name (e.g. `change:<id>`, `config`, `log:<seq>`) or ledger
+    /// entry key (e.g. `discovery:42`).
+    pub document: String,
+    /// HTTP status the endpoint answered (400, 413 or 422).
+    pub http_status: u16,
+    pub message: String,
+    /// Unix milliseconds when the refusal was recorded.
+    pub at: i64,
+}
+
 /// Delivered sequence in each AIRC ledger, for `ledger_push`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerCursors {
@@ -67,7 +81,8 @@ pub struct LedgerCursors {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeedHealth {
     pub state: FeedState,
-    /// Unix milliseconds of the most recent successful exchange, if any.
+    /// Unix milliseconds of the most recent delivered batch (or successful
+    /// relay exchange), if any.
     #[serde(default)]
     pub last_success_at: Option<i64>,
     /// The last sent sequence or cursor: delivered event sequence for
@@ -89,4 +104,8 @@ pub struct FeedHealth {
     /// Unix milliseconds when the next retry is scheduled while failing.
     #[serde(default)]
     pub next_retry_at: Option<i64>,
+    /// Documents or entries the endpoint refused (HTTP 400, 413 or 422) and
+    /// that are skipped until their content changes (#444).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<RefusedItem>,
 }

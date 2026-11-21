@@ -55,6 +55,13 @@ pub enum SendFailure {
     },
 }
 
+/// Whether `status` means the endpoint refused the batch itself (invalid item,
+/// payload too large or unprocessable entity), so splitting by halves can
+/// isolate refused items instead of retrying the same batch unchanged (#444).
+pub fn is_batch_refusal(status: Option<u16>) -> bool {
+    matches!(status, Some(400 | 413 | 422))
+}
+
 /// The credential git's helpers hold for `endpoint`, or `None` when they
 /// hold none. Never prompts: a headless server has no one to answer.
 pub async fn credential(data_dir: &Path, endpoint: &str) -> Option<Credential> {

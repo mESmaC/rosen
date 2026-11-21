@@ -13,6 +13,8 @@
 //! stores nothing, and the same batch would be refused on every retry, so
 //! fields are clipped to fit rather than sent whole.
 
+use std::collections::BTreeSet;
+
 use rosen_protocol::channel::Ledger;
 use rusqlite::{params, Connection, Row};
 
@@ -32,12 +34,18 @@ const DISCOVERY_ENVELOPE: &str = "velocity-airc/discovery/v";
 /// Fields that mark a bare JSON record from older Velocity builds.
 const LEGACY_RECORDS: [&str; 3] = ["checkout", "task_result", "delivery_ack"];
 
+/// One encoded ledger entry ready to include in a request batch.
+#[derive(Debug, Clone)]
+pub struct BatchEntry {
+    pub ledger: Ledger,
+    pub seq: u64,
+    pub json: Vec<u8>,
+}
+
 /// One request's worth of entries, in sequence order.
 #[derive(Debug, Default)]
 pub struct Batch {
-    /// The JSON request body, `{"entries":[...]}`.
-    pub body: Vec<u8>,
-    pub count: usize,
+    pub entries: Vec<BatchEntry>,
     /// The rows it read and the entries it sent, per ledger.
     pub extent: Extent,
 }
@@ -66,38 +74,61 @@ pub fn empty_body() -> Vec<u8> {
     br#"{"entries":[]}"#.to_vec()
 }
 
+/// Encodes `entries` as `{"entries":[...]}`.
+pub fn encode(entries: &[BatchEntry]) -> Vec<u8> {
+    let mut body = br#"{"entries":["#.to_vec();
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            body.push(b',');
+        }
+        body.extend_from_slice(&entry.json);
+    }
+    body.extend_from_slice(b"]}");
+    body
+}
+
+/// The scanned and delivered sequences covered by `entries`.
+pub fn extent_of(entries: &[BatchEntry]) -> Extent {
+    let mut extent = Extent::default();
+    for entry in entries {
+        let cursor = extent.get_mut(entry.ledger);
+        cursor.scanned = cursor.scanned.max(entry.seq);
+        cursor.delivered = cursor.delivered.max(entry.seq);
+    }
+    extent
+}
+
 /// Reads the rows after each ledger's cursor, oldest first, and packs the
-/// ones to send into one batch. Rows it skips still count as read.
-pub fn next_batch(conn: &Connection, cursors: &Cursors) -> rusqlite::Result<Batch> {
+/// ones to send into one batch. Rows it skips (or that were previously
+/// refused) still count as read.
+pub fn next_batch(
+    conn: &Connection,
+    cursors: &Cursors,
+    refused: &BTreeSet<(&'static str, u64)>,
+) -> rusqlite::Result<Batch> {
     let rows = read_after(conn, cursors)?;
     let mut extent = Extent::default();
-    let mut encoded: Vec<Vec<u8>> = Vec::new();
+    let mut entries = Vec::new();
     let mut body_len = empty_body().len();
     for row in rows {
         let (seq, ledger) = (row.seq, row.ledger);
-        if let Some(entry) = wire_entry(row) {
-            let json = entry.to_string().into_bytes();
-            // A row that does not fit waits for the next batch, unread. The
-            // first always fits: clipping keeps one entry far under the bound.
-            let full = body_len + json.len() + 1 > MAX_BODY && !encoded.is_empty();
-            if encoded.len() == MAX_ENTRIES || full {
-                break;
+        if !refused.contains(&(ledger.as_str(), seq)) {
+            if let Some(entry) = wire_entry(row) {
+                let json = entry.to_string().into_bytes();
+                // A row that does not fit waits for the next batch, unread. The
+                // first always fits: clipping keeps one entry far under the bound.
+                let full = body_len + json.len() + 1 > MAX_BODY && !entries.is_empty();
+                if entries.len() == MAX_ENTRIES || full {
+                    break;
+                }
+                body_len += json.len() + 1;
+                entries.push(BatchEntry { ledger, seq, json });
+                extent.get_mut(ledger).delivered = seq;
             }
-            body_len += json.len() + 1;
-            encoded.push(json);
-            extent.get_mut(ledger).delivered = seq;
         }
         extent.get_mut(ledger).scanned = seq;
     }
-    let count = encoded.len();
-    let mut body = br#"{"entries":["#.to_vec();
-    body.extend(encoded.join(&b','));
-    body.extend_from_slice(b"]}");
-    Ok(Batch {
-        body,
-        count,
-        extent,
-    })
+    Ok(Batch { entries, extent })
 }
 
 fn read_after(conn: &Connection, cursors: &Cursors) -> rusqlite::Result<Vec<StoredEntry>> {

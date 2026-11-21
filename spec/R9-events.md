@@ -64,6 +64,8 @@
   - The endpoint keeps the newer of two copies by `seq`, so a repeated batch changes nothing, and answers `{"highest_sequence":N}`.
     On start and after a failure the server first sends an empty batch to read that, resumes from it when it is less than was delivered, and then resends every live document.
   - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `state_push` event with `status: "failed"`; the first success after failures publishes one with `status: "sent"`, `sent`, `delivered` and `after_failures`, matching `ledger_push` (R13).
+    When the endpoint refuses a batch with HTTP 400, 413 or 422, the feed splits the batch by halves to isolate the refused item(s), skips each refused document until its content changes, publishes `state_push` `status: "refused"` naming the document, and keeps delivering the rest.
+    Health records `last_success_at` only for delivered batches, not empty reconciliation probes.
     HTTP 410 publishes `status: "stopped"` and stops sending until `collapse` changes or the server restarts.
   - Receipt signatures, machine credentials and their hashes, join keys, network addresses, certificate fingerprints and the data directory are never sent.
     Messages and piece claims are sent only as channel lines with `collapse_channel = true`.

@@ -26,6 +26,9 @@ struct Intake {
     batches: Vec<Vec<Value>>,
     /// The HTTP status to answer instead of storing, when set.
     failing: Option<u16>,
+    /// When set, any batch whose body contains `needle` is refused with `status`.
+    refuse: Option<(String, u16)>,
+    refusals: usize,
 }
 
 impl Intake {
@@ -37,6 +40,12 @@ impl Intake {
     fn answer(&mut self, body: &[u8]) -> (u16, String) {
         if let Some(status) = self.failing {
             return (status, json!({"error": "unavailable"}).to_string());
+        }
+        if let Some((needle, status)) = &self.refuse {
+            if String::from_utf8_lossy(body).contains(needle) {
+                self.refusals += 1;
+                return (*status, json!({"error": "invalid entry"}).to_string());
+            }
         }
         let batch: Value = serde_json::from_slice(body).unwrap();
         let entries = batch["entries"].as_array().unwrap().clone();
@@ -223,4 +232,61 @@ fn ledger_push_sends_only_ordinary_entries_and_catches_up_after_an_outage() {
     let mut session = Session::default();
     let gone = push(&mut session).unwrap_err();
     assert!(matches!(gone, PushError::Gone { .. }), "{gone:?}");
+}
+
+/// Risk (#444, R13): one entry Collapse refuses (400/413/422) must be split
+/// out and skipped so valid entries deliver and the next pass does not resend
+/// the refused entry.
+#[test]
+fn ledger_push_splits_refused_batch_and_skips_invalid_entry() {
+    let data = tempfile::tempdir().unwrap();
+    rosen_server::mirror::owner::mark(data.path()).unwrap();
+    let state = ServerState::new(ServerConfig {
+        data_dir: data.path().to_path_buf(),
+        endpoint: Endpoint::new("rosen-ledger-refused-test"),
+        warm_pool_dir: None,
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let url = format!("http://{}/o/r/ledgers", listener.local_addr().unwrap());
+    let intake = Arc::new(Mutex::new(Intake {
+        refuse: Some(("poison-entry".into(), 422)),
+        ..Intake::default()
+    }));
+    runtime.spawn(serve(listener, Arc::clone(&intake)));
+
+    let join = ChannelRequest::Join {
+        member: "a".into(),
+        nick: "alice".into(),
+        machine: "m1".into(),
+    };
+    channel::run(&state.events, join).unwrap();
+    append(&state, Ledger::Discovery, "good first", None);
+    append(&state, Ledger::Discovery, "poison-entry", None);
+    append(&state, Ledger::PastWork, "good third", None);
+
+    let mut session = Session::default();
+    let pushed = runtime
+        .block_on(push_to(&state.config, &url, &mut session))
+        .unwrap();
+    assert!(
+        matches!(pushed, Pushed::Current { sent: 2, .. }),
+        "{pushed:?}"
+    );
+    assert_eq!(sent_sequences(&intake), [1, 3]);
+
+    // Next pass delivers a new entry without resending the refused entry.
+    let refusals_before = intake.lock().unwrap().refusals;
+    append(&state, Ledger::Discovery, "good fourth", None);
+    let pushed = runtime
+        .block_on(push_to(&state.config, &url, &mut session))
+        .unwrap();
+    assert!(
+        matches!(pushed, Pushed::Current { sent: 1, .. }),
+        "{pushed:?}"
+    );
+    assert_eq!(sent_sequences(&intake), [1, 3, 4]);
+    assert_eq!(intake.lock().unwrap().refusals, refusals_before);
 }

@@ -36,12 +36,32 @@ struct Intake {
     bodies: Vec<Vec<u8>>,
     paths: Vec<String>,
     failing: Option<u16>,
+    /// When set, any batch whose body contains `needle` is refused with `status`.
+    refuse: Option<(String, u16)>,
+    refusals: usize,
+    probes: usize,
 }
 
 impl Intake {
     fn answer(&mut self, path: &str, body: &[u8]) -> (u16, String) {
         if let Some(status) = self.failing {
             return (status, "{}".into());
+        }
+        if let Some((needle, status)) = &self.refuse {
+            if String::from_utf8_lossy(body).contains(needle) {
+                self.refusals += 1;
+                return (*status, json!({"error": "invalid item"}).to_string());
+            }
+        }
+        let parsed: Value = serde_json::from_slice(body).unwrap();
+        let is_probe = parsed["through"].as_u64() == Some(0)
+            && SECTIONS
+                .iter()
+                .all(|s| parsed[*s].as_array().is_some_and(Vec::is_empty))
+            && parsed.get("relay").is_none()
+            && parsed.get("platforms").is_none();
+        if is_probe {
+            self.probes += 1;
         }
         self.paths.push(path.to_owned());
         self.bodies.push(body.to_vec());
@@ -625,4 +645,113 @@ async fn server_status_reports_collapse_401_recovery_and_410_stop() {
     assert_eq!(sf.last_error.as_ref().unwrap().http_status, Some(410));
     assert!(sf.next_retry_at.is_none());
     feed.abort();
+}
+
+/// Risk (#444, R9, R10): one invalid item in a batch must not stall delivery
+/// of valid items forever, status and events must name the refused document,
+/// the next pass must not resend it unchanged, and empty probes must never
+/// bump `last_success_at`.
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_item_splits_batch_skips_unchanged_and_probes_do_not_hide_failure() {
+    let data = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!("http://{}/o/r", listener.local_addr().unwrap());
+    let intake = Arc::new(Mutex::new(Intake::default()));
+    tokio::spawn(serve(listener, Arc::clone(&intake)));
+    let state = setup(data.path(), &root, "");
+
+    let good = change_editing(&state, "good.txt").await;
+    let bad = change_editing(&state, "bad.txt").await;
+    let bad_doc = format!("change:{bad}");
+    intake.lock().unwrap().refuse = Some((bad.clone(), 400));
+
+    let feed = tokio::spawn(rosen_server::state_push::run(Arc::clone(&state)));
+    let wait = Duration::from_secs(30);
+
+    until(&intake, wait, |i| i.change(&good).is_some()).await;
+    assert!(intake.lock().unwrap().change(&bad).is_none());
+
+    let status = until_status(&state, wait, |s| {
+        s.collapse.as_ref().is_some_and(|c| {
+            c.state_feed.state == FeedState::Current
+                && c.state_feed.refused.iter().any(|r| r.document == bad_doc)
+        })
+    })
+    .await;
+    assert!(status
+        .collapse
+        .as_ref()
+        .unwrap()
+        .state_feed
+        .last_success_at
+        .is_some());
+    assert!(state_push_events(&state).iter().any(|e| {
+        e.detail["status"] == "refused"
+            && e.detail["document"] == bad_doc
+            && e.detail["http_status"] == 400
+    }));
+
+    // Next pass delivers a new valid change without resending `bad` unchanged.
+    let refusals_before = intake.lock().unwrap().refusals;
+    let later = change_editing(&state, "later.txt").await;
+    until(&intake, wait, |i| i.change(&later).is_some()).await;
+    assert_eq!(intake.lock().unwrap().refusals, refusals_before);
+
+    // Once Collapse accepts `bad` and `bad` changes, it delivers and clears refusal.
+    assert_refusal_clears_and_probes_keep_last_success(&state, &intake, &bad, wait).await;
+    feed.abort();
+}
+
+async fn assert_refusal_clears_and_probes_keep_last_success(
+    state: &Arc<ServerState>,
+    intake: &Mutex<Intake>,
+    bad: &str,
+    wait: Duration,
+) {
+    intake.lock().unwrap().refuse = None;
+    // Claiming a new path changes `bad`'s fingerprint and fires an urgent
+    // `claim` event (`SETTLE = 2s`), unlike a bare snapshot (`SNAPSHOT_WAIT = 60s`).
+    call(
+        state,
+        Request::ClaimPaths(ClaimRequest {
+            change: bad.to_owned(),
+            paths: vec!["fixed.txt".into()],
+            exclusive: false,
+        }),
+    )
+    .await;
+    until(intake, wait, |i| i.change(bad).is_some()).await;
+    let cleared = until_status(state, wait, |s| {
+        s.collapse
+            .as_ref()
+            .is_some_and(|c| c.state_feed.refused.is_empty())
+    })
+    .await;
+    let ok_before = cleared
+        .collapse
+        .as_ref()
+        .unwrap()
+        .state_feed
+        .last_success_at;
+
+    // Probes alone never bump `last_success_at` while non-probe sends fail (500).
+    let probes_before = intake.lock().unwrap().probes;
+    intake.lock().unwrap().refuse = Some(("\"changes\":[{".into(), 500));
+    let _blocked = change_editing(state, "blocked.txt").await;
+    let failing = until_status(state, wait, |s| {
+        s.collapse.as_ref().is_some_and(|c| {
+            c.state_feed.state == FeedState::Failing
+                && intake.lock().unwrap().probes > probes_before
+        })
+    })
+    .await;
+    assert_eq!(
+        failing
+            .collapse
+            .as_ref()
+            .unwrap()
+            .state_feed
+            .last_success_at,
+        ok_before
+    );
 }

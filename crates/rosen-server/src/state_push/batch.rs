@@ -16,7 +16,6 @@
 
 use serde_json::{json, Map, Value};
 
-use super::store::Sent;
 use super::unit::{Delivery, Section, Unit};
 use crate::ledger_push::MAX_BODY;
 
@@ -36,66 +35,68 @@ const SECTIONS: [Section; 9] = [
     Section::Channel,
 ];
 
-/// One request and the documents it completes.
+/// One stamped, sized item inside a batch, tied back to its source unit so
+/// halving on HTTP 400/413/422 can name and skip the refused document (#444).
+#[derive(Clone, Debug)]
+pub struct BatchItem {
+    pub section: Section,
+    pub value: Value,
+    pub unit: usize,
+}
+
+/// One request and the items it carries.
 pub struct Batch {
     pub body: Vec<u8>,
-    pub documents: Vec<(String, Sent)>,
-    /// How many log lines it completes.
-    pub lines: usize,
+    pub items: Vec<BatchItem>,
 }
 
 /// The body that sends nothing, asking only what the endpoint holds.
 pub fn probe() -> Vec<u8> {
-    body(0, &[])
+    encode(0, &[])
 }
 
-/// Splits `units` into batches. A unit's document is recorded with the
-/// batch holding its last item, so it only counts as delivered once all
-/// of it has been.
+/// Splits `units` into size-bounded batches.
+#[cfg(test)]
 pub fn split(units: Vec<Unit>, seq: u64, delivered: u64) -> Vec<Batch> {
+    split_slice(&units, seq, delivered)
+}
+
+/// Splits `units` into size-bounded batches, recording each item's index in
+/// `units` so the sender can track unit completion across split sub-batches.
+pub fn split_slice(units: &[Unit], seq: u64, delivered: u64) -> Vec<Batch> {
     let mut batches = Vec::new();
-    let mut items: Vec<(Section, Value)> = Vec::new();
-    let mut documents = Vec::new();
-    let mut lines = 0;
+    let mut items: Vec<BatchItem> = Vec::new();
     let mut size = ENVELOPE;
-    for unit in units {
+    for (unit_index, unit) in units.iter().enumerate() {
         let logged = unit.delivery == Delivery::Log;
-        for (section, item) in unit.items {
-            let item = if logged || section == Section::Relay {
-                item
+        for (section, item) in &unit.items {
+            let item = if logged || *section == Section::Relay {
+                item.clone()
             } else {
-                stamped(item, seq)
+                stamped(item.clone(), seq)
             };
             let item = sized(item);
             let length = serde_json::to_vec(&item).map_or(0, |bytes| bytes.len()) + 1;
             if size + length > MAX_BODY && !items.is_empty() {
                 batches.push(Batch {
-                    body: body(delivered, &items),
-                    documents: std::mem::take(&mut documents),
-                    lines: std::mem::take(&mut lines),
+                    body: encode(delivered, &items),
+                    items: std::mem::take(&mut items),
                 });
-                items.clear();
                 size = ENVELOPE;
             }
             size += length;
-            items.push((section, item));
+            items.push(BatchItem {
+                section: *section,
+                value: item,
+                unit: unit_index,
+            });
         }
-        if logged {
-            lines += 1;
-            continue;
-        }
-        let sent = Sent {
-            fingerprint: unit.fingerprint,
-            related: unit.related,
-        };
-        documents.push((unit.document, sent));
     }
     // Every unit holds an item, so `items` is empty only when `units` was.
     if !items.is_empty() {
         batches.push(Batch {
-            body: body(seq, &items),
-            documents,
-            lines,
+            body: encode(seq, &items),
+            items,
         });
     }
     batches
@@ -125,23 +126,25 @@ fn sized(item: Value) -> Value {
     Value::Object(marker)
 }
 
-fn body(through: u64, items: &[(Section, Value)]) -> Vec<u8> {
+/// Encodes `items` as a v1 state-feed JSON batch claiming completeness
+/// through `through`.
+pub fn encode(through: u64, items: &[BatchItem]) -> Vec<u8> {
     let mut envelope = Map::new();
     envelope.insert("format".into(), json!(FORMAT));
     envelope.insert("through".into(), json!(through));
     for section in SECTIONS {
         let listed: Vec<&Value> = items
             .iter()
-            .filter(|(kind, _)| *kind == section)
-            .map(|(_, item)| item)
+            .filter(|item| item.section == section)
+            .map(|item| &item.value)
             .collect();
         envelope.insert(section.key().into(), json!(listed));
     }
-    if let Some((_, relay)) = items.iter().find(|(kind, _)| *kind == Section::Relay) {
-        envelope.insert(Section::Relay.key().into(), relay.clone());
+    if let Some(relay) = items.iter().find(|item| item.section == Section::Relay) {
+        envelope.insert(Section::Relay.key().into(), relay.value.clone());
     }
-    if let Some((_, platforms)) = items.iter().find(|(kind, _)| *kind == Section::Platforms) {
-        envelope.insert(Section::Platforms.key().into(), platforms.clone());
+    if let Some(platforms) = items.iter().find(|item| item.section == Section::Platforms) {
+        envelope.insert(Section::Platforms.key().into(), platforms.value.clone());
     }
     serde_json::to_vec(&Value::Object(envelope)).unwrap_or_default()
 }

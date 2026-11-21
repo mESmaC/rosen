@@ -60,6 +60,7 @@ Rosen is its store and its authority.
     The server stores how far each ledger has reached each endpoint, so a restart resumes there.
     On start and after a failure it first sends an empty batch to read what the endpoint holds, and resends from there when that is less than it delivered.
   - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `ledger_push` event (R9); the first success after failures publishes one too.
+    When the endpoint refuses a batch with HTTP 400, 413 or 422, the push splits the batch by halves to isolate the refused entry(s), skips them, publishes `ledger_push` `status: "refused"` naming the entry, and keeps delivering the rest; health counts `last_success_at` only for delivered batches.
     HTTP 410 (the endpoint's repository is archived) stops sending until the endpoint changes or the server restarts.
   - Without `ledger_endpoint` or `collapse`, nothing is sent.
   - Only the mirror-owner server (R1) pushes ledger entries; any other server sends nothing.

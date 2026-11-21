@@ -9,7 +9,9 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use rosen_protocol::{CollapseHealth, FeedError, FeedHealth, FeedState, LedgerCursors};
+use rosen_protocol::{
+    CollapseHealth, FeedError, FeedHealth, FeedState, LedgerCursors, RefusedItem,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::ServerState;
@@ -222,7 +224,8 @@ fn state_feed_health(
         .map_or(0, |(scanned, _)| scanned)
         .max(tracked.clean_scanned.unwrap_or(0));
     let backlog = count_unsent_events(conn, scanned).unwrap_or(0);
-    build_health(is_owner, &tracked, cursor, None, None, backlog)
+    let refused = read_refused(conn, "state_push_refused", endpoint).unwrap_or_default();
+    build_health(is_owner, &tracked, cursor, None, None, backlog, refused)
 }
 
 fn ledger_push_health(
@@ -236,7 +239,16 @@ fn ledger_push_health(
     let cursor = (present || tracked.last_success_at.is_some())
         .then(|| cursors.discovery.max(cursors.past_work));
     let backlog = count_unsent_ledger(conn, scanned).unwrap_or(0);
-    build_health(is_owner, &tracked, cursor, Some(cursors), None, backlog)
+    let refused = read_refused(conn, "ledger_push_refused", endpoint).unwrap_or_default();
+    build_health(
+        is_owner,
+        &tracked,
+        cursor,
+        Some(cursors),
+        None,
+        backlog,
+        refused,
+    )
 }
 
 fn relay_health(conn: &Connection, tracker: &Tracker, root: &str, is_owner: bool) -> FeedHealth {
@@ -245,7 +257,15 @@ fn relay_health(conn: &Connection, tracker: &Tracker, root: &str, is_owner: bool
     let cursor = row.map(|(_, after)| after);
     let generation = row.and_then(|(gen, _)| gen);
     let backlog = count_unposted_relay(conn, root).unwrap_or(0);
-    build_health(is_owner, &tracked, cursor, None, generation, backlog)
+    build_health(
+        is_owner,
+        &tracked,
+        cursor,
+        None,
+        generation,
+        backlog,
+        Vec::new(),
+    )
 }
 
 fn build_health(
@@ -255,6 +275,7 @@ fn build_health(
     ledger_cursors: Option<LedgerCursors>,
     doorbell_generation: Option<i64>,
     backlog: u64,
+    refused: Vec<RefusedItem>,
 ) -> FeedHealth {
     let (state, last_error, next_retry_at) = if !is_owner {
         (FeedState::NotOwner, None, None)
@@ -286,6 +307,7 @@ fn build_health(
         backlog,
         last_error,
         next_retry_at,
+        refused: if is_owner { refused } else { Vec::new() },
     }
 }
 
@@ -295,6 +317,32 @@ fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
         [name],
         |row| row.get(0),
     )
+}
+
+/// Reads currently skipped refused items from `state_push_refused` or
+/// `ledger_push_refused` (#444).
+fn read_refused(
+    conn: &Connection,
+    table: &str,
+    endpoint: &str,
+) -> rusqlite::Result<Vec<RefusedItem>> {
+    if !table_exists(conn, table)? {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT document, http_status, message, refused_at FROM {table}
+         WHERE endpoint = ?1 ORDER BY refused_at, document"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([endpoint], |row| {
+        Ok(RefusedItem {
+            document: row.get(0)?,
+            http_status: u16::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+            message: row.get(2)?,
+            at: row.get(3)?,
+        })
+    })?;
+    rows.collect()
 }
 
 fn read_state_cursor(conn: &Connection, endpoint: &str) -> rusqlite::Result<Option<(u64, u64)>> {

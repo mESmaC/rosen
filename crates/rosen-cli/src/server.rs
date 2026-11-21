@@ -2,8 +2,8 @@
 //! talk to the daemon directly rather than through a project operation.
 
 use rosen_client::protocol::{
-    CollapseHealth, Event, FeedHealth, FeedState, PlatformStatus, RelayKind, RelaySetting,
-    ServerStatus,
+    CollapseHealth, Event, FeedHealth, FeedState, PlatformStatus, RefusedItem, RelayKind,
+    RelaySetting, ServerStatus,
 };
 use rosen_client::{Client, Endpoint, Error};
 use rosen_core::{AgentId, Platform};
@@ -255,21 +255,48 @@ fn feed_health_line(cursor_label: &str, health: &FeedHealth) -> String {
     if let Some(at) = health.next_retry_at {
         parts.push(format!("retry {}", utc_second(at)));
     }
+    if let Some(summary) = refused_summary(&health.refused) {
+        parts.push(summary);
+    }
     let head = if parts.is_empty() {
         label.to_owned()
     } else {
         format!("{label} ({})", parts.join(", "))
     };
-    match &health.last_error {
-        Some(error) => {
-            let message = error
-                .message
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
+    let trailing = health
+        .last_error
+        .as_ref()
+        .map(|error| error.message.as_str())
+        .or_else(|| health.refused.last().map(|item| item.message.as_str()));
+    match trailing {
+        Some(raw) => {
+            let message = raw.split_whitespace().collect::<Vec<_>>().join(" ");
             format!("{head}: {message}")
         }
         None => head,
+    }
+}
+
+fn refused_summary(refused: &[RefusedItem]) -> Option<String> {
+    match refused {
+        [] => None,
+        [only] => Some(format!(
+            "refused {} (HTTP {})",
+            only.document, only.http_status
+        )),
+        many => {
+            let names: Vec<&str> = many.iter().take(3).map(|r| r.document.as_str()).collect();
+            let extra = many.len().saturating_sub(names.len());
+            if extra > 0 {
+                Some(format!(
+                    "refused {}: {} +{extra} more",
+                    many.len(),
+                    names.join(", ")
+                ))
+            } else {
+                Some(format!("refused {}: {}", many.len(), names.join(", ")))
+            }
+        }
     }
 }
 
@@ -507,8 +534,9 @@ mod tests {
         );
     }
 
-    /// Risk (#434): a revoked Collapse token must show HTTP 401 and the time
-    /// of the last success on one line, then return cleanly to current.
+    /// Risk (#434, #444): a revoked Collapse token must show HTTP 401 and the time
+    /// of the last success on one line, then return cleanly to current; refused
+    /// documents must be named directly on the status line.
     #[test]
     fn feed_health_line_reports_401_last_ok_and_current() {
         use rosen_client::protocol::FeedError;
@@ -525,6 +553,7 @@ mod tests {
                 at: 1_700_000_060_000,
             }),
             next_retry_at: Some(1_700_000_065_000),
+            refused: Vec::new(),
         };
         let line = feed_health_line("seq", &failing);
         assert!(!line.contains('\n'), "{line}");
@@ -543,10 +572,25 @@ mod tests {
             backlog: 0,
             last_error: None,
             next_retry_at: None,
+            refused: Vec::new(),
         };
         assert_eq!(
             feed_health_line("seq", &current),
             "current (seq 45, last ok 2023-11-14 22:15:20 UTC)"
+        );
+
+        let with_refused = FeedHealth {
+            refused: vec![RefusedItem {
+                document: "change:abc".into(),
+                http_status: 400,
+                message: "HTTP 400: bad field".into(),
+                at: 1_700_000_125_000,
+            }],
+            ..current
+        };
+        assert_eq!(
+            feed_health_line("seq", &with_refused),
+            "current (seq 45, last ok 2023-11-14 22:15:20 UTC, refused change:abc (HTTP 400)): HTTP 400: bad field"
         );
     }
 

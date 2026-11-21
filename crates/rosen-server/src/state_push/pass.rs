@@ -9,10 +9,10 @@ use std::sync::Arc;
 use rosen_core::{ChangeId, ChangeState};
 use rosen_protocol::ChangeFilter;
 
-use super::batch;
+use super::batch::{self, Batch, BatchItem};
 use super::dirty::Pending;
 use super::facts::Stores;
-use super::store::{Cursor, StateStore};
+use super::store::{Cursor, Refusal, Sent, StateStore};
 use super::unit::{Delivery, Section, Unit};
 use super::{change_doc, PushError};
 use super::{log_lines, machines_doc, platforms_doc, review_docs};
@@ -92,8 +92,36 @@ impl Target {
 pub struct Delivered {
     /// Documents and lines acknowledged.
     pub count: usize,
-    /// Whether the presence document went, changed or not.
+    /// Whether any batch was accepted by the endpoint.
+    pub any_accepted: bool,
+    /// Whether the presence document went and was accepted.
     pub presence: bool,
+}
+
+/// Per-unit tracking across size-split batches and 400/413/422 halving.
+struct UnitProgress {
+    document: String,
+    fingerprint: String,
+    related: BTreeSet<String>,
+    delivery: Delivery,
+    remaining: usize,
+    refused: bool,
+}
+
+impl UnitProgress {
+    fn from_units(units: &[Unit]) -> Vec<Self> {
+        units
+            .iter()
+            .map(|unit| Self {
+                document: unit.document.clone(),
+                fingerprint: unit.fingerprint.clone(),
+                related: unit.related.clone(),
+                delivery: unit.delivery,
+                remaining: unit.items.len(),
+                refused: false,
+            })
+            .collect()
+    }
 }
 
 /// Sends what `pending` names through its scanned sequence; `channel` says
@@ -117,48 +145,157 @@ pub async fn send(
     let units = target
         .with_store(move |store, endpoint| unsent(store, endpoint, units, everything))
         .await?;
-    let presence = units
-        .iter()
-        .any(|unit| unit.items.iter().any(|(s, _)| *s == Section::Presence));
-    let batches = batch::split(units, seq, cursor.delivered);
-    let count = batches.len();
-    let mut sent = 0;
-    for (index, batch) in batches.into_iter().enumerate() {
-        let last = index + 1 == count;
-        let through = if last { seq } else { cursor.delivered };
-        let held = target.post(batch.body).await?;
-        state
-            .collapse
-            .record_success(Feed::StateFeed, &target.endpoint);
-        if held < through {
-            return Err(lost(target, cursor, through, held).await);
-        }
-        let mut next = *cursor;
-        if last {
-            next = Cursor {
-                scanned: seq,
-                delivered: seq.max(cursor.delivered),
-            };
-        }
-        sent += batch.documents.len() + batch.lines;
-        let documents = batch.documents;
-        target
-            .with_store(move |s, e| s.delivered(e, &documents, next))
-            .await?;
-        *cursor = next;
-    }
-    if count == 0 {
-        // Nothing changed for the endpoint; only the scan moves on.
+    let mut progress = UnitProgress::from_units(&units);
+    let batches = batch::split_slice(&units, seq, cursor.delivered);
+    let delivered = send_batches(state, target, batches, &mut progress, cursor, seq).await?;
+    if cursor.scanned < seq {
+        // Nothing went, or the pass's last item was refused: move only scan.
         cursor.scanned = cursor.scanned.max(seq);
         let kept = *cursor;
         target
             .with_store(move |s, e| s.save_cursor(e, kept))
             .await?;
     }
-    Ok(Delivered {
-        count: sent,
-        presence: presence && count > 0,
-    })
+    Ok(delivered)
+}
+
+/// Posts `batches` in order. On HTTP 400, 413 or 422, splits a multi-item
+/// batch by halves so refused items are isolated and skipped while valid items
+/// still deliver (#444).
+async fn send_batches(
+    state: &Arc<ServerState>,
+    target: &Target,
+    batches: Vec<Batch>,
+    progress: &mut [UnitProgress],
+    cursor: &mut Cursor,
+    seq: u64,
+) -> Result<Delivered, PushError> {
+    let count = batches.len();
+    let mut delivered = Delivered::default();
+    let mut stack: Vec<(Vec<BatchItem>, Option<Vec<u8>>, bool)> = batches
+        .into_iter()
+        .enumerate()
+        .rev()
+        .map(|(index, batch)| (batch.items, Some(batch.body), index + 1 == count))
+        .collect();
+    while let Some((items, prebuilt, is_final)) = stack.pop() {
+        let through = if is_final { seq } else { cursor.delivered };
+        let body = prebuilt.unwrap_or_else(|| batch::encode(through, &items));
+        match target.post(body).await {
+            Ok(held) => {
+                if held < through {
+                    return Err(lost(target, cursor, through, held).await);
+                }
+                state
+                    .collapse
+                    .record_success(Feed::StateFeed, &target.endpoint);
+                record_accepted(
+                    target,
+                    progress,
+                    &items,
+                    cursor,
+                    seq,
+                    is_final,
+                    &mut delivered,
+                )
+                .await?;
+            }
+            Err(PushError::Send { status, .. })
+                if send::is_batch_refusal(status) && items.len() > 1 =>
+            {
+                let mut left = items;
+                let right = left.split_off(left.len() / 2);
+                stack.push((right, None, is_final));
+                stack.push((left, None, false));
+            }
+            Err(PushError::Send {
+                status: Some(status),
+                message,
+                ..
+            }) if send::is_batch_refusal(Some(status)) => {
+                record_refused(state, target, progress, &items[0], status, &message).await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(delivered)
+}
+
+async fn record_accepted(
+    target: &Target,
+    progress: &mut [UnitProgress],
+    items: &[BatchItem],
+    cursor: &mut Cursor,
+    seq: u64,
+    is_final: bool,
+    delivered: &mut Delivered,
+) -> Result<(), PushError> {
+    let mut documents = Vec::new();
+    let mut lines = 0usize;
+    for item in items {
+        if item.section == Section::Presence {
+            delivered.presence = true;
+        }
+        let unit = &mut progress[item.unit];
+        unit.remaining = unit.remaining.saturating_sub(1);
+        if unit.delivery == Delivery::Log {
+            lines += 1;
+        } else if unit.remaining == 0 && !unit.refused {
+            let sent = Sent {
+                fingerprint: unit.fingerprint.clone(),
+                related: unit.related.clone(),
+            };
+            documents.push((unit.document.clone(), sent));
+        }
+    }
+    let next = if is_final {
+        Cursor {
+            scanned: seq.max(cursor.scanned),
+            delivered: seq.max(cursor.delivered),
+        }
+    } else {
+        *cursor
+    };
+    delivered.any_accepted = true;
+    delivered.count += documents.len() + lines;
+    target
+        .with_store(move |s, e| s.delivered(e, &documents, next))
+        .await?;
+    *cursor = next;
+    Ok(())
+}
+
+async fn record_refused(
+    state: &Arc<ServerState>,
+    target: &Target,
+    progress: &mut [UnitProgress],
+    item: &BatchItem,
+    status: u16,
+    message: &str,
+) -> Result<(), PushError> {
+    let unit = &mut progress[item.unit];
+    unit.refused = true;
+    unit.remaining = unit.remaining.saturating_sub(1);
+    let refusal = Refusal {
+        document: unit.document.clone(),
+        fingerprint: unit.fingerprint.clone(),
+        http_status: status,
+        message: message.to_owned(),
+        at: now_millis(),
+    };
+    let document = refusal.document.clone();
+    target
+        .with_store(move |s, e| s.record_refused(e, &refusal))
+        .await?;
+    super::report_refused(
+        state,
+        &target.endpoint,
+        &document,
+        item.section,
+        status,
+        message,
+    );
+    Ok(())
 }
 
 /// The endpoint acknowledged a batch but holds less than it covered: it
@@ -181,8 +318,10 @@ async fn lost(target: &Target, cursor: &mut Cursor, through: u64, held: u64) -> 
 }
 
 /// The units the endpoint does not hold yet; every one when resending
-/// everything. Log lines always go. An unchanged refresh goes only when
-/// something else does, so refreshing never makes a request of its own.
+/// everything. Log lines always go unless previously refused. Documents
+/// refused by the endpoint are skipped until their fingerprint changes. An
+/// unchanged refresh goes only when something else does, so refreshing never
+/// makes a request of its own.
 fn unsent(
     store: &mut StateStore,
     endpoint: &str,
@@ -192,6 +331,9 @@ fn unsent(
     let mut kept = Vec::with_capacity(units.len());
     let mut refreshed = Vec::new();
     for unit in units {
+        if store.is_refused(endpoint, &unit.document, &unit.fingerprint)? {
+            continue;
+        }
         if unit.delivery == Delivery::Log {
             kept.push(unit);
             continue;

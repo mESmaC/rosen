@@ -4094,6 +4094,17 @@
       "required": ["http_status", "message", "at"],
       "additionalProperties": false
     },
+    "RefusedItem": {
+      "type": "object",
+      "properties": {
+        "document": { "type": "string" },
+        "http_status": { "type": "integer", "minimum": 0 },
+        "message": { "type": "string" },
+        "at": { "type": "integer" }
+      },
+      "required": ["document", "http_status", "message", "at"],
+      "additionalProperties": false
+    },
     "LedgerCursors": {
       "type": "object",
       "properties": {
@@ -4143,6 +4154,10 @@
             { "type": "integer" },
             { "type": "null" }
           ]
+        },
+        "refused": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RefusedItem" }
         }
       },
       "required": ["state", "last_success_at", "cursor", "backlog", "last_error", "next_retry_at"],

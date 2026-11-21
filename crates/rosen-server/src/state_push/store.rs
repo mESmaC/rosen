@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS state_push_sent (
     related     TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (endpoint, document)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS state_push_refused (
+    endpoint    TEXT    NOT NULL,
+    document    TEXT    NOT NULL,
+    fingerprint TEXT    NOT NULL,
+    http_status INTEGER NOT NULL,
+    message     TEXT    NOT NULL,
+    refused_at  INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, document)
+) WITHOUT ROWID;
 ";
 
 /// Progress at one endpoint.
@@ -60,6 +69,17 @@ impl Cursor {
 pub struct Sent {
     pub fingerprint: String,
     pub related: BTreeSet<String>,
+}
+
+/// One document the endpoint refused (HTTP 400, 413 or 422), skipped until
+/// its fingerprint changes (#444).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    pub document: String,
+    pub fingerprint: String,
+    pub http_status: u16,
+    pub message: String,
+    pub at: i64,
 }
 
 pub struct StateStore {
@@ -137,8 +157,53 @@ impl StateStore {
         rows.collect()
     }
 
+    /// True when `document` with `fingerprint` was already refused by
+    /// `endpoint`, so the feed skips it until its content changes (#444).
+    pub fn is_refused(
+        &self,
+        endpoint: &str,
+        document: &str,
+        fingerprint: &str,
+    ) -> rusqlite::Result<bool> {
+        let found: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT fingerprint FROM state_push_refused
+                 WHERE endpoint = ?1 AND document = ?2",
+                params![endpoint, document],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.as_deref() == Some(fingerprint))
+    }
+
+    /// Records a refused document so subsequent passes skip it unchanged and
+    /// `server status` names it.
+    pub fn record_refused(&self, endpoint: &str, refusal: &Refusal) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "INSERT INTO state_push_refused
+                (endpoint, document, fingerprint, http_status, message, refused_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (endpoint, document) DO UPDATE SET
+                fingerprint = ?3,
+                http_status = ?4,
+                message = ?5,
+                refused_at = ?6",
+            params![
+                endpoint,
+                refusal.document,
+                refusal.fingerprint,
+                i64::from(refusal.http_status),
+                refusal.message,
+                refusal.at,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Records delivered documents and the cursor in one transaction, so a
-    /// crash between them cannot skip a document.
+    /// crash between them cannot skip a document. Clears any earlier refusal
+    /// for a document that has now been accepted.
     pub fn delivered(
         &mut self,
         endpoint: &str,
@@ -154,6 +219,10 @@ impl StateStore {
                  ON CONFLICT (endpoint, document)
                  DO UPDATE SET fingerprint = ?3, related = ?4",
                 params![endpoint, document, sent.fingerprint, related.join(" ")],
+            )?;
+            tx.execute(
+                "DELETE FROM state_push_refused WHERE endpoint = ?1 AND document = ?2",
+                params![endpoint, document],
             )?;
         }
         tx.execute(

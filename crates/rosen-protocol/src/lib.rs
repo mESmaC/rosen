@@ -45,7 +45,7 @@ pub use claim::{
     ClaimFilter, ClaimHolder, ClaimKind, ClaimOutcome, ClaimRequest, OverlapAnswer, OverlapQuery,
     OverlapRecord, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome, WokenWait,
 };
-pub use collapse::{CollapseHealth, FeedError, FeedHealth, FeedState, LedgerCursors};
+pub use collapse::{CollapseHealth, FeedError, FeedHealth, FeedState, LedgerCursors, RefusedItem};
 pub use collapse_check::{CollapseCheckItem, CollapseCheckReport, CollapseCheckStatus};
 pub use config::{ConfigQuery, ConfigRecord};
 pub use conflict::{ConflictsResolved, ResolveConflicts, ResolvedPath};

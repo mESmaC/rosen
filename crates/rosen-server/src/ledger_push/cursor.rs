@@ -9,6 +9,7 @@
 //! endpoint later reports holding less than `delivered`, it lost entries,
 //! and `scanned` goes back to what it reports so they are sent again.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use rosen_protocol::channel::Ledger;
@@ -22,7 +23,29 @@ CREATE TABLE IF NOT EXISTS ledger_push (
     delivered INTEGER NOT NULL,
     PRIMARY KEY (endpoint, ledger)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS ledger_push_refused (
+    endpoint    TEXT    NOT NULL,
+    document    TEXT    NOT NULL,
+    ledger      TEXT    NOT NULL CHECK (ledger IN ('discovery', 'past_work')),
+    seq         INTEGER NOT NULL,
+    http_status INTEGER NOT NULL,
+    message     TEXT    NOT NULL,
+    refused_at  INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, ledger, seq)
+) WITHOUT ROWID;
 ";
+
+/// One ledger entry the endpoint refused (HTTP 400, 413 or 422), skipped so
+/// subsequent batches continue (#444).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    pub document: String,
+    pub ledger: Ledger,
+    pub seq: u64,
+    pub http_status: u16,
+    pub message: String,
+    pub at: i64,
+}
 
 /// One value for each of the two ledgers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -146,6 +169,60 @@ impl CursorStore {
             }
         }
         Ok(cursors)
+    }
+
+    /// `(ledger_name, seq)` pairs already refused by `endpoint`, so a rewind
+    /// never resends them (#444).
+    pub fn refused_keys(&self, endpoint: &str) -> rusqlite::Result<BTreeSet<(&'static str, u64)>> {
+        let mut stmt = self
+            .connection
+            .prepare_cached("SELECT ledger, seq FROM ledger_push_refused WHERE endpoint = ?1")?;
+        let rows = stmt.query_map([endpoint], |row| {
+            let ledger: String = row.get(0)?;
+            let seq = u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0);
+            Ok((Ledger::parse(&ledger), seq))
+        })?;
+        let mut keys = BTreeSet::new();
+        for row in rows {
+            if let (Some(ledger), seq) = row? {
+                keys.insert((ledger.as_str(), seq));
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Records a refused entry and advances that ledger's `scanned` cursor in
+    /// one transaction so the entry is not resent on the next pass (#444).
+    pub fn record_refused(&mut self, endpoint: &str, refusal: &Refusal) -> rusqlite::Result<()> {
+        let tx = self.connection.transaction()?;
+        let seq = i64::try_from(refusal.seq).unwrap_or(i64::MAX);
+        tx.execute(
+            "INSERT INTO ledger_push_refused
+                (endpoint, document, ledger, seq, http_status, message, refused_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (endpoint, ledger, seq) DO UPDATE SET
+                document = ?2,
+                http_status = ?5,
+                message = ?6,
+                refused_at = ?7",
+            params![
+                endpoint,
+                refusal.document,
+                refusal.ledger.as_str(),
+                seq,
+                i64::from(refusal.http_status),
+                refusal.message,
+                refusal.at,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO ledger_push (endpoint, ledger, scanned, delivered)
+             VALUES (?1, ?2, ?3, 0)
+             ON CONFLICT (endpoint, ledger)
+             DO UPDATE SET scanned = MAX(scanned, ?3)",
+            params![endpoint, refusal.ledger.as_str(), seq],
+        )?;
+        tx.commit()
     }
 
     /// Stores both ledgers' progress at `endpoint` in one transaction.

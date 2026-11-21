@@ -182,9 +182,11 @@ async fn finish_step(
                 report_recovered(state, &endpoint, sent, delivered, *failures);
                 *failures = 0;
             }
+            // Clears any prior transient failure without fabricating last_success_at
+            // when a pass had nothing to deliver or every item was refused (#444).
             state
                 .collapse
-                .set_pending(CollapseFeed::StateFeed, &endpoint, false, Some(scanned_to));
+                .record_idle(CollapseFeed::StateFeed, &endpoint, Some(scanned_to));
             true
         }
         Ok(Step::Wait {
@@ -195,6 +197,9 @@ async fn finish_step(
         }) => {
             if *failures > 0 && empty {
                 report_recovered(state, &endpoint, 0, delivered, *failures);
+                state
+                    .collapse
+                    .record_idle(CollapseFeed::StateFeed, &endpoint, None);
                 *failures = 0;
             }
             wait_for_news(state, wake, until).await
@@ -308,7 +313,7 @@ async fn send_pass(
         scanned_to,
         ..Pending::default()
     };
-    if delivered.count > 0 {
+    if delivered.any_accepted || delivered.count > 0 {
         session.last_send = Some(Instant::now());
     }
     if delivered.presence {
@@ -429,9 +434,7 @@ async fn reconcile(
         relay: Arc::clone(&state.relay_wake),
     };
     let held = target.post(batch::probe()).await?;
-    state
-        .collapse
-        .record_success(CollapseFeed::StateFeed, endpoint);
+    // A probe delivers no items, so it never advances last_success_at (#444).
     let (metadata, endpoint) = (state.config.metadata_path(), endpoint.to_owned());
     let tip = state.events.announced_seq();
     let cursor = blocking(move || {
@@ -601,6 +604,30 @@ fn report_recovered(
             "sent": sent,
             "delivered": delivered,
             "after_failures": failures,
+        }),
+    );
+}
+
+/// Publishes a `state_push` event when a single document/item is refused by
+/// the endpoint (HTTP 400, 413 or 422) and skipped so the rest of the batch
+/// can be delivered (R9, #444).
+pub(crate) fn report_refused(
+    state: &ServerState,
+    endpoint: &str,
+    document: &str,
+    section: unit::Section,
+    http_status: u16,
+    error: &str,
+) {
+    report(
+        state,
+        json!({
+            "status": "refused",
+            "endpoint": endpoint,
+            "document": document,
+            "section": section.key(),
+            "http_status": http_status,
+            "error": error,
         }),
     );
 }

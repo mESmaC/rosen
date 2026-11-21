@@ -35,10 +35,12 @@ pub use entries::{rfc3339_utc, MAX_BODY, MAX_ENTRIES};
 pub use send::SendFailure;
 
 use crate::collapse_health::{Feed, Tracker};
+use crate::events::EventLog;
 use crate::landing::Ledger;
 use crate::project_config;
 use crate::{ServerConfig, ServerState};
-use cursor::CursorStore;
+use cursor::{CursorStore, Refusal};
+use entries::BatchEntry;
 
 /// The first retry waits this long; each further failure doubles the wait.
 const RETRY_START: Duration = Duration::from_secs(1);
@@ -160,7 +162,14 @@ pub async fn push_once(state: &ServerState, session: &mut Session) -> Result<Pus
         return Ok(Pushed::Stopped { endpoint });
     }
     session.stopped = None;
-    push_to_with(&state.config, &endpoint, session, Some(&state.collapse)).await
+    push_to_with(
+        &state.config,
+        &endpoint,
+        session,
+        Some(&state.collapse),
+        Some(&state.events),
+    )
+    .await
 }
 
 /// Sends every entry `endpoint` lacks, one batch at a time. Public so a
@@ -170,7 +179,7 @@ pub async fn push_to(
     endpoint: &str,
     session: &mut Session,
 ) -> Result<Pushed, PushError> {
-    push_to_with(config, endpoint, session, None).await
+    push_to_with(config, endpoint, session, None, None).await
 }
 
 async fn push_to_with(
@@ -178,6 +187,7 @@ async fn push_to_with(
     endpoint: &str,
     session: &mut Session,
     tracker: Option<&Tracker>,
+    events: Option<&EventLog>,
 ) -> Result<Pushed, PushError> {
     // Only the mirror owner sends ledger entries (#433): another server's
     // sequence numbers would collide and hide the owner's entries.
@@ -186,7 +196,7 @@ async fn push_to_with(
         return Ok(Pushed::NotOwner);
     }
     let _in_flight = tracker.map(|t| t.begin(Feed::LedgerPush, endpoint));
-    let (target, mut held) = prepare_target(config, endpoint, session, tracker).await?;
+    let (target, mut held) = prepare_target(config, endpoint, session).await?;
     let mut sent = 0;
     loop {
         let batch = target.next_batch().await?;
@@ -198,30 +208,103 @@ async fn push_to_with(
             });
         }
         let extent = batch.extent;
-        let kept = if batch.count == 0 {
-            // Only skipped rows: the cursor moves past them, nothing is sent.
-            target.update(move |cursors| cursors.skip(&extent)).await?
-        } else {
-            held = target.send(batch.body).await?;
-            if let Some(t) = tracker {
-                t.record_success(Feed::LedgerPush, endpoint);
+        if !batch.entries.is_empty() {
+            sent += send_batch(&target, batch.entries, &mut held, tracker, events).await?;
+        }
+        // Advance scanned past any skipped rows covered by this batch.
+        target.update(move |cursors| cursors.skip(&extent)).await?;
+    }
+}
+
+/// Sends `entries` as one batch, splitting by halves on HTTP 400, 413 or 422
+/// to isolate and skip refused entries while delivering the rest (#444).
+async fn send_batch(
+    target: &Target,
+    entries: Vec<BatchEntry>,
+    held: &mut Held,
+    tracker: Option<&Tracker>,
+    events: Option<&EventLog>,
+) -> Result<usize, PushError> {
+    let mut sent = 0;
+    let mut stack = vec![entries];
+    while let Some(chunk) = stack.pop() {
+        let body = entries::encode(&chunk);
+        match target.send(body).await {
+            Ok(answer) => {
+                *held = answer;
+                let sub = entries::extent_of(&chunk);
+                let kept = target
+                    .update(move |cursors| cursors.acknowledge(&sub, &answer))
+                    .await?;
+                if !kept {
+                    return Err(target.failure(None, lost_batch(&sub, &answer)));
+                }
+                if let Some(t) = tracker {
+                    t.record_success(Feed::LedgerPush, &target.endpoint);
+                }
+                sent += chunk.len();
             }
-            sent += batch.count;
-            target
-                .update(move |cursors| cursors.acknowledge(&extent, &held))
-                .await?
-        };
-        if !kept {
-            return Err(target.failure(None, lost_batch(&extent, &held)));
+            Err(PushError::Send { status, .. })
+                if send::is_batch_refusal(status) && chunk.len() > 1 =>
+            {
+                let mut left = chunk;
+                let right = left.split_off(left.len() / 2);
+                stack.push(right);
+                stack.push(left);
+            }
+            Err(PushError::Send {
+                status: Some(status),
+                message,
+                ..
+            }) if send::is_batch_refusal(Some(status)) => {
+                record_refused(target, events, &chunk[0], status, &message).await?;
+            }
+            Err(error) => return Err(error),
         }
     }
+    Ok(sent)
+}
+
+async fn record_refused(
+    target: &Target,
+    events: Option<&EventLog>,
+    entry: &BatchEntry,
+    status: u16,
+    message: &str,
+) -> Result<(), PushError> {
+    let document = format!("{}:{}", entry.ledger.as_str(), entry.seq);
+    let refusal = Refusal {
+        document: document.clone(),
+        ledger: entry.ledger,
+        seq: entry.seq,
+        http_status: status,
+        message: message.to_owned(),
+        at: crate::post_land::submitter::now_millis(),
+    };
+    let (metadata, endpoint) = (target.metadata.clone(), target.endpoint.clone());
+    blocking(move || {
+        let mut store = CursorStore::open(&metadata)?;
+        store.record_refused(&endpoint, &refusal)
+    })
+    .await?;
+    if let Some(events) = events {
+        report_refused(
+            events,
+            &target.endpoint,
+            &document,
+            entry.ledger.as_str(),
+            entry.seq,
+            status,
+            message,
+        );
+    }
+    Ok(())
 }
 
 async fn prepare_target(
     config: &ServerConfig,
     endpoint: &str,
     session: &mut Session,
-    tracker: Option<&Tracker>,
 ) -> Result<(Target, Held), PushError> {
     let fresh = !matches!(&session.reconciled, Some(known) if known.endpoint == endpoint);
     let credential = match &session.reconciled {
@@ -232,9 +315,7 @@ async fn prepare_target(
     let mut held = Held::default();
     if fresh {
         held = target.send(entries::empty_body()).await?;
-        if let Some(t) = tracker {
-            t.record_success(Feed::LedgerPush, endpoint);
-        }
+        // A probe delivers no entries, so it never advances last_success_at (#444).
         target
             .update(move |cursors| {
                 cursors.reconcile(&held);
@@ -304,7 +385,8 @@ impl Target {
         blocking(move || {
             let store = CursorStore::open(&metadata)?;
             let cursors = store.load(&endpoint)?;
-            entries::next_batch(store.connection(), &cursors)
+            let refused = store.refused_keys(&endpoint)?;
+            entries::next_batch(store.connection(), &cursors, &refused)
         })
         .await
     }
@@ -491,6 +573,30 @@ fn report_stopped(state: &ServerState, endpoint: &str) {
         "error": STOPPED_MESSAGE,
     });
     state.events.publish(EventKind::LedgerPush, None, detail);
+}
+
+/// Publishes a `ledger_push` event when a single ledger entry is refused by
+/// the endpoint (HTTP 400, 413 or 422) and skipped so the rest of the batch
+/// can be delivered (R13, #444).
+fn report_refused(
+    events: &EventLog,
+    endpoint: &str,
+    document: &str,
+    ledger: &str,
+    sequence: u64,
+    http_status: u16,
+    error: &str,
+) {
+    let detail = json!({
+        "status": "refused",
+        "endpoint": endpoint,
+        "document": document,
+        "ledger": ledger,
+        "sequence": sequence,
+        "http_status": http_status,
+        "error": error,
+    });
+    events.publish(EventKind::LedgerPush, None, detail);
 }
 
 /// Publishes a `ledger_push` event when a pass succeeds after failures, so
