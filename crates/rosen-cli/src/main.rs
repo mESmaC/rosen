@@ -3,6 +3,8 @@
 mod change_cmd;
 mod claim_cmd;
 mod collapse_cmd;
+mod collapse_config;
+mod collapse_git;
 mod commands;
 mod commit_cmd;
 mod config_cmd;
@@ -141,6 +143,12 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
         }
         Command::Collapse(commands::CollapseCommand::Check) => {
             block_on(collapse_cmd::check(json, &endpoint))
+        }
+        Command::Collapse(commands::CollapseCommand::Link(args)) => {
+            block_on(collapse_cmd::link(json, &endpoint, args))
+        }
+        Command::Collapse(commands::CollapseCommand::Unlink(args)) => {
+            block_on(collapse_cmd::unlink(json, &endpoint, args))
         }
         Command::Machine(command) => block_on(machine_cmd::run(json, &endpoint, command)),
         Command::Mcp(args) => {

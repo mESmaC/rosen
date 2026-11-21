@@ -1,5 +1,5 @@
 ### R10 · CLI
-- The `rosen` commands are `import`, `mirror adopt|catch-up|drop-paths` (operator only, R1), `collapse check` (R1), `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve|list|mark|landed|failures`, `receipt submit`, `land`, `rebase`, `resolve`, `workspace list|delete|watch`, `server start|stop|status`, `run`, `config show`, `events`, `machine join|list|approve|revoke`, `machine key create|list|revoke` (R14) and `mcp`.
+- The `rosen` commands are `import`, `mirror adopt|catch-up|drop-paths` (operator only, R1), `collapse link|unlink|check` (R1), `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve|list|mark|landed|failures`, `receipt submit`, `land`, `rebase`, `resolve`, `workspace list|delete|watch`, `server start|stop|status`, `run`, `config show`, `events`, `machine join|list|approve|revoke`, `machine key create|list|revoke` (R14) and `mcp`.
 - `--json` on every command, with versioned output schemas.
   Each output line has a `schema` ID (`rosen.<shape>/v1`); incompatible shape changes bump that version.
   `--json-schema` prints the offline JSON Schema catalog (`crates/rosen-cli/schemas/v1.json`), including nested records and refusal variants.
@@ -15,7 +15,7 @@
   Each tool is one command, named by its words joined with `_`, with the command's arguments and help as its inputs, read from the same definitions `--help` prints.
   A call runs that command with `--json` and returns its versioned JSON object as `structuredContent` alongside a text copy; a failure or refusal is an error result holding its `rosen.error/v1` object.
   `--workspace <DIR>` runs the commands in that workspace.
-  `wait` (parking with `--park`), `events` (draining pending events with `--once`) and `run` (wrapped as `rosen.run/v1`) are offered as tools so MCP matches the CLI for agent use; `workspace watch` and the operator's commands (`import`, `mirror`, `server start`, `server stop`, `server relay`, `machine`) are not tools.
+  `wait` (parking with `--park`), `events` (draining pending events with `--once`) and `run` (wrapped as `rosen.run/v1`) are offered as tools so MCP matches the CLI for agent use; `workspace watch` and the operator's commands (`import`, `mirror`, `collapse link`, `collapse unlink`, `server start`, `server stop`, `server relay`, `machine`) are not tools.
   `review approve`, `receipt submit` and `land` are tools only with `--landing`; in managed workspaces without `--landing`, `workspace delete` is also omitted.
 - `rosen server stop` asks the server to stop and returns once its process has exited, which is when its data directory is free for another server.
   It never starts a server, and succeeds when none is running.
@@ -23,3 +23,4 @@
 - `rosen server status` reports the git commit the server was built from and the path of its executable, since the version is the same for every commit, and whether HTTPS mirror reads are using proactive basic auth.
   When the base names a `collapse` root, it also reports the health of the state feed, ledger push and action relay (`sending`, `current`, `failing`, `stopped`, `not_owner` or `no_credential`, with last success time, cursor, backlog, last error and next retry time).
 - `rosen collapse check` verifies a server's Collapse link without making changes (R1), printing one line per check (`pass`, `fail` or `skipped`) with a fix hint, supporting `--json` (`rosen.collapse.check/v1`), and exiting non-zero when any check fails.
+- `rosen collapse link <owner>/<name>` links a running server to Collapse in one command (R1), reading the push token from stdin or `ROSEN_COLLAPSE_TOKEN` (never as an argument), supporting `--host`, `--relay`, `--land` and `--json` (`rosen.collapse.link/v1`), and `rosen collapse unlink` reverses it (`rosen.collapse.unlink/v1`), keeping stored credentials unless `--forget-credentials` is given.

@@ -10,10 +10,10 @@ use serde_json::{json, Map, Value};
 /// Commands that are never tools.
 /// - `mcp` is this server.
 /// - `workspace watch` runs indefinitely in the background.
-/// - `import`, `mirror`, `server start|stop|relay` are operator-only: the host
-///   that starts this server has already started the project's server, and an
-///   agent that stopped it would stop every other agent's work.
-const NOT_TOOLS: [&str; 9] = [
+/// - `import`, `mirror`, `server start|stop|relay`, `collapse link|unlink` are
+///   operator-only: the host that starts this server has already started the
+///   project's server, and an agent must not stop it or handle push tokens.
+const NOT_TOOLS: [&str; 11] = [
     "mcp",
     "workspace watch",
     "import",
@@ -23,6 +23,8 @@ const NOT_TOOLS: [&str; 9] = [
     "mirror drop-paths",
     "mirror adopt",
     "mirror catch-up",
+    "collapse link",
+    "collapse unlink",
 ];
 
 /// Enrollment is the operator's too, and `machine key create` prints a

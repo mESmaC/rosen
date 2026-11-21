@@ -155,6 +155,12 @@
     },
     {
       "$ref": "#/$defs/rosen.collapse.check~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.collapse.link~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.collapse.unlink~1v1"
     }
   ],
   "$defs": {
@@ -5150,6 +5156,55 @@
       ],
       "additionalProperties": false
     },
+    "CollapseCheckReport": {
+      "description": "Read-only verification report for a server's Collapse link (R1, R10).",
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "mirror_remote": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "collapse": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ledger_endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mirror_owner": {
+          "type": "boolean"
+        },
+        "mirror_proactive_auth": {
+          "type": "boolean"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CollapseCheckItem"
+          }
+        }
+      },
+      "required": [
+        "ok",
+        "mirror_remote",
+        "collapse",
+        "ledger_endpoint",
+        "mirror_owner",
+        "mirror_proactive_auth",
+        "checks"
+      ],
+      "additionalProperties": false
+    },
     "rosen.collapse.check/v1": {
       "description": "Read-only end-to-end verification of a server's Collapse link (R1, R10). Exits non-zero when ok is false.",
       "type": "object",
@@ -5204,6 +5259,136 @@
       "additionalProperties": false,
       "x-commands": [
         "collapse check"
+      ]
+    },
+    "rosen.collapse.link/v1": {
+      "description": "Result of linking a running Rosen server to Collapse (R1, R10).",
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.collapse.link/v1"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "collapse": {
+          "type": "string"
+        },
+        "mirror_remote": {
+          "type": "string"
+        },
+        "credentials_approved": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "proactive_auth_configured": {
+          "type": "boolean"
+        },
+        "change": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ChangeRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "land": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/LandAnswer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relay": {
+          "$ref": "#/$defs/RelaySetting"
+        },
+        "check": {
+          "$ref": "#/$defs/CollapseCheckReport"
+        }
+      },
+      "required": [
+        "schema",
+        "ok",
+        "repo",
+        "collapse",
+        "mirror_remote",
+        "credentials_approved",
+        "proactive_auth_configured",
+        "change",
+        "land",
+        "relay",
+        "check"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "collapse link"
+      ]
+    },
+    "rosen.collapse.unlink/v1": {
+      "description": "Result of unlinking a running Rosen server from Collapse (R1, R10).",
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.collapse.unlink/v1"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "change": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ChangeRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "land": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/LandAnswer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relay": {
+          "$ref": "#/$defs/RelaySetting"
+        },
+        "proactive_auth_cleared": {
+          "type": "boolean"
+        },
+        "credentials_forgotten": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "ok",
+        "change",
+        "land",
+        "relay",
+        "proactive_auth_cleared",
+        "credentials_forgotten"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "collapse unlink"
       ]
     }
   }

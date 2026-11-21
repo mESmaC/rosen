@@ -98,7 +98,7 @@ pub enum Command {
     /// Stored objects and authored snapshots remain; this is not a purge.
     #[command(name = "mirror", subcommand)]
     Mirror(MirrorCommand),
-    /// Inspect and verify a Collapse link.
+    /// Link, unlink or verify a Collapse repository connection.
     #[command(name = "collapse", subcommand)]
     Collapse(CollapseCommand),
     /// Import a git repository; its default branch becomes the base.
@@ -930,6 +930,70 @@ pub enum CollapseCommand {
     /// state and ledger endpoints, and the relay allow-list and doorbell.
     /// Exits non-zero when any check fails.
     Check,
+    /// Link the running Rosen server to a Collapse repository in one command.
+    ///
+    /// Reads a Collapse push token from stdin or `ROSEN_COLLAPSE_TOKEN` (never
+    /// as a command-line argument), approves git credentials for `.git`,
+    /// `/rosen/state` and `/ledgers`, configures `http.<mirror>.proactiveAuth`
+    /// as `basic`, opens and names a change updating `rosen.toml` (landing it
+    /// when `--land` is given), sets the relay allow-list, and runs
+    /// `rosen collapse check`.
+    Link(CollapseLinkArgs),
+    /// Unlink the running Rosen server from Collapse.
+    ///
+    /// Opens and names a change removing `collapse` and `[mirror].remote` from
+    /// `rosen.toml` (landing it when `--land` is given), turns off the action
+    /// relay, and clears per-URL proactive auth. Stored git credentials are
+    /// left alone unless `--forget-credentials` is given.
+    Unlink(CollapseUnlinkArgs),
+}
+
+/// Parameters for `rosen collapse link`.
+#[derive(Debug, Args)]
+pub struct CollapseLinkArgs {
+    /// Collapse repository as `<owner>/<name>` (for example `mESmaC/example`).
+    #[arg(value_name = "OWNER/NAME")]
+    pub repo: String,
+    /// Collapse API origin (must be `https://...` with no path or credentials).
+    #[arg(
+        long,
+        default_value = crate::collapse_config::DEFAULT_COLLAPSE_HOST,
+        value_name = "URL"
+    )]
+    pub host: String,
+    /// Comma-separated relay action kinds to allow: `approve`, `land`, `mark`
+    /// (or `review-mark`), `config` (or `config-change`), `revoke` (or
+    /// `machine-revoke`); or `none` alone.
+    #[arg(
+        long,
+        value_name = "KINDS",
+        value_delimiter = ',',
+        default_value = "approve,land,mark,config"
+    )]
+    pub relay: Vec<String>,
+    /// Land the `rosen.toml` change after naming it.
+    #[arg(long)]
+    pub land: bool,
+    /// Owner of the `rosen.toml` change. Defaults to $ROSEN_AGENT, then the OS
+    /// user name.
+    #[arg(long)]
+    pub owner: Option<String>,
+}
+
+/// Parameters for `rosen collapse unlink`.
+#[derive(Debug, Args)]
+pub struct CollapseUnlinkArgs {
+    /// Land the `rosen.toml` change after naming it.
+    #[arg(long)]
+    pub land: bool,
+    /// Also remove stored git credentials for the Collapse `.git`,
+    /// `/rosen/state` and `/ledgers` paths.
+    #[arg(long)]
+    pub forget_credentials: bool,
+    /// Owner of the `rosen.toml` change. Defaults to $ROSEN_AGENT, then the OS
+    /// user name.
+    #[arg(long)]
+    pub owner: Option<String>,
 }
 
 impl Command {
@@ -941,6 +1005,8 @@ impl Command {
             Command::Mirror(MirrorCommand::CatchUp) => "mirror catch-up",
             Command::Mirror(MirrorCommand::DropPaths { .. }) => "mirror drop-paths",
             Command::Collapse(CollapseCommand::Check) => "collapse check",
+            Command::Collapse(CollapseCommand::Link(_)) => "collapse link",
+            Command::Collapse(CollapseCommand::Unlink(_)) => "collapse unlink",
             Command::Import { .. } => "import",
             Command::Change(sub) => sub.path(),
             Command::Commit { .. } => "commit",

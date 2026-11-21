@@ -4,6 +4,7 @@
 //! each link pulls in the whole crate and its dependencies (#414). Add new
 //! integration tests as modules here unless they need their own process.
 
+mod collapse_link;
 mod json_output;
 mod run_nested;
 mod run_output;

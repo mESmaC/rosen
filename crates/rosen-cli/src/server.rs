@@ -256,26 +256,47 @@ pub async fn relay(json: bool, endpoint: &Endpoint, allow: &[String]) -> Result<
     Ok(true)
 }
 
-/// `none` alone, or kinds Rosen relays.
-fn relay_kinds(allow: &[String]) -> Result<Vec<RelayKind>, String> {
-    let words: Vec<&str> = allow.iter().map(|word| word.trim()).collect();
+/// `none` alone, or kinds Rosen relays (accepting both the short words and
+/// Collapse's descriptive aliases such as `review-mark` and `config-change`).
+pub(crate) fn relay_kinds(allow: &[String]) -> Result<Vec<RelayKind>, String> {
+    let words: Vec<&str> = allow
+        .iter()
+        .map(|word| word.trim())
+        .filter(|word| !word.is_empty())
+        .collect();
     if words == ["none"] {
         return Ok(Vec::new());
+    }
+    if words.is_empty() {
+        return Err(
+            "empty relay allow-list; use approve, land, mark (review-mark), \
+             config (config-change), revoke (machine-revoke) or none alone"
+                .to_owned(),
+        );
     }
     words
         .iter()
         .map(|word| {
-            RelayKind::parse(word).ok_or_else(|| {
+            parse_relay_kind(word).ok_or_else(|| {
                 format!(
-                    "unknown relay kind {word:?}; use approve, land, mark, config, revoke \
-                     or none alone"
+                    "unknown relay kind {word:?}; use approve, land, mark (review-mark), \
+                     config (config-change), revoke (machine-revoke) or none alone"
                 )
             })
         })
         .collect()
 }
 
-fn relay_line(setting: &RelaySetting) -> String {
+fn parse_relay_kind(word: &str) -> Option<RelayKind> {
+    RelayKind::parse(word).or(match word {
+        "review-mark" | "review_mark" => Some(RelayKind::Mark),
+        "config-change" | "config_change" => Some(RelayKind::Config),
+        "machine-revoke" | "machine_revoke" => Some(RelayKind::Revoke),
+        _ => None,
+    })
+}
+
+pub(crate) fn relay_line(setting: &RelaySetting) -> String {
     let kinds: Vec<&str> = setting.allow.iter().map(|kind| kind.as_str()).collect();
     match (setting.revoked, kinds.is_empty()) {
         (true, _) => "off (the collapse machine is revoked)".to_owned(),
