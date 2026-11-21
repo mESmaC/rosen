@@ -230,6 +230,7 @@ fn feed_health_line(cursor_label: &str, health: &FeedHealth) -> String {
         FeedState::Stopped => "stopped",
         FeedState::NotOwner => "not owner",
         FeedState::NoCredential => "no credential",
+        FeedState::Diverged => "diverged",
     };
     let mut parts = Vec::new();
     if let Some(code) = health.last_error.as_ref().and_then(|err| err.http_status) {

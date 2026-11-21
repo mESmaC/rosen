@@ -4077,7 +4077,7 @@
     },
     "FeedState": {
       "type": "string",
-      "enum": ["sending", "current", "failing", "stopped", "not_owner", "no_credential"]
+      "enum": ["sending", "current", "failing", "stopped", "not_owner", "no_credential", "diverged"]
     },
     "FeedError": {
       "type": "object",
@@ -5064,6 +5064,9 @@
         "format": {
           "const": 1
         },
+        "feed_id": {
+          "type": "string"
+        },
         "through": {
           "type": "integer",
           "minimum": 0
@@ -5471,6 +5474,15 @@
         },
         "relay": {
           "$ref": "#/$defs/RelaySetting"
+        },
+        "reset": {
+          "type": "boolean"
+        },
+        "feed_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "check": {
           "$ref": "#/$defs/CollapseCheckReport"

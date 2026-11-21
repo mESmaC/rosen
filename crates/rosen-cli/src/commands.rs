@@ -942,6 +942,9 @@ pub enum CollapseCommand {
     /// `/ledgers`, configures `http.<mirror>.proactiveAuth` as `basic`, opens
     /// and names a change updating `rosen.toml` (landing it when `--land` is
     /// given), sets the relay allow-list, and runs `rosen collapse check`.
+    /// With `--reset`, asks Collapse to clear that repository's `rosen_*` feed
+    /// tables and accept this server's feed ID (can be run without
+    /// `<owner>/<name>` when `collapse` is already configured on the base).
     Link(CollapseLinkArgs),
     /// Unlink the running Rosen server from Collapse.
     ///
@@ -957,8 +960,9 @@ pub enum CollapseCommand {
 #[derive(Debug, Args)]
 pub struct CollapseLinkArgs {
     /// Collapse repository as `<owner>/<name>` (for example `mESmaC/example`).
+    /// Optional with `--reset` when `collapse` is already configured on the base.
     #[arg(value_name = "OWNER/NAME")]
-    pub repo: String,
+    pub repo: Option<String>,
     /// Collapse API origin (must be `https://...` with no path or credentials).
     #[arg(
         long,
@@ -979,6 +983,10 @@ pub struct CollapseLinkArgs {
     /// Land the `rosen.toml` change after naming it.
     #[arg(long)]
     pub land: bool,
+    /// Ask Collapse to clear this repository's `rosen_*` feed tables and
+    /// accept this server's feed ID, recovering from a `diverged` feed (#445).
+    #[arg(long)]
+    pub reset: bool,
     /// Owner of the `rosen.toml` change. Defaults to $ROSEN_AGENT, then the OS
     /// user name.
     #[arg(long)]

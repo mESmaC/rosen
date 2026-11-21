@@ -21,8 +21,8 @@ use crate::ledger_push::MAX_BODY;
 
 /// The format Collapse reads; it refuses one it does not know.
 const FORMAT: u64 = 1;
-/// Room left for the envelope around the items.
-const ENVELOPE: usize = 256;
+/// Room left for the envelope around the items (including `"feed_id"`).
+const ENVELOPE: usize = 320;
 const SECTIONS: [Section; 9] = [
     Section::Changes,
     Section::Conflicts,
@@ -51,19 +51,19 @@ pub struct Batch {
 }
 
 /// The body that sends nothing, asking only what the endpoint holds.
-pub fn probe() -> Vec<u8> {
-    encode(0, &[])
+pub fn probe(feed_id: Option<&str>) -> Vec<u8> {
+    encode(feed_id, 0, &[])
 }
 
 /// Splits `units` into size-bounded batches.
 #[cfg(test)]
-pub fn split(units: Vec<Unit>, seq: u64, delivered: u64) -> Vec<Batch> {
-    split_slice(&units, seq, delivered)
+pub fn split(feed_id: Option<&str>, units: Vec<Unit>, seq: u64, delivered: u64) -> Vec<Batch> {
+    split_slice(feed_id, &units, seq, delivered)
 }
 
 /// Splits `units` into size-bounded batches, recording each item's index in
 /// `units` so the sender can track unit completion across split sub-batches.
-pub fn split_slice(units: &[Unit], seq: u64, delivered: u64) -> Vec<Batch> {
+pub fn split_slice(feed_id: Option<&str>, units: &[Unit], seq: u64, delivered: u64) -> Vec<Batch> {
     let mut batches = Vec::new();
     let mut items: Vec<BatchItem> = Vec::new();
     let mut size = ENVELOPE;
@@ -79,7 +79,7 @@ pub fn split_slice(units: &[Unit], seq: u64, delivered: u64) -> Vec<Batch> {
             let length = serde_json::to_vec(&item).map_or(0, |bytes| bytes.len()) + 1;
             if size + length > MAX_BODY && !items.is_empty() {
                 batches.push(Batch {
-                    body: encode(delivered, &items),
+                    body: encode(feed_id, delivered, &items),
                     items: std::mem::take(&mut items),
                 });
                 size = ENVELOPE;
@@ -95,7 +95,7 @@ pub fn split_slice(units: &[Unit], seq: u64, delivered: u64) -> Vec<Batch> {
     // Every unit holds an item, so `items` is empty only when `units` was.
     if !items.is_empty() {
         batches.push(Batch {
-            body: encode(seq, &items),
+            body: encode(feed_id, seq, &items),
             items,
         });
     }
@@ -127,10 +127,13 @@ fn sized(item: Value) -> Value {
 }
 
 /// Encodes `items` as a v1 state-feed JSON batch claiming completeness
-/// through `through`.
-pub fn encode(through: u64, items: &[BatchItem]) -> Vec<u8> {
+/// through `through`, carrying this server's persistent `feed_id` when set.
+pub fn encode(feed_id: Option<&str>, through: u64, items: &[BatchItem]) -> Vec<u8> {
     let mut envelope = Map::new();
     envelope.insert("format".into(), json!(FORMAT));
+    if let Some(id) = feed_id {
+        envelope.insert("feed_id".into(), json!(id));
+    }
     envelope.insert("through".into(), json!(through));
     for section in SECTIONS {
         let listed: Vec<&Value> = items

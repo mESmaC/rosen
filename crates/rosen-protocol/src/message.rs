@@ -138,6 +138,10 @@ pub enum Request {
     },
     /// Read-only end-to-end verification of the server's Collapse link (R1, R10, #435).
     CollapseCheck,
+    /// Operator-only: ask Collapse to clear this repository's `rosen_*` feed
+    /// tables, rotate/persist the feed ID, reset local cursors and resume
+    /// pushing (`rosen collapse link --reset`, R1, R9, #445).
+    CollapseReset,
     /// Reads the next persisted checker job for a failed batch (R12).
     BisectNext {
         session: i64,
@@ -379,6 +383,8 @@ pub enum Response {
     Relay(crate::RelaySetting),
     /// Boxed: `CollapseCheckReport` holds several optional strings and a Vec (clippy::large_enum_variant).
     CollapseCheck(Box<crate::CollapseCheckReport>),
+    /// Answer to [`Request::CollapseReset`].
+    CollapseReset(crate::CollapseResetReport),
     Bisection(crate::BisectState),
     Machines(Vec<crate::machine::MachineRecord>),
     Machine(crate::machine::MachineRecord),

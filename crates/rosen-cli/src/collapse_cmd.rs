@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use rosen_client::protocol::{
-    ChangeRecord, CollapseCheckReport, ErrorCode, LandAnswer, LandStatus, NewChange, ReadAnswer,
-    ReadRequest, RelaySetting, SnapshotRequest,
+    ChangeRecord, CollapseCheckReport, CollapseResetReport, ErrorCode, LandAnswer, LandStatus,
+    NewChange, ReadAnswer, ReadRequest, RelaySetting, SnapshotRequest,
 };
 use rosen_client::{Client, Endpoint, Error};
 use rosen_core::{AgentId, ProjectConfig, CONFIG_PATH};
@@ -41,7 +41,23 @@ pub async fn link(
     endpoint: &Endpoint,
     args: &CollapseLinkArgs,
 ) -> Result<Succeeded, Error> {
-    let target = CollapseTarget::parse(&args.repo, &args.host).map_err(Error::InvalidArgument)?;
+    match args.repo.as_deref() {
+        Some(repo) => link_repo(json, endpoint, args, repo).await,
+        None if args.reset => reset_existing(json, endpoint).await,
+        None => Err(Error::InvalidArgument(
+            "missing `<owner>/<name>` repository (or pass `--reset` to reset an already-linked Collapse feed)"
+                .to_owned(),
+        )),
+    }
+}
+
+async fn link_repo(
+    json: bool,
+    endpoint: &Endpoint,
+    args: &CollapseLinkArgs,
+    repo: &str,
+) -> Result<Succeeded, Error> {
+    let target = CollapseTarget::parse(repo, &args.host).map_err(Error::InvalidArgument)?;
     let relay_kinds = crate::server::relay_kinds(&args.relay).map_err(Error::InvalidArgument)?;
     let owner = crate::change_cmd::resolve_owner(args.owner.as_deref())?;
     let token = collapse_git::read_push_token()?;
@@ -66,26 +82,77 @@ pub async fn link(
     let message = format!("Link Collapse repository {}", target.repo_slug());
     let (change, land) = apply_config_edit(&client, owner, edit, message, args.land).await?;
     let relay = client.relay_set(relay_kinds).await?;
+    let land_failed = is_land_refused(land.as_ref());
+    let reset = if args.reset && !land_failed {
+        Some(client.collapse_reset().await?)
+    } else {
+        None
+    };
     let check = client.collapse_check().await?;
 
-    let land_failed = is_land_refused(land.as_ref());
     let unlanded_change = !args.land && change.is_some();
     let ok = !land_failed && (unlanded_change || check.ok);
     print_link(
         json,
         &LinkSummary {
             ok,
-            target: &target,
+            repo: &target.repo_slug(),
+            collapse: &target.collapse_root,
+            mirror_remote: &target.mirror_remote,
+            origin: Some(&target.origin),
             use_http_path_configured,
             credentials_approved: &credentials_approved,
             proactive_auth_configured,
             change: change.as_ref(),
             land: land.as_ref(),
             relay: &relay,
+            reset: reset.as_ref(),
             check: &check,
         },
     );
     Ok(ok)
+}
+
+async fn reset_existing(json: bool, endpoint: &Endpoint) -> Result<Succeeded, Error> {
+    let client = Client::connect(endpoint).await?;
+    let reset = client.collapse_reset().await?;
+    let status = client.status().await?;
+    let check = client.collapse_check().await?;
+    let relay = status.relay.unwrap_or_default();
+    let repo = slug_from_collapse_root(&reset.collapse);
+    let mirror_remote = check
+        .mirror_remote
+        .clone()
+        .unwrap_or_else(|| format!("{}.git", reset.collapse.trim_end_matches('/')));
+    print_link(
+        json,
+        &LinkSummary {
+            ok: check.ok,
+            repo: &repo,
+            collapse: &reset.collapse,
+            mirror_remote: &mirror_remote,
+            origin: None,
+            use_http_path_configured: false,
+            credentials_approved: &[],
+            proactive_auth_configured: false,
+            change: None,
+            land: None,
+            relay: &relay,
+            reset: Some(&reset),
+            check: &check,
+        },
+    );
+    Ok(check.ok)
+}
+
+fn slug_from_collapse_root(root: &str) -> String {
+    let trimmed = root.trim_end_matches('/');
+    let parts: Vec<&str> = trimmed.rsplit('/').take(2).collect();
+    if parts.len() == 2 {
+        format!("{}/{}", parts[1], parts[0])
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 /// Reverses `rosen collapse link`: opens and names a change removing `collapse`
@@ -223,13 +290,17 @@ fn is_land_refused(land: Option<&LandAnswer>) -> bool {
 
 struct LinkSummary<'a> {
     ok: bool,
-    target: &'a CollapseTarget,
+    repo: &'a str,
+    collapse: &'a str,
+    mirror_remote: &'a str,
+    origin: Option<&'a str>,
     use_http_path_configured: bool,
     credentials_approved: &'a [String],
     proactive_auth_configured: bool,
     change: Option<&'a ChangeRecord>,
     land: Option<&'a LandAnswer>,
     relay: &'a RelaySetting,
+    reset: Option<&'a CollapseResetReport>,
     check: &'a CollapseCheckReport,
 }
 
@@ -247,39 +318,46 @@ fn print_link(json: bool, summary: &LinkSummary<'_>) {
         let body = json!({
             "schema": COLLAPSE_LINK_SCHEMA,
             "ok": summary.ok,
-            "repo": summary.target.repo_slug(),
-            "collapse": summary.target.collapse_root,
-            "mirror_remote": summary.target.mirror_remote,
+            "repo": summary.repo,
+            "collapse": summary.collapse,
+            "mirror_remote": summary.mirror_remote,
             "credentials_approved": summary.credentials_approved,
             "proactive_auth_configured": summary.proactive_auth_configured,
             "change": summary.change,
             "land": summary.land,
             "relay": summary.relay,
+            "reset": summary.reset.is_some(),
+            "feed_id": summary.reset.map(|r| r.feed_id.as_str()),
             "check": summary.check,
         });
         println!("{body}");
         return;
     }
-    println!("collapse:    {}", summary.target.collapse_root);
-    println!("mirror:      {}", summary.target.mirror_remote);
-    if summary.use_http_path_configured {
+    println!("collapse:    {}", summary.collapse);
+    println!("mirror:      {}", summary.mirror_remote);
+    if let Some(origin) = summary.origin.filter(|_| summary.use_http_path_configured) {
+        println!("http-path:   credential.{origin}.useHttpPath = true");
+    }
+    if !summary.credentials_approved.is_empty() {
         println!(
-            "http-path:   credential.{}.useHttpPath = true",
-            summary.target.origin
+            "credentials: approved {} path(s)",
+            summary.credentials_approved.len()
         );
     }
-    println!(
-        "credentials: approved {} path(s)",
-        summary.credentials_approved.len()
-    );
     if summary.proactive_auth_configured {
         println!(
             "proactive:   http.{}.proactiveAuth = basic",
-            summary.target.mirror_remote
+            summary.mirror_remote
         );
     }
     print_change_and_land(summary.change, summary.land);
     println!("relay:       {}", crate::server::relay_line(summary.relay));
+    if let Some(reset) = summary.reset {
+        println!(
+            "reset:       cleared Collapse feed tables (feed_id {})",
+            reset.feed_id
+        );
+    }
     println!();
     print_check_lines(summary.check);
 }

@@ -59,6 +59,7 @@ const CHANGE_C: &str = "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm";
 const COMMIT_1: &str = "1111111111111111111111111111111111111111";
 const COMMIT_2: &str = "2222222222222222222222222222222222222222";
 const COMMIT_3: &str = "3333333333333333333333333333333333333333";
+const FEED_ID: &str = "0123456789abcdef0123456789abcdef";
 
 /// Exact-value stabilizer for runtime-minted IDs, commits and timestamps.
 ///
@@ -261,7 +262,7 @@ fn record_commit_time(state: &ServerState, commit: ObjectId, stab: &mut Stabiliz
 }
 
 fn single_batch(units: Vec<Unit>, seq: u64, delivered: u64, stab: &Stabilizer) -> Value {
-    let batches = batch::split(units, seq, delivered);
+    let batches = batch::split(Some(FEED_ID), units, seq, delivered);
     assert_eq!(batches.len(), 1, "expected one state-feed batch");
     let mut parsed: Value = serde_json::from_slice(&batches[0].body).unwrap();
     stab.apply(&mut parsed);
@@ -1151,13 +1152,20 @@ async fn generate_ledger_push() -> Value {
     ));
 
     let reqs = captured.lock().unwrap();
-    reqs.requests
+    let mut batch = reqs
+        .requests
         .iter()
         .find_map(|(_, _, body)| {
             let v: Value = serde_json::from_slice(body).unwrap();
             (!v["entries"].as_array().unwrap().is_empty()).then_some(v)
         })
-        .expect("captured ledger push batch")
+        .expect("captured ledger push batch");
+    let actual_feed_id =
+        crate::collapse_feed::get_or_create(&state.config.metadata_path()).unwrap();
+    let mut stab = Stabilizer::default();
+    stab.map_str(actual_feed_id, FEED_ID);
+    stab.apply(&mut batch);
+    batch
 }
 
 fn strip_repo_prefix(path: &str) -> String {
@@ -1397,6 +1405,10 @@ async fn collapse_wire_fixtures_match_real_senders() {
         ("state-feed-machines.json", generate_state_feed_machines()),
         ("state-feed-presence.json", generate_state_feed_presence()),
         ("state-feed-channel.json", generate_state_feed_channel()),
+        (
+            "state-feed-reset.json",
+            serde_json::from_slice(&crate::collapse_feed::reset_body(FEED_ID)).unwrap(),
+        ),
         ("ledger-push.json", generate_ledger_push().await),
         ("relay-doorbell.json", doorbell),
         ("relay-actions.json", actions),

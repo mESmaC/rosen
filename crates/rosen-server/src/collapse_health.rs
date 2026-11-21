@@ -38,6 +38,7 @@ struct FeedSlot {
     in_flight: bool,
     has_pending: bool,
     stopped: bool,
+    diverged: bool,
     no_credential: bool,
     /// Highest event sequence confirmed clean in memory by `state_push`,
     /// avoiding false backlog counts for ignored events between sends.
@@ -88,6 +89,7 @@ impl Tracker {
         let mut slot = lock(&self.feeds[feed as usize]);
         slot.select_endpoint(endpoint);
         slot.stopped = false;
+        slot.diverged = false;
         slot.no_credential = false;
         slot.last_success_at = Some(now_millis());
         slot.last_error = None;
@@ -101,6 +103,7 @@ impl Tracker {
         slot.select_endpoint(endpoint);
         slot.has_pending = false;
         slot.stopped = false;
+        slot.diverged = false;
         slot.no_credential = false;
         slot.last_error = None;
         slot.next_retry_at = None;
@@ -144,6 +147,7 @@ impl Tracker {
             slot.select_endpoint(endpoint);
         }
         slot.stopped = false;
+        slot.diverged = false;
         slot.no_credential = no_credential;
         slot.last_error = Some(FeedError {
             http_status: status,
@@ -159,6 +163,7 @@ impl Tracker {
         slot.select_endpoint(endpoint);
         slot.has_pending = false;
         slot.stopped = true;
+        slot.diverged = false;
         slot.no_credential = false;
         slot.last_error = Some(FeedError {
             http_status: Some(410),
@@ -166,6 +171,33 @@ impl Tracker {
             at: now_millis(),
         });
         slot.next_retry_at = None;
+    }
+
+    /// Records a diverged Collapse feed (HTTP 409 `source_changed` or Collapse
+    /// ahead of the local log), pausing sends until `--reset` (#445).
+    pub fn record_diverged(&self, feed: Feed, endpoint: &str, status: Option<u16>, message: &str) {
+        let mut slot = lock(&self.feeds[feed as usize]);
+        slot.select_endpoint(endpoint);
+        slot.has_pending = false;
+        slot.stopped = false;
+        slot.diverged = true;
+        slot.no_credential = false;
+        slot.last_error = Some(FeedError {
+            http_status: status,
+            message: message.to_owned(),
+            at: now_millis(),
+        });
+        slot.next_retry_at = None;
+    }
+
+    /// Clears diverged/stopped state and cached scan progress after
+    /// `rosen collapse link --reset` (#445).
+    pub fn clear_reset(&self, feed: Feed, endpoint: &str) {
+        let mut slot = lock(&self.feeds[feed as usize]);
+        *slot = FeedSlot {
+            endpoint: Some(endpoint.to_owned()),
+            ..FeedSlot::default()
+        };
     }
 
     fn slot_for(&self, feed: Feed, endpoint: &str) -> FeedSlot {
@@ -279,6 +311,8 @@ fn build_health(
 ) -> FeedHealth {
     let (state, last_error, next_retry_at) = if !is_owner {
         (FeedState::NotOwner, None, None)
+    } else if tracked.diverged {
+        (FeedState::Diverged, tracked.last_error.clone(), None)
     } else if tracked.stopped {
         (FeedState::Stopped, tracked.last_error.clone(), None)
     } else if tracked.no_credential {

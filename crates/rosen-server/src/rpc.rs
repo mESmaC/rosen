@@ -50,6 +50,15 @@ pub async fn dispatch_from(
                 "the Collapse action relay is an operator setting; run it on the server using its local endpoint")),
         };
     }
+    if let Request::CollapseReset = request {
+        return match origin {
+            crate::receipts::Origin::Local => crate::collapse_feed::handle_reset(state).await,
+            _ => Outcome::Error(ErrorBody::new(
+                ErrorCode::Refused,
+                "resetting Collapse feeds is an operator command; run it on the server using its local endpoint",
+            )),
+        };
+    }
     let _running = state.maintenance.read().await;
     match request {
         Request::ReceiptSubmit(req) if !state.is_shutting_down() => {

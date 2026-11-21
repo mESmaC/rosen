@@ -30,6 +30,10 @@ pub enum FeedState {
     NotOwner,
     /// Git's credential helper holds no push token for the HTTPS endpoint.
     NoCredential,
+    /// Collapse holds feed state from another Rosen server (HTTP 409
+    /// `source_changed`) or ahead of this server's local log; sending is
+    /// paused until `rosen collapse link --reset` (#445).
+    Diverged,
 }
 
 impl FeedState {
@@ -41,8 +45,18 @@ impl FeedState {
             FeedState::Stopped => "stopped",
             FeedState::NotOwner => "not_owner",
             FeedState::NoCredential => "no_credential",
+            FeedState::Diverged => "diverged",
         }
     }
+}
+
+/// Result of resetting a repository's Collapse feed (`rosen collapse link --reset`, #445).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollapseResetReport {
+    /// The Collapse root URL whose `rosen_*` feed tables were cleared.
+    pub collapse: String,
+    /// The persistent feed ID now used for state and ledger batches.
+    pub feed_id: String,
 }
 
 /// The most recent failure of a Collapse link.

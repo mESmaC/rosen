@@ -17,9 +17,12 @@ use rosen_protocol::{
 use rosen_store::LooseObjectStore;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
+use crate::collapse_feed;
 use crate::import::git_command;
 use crate::ledger_push::send::{self, Credential, SendFailure};
+use crate::ledger_push::{entries as ledger_entries, Held};
 use crate::mirror::{hide_credentials, proactive_auth};
+use crate::state_push::batch as state_batch;
 use crate::{ServerConfig, ServerState};
 
 /// Timeout for one `git ls-remote` probe.
@@ -27,12 +30,6 @@ const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Timeout for one local `git config` read.
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Empty state feed batch (SPEC R9): stores nothing and reads `highest_sequence`.
-const STATE_PROBE_BODY: &[u8] = br#"{"format":1,"through":0,"changes":[],"conflicts":[],"threads":[],"coverage":[],"config":[],"events":[],"machines":[],"presence":[],"channel":[]}"#;
-
-/// Empty ledger batch (SPEC R13): stores nothing and reads `highest_sequence`.
-const LEDGER_PROBE_BODY: &[u8] = br#"{"entries":[]}"#;
 
 /// Read-only snapshot of the server's Collapse-relevant configuration.
 struct ServerSnapshot {
@@ -47,6 +44,9 @@ struct ServerSnapshot {
     mirror_owner: bool,
     mirror_proactive_auth: bool,
     relay: RelaySetting,
+    feed_id: Option<String>,
+    local_event_seq: u64,
+    local_ledger_seq: Held,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -124,8 +124,20 @@ async fn run_checks(config: &ServerConfig, snapshot: &ServerSnapshot) -> Vec<Col
         cred_state,
         cred_ledgers,
         check_mirror_ls_remote(config, snapshot, &git_dir).await,
-        check_state_endpoint(snapshot.state_url.as_deref(), state_cred.as_ref()).await,
-        check_ledger_endpoint(snapshot.ledger_url.as_deref(), ledger_cred.as_ref()).await,
+        check_state_endpoint(
+            snapshot.state_url.as_deref(),
+            state_cred.as_ref(),
+            snapshot.feed_id.as_deref(),
+            snapshot.local_event_seq,
+        )
+        .await,
+        check_ledger_endpoint(
+            snapshot.ledger_url.as_deref(),
+            ledger_cred.as_ref(),
+            snapshot.feed_id.as_deref(),
+            snapshot.local_ledger_seq,
+        )
+        .await,
         check_relay_allow(&snapshot.relay),
         check_relay_doorbell(
             snapshot.collapse.as_deref(),
@@ -150,6 +162,9 @@ fn read_snapshot(config: &ServerConfig, proactive: bool) -> Result<ServerSnapsho
         mirror_owner,
         mirror_proactive_auth: proactive,
         relay: RelaySetting::default(),
+        feed_id: None,
+        local_event_seq: 0,
+        local_ledger_seq: Held::default(),
     };
     let metadata = config.metadata_path();
     if !metadata.is_file() {
@@ -158,6 +173,9 @@ fn read_snapshot(config: &ServerConfig, proactive: bool) -> Result<ServerSnapsho
     let conn = open_read_only(&metadata)?;
     let stored_mirror = read_stored_mirror(&conn)?;
     snapshot.relay = read_relay_setting(&conn)?;
+    snapshot.local_event_seq = collapse_feed::local_event_seq(&conn)?;
+    snapshot.local_ledger_seq = collapse_feed::local_ledger_seq(&conn)?;
+    snapshot.feed_id = collapse_feed::read_only(&conn)?;
     if let Some((branch, commit)) = read_base_ref(&conn)? {
         snapshot.has_base = true;
         snapshot.base_branch = Some(branch);
@@ -177,6 +195,13 @@ fn read_snapshot(config: &ServerConfig, proactive: bool) -> Result<ServerSnapsho
     }
     if snapshot.mirror_remote.is_none() {
         snapshot.mirror_remote = stored_mirror;
+    }
+    drop(conn);
+    if snapshot.feed_id.is_none() && (snapshot.state_url.is_some() || snapshot.ledger_url.is_some())
+    {
+        // Materialize the server's persistent feed_id so probes immediately
+        // catch source mismatches; fall back to None if the DB is read-only.
+        snapshot.feed_id = collapse_feed::get_or_create(&metadata).ok();
     }
     Ok(snapshot)
 }
@@ -676,6 +701,8 @@ async fn run_ls_remote(
 async fn check_state_endpoint(
     url: Option<&str>,
     credential: Option<&Credential>,
+    feed_id: Option<&str>,
+    local_event_seq: u64,
 ) -> CollapseCheckItem {
     let Some(url) = url else {
         return skipped("state_endpoint", "no `collapse` root configured", None);
@@ -690,11 +717,20 @@ async fn check_state_endpoint(
             );
         }
     };
-    match send::post_json(scratch.path(), url, STATE_PROBE_BODY, credential).await {
+    let probe = state_batch::probe(feed_id);
+    match send::post_json(scratch.path(), url, &probe, credential).await {
         Ok(accepted) => match serde_json::from_str::<serde_json::Value>(&accepted.body)
             .ok()
             .and_then(|v| v.get("highest_sequence")?.as_u64())
         {
+            Some(highest) if highest > local_event_seq => fail(
+                "state_endpoint",
+                format!(
+                    "diverged at {url}: Collapse holds event {highest}, ahead of this server's \
+                     latest event {local_event_seq}"
+                ),
+                "run `rosen collapse link --reset` to clear Collapse's feed tables and resend from this server",
+            ),
             Some(highest) => pass(
                 "state_endpoint",
                 format!(
@@ -718,6 +754,8 @@ async fn check_state_endpoint(
 async fn check_ledger_endpoint(
     url: Option<&str>,
     credential: Option<&Credential>,
+    feed_id: Option<&str>,
+    local_ledger_seq: Held,
 ) -> CollapseCheckItem {
     let Some(url) = url else {
         return skipped(
@@ -736,7 +774,25 @@ async fn check_ledger_endpoint(
             );
         }
     };
-    match send::post(scratch.path(), url, LEDGER_PROBE_BODY, credential).await {
+    let probe = ledger_entries::empty_body(feed_id);
+    match send::post(scratch.path(), url, &probe, credential).await {
+        Ok(held)
+            if held.discovery > local_ledger_seq.discovery
+                || held.past_work > local_ledger_seq.past_work =>
+        {
+            fail(
+                "ledger_endpoint",
+                format!(
+                    "diverged at {url}: Collapse holds discovery {} and past_work {}, ahead of \
+                     this server's latest {} and {}",
+                    held.discovery,
+                    held.past_work,
+                    local_ledger_seq.discovery,
+                    local_ledger_seq.past_work
+                ),
+                "run `rosen collapse link --reset` to clear Collapse's feed tables and accept this server's feed ID",
+            )
+        }
         Ok(held) => pass(
             "ledger_endpoint",
             format!(
@@ -817,6 +873,11 @@ fn endpoint_failure(
             name,
             format!("HTTP 410 from {url}: repository is archived or deleted"),
             "unarchive the repository on Collapse or update `collapse` in rosen.toml",
+        ),
+        SendFailure::SourceChanged { message } => fail(
+            name,
+            format!("diverged at {url} (HTTP 409): {message}"),
+            "run `rosen collapse link --reset` to clear Collapse's feed tables and accept this server's feed ID",
         ),
         SendFailure::Failed { status, message } => {
             let detail = match (credential, status) {

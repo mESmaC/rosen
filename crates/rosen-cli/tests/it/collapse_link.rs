@@ -415,6 +415,7 @@ fn collapse_link_validates_inputs_and_excludes_from_mcp() {
         "token must never be a CLI flag: {text}"
     );
     assert!(text.contains("ROSEN_COLLAPSE_TOKEN"), "{text}");
+    assert!(text.contains("--reset"), "{text}");
 
     // Bad arguments and missing token return rosen.error/v1 with --json.
     for args in [
@@ -436,6 +437,7 @@ fn collapse_link_validates_inputs_and_excludes_from_mcp() {
             "bogus",
         ],
         vec!["--json", "collapse", "link", "mESmaC/example"],
+        vec!["--json", "collapse", "link"],
     ] {
         let out = Command::new(rosen_bin())
             .args(&args)

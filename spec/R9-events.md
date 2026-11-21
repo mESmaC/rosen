@@ -36,7 +36,8 @@
   - Nothing is sent on a timer, so an idle project wakes no endpoint.
     Sends start at most once every 10 s, about 2 s after the first dirtying event; one holding only snapshots waits up to 60 s.
     The machine list and presence ride on the next send, or else go 60 s after their last change.
-  - A request is a JSON batch `{"format":1,"through":N,"changes":[...],"conflicts":[...],"threads":[...],"coverage":[...],"config":[...],"events":[...],"machines":[...],"presence":[...],"channel":[...]}` of at most 2 MB.
+  - A request is a JSON batch `{"format":1,"feed_id":"...","through":N,"changes":[...],"conflicts":[...],"threads":[...],"coverage":[...],"config":[...],"events":[...],"machines":[...],"presence":[...],"channel":[...]}` of at most 2 MB.
+    `feed_id` is a persistent random identifier per server data directory sent with every state and ledger batch.
     Each item is the whole current document, not a delta, and carries `seq`, the event sequence it reflects.
     A change's conflicts and threads are items of their own, so a large change splits across batches; an item too large for any batch is sent as a `too_large` marker.
     `through` is the sequence the endpoint holds everything through once it stores the batch, and only a pass's last batch raises it.
@@ -66,6 +67,7 @@
   - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `state_push` event with `status: "failed"`; the first success after failures publishes one with `status: "sent"`, `sent`, `delivered` and `after_failures`, matching `ledger_push` (R13).
     When the endpoint refuses a batch with HTTP 400, 413 or 422, the feed splits the batch by halves to isolate the refused item(s), skips each refused document until its content changes, publishes `state_push` `status: "refused"` naming the document, and keeps delivering the rest.
     Health records `last_success_at` only for delivered batches, not empty reconciliation probes.
+    HTTP 409 `source_changed` (or Collapse reporting `highest_sequence` ahead of this server's local event log) publishes `status: "diverged"`, reports `diverged` in `server status` and `collapse check`, and sends nothing until the operator runs `rosen collapse link --reset`.
     HTTP 410 publishes `status: "stopped"` and stops sending until `collapse` changes or the server restarts.
   - Receipt signatures, machine credentials and their hashes, join keys, network addresses, certificate fingerprints and the data directory are never sent.
     Messages and piece claims are sent only as channel lines with `collapse_channel = true`.

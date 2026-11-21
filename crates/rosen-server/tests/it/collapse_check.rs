@@ -24,6 +24,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[derive(Default)]
 struct MockCollapse {
     state_status: Option<u16>,
+    state_body: Option<String>,
+    state_highest: u64,
+    ledger_highest: (u64, u64),
     requests: Vec<(String, String)>,
 }
 
@@ -32,19 +35,32 @@ impl MockCollapse {
         self.requests.push((method.to_owned(), path.to_owned()));
         if path.ends_with("/rosen/state") {
             if let Some(status) = self.state_status {
-                return (status, json!({"error": "unauthorized"}).to_string());
+                let body = self
+                    .state_body
+                    .clone()
+                    .unwrap_or_else(|| json!({"error": "unauthorized"}).to_string());
+                return (status, body);
             }
             let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
             assert_eq!(parsed["through"], 0);
+            assert!(parsed["feed_id"].as_str().is_some_and(|s| !s.is_empty()));
             assert!(parsed["changes"].as_array().unwrap().is_empty());
-            return (200, json!({"highest_sequence": 42}).to_string());
+            return (
+                200,
+                json!({"highest_sequence": self.state_highest}).to_string(),
+            );
         }
         if path.ends_with("/ledgers") {
             let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+            assert!(parsed["feed_id"].as_str().is_some_and(|s| !s.is_empty()));
             assert!(parsed["entries"].as_array().unwrap().is_empty());
             return (
                 200,
-                json!({"highest_sequence": {"discovery": 7, "past_work": 3}}).to_string(),
+                json!({"highest_sequence": {
+                    "discovery": self.ledger_highest.0,
+                    "past_work": self.ledger_highest.1
+                }})
+                .to_string(),
             );
         }
         if path.ends_with("/rosen/doorbell") {
@@ -231,6 +247,38 @@ fn collapse_check_passes_when_linked_and_pinpoints_each_failure() {
         CollapseCheckStatus::Pass
     );
     mock.lock().unwrap().state_status = None;
+
+    // 3b. HTTP 409 source_changed and stopgap (Collapse ahead of local log) report `diverged`.
+    {
+        let mut m = mock.lock().unwrap();
+        m.state_status = Some(409);
+        m.state_body = Some(json!({"error": "source_changed"}).to_string());
+        m.ledger_highest = (7, 3);
+    }
+    let report = check(&runtime, &state);
+    assert!(!report.ok);
+    let sf = find(&report, "state_endpoint");
+    assert_eq!(sf.status, CollapseCheckStatus::Fail);
+    assert!(sf.detail.contains("diverged"), "{sf:?}");
+    assert!(sf.hint.as_deref().unwrap().contains("--reset"), "{sf:?}");
+    let lf = find(&report, "ledger_endpoint");
+    assert_eq!(lf.status, CollapseCheckStatus::Fail);
+    assert!(lf.detail.contains("diverged"), "{lf:?}");
+    assert!(lf.hint.as_deref().unwrap().contains("--reset"), "{lf:?}");
+    {
+        let mut m = mock.lock().unwrap();
+        m.state_status = None;
+        m.state_body = None;
+        m.state_highest = 42;
+        m.ledger_highest = (0, 0);
+    }
+    let report = check(&runtime, &state);
+    assert!(!report.ok);
+    assert!(
+        find(&report, "state_endpoint").detail.contains("diverged"),
+        "{report:?}"
+    );
+    mock.lock().unwrap().state_highest = 0;
 
     // 4. Pointing `collapse` at a different repository fails `repo_match` with a hint.
     let mismatch_dir = tempfile::tempdir().unwrap();

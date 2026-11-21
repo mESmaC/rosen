@@ -47,6 +47,10 @@ pub enum SendFailure {
     /// HTTP 410: the endpoint's repository is archived or deleted. Retrying
     /// cannot help, so the push stops until the endpoint changes.
     Gone,
+    /// HTTP 409 `source_changed`: the endpoint holds feed state from another
+    /// Rosen server (different `feed_id`). Sending stops until the operator
+    /// runs `rosen collapse link --reset` (#445).
+    SourceChanged { message: String },
     /// Anything else, retried with backoff. `status` is the HTTP status when
     /// the endpoint answered.
     Failed {
@@ -260,6 +264,11 @@ fn answer(status: u16, response: &str) -> Result<Accepted, SendFailure> {
     if status == 410 {
         return Err(SendFailure::Gone);
     }
+    if status == 409 && is_source_changed(response) {
+        return Err(SendFailure::SourceChanged {
+            message: source_changed_message(response),
+        });
+    }
     let refuse = |message: String| SendFailure::Failed {
         status: Some(status),
         message,
@@ -276,6 +285,35 @@ fn answer(status: u16, response: &str) -> Result<Accepted, SendFailure> {
         status,
         body: response.to_owned(),
     })
+}
+
+fn is_source_changed(response: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(response) {
+        for key in ["error", "code", "reason"] {
+            if value.get(key).and_then(serde_json::Value::as_str) == Some("source_changed") {
+                return true;
+            }
+        }
+    }
+    response.contains("source_changed")
+}
+
+fn source_changed_message(response: &str) -> String {
+    let detail = serde_json::from_str::<serde_json::Value>(response)
+        .ok()
+        .and_then(|v| {
+            v.get("message")
+                .or_else(|| v.get("detail"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|text| !text.trim().is_empty());
+    match detail {
+        Some(text) => format!(
+            "source_changed ({text}); run `rosen collapse link --reset` to replace Collapse's feed state"
+        ),
+        None => "source_changed: Collapse holds feed state from another Rosen server; run `rosen collapse link --reset` to replace Collapse's feed state".to_owned(),
+    }
 }
 
 /// What the ledger endpoint holds, from its answer.

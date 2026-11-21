@@ -23,6 +23,7 @@ use crate::ServerState;
 /// One endpoint and what reaching it needs.
 pub struct Target {
     pub endpoint: String,
+    pub feed_id: String,
     pub scratch: PathBuf,
     pub credential: Option<Credential>,
     pub stores: Stores,
@@ -54,6 +55,11 @@ impl Target {
         let endpoint = self.endpoint.clone();
         match failure {
             SendFailure::Gone => PushError::Gone { endpoint },
+            SendFailure::SourceChanged { message } => PushError::Diverged {
+                endpoint,
+                status: Some(409),
+                message,
+            },
             SendFailure::Failed { status, message } => {
                 let no_credential = endpoint.starts_with("https://")
                     && self.credential.is_none()
@@ -146,7 +152,7 @@ pub async fn send(
         .with_store(move |store, endpoint| unsent(store, endpoint, units, everything))
         .await?;
     let mut progress = UnitProgress::from_units(&units);
-    let batches = batch::split_slice(&units, seq, cursor.delivered);
+    let batches = batch::split_slice(Some(&target.feed_id), &units, seq, cursor.delivered);
     let delivered = send_batches(state, target, batches, &mut progress, cursor, seq).await?;
     if cursor.scanned < seq {
         // Nothing went, or the pass's last item was refused: move only scan.
@@ -180,7 +186,8 @@ async fn send_batches(
         .collect();
     while let Some((items, prebuilt, is_final)) = stack.pop() {
         let through = if is_final { seq } else { cursor.delivered };
-        let body = prebuilt.unwrap_or_else(|| batch::encode(through, &items));
+        let body =
+            prebuilt.unwrap_or_else(|| batch::encode(Some(&target.feed_id), through, &items));
         match target.post(body).await {
             Ok(held) => {
                 if held < through {

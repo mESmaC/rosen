@@ -28,13 +28,22 @@ struct Intake {
     failing: Option<u16>,
     /// When set, any batch whose body contains `needle` is refused with `status`.
     refuse: Option<(String, u16)>,
+    /// When set, batches with a different `feed_id` receive HTTP 409 `source_changed`.
+    expected_feed_id: Option<String>,
+    /// Floor reported for `highest_sequence` even when `held` is empty.
+    floor: (u64, u64),
     refusals: usize,
 }
 
 impl Intake {
     fn highest(&self, ledger: &str) -> u64 {
         let keys = self.held.keys().filter(|(l, _)| l == ledger);
-        keys.map(|(_, seq)| *seq).max().unwrap_or(0)
+        let floor = match ledger {
+            "discovery" => self.floor.0,
+            "past_work" => self.floor.1,
+            _ => 0,
+        };
+        keys.map(|(_, seq)| *seq).max().unwrap_or(0).max(floor)
     }
 
     fn answer(&mut self, body: &[u8]) -> (u16, String) {
@@ -48,6 +57,11 @@ impl Intake {
             }
         }
         let batch: Value = serde_json::from_slice(body).unwrap();
+        if let Some(expected) = &self.expected_feed_id {
+            if batch["feed_id"].as_str() != Some(expected.as_str()) {
+                return (409, json!({"error": "source_changed"}).to_string());
+            }
+        }
         let entries = batch["entries"].as_array().unwrap().clone();
         for entry in &entries {
             let ledger = entry["ledger"].as_str().unwrap().to_owned();
@@ -289,4 +303,67 @@ fn ledger_push_splits_refused_batch_and_skips_invalid_entry() {
     );
     assert_eq!(sent_sequences(&intake), [1, 3, 4]);
     assert_eq!(intake.lock().unwrap().refusals, refusals_before);
+}
+
+/// Risk (#445, R13): ledger push must detect both HTTP 409 `source_changed`
+/// and a Collapse sequence ahead of local ledgers as `Diverged` without
+/// sending colliding entries.
+#[test]
+fn ledger_push_detects_source_changed_and_stopgap_divergence() {
+    let data = tempfile::tempdir().unwrap();
+    rosen_server::mirror::owner::mark(data.path()).unwrap();
+    let state = ServerState::new(ServerConfig {
+        data_dir: data.path().to_path_buf(),
+        endpoint: Endpoint::new("rosen-ledger-diverged-test"),
+        warm_pool_dir: None,
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let url = format!("http://{}/o/r/ledgers", listener.local_addr().unwrap());
+    let intake = Arc::new(Mutex::new(Intake {
+        expected_feed_id: Some("other-server-feed".into()),
+        ..Intake::default()
+    }));
+    runtime.spawn(serve(listener, Arc::clone(&intake)));
+
+    let join = ChannelRequest::Join {
+        member: "a".into(),
+        nick: "alice".into(),
+        machine: "m1".into(),
+    };
+    channel::run(&state.events, join).unwrap();
+    append(&state, Ledger::Discovery, "fresh entry", None);
+
+    let mut session = Session::default();
+    let err = runtime
+        .block_on(push_to(&state.config, &url, &mut session))
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            PushError::Diverged {
+                status: Some(409),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(intake.lock().unwrap().batches.is_empty());
+
+    // Stopgap when Collapse does not check feed_id yet but holds higher seq.
+    {
+        let mut i = intake.lock().unwrap();
+        i.expected_feed_id = None;
+        i.floor = (50, 0);
+    }
+    let err = runtime
+        .block_on(push_to(&state.config, &url, &mut session))
+        .unwrap_err();
+    assert!(
+        matches!(err, PushError::Diverged { status: None, .. }),
+        "{err:?}"
+    );
+    assert!(intake.lock().unwrap().batches.is_empty());
 }

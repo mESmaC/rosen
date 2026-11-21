@@ -17,7 +17,7 @@
 //! server last delivered.
 
 mod cursor;
-mod entries;
+pub(crate) mod entries;
 pub(crate) mod send;
 
 use std::path::PathBuf;
@@ -57,6 +57,9 @@ pub enum Pushed {
     NotOwner,
     /// The endpoint answered 410 earlier; nothing is sent until it changes.
     Stopped { endpoint: String },
+    /// Collapse holds feed state from another Rosen server or ahead of local
+    /// ledgers; nothing is sent until `rosen collapse link --reset` (#445).
+    Diverged { endpoint: String },
     /// The endpoint holds every entry; `sent` entries went in this pass.
     Current {
         endpoint: String,
@@ -65,13 +68,21 @@ pub enum Pushed {
     },
 }
 
-/// Why a pass failed. Every failure but [`PushError::Gone`] is retried.
+/// Why a pass failed. Every failure but [`PushError::Gone`] and
+/// [`PushError::Diverged`] is retried.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PushError {
     /// Reading or writing the metadata store failed.
     Store(String),
     /// The endpoint's repository is archived or deleted (HTTP 410).
     Gone { endpoint: String },
+    /// Collapse holds feed state from another Rosen server (HTTP 409
+    /// `source_changed`) or ahead of this server's local ledgers (#445).
+    Diverged {
+        endpoint: String,
+        status: Option<u16>,
+        message: String,
+    },
     Send {
         endpoint: String,
         status: Option<u16>,
@@ -92,59 +103,107 @@ pub struct Session {
     reconciled: Option<Reconciled>,
     /// The endpoint that answered 410.
     stopped: Option<String>,
+    /// The endpoint that reported `diverged` (409 `source_changed` or ahead of local ledgers).
+    diverged: Option<String>,
 }
 
-/// An endpoint this run has reached, with the credential found for it. The
-/// credential is kept because a lookup can take seconds: Git Credential
-/// Manager probes an unfamiliar host before it answers.
+/// An endpoint this run has reached, with the credential and feed ID found
+/// for it. The credential is kept because a lookup can take seconds: Git
+/// Credential Manager probes an unfamiliar host before it answers.
 #[derive(Debug)]
 struct Reconciled {
     endpoint: String,
+    feed_id: String,
     credential: Option<send::Credential>,
 }
 
 /// Sends new ledger entries until shutdown is requested.
 pub async fn run(state: Arc<ServerState>) {
     let mut wake = state.events.watch();
+    let mut reset = state.subscribe_collapse_reset();
     let mut session = Session::default();
     let mut failures: u32 = 0;
     loop {
+        if reset.has_changed().unwrap_or(false) {
+            let _ = *reset.borrow_and_update();
+            session.reconciled = None;
+            session.stopped = None;
+            session.diverged = None;
+            failures = 0;
+        }
         // Appends after this point wake the next pass, even if they arrive
         // while this one is sending.
         let seen = state.events.announced_seq();
-        let keep_going = match push_once(&state, &mut session).await {
-            Ok(pushed) => {
-                if failures > 0 {
-                    report_recovered(&state, &pushed, failures);
-                }
-                if let Pushed::Current { endpoint, .. } = &pushed {
-                    state.collapse.record_idle(Feed::LedgerPush, endpoint, None);
-                }
-                failures = 0;
-                // Without an endpoint only a land can change the outcome.
-                let sending = matches!(pushed, Pushed::Current { .. });
-                wait_for_news(&state, &mut wake, seen, sending).await
-            }
-            Err(PushError::Gone { endpoint }) => {
-                report_stopped(&state, &endpoint);
-                state
-                    .collapse
-                    .record_stopped(Feed::LedgerPush, &endpoint, STOPPED_MESSAGE);
-                session.stopped = Some(endpoint);
-                failures = 0;
-                wait_for_news(&state, &mut wake, seen, false).await
-            }
-            Err(error) => {
-                session.reconciled = None;
-                failures = failures.saturating_add(1);
-                let delay = retry_delay(failures);
-                report_failure(&state, &error, failures, delay);
-                record_failure(&state, &error, delay);
-                sleep_unless_shutdown(&state, delay).await
-            }
-        };
-        if !keep_going {
+        let outcome = push_once(&state, &mut session).await;
+        if !finish_pass(
+            &state,
+            &mut session,
+            &mut wake,
+            &mut reset,
+            &mut failures,
+            seen,
+            outcome,
+        )
+        .await
+        {
             return;
+        }
+    }
+}
+
+async fn finish_pass(
+    state: &Arc<ServerState>,
+    session: &mut Session,
+    wake: &mut watch::Receiver<u64>,
+    reset: &mut watch::Receiver<u64>,
+    failures: &mut u32,
+    seen: u64,
+    outcome: Result<Pushed, PushError>,
+) -> bool {
+    match outcome {
+        Ok(pushed) => {
+            if *failures > 0 {
+                report_recovered(state, &pushed, *failures);
+            }
+            if let Pushed::Current { endpoint, .. } = &pushed {
+                state.collapse.record_idle(Feed::LedgerPush, endpoint, None);
+            }
+            *failures = 0;
+            // Without an endpoint only a land or reset can change the outcome.
+            let sending = matches!(pushed, Pushed::Current { .. });
+            wait_for_news(state, wake, reset, seen, sending).await
+        }
+        Err(PushError::Gone { endpoint }) => {
+            report_stopped(state, &endpoint);
+            state
+                .collapse
+                .record_stopped(Feed::LedgerPush, &endpoint, STOPPED_MESSAGE);
+            session.stopped = Some(endpoint);
+            session.reconciled = None;
+            *failures = 0;
+            wait_for_news(state, wake, reset, seen, false).await
+        }
+        Err(PushError::Diverged {
+            endpoint,
+            status,
+            message,
+        }) => {
+            report_diverged(state, &endpoint, status, &message);
+            state
+                .collapse
+                .record_diverged(Feed::LedgerPush, &endpoint, status, &message);
+            session.diverged = Some(endpoint);
+            session.reconciled = None;
+            *failures = 0;
+            wait_for_news(state, wake, reset, seen, false).await
+        }
+        Err(error) => {
+            session.reconciled = None;
+            *failures = failures.saturating_add(1);
+            let delay = retry_delay(*failures);
+            report_failure(state, &error, *failures, delay);
+            record_failure(state, &error, delay);
+            sleep_unless_shutdown(state, delay).await
         }
     }
 }
@@ -161,7 +220,11 @@ pub async fn push_once(state: &ServerState, session: &mut Session) -> Result<Pus
     if session.stopped.as_deref() == Some(endpoint.as_str()) {
         return Ok(Pushed::Stopped { endpoint });
     }
+    if session.diverged.as_deref() == Some(endpoint.as_str()) {
+        return Ok(Pushed::Diverged { endpoint });
+    }
     session.stopped = None;
+    session.diverged = None;
     push_to_with(
         &state.config,
         &endpoint,
@@ -228,7 +291,7 @@ async fn send_batch(
     let mut sent = 0;
     let mut stack = vec![entries];
     while let Some(chunk) = stack.pop() {
-        let body = entries::encode(&chunk);
+        let body = entries::encode(Some(&target.feed_id), &chunk);
         match target.send(body).await {
             Ok(answer) => {
                 *held = answer;
@@ -307,15 +370,35 @@ async fn prepare_target(
     session: &mut Session,
 ) -> Result<(Target, Held), PushError> {
     let fresh = !matches!(&session.reconciled, Some(known) if known.endpoint == endpoint);
-    let credential = match &session.reconciled {
-        Some(known) if !fresh => known.credential.clone(),
-        _ => send::credential(&config.data_dir, endpoint).await,
+    let (credential, feed_id) = match &session.reconciled {
+        Some(known) if !fresh => (known.credential.clone(), known.feed_id.clone()),
+        _ => {
+            let metadata = config.metadata_path();
+            let feed_id = blocking(move || crate::collapse_feed::get_or_create(&metadata)).await?;
+            let credential = send::credential(&config.data_dir, endpoint).await;
+            (credential, feed_id)
+        }
     };
-    let target = Target::new(config, endpoint, credential);
+    let target = Target::new(config, endpoint, feed_id, credential);
     let mut held = Held::default();
     if fresh {
-        held = target.send(entries::empty_body()).await?;
+        held = target
+            .send(entries::empty_body(Some(&target.feed_id)))
+            .await?;
         // A probe delivers no entries, so it never advances last_success_at (#444).
+        let local_latest = target.local_latest().await?;
+        if held.discovery > local_latest.discovery || held.past_work > local_latest.past_work {
+            return Err(PushError::Diverged {
+                endpoint: endpoint.to_owned(),
+                status: None,
+                message: format!(
+                    "Collapse holds ledger entries through discovery {} and past_work {}, ahead \
+                     of this server's latest {} and {}; run `rosen collapse link --reset` to \
+                     replace Collapse's feed state",
+                    held.discovery, held.past_work, local_latest.discovery, local_latest.past_work
+                ),
+            });
+        }
         target
             .update(move |cursors| {
                 cursors.reconcile(&held);
@@ -324,6 +407,7 @@ async fn prepare_target(
             .await?;
         session.reconciled = Some(Reconciled {
             endpoint: endpoint.to_owned(),
+            feed_id: target.feed_id.clone(),
             credential: target.credential.clone(),
         });
     }
@@ -333,15 +417,22 @@ async fn prepare_target(
 /// One endpoint and what reaching it needs.
 struct Target {
     endpoint: String,
+    feed_id: String,
     metadata: PathBuf,
     scratch: PathBuf,
     credential: Option<send::Credential>,
 }
 
 impl Target {
-    fn new(config: &ServerConfig, endpoint: &str, credential: Option<send::Credential>) -> Self {
+    fn new(
+        config: &ServerConfig,
+        endpoint: &str,
+        feed_id: String,
+        credential: Option<send::Credential>,
+    ) -> Self {
         Self {
             endpoint: endpoint.to_owned(),
+            feed_id,
             metadata: config.metadata_path(),
             scratch: config.data_dir.join("ledger-push"),
             credential,
@@ -356,8 +447,23 @@ impl Target {
                 SendFailure::Gone => PushError::Gone {
                     endpoint: self.endpoint.clone(),
                 },
+                SendFailure::SourceChanged { message } => PushError::Diverged {
+                    endpoint: self.endpoint.clone(),
+                    status: Some(409),
+                    message,
+                },
                 SendFailure::Failed { status, message } => self.failure(status, message),
             })
+    }
+
+    async fn local_latest(&self) -> Result<Held, PushError> {
+        let metadata = self.metadata.clone();
+        blocking(move || {
+            let store = CursorStore::open(&metadata)?;
+            crate::collapse_feed::local_ledger_seq(store.connection())
+                .map_err(rusqlite::Error::InvalidParameterName)
+        })
+        .await
     }
 
     fn failure(&self, status: Option<u16>, message: String) -> PushError {
@@ -381,12 +487,16 @@ impl Target {
 
     /// The next batch after the stored cursors, read on the blocking pool.
     async fn next_batch(&self) -> Result<entries::Batch, PushError> {
-        let (metadata, endpoint) = (self.metadata.clone(), self.endpoint.clone());
+        let (metadata, endpoint, feed_id) = (
+            self.metadata.clone(),
+            self.endpoint.clone(),
+            self.feed_id.clone(),
+        );
         blocking(move || {
             let store = CursorStore::open(&metadata)?;
             let cursors = store.load(&endpoint)?;
             let refused = store.refused_keys(&endpoint)?;
-            entries::next_batch(store.connection(), &cursors, &refused)
+            entries::next_batch(store.connection(), &cursors, &refused, Some(&feed_id))
         })
         .await
     }
@@ -458,17 +568,22 @@ pub(crate) async fn in_force(config: &ServerConfig) -> Result<Option<Arc<Project
     found
 }
 
-/// Waits until an event after `seen` can change what a pass would do: a
-/// land, which can change the endpoint, or, while `sending`, a channel line,
-/// which an append writes. Returns false when the server is shutting down.
+/// Waits until an event after `seen` or a Collapse feed reset can change what
+/// a pass would do: a land, which can change the endpoint, a reset, or, while
+/// `sending`, a channel line, which an append writes. Returns false when the
+/// server is shutting down.
 async fn wait_for_news(
     state: &Arc<ServerState>,
     wake: &mut watch::Receiver<u64>,
+    reset: &mut watch::Receiver<u64>,
     seen: u64,
     sending: bool,
 ) -> bool {
     let mut seen = seen;
     loop {
+        if reset.has_changed().unwrap_or(false) {
+            return true;
+        }
         // Marked before the read: an event announced after this wakes the
         // next pass, and every event up to `tip` is visible to the read.
         let tip = *wake.borrow_and_update();
@@ -483,6 +598,12 @@ async fn wait_for_news(
                 if changed.is_err() {
                     return false;
                 }
+            }
+            changed = reset.changed() => {
+                if changed.is_err() {
+                    return false;
+                }
+                return true;
             }
             () = state.shutdown_requested() => return false,
         }
@@ -517,6 +638,11 @@ fn record_failure(state: &ServerState, error: &PushError, retry_in: Duration) {
     let (endpoint, status, message, no_credential) = match error {
         PushError::Store(message) => (None, None, message.as_str(), false),
         PushError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone", false),
+        PushError::Diverged {
+            endpoint,
+            status,
+            message,
+        } => (Some(endpoint.as_str()), *status, message.as_str(), false),
         PushError::Send {
             endpoint,
             status,
@@ -545,6 +671,11 @@ fn report_failure(state: &ServerState, error: &PushError, attempt: u32, retry_in
     let (endpoint, status, message) = match error {
         PushError::Store(message) => (None, None, message.as_str()),
         PushError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone"),
+        PushError::Diverged {
+            endpoint,
+            status,
+            message,
+        } => (Some(endpoint.as_str()), *status, message.as_str()),
         PushError::Send {
             endpoint,
             status,
@@ -571,6 +702,19 @@ fn report_stopped(state: &ServerState, endpoint: &str) {
         "endpoint": endpoint,
         "http_status": 410,
         "error": STOPPED_MESSAGE,
+    });
+    state.events.publish(EventKind::LedgerPush, None, detail);
+}
+
+/// Publishes a `ledger_push` event when the push detects divergence (HTTP 409
+/// `source_changed` or Collapse ahead of local ledgers), once, since the push
+/// then pauses until `rosen collapse link --reset` (#445).
+fn report_diverged(state: &ServerState, endpoint: &str, status: Option<u16>, message: &str) {
+    let detail = json!({
+        "status": "diverged",
+        "endpoint": endpoint,
+        "http_status": status,
+        "error": message,
     });
     state.events.publish(EventKind::LedgerPush, None, detail);
 }

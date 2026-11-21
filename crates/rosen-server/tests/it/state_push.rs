@@ -38,6 +38,9 @@ struct Intake {
     failing: Option<u16>,
     /// When set, any batch whose body contains `needle` is refused with `status`.
     refuse: Option<(String, u16)>,
+    /// When set, batches with a different `feed_id` receive HTTP 409 `source_changed`.
+    expected_feed_id: Option<String>,
+    resets: usize,
     refusals: usize,
     probes: usize,
 }
@@ -47,6 +50,14 @@ impl Intake {
         if let Some(status) = self.failing {
             return (status, "{}".into());
         }
+        if path.ends_with("/rosen/state/reset") {
+            let parsed: Value = serde_json::from_slice(body).unwrap();
+            self.held.clear();
+            self.through = 0;
+            self.expected_feed_id = parsed["feed_id"].as_str().map(str::to_owned);
+            self.resets += 1;
+            return (200, json!({"ok": true}).to_string());
+        }
         if let Some((needle, status)) = &self.refuse {
             if String::from_utf8_lossy(body).contains(needle) {
                 self.refusals += 1;
@@ -54,6 +65,11 @@ impl Intake {
             }
         }
         let parsed: Value = serde_json::from_slice(body).unwrap();
+        if let Some(expected) = &self.expected_feed_id {
+            if parsed["feed_id"].as_str() != Some(expected.as_str()) {
+                return (409, json!({"error": "source_changed"}).to_string());
+            }
+        }
         let is_probe = parsed["through"].as_u64() == Some(0)
             && SECTIONS
                 .iter()
@@ -754,4 +770,68 @@ async fn assert_refusal_clears_and_probes_keep_last_success(
             .last_success_at,
         ok_before
     );
+}
+
+/// Risk (#445, R9): a fresh data directory linked to a Collapse repo with
+/// existing feed state must report `diverged` and send nothing (both on 409
+/// `source_changed` and under the stopgap when Collapse holds a higher
+/// sequence), then deliver its live state and lines after `CollapseReset`.
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_data_dir_reports_diverged_until_reset_then_delivers() {
+    let data = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!("http://{}/o/r", listener.local_addr().unwrap());
+    let intake = Arc::new(Mutex::new(Intake {
+        through: 500,
+        expected_feed_id: Some("old-server-feed-id".into()),
+        ..Intake::default()
+    }));
+    tokio::spawn(serve(listener, Arc::clone(&intake)));
+    let state = setup(data.path(), &root, "");
+    let change_id = change_editing(&state, "fresh.txt").await;
+    let seq = state.events.publish(
+        EventKind::Green,
+        Some(change_id.clone()),
+        json!({ "commit": "1111111111111111111111111111111111111111" }),
+    );
+    let feed = tokio::spawn(rosen_server::state_push::run(Arc::clone(&state)));
+    let wait = Duration::from_secs(30);
+
+    let diverged = until_status(&state, wait, |s| {
+        s.collapse
+            .as_ref()
+            .is_some_and(|c| c.state_feed.state == FeedState::Diverged)
+    })
+    .await;
+    let sf = &diverged.collapse.as_ref().unwrap().state_feed;
+    assert_eq!(sf.last_error.as_ref().unwrap().http_status, Some(409));
+    assert!(intake.lock().unwrap().bodies.is_empty());
+
+    let Response::CollapseReset(reset) = call(&state, Request::CollapseReset).await else {
+        panic!("expected CollapseReset");
+    };
+    assert_eq!(intake.lock().unwrap().resets, 1);
+    assert_eq!(
+        intake.lock().unwrap().expected_feed_id.as_deref(),
+        Some(reset.feed_id.as_str())
+    );
+
+    until(&intake, wait, |i| {
+        i.change(&change_id).is_some() && i.items("events").iter().any(|e| e["seq"] == seq)
+    })
+    .await;
+    let current = until_status(&state, wait, |s| {
+        s.collapse
+            .as_ref()
+            .is_some_and(|c| c.state_feed.state == FeedState::Current)
+    })
+    .await;
+    assert!(current
+        .collapse
+        .as_ref()
+        .unwrap()
+        .state_feed
+        .last_error
+        .is_none());
+    feed.abort();
 }

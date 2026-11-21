@@ -165,6 +165,12 @@ impl Remote {
             SendFailure::Gone => RelayError::Gone {
                 endpoint: self.root.clone(),
             },
+            SendFailure::SourceChanged { message } => RelayError::Send {
+                endpoint: url.to_owned(),
+                status: Some(409),
+                message,
+                no_credential: false,
+            },
             SendFailure::Failed { status, message } => {
                 let no_credential = self.root.starts_with("https://")
                     && self.credential.is_none()

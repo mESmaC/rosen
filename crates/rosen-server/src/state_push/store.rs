@@ -94,6 +94,11 @@ impl StateStore {
         Ok(Self { connection })
     }
 
+    /// The underlying metadata connection, for reading local event sequence bounds.
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
     /// Progress at `endpoint`, or `None` for an endpoint never reached.
     pub fn cursor(&self, endpoint: &str) -> rusqlite::Result<Option<Cursor>> {
         self.connection

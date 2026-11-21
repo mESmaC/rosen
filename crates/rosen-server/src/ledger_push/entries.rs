@@ -69,14 +69,27 @@ struct StoredEntry {
 }
 
 /// The request body that sends no entries, which reads what the endpoint
-/// holds.
-pub fn empty_body() -> Vec<u8> {
-    br#"{"entries":[]}"#.to_vec()
+/// holds (carrying this server's persistent `feed_id` when set).
+pub fn empty_body(feed_id: Option<&str>) -> Vec<u8> {
+    match feed_id {
+        Some(id) => serde_json::to_vec(&serde_json::json!({ "feed_id": id, "entries": [] }))
+            .unwrap_or_else(|_| br#"{"entries":[]}"#.to_vec()),
+        None => br#"{"entries":[]}"#.to_vec(),
+    }
 }
 
-/// Encodes `entries` as `{"entries":[...]}`.
-pub fn encode(entries: &[BatchEntry]) -> Vec<u8> {
-    let mut body = br#"{"entries":["#.to_vec();
+/// Encodes `entries` as `{"feed_id":"...","entries":[...]}` (or `{"entries":[...]}`
+/// when `feed_id` is `None`).
+pub fn encode(feed_id: Option<&str>, entries: &[BatchEntry]) -> Vec<u8> {
+    let mut body = match feed_id {
+        Some(id) => {
+            let mut prefix = br#"{"feed_id":"#.to_vec();
+            prefix.extend_from_slice(&serde_json::to_vec(id).unwrap_or_else(|_| b"\"\"".to_vec()));
+            prefix.extend_from_slice(br#","entries":["#);
+            prefix
+        }
+        None => br#"{"entries":["#.to_vec(),
+    };
     for (index, entry) in entries.iter().enumerate() {
         if index > 0 {
             body.push(b',');
@@ -105,11 +118,12 @@ pub fn next_batch(
     conn: &Connection,
     cursors: &Cursors,
     refused: &BTreeSet<(&'static str, u64)>,
+    feed_id: Option<&str>,
 ) -> rusqlite::Result<Batch> {
     let rows = read_after(conn, cursors)?;
     let mut extent = Extent::default();
     let mut entries = Vec::new();
-    let mut body_len = empty_body().len();
+    let mut body_len = empty_body(feed_id).len();
     for row in rows {
         let (seq, ledger) = (row.seq, row.ledger);
         if !refused.contains(&(ledger.as_str(), seq)) {

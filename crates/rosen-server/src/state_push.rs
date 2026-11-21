@@ -70,13 +70,21 @@ const MACHINE_CHECK: Duration = Duration::from_secs(10);
 /// this often even unchanged, so Collapse knows how current its count is.
 const PRESENCE_REFRESH: Duration = Duration::from_secs(5 * 60);
 
-/// Why a pass failed. Every failure but [`PushError::Gone`] is retried.
+/// Why a pass failed. Every failure but [`PushError::Gone`] and
+/// [`PushError::Diverged`] is retried.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PushError {
     /// Reading the metadata or object store failed.
     Store(String),
     /// The endpoint's repository is archived or deleted (HTTP 410).
     Gone { endpoint: String },
+    /// Collapse holds feed state from another Rosen server (HTTP 409
+    /// `source_changed`) or ahead of this server's local event log (#445).
+    Diverged {
+        endpoint: String,
+        status: Option<u16>,
+        message: String,
+    },
     Send {
         endpoint: String,
         status: Option<u16>,
@@ -128,6 +136,8 @@ struct Session {
     configured: Option<(Option<Feed>, u64)>,
     /// The endpoint that answered 410.
     stopped: Option<String>,
+    /// The endpoint that reported `diverged` (409 `source_changed` or ahead of local log).
+    diverged: Option<String>,
     pending: Pending,
     last_send: Option<Instant>,
     /// The machine list's fingerprint when last compared, and when.
@@ -139,12 +149,29 @@ struct Session {
     presence_sent: Option<Instant>,
 }
 
+impl Session {
+    fn clear_after_reset(&mut self) {
+        self.target = None;
+        self.stopped = None;
+        self.diverged = None;
+        self.pending = Pending::default();
+        self.last_send = None;
+        self.presence_sent = None;
+    }
+}
+
 /// Sends dirty documents until shutdown is requested.
 pub async fn run(state: Arc<ServerState>) {
     let mut wake = state.events.watch();
+    let mut reset = state.subscribe_collapse_reset();
     let mut session = Session::default();
     let mut failures: u32 = 0;
     loop {
+        if reset.has_changed().unwrap_or(false) {
+            let _ = *reset.borrow_and_update();
+            session.clear_after_reset();
+            failures = 0;
+        }
         // Events after this point wake the next wait.
         let seen = *wake.borrow_and_update();
         let outcome = step(&state, &mut session).await;
@@ -152,6 +179,7 @@ pub async fn run(state: Arc<ServerState>) {
             &state,
             &mut session,
             &mut wake,
+            &mut reset,
             &mut failures,
             seen,
             outcome,
@@ -167,6 +195,7 @@ async fn finish_step(
     state: &Arc<ServerState>,
     session: &mut Session,
     wake: &mut watch::Receiver<u64>,
+    reset: &mut watch::Receiver<u64>,
     failures: &mut u32,
     seen: u64,
     outcome: Result<Step, PushError>,
@@ -202,13 +231,27 @@ async fn finish_step(
                     .record_idle(CollapseFeed::StateFeed, &endpoint, None);
                 *failures = 0;
             }
-            wait_for_news(state, wake, until).await
+            wait_for_news(state, wake, reset, until).await
         }
         Ok(Step::WaitForLand) => {
             *failures = 0;
-            wait_for_land(state, wake, seen).await
+            wait_for_land(state, wake, reset, seen).await
         }
-        Err(PushError::Gone { endpoint }) => {
+        Err(error) => finish_error(state, session, wake, reset, failures, seen, error).await,
+    }
+}
+
+async fn finish_error(
+    state: &Arc<ServerState>,
+    session: &mut Session,
+    wake: &mut watch::Receiver<u64>,
+    reset: &mut watch::Receiver<u64>,
+    failures: &mut u32,
+    seen: u64,
+    error: PushError,
+) -> bool {
+    match error {
+        PushError::Gone { endpoint } => {
             report_stopped(state, &endpoint);
             state
                 .collapse
@@ -216,9 +259,23 @@ async fn finish_step(
             session.stopped = Some(endpoint);
             session.target = None;
             *failures = 0;
-            wait_for_land(state, wake, seen).await
+            wait_for_land(state, wake, reset, seen).await
         }
-        Err(error) => {
+        PushError::Diverged {
+            endpoint,
+            status,
+            message,
+        } => {
+            report_diverged(state, &endpoint, status, &message);
+            state
+                .collapse
+                .record_diverged(CollapseFeed::StateFeed, &endpoint, status, &message);
+            session.diverged = Some(endpoint);
+            session.target = None;
+            *failures = 0;
+            wait_for_land(state, wake, reset, seen).await
+        }
+        error => {
             session.target = None;
             *failures = failures.saturating_add(1);
             let delay = retry_delay(*failures);
@@ -241,10 +298,13 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<Step, P
         session.target = None;
         return Ok(Step::WaitForLand);
     };
-    if session.stopped.as_deref() == Some(endpoint.as_str()) {
+    if session.stopped.as_deref() == Some(endpoint.as_str())
+        || session.diverged.as_deref() == Some(endpoint.as_str())
+    {
         return Ok(Step::WaitForLand);
     }
     session.stopped = None;
+    session.diverged = None;
     if !matches!(&session.target, Some((target, _)) if target.endpoint == endpoint) {
         let _in_flight = state.collapse.begin(CollapseFeed::StateFeed, &endpoint);
         let (target, cursor) = reconcile(state, &endpoint).await?;
@@ -417,38 +477,58 @@ async fn configured_feed(
     Ok(feed)
 }
 
-/// Looks up the credential, asks the endpoint what it holds, and takes the
-/// stored cursor back to it if it lost documents. An endpoint never reached
-/// starts at the log's tip: the full resend that follows carries all live
-/// state, and closed changes are history the mirror already holds.
+/// Looks up the credential, asks the endpoint what it holds, checks for
+/// divergence against the local event log (#445), and takes the stored cursor
+/// back to it if it lost documents. An endpoint never reached starts at the
+/// log's tip: the full resend that follows carries all live state, and closed
+/// changes are history the mirror already holds.
 async fn reconcile(
     state: &Arc<ServerState>,
     endpoint: &str,
 ) -> Result<(Target, Cursor), PushError> {
+    let metadata = state.config.metadata_path();
+    let feed_id = blocking(move || crate::collapse_feed::get_or_create(&metadata)).await?;
     let credential = send::credential(&state.config.data_dir, endpoint).await;
     let target = Target {
         endpoint: endpoint.to_owned(),
+        feed_id,
         scratch: state.config.data_dir.join("state-push"),
         credential,
         stores: Stores::new(&state.config),
         relay: Arc::clone(&state.relay_wake),
     };
-    let held = target.post(batch::probe()).await?;
+    let held = target.post(batch::probe(Some(&target.feed_id))).await?;
     // A probe delivers no items, so it never advances last_success_at (#444).
-    let (metadata, endpoint) = (state.config.metadata_path(), endpoint.to_owned());
-    let tip = state.events.announced_seq();
-    let cursor = blocking(move || {
+    let (metadata, endpoint_owned) = (state.config.metadata_path(), endpoint.to_owned());
+    let announced = state.events.announced_seq();
+    let reconciled = blocking(move || {
         let store = StateStore::open(&metadata)?;
-        let mut cursor = store.cursor(&endpoint)?.unwrap_or(Cursor {
-            scanned: tip,
-            delivered: held.min(tip),
+        let local_latest = crate::collapse_feed::local_event_seq(store.connection())
+            .unwrap_or(0)
+            .max(announced);
+        if held > local_latest {
+            return Ok(Err(local_latest));
+        }
+        let mut cursor = store.cursor(&endpoint_owned)?.unwrap_or(Cursor {
+            scanned: local_latest,
+            delivered: held.min(local_latest),
         });
         cursor.reconcile(held);
-        store.save_cursor(&endpoint, cursor)?;
-        Ok(cursor)
+        store.save_cursor(&endpoint_owned, cursor)?;
+        Ok(Ok(cursor))
     })
     .await?;
-    Ok((target, cursor))
+    match reconciled {
+        Ok(cursor) => Ok((target, cursor)),
+        Err(local_latest) => Err(PushError::Diverged {
+            endpoint: endpoint.to_owned(),
+            status: None,
+            message: format!(
+                "Collapse holds state through event {held}, ahead of this server's latest event \
+                 {local_latest}; run `rosen collapse link --reset` to replace Collapse's feed state"
+            ),
+        }),
+    }
 }
 
 async fn scan(
@@ -468,10 +548,11 @@ async fn scan(
     Ok(())
 }
 
-/// Waits for a new event or until `until`. False at shutdown.
+/// Waits for a new event, a Collapse feed reset, or until `until`. False at shutdown.
 async fn wait_for_news(
     state: &ServerState,
     wake: &mut watch::Receiver<u64>,
+    reset: &mut watch::Receiver<u64>,
     until: Option<Instant>,
 ) -> bool {
     let deadline = async {
@@ -482,19 +563,24 @@ async fn wait_for_news(
     };
     tokio::select! {
         changed = wake.changed() => changed.is_ok(),
+        changed = reset.changed() => changed.is_ok(),
         () = deadline => true,
         () = state.shutdown_requested() => false,
     }
 }
 
-/// Waits for a land after `seen`, which may set or change the endpoint.
-/// False at shutdown.
+/// Waits for a land after `seen`, or a Collapse feed reset, which may set,
+/// change or reset the endpoint. False at shutdown.
 async fn wait_for_land(
     state: &Arc<ServerState>,
     wake: &mut watch::Receiver<u64>,
+    reset: &mut watch::Receiver<u64>,
     seen: u64,
 ) -> bool {
     loop {
+        if reset.has_changed().unwrap_or(false) {
+            return true;
+        }
         let reading = Arc::clone(state);
         let landed = tokio::task::spawn_blocking(move || {
             reading.events.holds_kind_after(seen, EventKind::Landed)
@@ -506,7 +592,7 @@ async fn wait_for_land(
             Ok(Err(error)) => eprintln!("rosen-server: state feed could not read events: {error}"),
             Err(join) => eprintln!("rosen-server: state feed could not read events: {join}"),
         }
-        if !wait_for_news(state, wake, None).await {
+        if !wait_for_news(state, wake, reset, None).await {
             return false;
         }
     }
@@ -525,6 +611,11 @@ fn record_failure(state: &ServerState, error: &PushError, retry_in: Duration) {
     let (endpoint, status, message, no_credential) = match error {
         PushError::Store(message) => (None, None, message.as_str(), false),
         PushError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone", false),
+        PushError::Diverged {
+            endpoint,
+            status,
+            message,
+        } => (Some(endpoint.as_str()), *status, message.as_str(), false),
         PushError::Send {
             endpoint,
             status,
@@ -553,6 +644,11 @@ fn report_failure(state: &ServerState, error: &PushError, attempt: u32, retry_in
     let (endpoint, status, message) = match error {
         PushError::Store(message) => (None, None, message.as_str()),
         PushError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone"),
+        PushError::Diverged {
+            endpoint,
+            status,
+            message,
+        } => (Some(endpoint.as_str()), *status, message.as_str()),
         PushError::Send {
             endpoint,
             status,
@@ -583,6 +679,21 @@ fn report_stopped(state: &ServerState, endpoint: &str) {
             "endpoint": endpoint,
             "http_status": 410,
             "error": STOPPED_MESSAGE,
+        }),
+    );
+}
+
+/// Publishes a `state_push` event when the feed detects divergence (HTTP 409
+/// `source_changed` or Collapse ahead of the local event log), once, since
+/// the feed then pauses until `rosen collapse link --reset` (#445).
+fn report_diverged(state: &ServerState, endpoint: &str, status: Option<u16>, message: &str) {
+    report(
+        state,
+        json!({
+            "status": "diverged",
+            "endpoint": endpoint,
+            "http_status": status,
+            "error": message,
         }),
     );
 }

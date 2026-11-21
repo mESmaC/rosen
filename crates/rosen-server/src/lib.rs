@@ -13,6 +13,7 @@ pub mod changes;
 pub mod channel;
 pub mod claims;
 pub mod collapse_check;
+pub mod collapse_feed;
 #[cfg(test)]
 mod collapse_fixtures;
 pub mod collapse_health;
@@ -107,6 +108,9 @@ pub struct ServerState {
     pub relay_wake: Arc<relay::Wake>,
     /// Live health of the Collapse state feed, ledger push and relay (#434).
     pub collapse: collapse_health::Tracker,
+    /// Bumped when `rosen collapse link --reset` clears Collapse's feed tables
+    /// so both `state_push` and `ledger_push` drop diverged state and resume (#445).
+    collapse_reset: watch::Sender<u64>,
     /// Live connected checkers by reported platform (R12, #440).
     pub checkers: Arc<post_land::checkers::CheckerRegistry>,
     /// Shared requests and mirror/recovery work; an operator rewrite takes
@@ -150,6 +154,7 @@ impl ServerState {
             mirror_proactive_auth: mirror::proactive_auth::ProactiveAuth::default(),
             relay_wake: Arc::default(),
             collapse: collapse_health::Tracker::default(),
+            collapse_reset: watch::Sender::new(0),
             checkers: Arc::default(),
             maintenance: tokio::sync::RwLock::new(()),
             open_connections: AtomicU64::new(0),
@@ -207,6 +212,17 @@ impl ServerState {
         let mut receiver = self.shutdown.subscribe();
         // An Err means the sender is gone, which also means the server is ending.
         let _ = receiver.wait_for(|stopping| *stopping).await;
+    }
+
+    /// Subscribes to Collapse feed reset notifications (`rosen collapse link --reset`).
+    pub fn subscribe_collapse_reset(&self) -> watch::Receiver<u64> {
+        self.collapse_reset.subscribe()
+    }
+
+    /// Wakes `state_push` and `ledger_push` after `rosen collapse link --reset`.
+    pub fn notify_collapse_reset(&self) {
+        self.collapse_reset
+            .send_modify(|gen| *gen = gen.wrapping_add(1));
     }
 
     /// Counts a connection as open until the returned guard drops.
