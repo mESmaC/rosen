@@ -27,6 +27,7 @@ pub mod bisect;
 pub mod changes;
 pub mod channel;
 pub mod claims;
+mod collapse;
 mod conflicts;
 pub mod connection;
 pub mod daemon;

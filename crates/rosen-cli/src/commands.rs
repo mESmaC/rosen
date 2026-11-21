@@ -98,6 +98,9 @@ pub enum Command {
     /// Stored objects and authored snapshots remain; this is not a purge.
     #[command(name = "mirror", subcommand)]
     Mirror(MirrorCommand),
+    /// Inspect and verify a Collapse link.
+    #[command(name = "collapse", subcommand)]
+    Collapse(CollapseCommand),
     /// Import a git repository; its default branch becomes the base.
     ///
     /// Copies every commit, tree and blob reachable from the branch into the
@@ -915,6 +918,20 @@ pub enum MirrorCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum CollapseCommand {
+    /// Verify the server's Collapse link end to end without making changes.
+    ///
+    /// Reads the server's configuration and checks mirror ownership, the
+    /// `collapse` root in `rosen.toml`, agreement with `[mirror]` on owner
+    /// and name, git push credentials for `.git`, `/rosen/state` and
+    /// `/ledgers` (reporting only presence, never tokens), a mirror
+    /// `ls-remote` with and without proactive auth, empty-batch probes of the
+    /// state and ledger endpoints, and the relay allow-list and doorbell.
+    /// Exits non-zero when any check fails.
+    Check,
+}
+
 impl Command {
     /// The command path as typed, for example `change new`, used to name the
     /// client operation and in error messages.
@@ -923,6 +940,7 @@ impl Command {
             Command::Mirror(MirrorCommand::Adopt { .. }) => "mirror adopt",
             Command::Mirror(MirrorCommand::CatchUp) => "mirror catch-up",
             Command::Mirror(MirrorCommand::DropPaths { .. }) => "mirror drop-paths",
+            Command::Collapse(CollapseCommand::Check) => "collapse check",
             Command::Import { .. } => "import",
             Command::Change(sub) => sub.path(),
             Command::Commit { .. } => "commit",

@@ -238,6 +238,7 @@ async fn dispatch_project(state: &Arc<ServerState>, request: Request) -> Outcome
             let collapse = crate::collapse_health::snapshot(state).await;
             Outcome::Ok(Response::Status(Box::new(status(state, relay, collapse))))
         }
+        Request::CollapseCheck => crate::collapse_check::handle(state).await,
         Request::Shutdown => {
             state.request_shutdown();
             Outcome::Ok(Response::ShuttingDown)

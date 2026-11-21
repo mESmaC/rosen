@@ -68,6 +68,9 @@
 - **Proactive HTTPS auth fallback.**
   When an HTTPS mirror read fails with repository not found, the server retries once with `-c http.proactiveAuth=basic` when git is 2.46 or later, and reports that git must be upgraded or `http.<url>.proactiveAuth` set when git is older.
   Once that retry succeeds, the server uses proactive basic auth for later mirror reads in its lifetime and reports it in `rosen server status`.
+- **Link with Collapse (`rosen collapse check`).**
+  `rosen collapse check` reads the server's configuration without making changes and probes each requirement of a Collapse link: the mirror-owner mark, the `collapse` root in the base's `rosen.toml`, owner and name agreement between `collapse` and `[mirror]`, git push credential presence for `.git`, `/rosen/state` and `/ledgers` (never printing any token), a mirror `ls-remote` with and without proactive auth, empty-batch reads of `/rosen/state` and `/ledgers`, and the relay allow-list and `/rosen/doorbell` read.
+  Each check reports `pass`, `fail` or `skipped` with a fix hint, and the command exits non-zero when any check fails.
 - Each failed push publishes a `mirror` event with the error and the retry delay.
   Retries back off from 1 s to at most 5 min.
   A push the remote refused is marked `rejected`.

@@ -152,6 +152,9 @@
     },
     {
       "$ref": "#/$defs/rosen.run~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.collapse.check~1v1"
     }
   ],
   "$defs": {
@@ -5114,6 +5117,93 @@
       "additionalProperties": false,
       "x-commands": [
         "mcp run"
+      ]
+    },
+    "CollapseCheckItem": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "skipped"
+          ]
+        },
+        "detail": {
+          "type": "string"
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "detail",
+        "hint"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.collapse.check/v1": {
+      "description": "Read-only end-to-end verification of a server's Collapse link (R1, R10). Exits non-zero when ok is false.",
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.collapse.check/v1"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "mirror_remote": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "collapse": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ledger_endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mirror_owner": {
+          "type": "boolean"
+        },
+        "mirror_proactive_auth": {
+          "type": "boolean"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CollapseCheckItem"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "ok",
+        "mirror_remote",
+        "collapse",
+        "ledger_endpoint",
+        "mirror_owner",
+        "mirror_proactive_auth",
+        "checks"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "collapse check"
       ]
     }
   }

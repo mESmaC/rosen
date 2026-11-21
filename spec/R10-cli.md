@@ -1,5 +1,5 @@
 ### R10 · CLI
-- The `rosen` commands are `import`, `mirror adopt|catch-up|drop-paths` (operator only, R1), `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve|list|mark|landed|failures`, `receipt submit`, `land`, `rebase`, `resolve`, `workspace list|delete|watch`, `server start|stop|status`, `run`, `config show`, `events`, `machine join|list|approve|revoke`, `machine key create|list|revoke` (R14) and `mcp`.
+- The `rosen` commands are `import`, `mirror adopt|catch-up|drop-paths` (operator only, R1), `collapse check` (R1), `change new|list|show|abandon`, `commit`, `status`, `diff`, `log`, `claim|share|wait|release`, `overlaps`, `review comment|approve|resolve|list|mark|landed|failures`, `receipt submit`, `land`, `rebase`, `resolve`, `workspace list|delete|watch`, `server start|stop|status`, `run`, `config show`, `events`, `machine join|list|approve|revoke`, `machine key create|list|revoke` (R14) and `mcp`.
 - `--json` on every command, with versioned output schemas.
   Each output line has a `schema` ID (`rosen.<shape>/v1`); incompatible shape changes bump that version.
   `--json-schema` prints the offline JSON Schema catalog (`crates/rosen-cli/schemas/v1.json`), including nested records and refusal variants.
@@ -22,3 +22,4 @@
   A stopping server refuses new work, answers the requests it is already running, a land included, and then exits.
 - `rosen server status` reports the git commit the server was built from and the path of its executable, since the version is the same for every commit, and whether HTTPS mirror reads are using proactive basic auth.
   When the base names a `collapse` root, it also reports the health of the state feed, ledger push and action relay (`sending`, `current`, `failing`, `stopped`, `not_owner` or `no_credential`, with last success time, cursor, backlog, last error and next retry time).
+- `rosen collapse check` verifies a server's Collapse link without making changes (R1), printing one line per check (`pass`, `fail` or `skipped`) with a fix hint, supporting `--json` (`rosen.collapse.check/v1`), and exiting non-zero when any check fails.

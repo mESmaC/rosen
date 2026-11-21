@@ -12,6 +12,7 @@ mod change_ids;
 mod channel_events;
 mod channel_quarantine;
 mod claim_release;
+mod collapse_check;
 mod crash_recovery;
 mod enrollment;
 mod event_resume;

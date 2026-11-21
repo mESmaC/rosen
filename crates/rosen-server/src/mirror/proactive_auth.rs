@@ -13,7 +13,7 @@ use std::time::Duration;
 const MIN_GIT_VERSION: (u32, u32) = (2, 46);
 
 /// Git flags enabling proactive basic auth for one command invocation.
-pub(super) const PROACTIVE_AUTH_ARGS: [&str; 2] = ["-c", "http.proactiveAuth=basic"];
+pub(crate) const PROACTIVE_AUTH_ARGS: [&str; 2] = ["-c", "http.proactiveAuth=basic"];
 
 /// Reported when an HTTPS mirror read fails with not-found on a git older than 2.46.
 pub const OLD_GIT_MESSAGE: &str =
@@ -37,7 +37,7 @@ impl ProactiveAuth {
 
 /// True only for `https://` remotes. Plaintext `http://` never sends
 /// credentials proactively without a challenge.
-pub(super) fn is_https(remote: &str) -> bool {
+pub(crate) fn is_https(remote: &str) -> bool {
     remote
         .get(..8)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
@@ -53,7 +53,7 @@ pub(super) fn is_remote_read(args: &[&str]) -> bool {
 ///
 /// Matches both host-supplied `remote: Repository not found.` messages and
 /// git's own `fatal: repository '<url>' not found` diagnostic.
-pub(super) fn is_not_found(stderr: &str) -> bool {
+pub(crate) fn is_not_found(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     if lower.contains("repository not found") {
         return true;
@@ -87,7 +87,7 @@ pub(super) fn version_supports_proactive_auth(version: (u32, u32)) -> bool {
 }
 
 /// True when the installed `git` binary is 2.46 or later.
-pub(super) async fn git_supports_proactive_auth() -> bool {
+pub(crate) async fn git_supports_proactive_auth() -> bool {
     let mut command = tokio::process::Command::new("git");
     command
         .arg("--version")

@@ -136,6 +136,8 @@ pub enum Request {
     RelaySet {
         allow: Vec<crate::RelayKind>,
     },
+    /// Read-only end-to-end verification of the server's Collapse link (R1, R10, #435).
+    CollapseCheck,
     /// Reads the next persisted checker job for a failed batch (R12).
     BisectNext {
         session: i64,
@@ -366,6 +368,8 @@ pub enum Response {
     MirrorRewritten(crate::HistoryRewrite),
     /// The answer to `relay_set`: the setting now stored.
     Relay(crate::RelaySetting),
+    /// Boxed: `CollapseCheckReport` holds several optional strings and a Vec (clippy::large_enum_variant).
+    CollapseCheck(Box<crate::CollapseCheckReport>),
     Bisection(crate::BisectState),
     Machines(Vec<crate::machine::MachineRecord>),
     Machine(crate::machine::MachineRecord),

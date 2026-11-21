@@ -13,6 +13,7 @@ pub const CHANGE_LIST_SCHEMA: &str = "rosen.change.list/v1";
 pub const CHANGE_SCHEMA: &str = "rosen.change/v1";
 pub const CHANGE_WORKSPACE_SCHEMA: &str = "rosen.change.workspace/v2";
 pub const CLAIM_SCHEMA: &str = "rosen.claim/v2";
+pub const COLLAPSE_CHECK_SCHEMA: &str = "rosen.collapse.check/v1";
 pub const CONFIG_SCHEMA: &str = "rosen.config/v2";
 pub const DIFF_SCHEMA: &str = "rosen.diff/v1";
 pub const ERROR_SCHEMA: &str = "rosen.error/v1";

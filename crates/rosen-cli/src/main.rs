@@ -2,6 +2,7 @@
 
 mod change_cmd;
 mod claim_cmd;
+mod collapse_cmd;
 mod commands;
 mod commit_cmd;
 mod config_cmd;
@@ -137,6 +138,9 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
         }
         Command::Mirror(commands::MirrorCommand::DropPaths { paths }) => {
             block_on(mirror_cmd::drop_paths(json, &endpoint, paths))
+        }
+        Command::Collapse(commands::CollapseCommand::Check) => {
+            block_on(collapse_cmd::check(json, &endpoint))
         }
         Command::Machine(command) => block_on(machine_cmd::run(json, &endpoint, command)),
         Command::Mcp(args) => {
