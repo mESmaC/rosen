@@ -12,6 +12,7 @@ pub const DEFAULT_COLLAPSE_HOST: &str = "https://api.collapse.sh";
 /// Validated Collapse repository target and the URLs derived from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollapseTarget {
+    pub origin: String,
     pub owner: String,
     pub name: String,
     pub collapse_root: String,
@@ -42,6 +43,7 @@ impl CollapseTarget {
             format!("collapse = {collapse_root:?}\n[mirror]\nremote = {mirror_remote:?}\n");
         ProjectConfig::parse(&check_toml).map_err(|err| err.to_string())?;
         Ok(Self {
+            origin,
             owner,
             name,
             collapse_root,

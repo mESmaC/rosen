@@ -27,9 +27,10 @@ pub async fn check(json: bool, endpoint: &Endpoint) -> Result<Succeeded, Error> 
     Ok(report.ok)
 }
 
-/// Links a running Rosen server to Collapse in one command (#437):
-/// 1. Reads the push token from stdin or `ROSEN_COLLAPSE_TOKEN` and approves
-///    git credentials for `.git`, `/rosen/state` and `/ledgers`, plus sets
+/// Links a running Rosen server to Collapse in one command (#437, #442):
+/// 1. Reads the push token from stdin or `ROSEN_COLLAPSE_TOKEN`, sets
+///    `credential.<origin>.useHttpPath = true`, approves git credentials for
+///    `.git`, `/rosen/state` and `/ledgers`, and sets
 ///    `http.<mirror>.proactiveAuth = basic`.
 /// 2. Opens and names a change updating `rosen.toml` with `collapse` and
 ///    `[mirror].remote`, landing it if `--land` is given.
@@ -56,6 +57,8 @@ pub async fn link(
     .map_err(Error::InvalidArgument)?;
 
     let git_dir = collapse_git::existing_git_dir(&status.data_dir);
+    let use_http_path_configured =
+        collapse_git::set_use_http_path(&git_dir, &target.origin).await?;
     let credentials_approved =
         collapse_git::approve_credentials(&git_dir, &target.credential_urls(), &token).await?;
     let proactive_auth_configured =
@@ -73,6 +76,7 @@ pub async fn link(
         &LinkSummary {
             ok,
             target: &target,
+            use_http_path_configured,
             credentials_approved: &credentials_approved,
             proactive_auth_configured,
             change: change.as_ref(),
@@ -220,6 +224,7 @@ fn is_land_refused(land: Option<&LandAnswer>) -> bool {
 struct LinkSummary<'a> {
     ok: bool,
     target: &'a CollapseTarget,
+    use_http_path_configured: bool,
     credentials_approved: &'a [String],
     proactive_auth_configured: bool,
     change: Option<&'a ChangeRecord>,
@@ -257,6 +262,12 @@ fn print_link(json: bool, summary: &LinkSummary<'_>) {
     }
     println!("collapse:    {}", summary.target.collapse_root);
     println!("mirror:      {}", summary.target.mirror_remote);
+    if summary.use_http_path_configured {
+        println!(
+            "http-path:   credential.{}.useHttpPath = true",
+            summary.target.origin
+        );
+    }
     println!(
         "credentials: approved {} path(s)",
         summary.credentials_approved.len()
@@ -350,10 +361,10 @@ fn print_check_lines(report: &CollapseCheckReport) {
         let status = item.status.as_str();
         match &item.hint {
             Some(hint) => println!(
-                "{status:<7}  {:<18} {} — hint: {hint}",
+                "{status:<7}  {:<24} {} — hint: {hint}",
                 item.name, item.detail
             ),
-            None => println!("{status:<7}  {:<18} {}", item.name, item.detail),
+            None => println!("{status:<7}  {:<24} {}", item.name, item.detail),
         }
     }
 }

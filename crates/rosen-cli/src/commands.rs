@@ -924,27 +924,29 @@ pub enum CollapseCommand {
     ///
     /// Reads the server's configuration and checks mirror ownership, the
     /// `collapse` root in `rosen.toml`, agreement with `[mirror]` on owner
-    /// and name, git push credentials for `.git`, `/rosen/state` and
-    /// `/ledgers` (reporting only presence, never tokens), a mirror
-    /// `ls-remote` with and without proactive auth, empty-batch probes of the
-    /// state and ledger endpoints, and the relay allow-list and doorbell.
-    /// Exits non-zero when any check fails.
+    /// and name, `credential.useHttpPath` for HTTPS origins, git push
+    /// credentials for `.git`, `/rosen/state` and `/ledgers` (reporting only
+    /// presence, never tokens), a mirror `ls-remote` with and without
+    /// proactive auth, empty-batch probes of the state and ledger endpoints,
+    /// and the relay allow-list and doorbell. Exits non-zero when any check
+    /// fails.
     Check,
     /// Link the running Rosen server to a Collapse repository in one command.
     ///
     /// Reads a Collapse push token from stdin or `ROSEN_COLLAPSE_TOKEN` (never
-    /// as a command-line argument), approves git credentials for `.git`,
-    /// `/rosen/state` and `/ledgers`, configures `http.<mirror>.proactiveAuth`
-    /// as `basic`, opens and names a change updating `rosen.toml` (landing it
-    /// when `--land` is given), sets the relay allow-list, and runs
-    /// `rosen collapse check`.
+    /// as a command-line argument), sets `credential.<origin>.useHttpPath` to
+    /// `true`, approves git credentials for `.git`, `/rosen/state` and
+    /// `/ledgers`, configures `http.<mirror>.proactiveAuth` as `basic`, opens
+    /// and names a change updating `rosen.toml` (landing it when `--land` is
+    /// given), sets the relay allow-list, and runs `rosen collapse check`.
     Link(CollapseLinkArgs),
     /// Unlink the running Rosen server from Collapse.
     ///
     /// Opens and names a change removing `collapse` and `[mirror].remote` from
     /// `rosen.toml` (landing it when `--land` is given), turns off the action
     /// relay, and clears per-URL proactive auth. Stored git credentials are
-    /// left alone unless `--forget-credentials` is given.
+    /// left alone unless `--forget-credentials` is given, which rejects only
+    /// this repository's path-scoped entries.
     Unlink(CollapseUnlinkArgs),
 }
 

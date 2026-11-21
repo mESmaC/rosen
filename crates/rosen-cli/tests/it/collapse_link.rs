@@ -75,11 +75,11 @@ fn setup_git_config(dir: &Path) -> (PathBuf, PathBuf) {
     let gitconfig = dir.join("gitconfig");
     let cred_file = dir.join("credentials");
     let cred_arg = cred_file.to_string_lossy().replace('\\', "/");
+    // Deliberately omit `useHttpPath = true` so the tests prove `collapse link`
+    // configures it before approving credentials (#442).
     fs::write(
         &gitconfig,
-        format!(
-            "[credential]\n\thelper =\n\thelper = store --file=\"{cred_arg}\"\n\tuseHttpPath = true\n"
-        ),
+        format!("[credential]\n\thelper =\n\thelper = store --file=\"{cred_arg}\"\n"),
     )
     .unwrap();
     (gitconfig, cred_file)
@@ -638,6 +638,7 @@ fn verify_link_with_stdin_and_land(endpoint: &str, gitconfig: &Path, cred_file: 
         "mirror_owner",
         "collapse_config",
         "repo_match",
+        "credential_use_http_path",
         "credential_mirror",
         "credential_state",
         "credential_ledgers",
@@ -650,6 +651,11 @@ fn verify_link_with_stdin_and_land(endpoint: &str, gitconfig: &Path, cred_file: 
         );
     }
     let cfg_text = fs::read_to_string(gitconfig).unwrap();
+    assert!(
+        cfg_text.contains("[credential \"https://collapse.invalid\"]")
+            && cfg_text.contains("useHttpPath = true"),
+        "{cfg_text}"
+    );
     assert!(
         cfg_text.contains("https://collapse.invalid/mESmaC/example.git")
             && cfg_text.contains("proactiveAuth = basic"),
@@ -767,4 +773,222 @@ fn verify_env_relink_and_forget_credentials(endpoint: &str, gitconfig: &Path, cr
         after_forget.trim().is_empty(),
         "credentials remained: {after_forget}"
     );
+}
+
+fn fill_password(dir: &Path, gitconfig: &Path, url: &str) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir).args(["credential", "fill"]);
+    apply_test_git_env(&mut cmd, gitconfig);
+    let out = run_command_with_timeout(
+        cmd,
+        Some(&format!("url={url}\n\n")),
+        GIT_TIMEOUT,
+        "git credential fill",
+    )
+    .unwrap();
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("password=").map(str::to_owned))
+    })?
+}
+
+fn repo_urls(slug: &str) -> [String; 3] {
+    [
+        format!("https://collapse.invalid/{slug}.git"),
+        format!("https://collapse.invalid/{slug}/rosen/state"),
+        format!("https://collapse.invalid/{slug}/ledgers"),
+    ]
+}
+
+fn assert_repo_passwords(dir: &Path, gitconfig: &Path, slug: &str, expected: Option<&str>) {
+    for url in repo_urls(slug) {
+        assert_eq!(
+            fill_password(dir, gitconfig, &url).as_deref(),
+            expected,
+            "{url}"
+        );
+    }
+}
+
+fn link_and_check_repo(endpoint: &str, gitconfig: &Path, slug: &str, token: &str) {
+    let out = run_rosen(
+        endpoint,
+        gitconfig,
+        &[
+            "--json",
+            "collapse",
+            "link",
+            slug,
+            "--host",
+            "https://collapse.invalid",
+            "--land",
+        ],
+        None,
+        Some(token),
+    );
+    let linked: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        check_status(&linked["check"], "credential_use_http_path"),
+        "pass",
+        "{linked}"
+    );
+}
+
+fn spawn_imported_server(
+    server: &Path,
+    dir: &Path,
+    label: &str,
+    source: &Path,
+    gitconfig: &Path,
+) -> (String, ServerProcess) {
+    fs::create_dir_all(dir).unwrap();
+    let ep = endpoint_for(dir, label);
+    let srv = spawn_server(server, &dir.join("data"), &ep, gitconfig);
+    let out = run_rosen(
+        &ep,
+        gitconfig,
+        &["import", source.to_str().unwrap()],
+        None,
+        None,
+    );
+    assert!(out.status.success(), "{out:?}");
+    (ep, srv)
+}
+
+fn verify_check_fails_when_use_http_path_unset(root: &Path, endpoint: &str, gitconfig: &Path) {
+    let mut unset = Command::new("git");
+    unset.arg("-C").arg(root).args([
+        "config",
+        "--global",
+        "--unset-all",
+        "credential.https://collapse.invalid.useHttpPath",
+    ]);
+    apply_test_git_env(&mut unset, gitconfig);
+    assert!(
+        run_command_with_timeout(unset, None, GIT_TIMEOUT, "git unset")
+            .unwrap()
+            .status
+            .success()
+    );
+    let out = run_rosen(
+        endpoint,
+        gitconfig,
+        &["--json", "collapse", "check"],
+        None,
+        None,
+    );
+    assert!(!out.status.success());
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let item = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == "credential_use_http_path")
+        .unwrap();
+    assert_eq!(item["status"], "fail", "{item}");
+    assert!(
+        item["hint"].as_str().is_some_and(|h| h
+            .contains("git config --global credential.https://collapse.invalid.useHttpPath true")),
+        "{item}"
+    );
+}
+
+fn verify_forget_keeps_host_wide_credential(endpoint: &str, gitconfig: &Path, cred_file: &Path) {
+    let mut creds = fs::read_to_string(cred_file).unwrap();
+    creds.push_str("https://rosen:tok_host_wide_99999@collapse.invalid\n");
+    fs::write(cred_file, creds).unwrap();
+    let forget = run_rosen(
+        endpoint,
+        gitconfig,
+        &[
+            "--json",
+            "collapse",
+            "unlink",
+            "--land",
+            "--forget-credentials",
+        ],
+        None,
+        None,
+    );
+    assert!(forget.status.success(), "{forget:?}");
+    let remaining = fs::read_to_string(cred_file).unwrap();
+    assert!(
+        remaining.contains("tok_host_wide_99999@collapse.invalid"),
+        "{remaining}"
+    );
+    assert!(!remaining.contains("/mESmaC/repo-b"), "{remaining}");
+}
+
+/// Risk (SPEC R1, #442): without `credential.<origin>.useHttpPath = true`,
+/// linking a second repository on the same host overwrites the first token,
+/// and `unlink --forget-credentials` wipes the host-wide and sibling tokens.
+#[test]
+fn collapse_two_repositories_on_same_host_keep_distinct_tokens_and_unlink_isolates() {
+    let Some(server) = server_bin() else {
+        return;
+    };
+    let root = unique_dir("multi");
+    let source = root.join("source");
+    let (gitconfig, cred_file) = setup_git_config(&root);
+    init_source_repo(&source, &gitconfig);
+    let (ep_a, mut srv_a) =
+        spawn_imported_server(&server, &root.join("a"), "ca", &source, &gitconfig);
+    let (ep_b, mut srv_b) =
+        spawn_imported_server(&server, &root.join("b"), "cb", &source, &gitconfig);
+
+    link_and_check_repo(&ep_a, &gitconfig, "mESmaC/repo-a", "tok_repo_a_11111");
+    link_and_check_repo(&ep_b, &gitconfig, "mESmaC/repo-b", "tok_repo_b_22222");
+    assert_repo_passwords(&root, &gitconfig, "mESmaC/repo-a", Some("tok_repo_a_11111"));
+    assert_repo_passwords(&root, &gitconfig, "mESmaC/repo-b", Some("tok_repo_b_22222"));
+
+    let forget_a = run_rosen(
+        &ep_a,
+        &gitconfig,
+        &[
+            "--json",
+            "collapse",
+            "unlink",
+            "--land",
+            "--forget-credentials",
+        ],
+        None,
+        None,
+    );
+    assert!(forget_a.status.success(), "{forget_a:?}");
+    assert_repo_passwords(&root, &gitconfig, "mESmaC/repo-a", None);
+    assert_repo_passwords(&root, &gitconfig, "mESmaC/repo-b", Some("tok_repo_b_22222"));
+    let check_b: Value = serde_json::from_slice(
+        &run_rosen(
+            &ep_b,
+            &gitconfig,
+            &["--json", "collapse", "check"],
+            None,
+            None,
+        )
+        .stdout,
+    )
+    .unwrap();
+    for passed in [
+        "credential_use_http_path",
+        "credential_mirror",
+        "credential_state",
+        "credential_ledgers",
+    ] {
+        assert_eq!(
+            check_status(&check_b, passed),
+            "pass",
+            "{passed}: {check_b}"
+        );
+    }
+
+    verify_check_fails_when_use_http_path_unset(&root, &ep_b, &gitconfig);
+    verify_forget_keeps_host_wide_credential(&ep_b, &gitconfig, &cred_file);
+    srv_a
+        .stop_and_wait(&ep_a, &gitconfig, SHUTDOWN_TIMEOUT)
+        .unwrap();
+    srv_b
+        .stop_and_wait(&ep_b, &gitconfig, SHUTDOWN_TIMEOUT)
+        .unwrap();
+    let _ = fs::remove_dir_all(&root);
 }

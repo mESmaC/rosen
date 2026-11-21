@@ -25,6 +25,9 @@ use crate::{ServerConfig, ServerState};
 /// Timeout for one `git ls-remote` probe.
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Timeout for one local `git config` read.
+const CONFIG_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Empty state feed batch (SPEC R9): stores nothing and reads `highest_sequence`.
 const STATE_PROBE_BODY: &[u8] = br#"{"format":1,"through":0,"changes":[],"conflicts":[],"threads":[],"coverage":[],"config":[],"events":[],"machines":[],"presence":[],"channel":[]}"#;
 
@@ -90,6 +93,7 @@ pub async fn run(state: &Arc<ServerState>) -> Result<CollapseCheckReport, String
 
 async fn run_checks(config: &ServerConfig, snapshot: &ServerSnapshot) -> Vec<CollapseCheckItem> {
     let git_dir = existing_dir(&config.data_dir);
+    let cred_use_http_path = check_credential_use_http_path(snapshot, &git_dir).await;
     let (cred_mirror, _) = check_credential(
         "credential_mirror",
         snapshot.mirror_remote.as_deref(),
@@ -115,6 +119,7 @@ async fn run_checks(config: &ServerConfig, snapshot: &ServerSnapshot) -> Vec<Col
         check_mirror_owner(&config.data_dir, snapshot.mirror_owner),
         check_collapse_config(snapshot),
         check_repo_match(snapshot),
+        cred_use_http_path,
         cred_mirror,
         cred_state,
         cred_ledgers,
@@ -343,6 +348,136 @@ fn check_repo_match(snapshot: &ServerSnapshot) -> CollapseCheckItem {
             ),
             "update `collapse` or `[mirror].remote` in rosen.toml so both point to the same <owner>/<name>, then land it",
         ),
+    }
+}
+
+/// Verifies that git keys HTTPS credentials by full path (`credential.useHttpPath = true`)
+/// for every configured Collapse/mirror HTTPS URL so linking multiple repositories on one
+/// host keeps each repository's push token isolated (SPEC R1, #442).
+async fn check_credential_use_http_path(
+    snapshot: &ServerSnapshot,
+    git_dir: &Path,
+) -> CollapseCheckItem {
+    let urls = https_credential_urls(snapshot);
+    if urls.is_empty() {
+        return skipped(
+            "credential_use_http_path",
+            "no HTTPS Collapse or mirror URL configured",
+            None,
+        );
+    }
+    let (mut checked, mut missing) = (Vec::new(), Vec::new());
+    for url in urls {
+        let Some(origin) = https_origin(url) else {
+            continue;
+        };
+        push_unique(&mut checked, &origin);
+        match url_has_use_http_path(git_dir, url).await {
+            Ok(true) => {}
+            Ok(false) => push_unique(&mut missing, &origin),
+            Err(error) => {
+                return fail(
+                    "credential_use_http_path",
+                    format!("could not read git credential.useHttpPath for {origin}: {error}"),
+                    format!("git config --global credential.{origin}.useHttpPath true"),
+                );
+            }
+        }
+    }
+    finish_use_http_path_check(&checked, &missing)
+}
+
+fn https_credential_urls(snapshot: &ServerSnapshot) -> Vec<&str> {
+    [
+        snapshot.mirror_remote.as_deref(),
+        snapshot.state_url.as_deref(),
+        snapshot.ledger_url.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|url| proactive_auth::is_https(url))
+    .collect()
+}
+
+fn finish_use_http_path_check(checked: &[String], missing: &[String]) -> CollapseCheckItem {
+    if checked.is_empty() {
+        return skipped(
+            "credential_use_http_path",
+            "no HTTPS Collapse or mirror origin configured",
+            None,
+        );
+    }
+    if missing.is_empty() {
+        return pass(
+            "credential_use_http_path",
+            format!("credential.useHttpPath is true for {}", checked.join(", ")),
+        );
+    }
+    let hints: Vec<String> = missing
+        .iter()
+        .map(|o| format!("git config --global credential.{o}.useHttpPath true"))
+        .collect();
+    fail(
+        "credential_use_http_path",
+        format!(
+            "credential.useHttpPath is unset for {}; linking a second repository on the same host overwrites the first token",
+            missing.join(", ")
+        ),
+        hints.join(" && "),
+    )
+}
+
+async fn url_has_use_http_path(git_dir: &Path, url: &str) -> Result<bool, String> {
+    let mut command = tokio::process::Command::from(git_command(git_dir));
+    command
+        .args([
+            "config",
+            "--bool",
+            "--get-urlmatch",
+            "credential.useHttpPath",
+            url,
+        ])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(CONFIG_TIMEOUT, command.output())
+        .await
+        .map_err(|_| format!("git config did not finish within {CONFIG_TIMEOUT:?}"))?
+        .map_err(|error| format!("could not run git: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&output.stdout).trim() == "true"),
+        // `git config --get-urlmatch` exits 1 when no matching key is configured.
+        Some(1) => Ok(false),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let cleaned = hide_credentials(url, stderr.trim());
+            Err(if cleaned.is_empty() {
+                format!("git exited with {}", output.status)
+            } else {
+                cleaned
+            })
+        }
+    }
+}
+
+fn https_origin(url: &str) -> Option<String> {
+    if !proactive_auth::is_https(url) {
+        return None;
+    }
+    let rest = &url[8..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    (!host_port.is_empty()).then(|| format!("https://{host_port}"))
+}
+
+fn push_unique(values: &mut Vec<String>, item: &str) {
+    if !values.iter().any(|existing| existing == item) {
+        values.push(item.to_owned());
     }
 }
 

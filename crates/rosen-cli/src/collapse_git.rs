@@ -94,18 +94,37 @@ pub async fn approve_credentials(
     Ok(approved)
 }
 
-/// Removes stored credentials from git's credential helper for every HTTPS URL.
+/// Removes stored path-scoped credentials from git's credential helper for
+/// every HTTPS URL that carries a non-empty path.
+///
+/// Forces `credential.useHttpPath = true` for the reject call so unlinking
+/// never removes a host-wide credential or another repository's entries even
+/// when global git config lacks `useHttpPath` (SPEC R1, #442).
 pub async fn reject_credentials(git_dir: &Path, urls: &[&str]) -> Result<Vec<String>, Error> {
     let mut forgotten = Vec::with_capacity(urls.len());
     for &url in urls {
-        if !is_https(url) {
+        if !has_https_path(url) {
             continue;
         }
         let body = format!("url={url}\n\n");
-        run_git_stdin(git_dir, &["credential", "reject"], &body, None).await?;
+        let args = reject_args(url);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_git_stdin(git_dir, &arg_refs, &body, None).await?;
         forgotten.push(url.to_owned());
     }
     Ok(forgotten)
+}
+
+/// Configures `credential.<origin>.useHttpPath = true` in global git config
+/// before approving credentials so git keys Collapse tokens by full URL path
+/// instead of overwriting one host-wide entry (SPEC R1, #442).
+pub async fn set_use_http_path(git_dir: &Path, origin: &str) -> Result<bool, Error> {
+    if !is_https(origin) {
+        return Ok(false);
+    }
+    let key = use_http_path_key(origin);
+    run_git_config(git_dir, &["config", "--global", &key, "true"]).await?;
+    Ok(true)
 }
 
 /// Configures `http.<mirror_url>.proactiveAuth = basic` in global git config so
@@ -140,8 +159,54 @@ pub async fn unset_proactive_auth(git_dir: &Path, mirror_url: &str) -> Result<bo
     }
 }
 
+fn use_http_path_key(origin: &str) -> String {
+    let origin = origin.trim_end_matches('/');
+    format!("credential.{origin}.useHttpPath")
+}
+
 fn proactive_auth_key(mirror_url: &str) -> String {
     format!("http.{mirror_url}.proactiveAuth")
+}
+
+fn https_origin(url: &str) -> Option<String> {
+    if !is_https(url) {
+        return None;
+    }
+    let rest = &url[8..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    (!host_port.is_empty()).then(|| format!("https://{host_port}"))
+}
+
+fn has_https_path(url: &str) -> bool {
+    if !is_https(url) {
+        return false;
+    }
+    let Some((_, path)) = url[8..].split_once('/') else {
+        return false;
+    };
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    !path.trim_matches('/').is_empty()
+}
+
+fn reject_args(url: &str) -> Vec<String> {
+    let mut args = vec!["-c".to_owned(), "credential.useHttpPath=true".to_owned()];
+    if let Some(origin) = https_origin(url) {
+        if !origin.contains('=') {
+            args.push("-c".to_owned());
+            args.push(format!("credential.{origin}.useHttpPath=true"));
+        }
+    }
+    if !url.contains('=') {
+        args.push("-c".to_owned());
+        args.push(format!("credential.{url}.useHttpPath=true"));
+    }
+    args.push("credential".to_owned());
+    args.push("reject".to_owned());
+    args
 }
 
 pub fn is_https(url: &str) -> bool {
