@@ -4,28 +4,18 @@
 //! come from the same clap definitions `--help` prints, so a command gained
 //! or changed in `commands.rs` is a tool gained or changed with no edit here.
 
-use clap::{Arg, ArgAction, CommandFactory};
+use clap::{Arg, ArgAction};
 use serde_json::{json, Map, Value};
-
-use crate::commands::Cli;
 
 /// Commands that are never tools.
 /// - `mcp` is this server.
-/// - `wait`, `events` and `workspace watch` run until something happens
-///   elsewhere, and a tool call has to return.
-/// - `run` runs another program with the caller's terminal, for as long as
-///   that takes.
-/// - `import`, `server start` and `server stop` are the operator's: the host
-///   that starts this server has already started the project's server, and
-///   an agent that stopped it would stop every other agent's work.
-/// - `server relay` grants Collapse's owner authority on this server, and
-///   only the operator may (R14).
-const NOT_TOOLS: [&str; 12] = [
+/// - `workspace watch` runs indefinitely in the background.
+/// - `import`, `mirror`, `server start|stop|relay` are operator-only: the host
+///   that starts this server has already started the project's server, and an
+///   agent that stopped it would stop every other agent's work.
+const NOT_TOOLS: [&str; 9] = [
     "mcp",
-    "wait",
-    "events",
     "workspace watch",
-    "run",
     "import",
     "server start",
     "server stop",
@@ -43,12 +33,18 @@ const NOT_TOOLS_UNDER: &str = "machine ";
 /// (`rosen mcp --landing`): an author's agent has no use for them.
 const LANDING: [&str; 3] = ["review approve", "receipt submit", "land"];
 
+/// Workspace lifecycle commands the managing host owns in managed workspaces.
+const MANAGED_HOST_OWNED: [&str; 1] = ["workspace delete"];
+
 /// One `rosen` command as a tool.
 pub struct Tool {
     /// The command's words joined by `_`, such as `change_new`.
     pub name: String,
     /// The command's words, such as `change new`.
     words: Vec<String>,
+    /// Extra flags always appended for MCP calls so a tool returns promptly
+    /// (`--park` for `wait`, `--once` for `events`).
+    forced_flags: Vec<String>,
     description: String,
     inputs: Vec<Input>,
 }
@@ -75,19 +71,28 @@ enum Kind {
 }
 
 /// Every tool this server offers, in the order `rosen --help` lists them.
-pub fn tools(landing: bool) -> Vec<Tool> {
-    let mut root = Cli::command();
+pub fn tools(landing: bool, managed: bool) -> Vec<Tool> {
+    let mut root = crate::commands::command(managed);
     // Fills in what the derive leaves for later, such as positional indexes.
     root.build();
     let mut found = Vec::new();
     collect(&root, &mut Vec::new(), &mut found);
-    found.retain(|tool| offered(&tool.words.join(" "), landing));
+    found.retain(|tool| offered(&tool.words.join(" "), landing, managed));
     found
 }
 
-fn offered(command: &str, landing: bool) -> bool {
+fn offered(command: &str, landing: bool, managed: bool) -> bool {
     let never = NOT_TOOLS.contains(&command) || command.starts_with(NOT_TOOLS_UNDER);
-    !never && (landing || !LANDING.contains(&command))
+    if never {
+        return false;
+    }
+    if LANDING.contains(&command) {
+        return landing;
+    }
+    if managed && !landing && MANAGED_HOST_OWNED.contains(&command) {
+        return false;
+    }
+    true
 }
 
 /// Adds a tool for each command under `command` that has no subcommands.
@@ -111,15 +116,30 @@ fn collect(command: &clap::Command, words: &mut Vec<String>, found: &mut Vec<Too
 
 impl Tool {
     fn of(command: &clap::Command, words: &[String]) -> Tool {
+        let name = words.join("_");
         let about = command.get_long_about().or_else(|| command.get_about());
+        let mut description = about.map(ToString::to_string).unwrap_or_default();
         let mut inputs: Vec<Input> = command.get_arguments().filter_map(Input::of).collect();
         inputs.sort_by_key(|input| input.index);
+        let forced_flags = specialize_for_mcp(&name, &mut description, &mut inputs);
         Tool {
-            name: words.join("_"),
+            name,
             words: words.to_vec(),
-            description: about.map(ToString::to_string).unwrap_or_default(),
+            forced_flags,
+            description,
             inputs,
         }
+    }
+
+    /// True for `rosen run`, which captures the queued command's output into
+    /// a `rosen.run/v1` object rather than inheriting `--json`.
+    pub fn is_run(&self) -> bool {
+        self.name == "run"
+    }
+
+    /// The command path as typed, for `rosen.error/v1` reporting.
+    pub fn command_path(&self) -> String {
+        self.words.join(" ")
     }
 
     /// The tool as `tools/list` describes it.
@@ -166,6 +186,7 @@ impl Tool {
             ));
         }
         let mut words = self.words.clone();
+        words.extend(self.forced_flags.iter().cloned());
         let mut positional = Vec::new();
         for input in &self.inputs {
             let Some(value) = given.get(&input.name).filter(|value| !value.is_null()) else {
@@ -186,6 +207,34 @@ impl Tool {
 
     fn input(&self, name: &str) -> Option<&Input> {
         self.inputs.iter().find(|input| input.name == name)
+    }
+}
+
+/// Adapts blocking CLI commands (`wait`, `events`) so MCP tool calls always
+/// return promptly rather than hanging the JSON-RPC stdio stream.
+fn specialize_for_mcp(
+    name: &str,
+    description: &mut String,
+    inputs: &mut Vec<Input>,
+) -> Vec<String> {
+    match name {
+        "wait" => {
+            inputs.retain(|input| input.name != "park");
+            *description = "Record a path-claim wait and return at once (parking) so the \
+                managing host can wake your thread when the claimed paths are released. \
+                Returns `waiting_on`, `free` and `cursor`."
+                .to_owned();
+            vec!["--park".to_owned()]
+        }
+        "events" => {
+            inputs.retain(|input| input.name != "once");
+            *description = "Read pending Rosen events up to the server's latest sequence number \
+                and return them as `rosen.events/v1`, advancing your stored cursor unless `all` \
+                is true."
+                .to_owned();
+            vec!["--once".to_owned()]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -260,7 +309,13 @@ impl Input {
         Ok(match &self.option {
             Some(name) => texts
                 .iter()
-                .map(|text| format!("--{name}={text}"))
+                .map(|text| {
+                    if text.is_empty() {
+                        format!("--{name}")
+                    } else {
+                        format!("--{name}={text}")
+                    }
+                })
                 .collect(),
             None => texts,
         })

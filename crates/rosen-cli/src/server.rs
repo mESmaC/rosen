@@ -6,6 +6,7 @@ use rosen_client::{Client, Endpoint, Error};
 use rosen_core::AgentId;
 use serde_json::json;
 
+use crate::output::EVENTS_SCHEMA;
 use crate::output::EVENT_SCHEMA;
 use crate::output::SERVER_STATUS_SCHEMA as STATUS_SCHEMA;
 
@@ -205,6 +206,74 @@ pub async fn stream_events(
         }
     }
     Err(Error::Disconnected)
+}
+
+/// Idle timeout while draining pending events for `--once`.
+const POLL_IDLE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Reads pending events up to the server's current sequence number and exits,
+/// acknowledging them for `agent` when not `--all`.
+pub async fn poll_events(
+    json: bool,
+    endpoint: &Endpoint,
+    agent: Option<AgentId>,
+    after: Option<u64>,
+    limit: Option<usize>,
+) -> Result<Succeeded, Error> {
+    let client = rosen_client::connect_or_start(endpoint).await?;
+    let last_event = client.status().await?.last_event;
+    let empty =
+        limit == Some(0) || last_event == 0 || after.is_some_and(|cursor| cursor >= last_event);
+    let mut collected = Vec::new();
+    if !empty {
+        let mut events = match &agent {
+            Some(agent) => client.subscribe_as(agent.clone(), after).await?,
+            None => client.subscribe(after).await?,
+        };
+        while let Ok(Some(event)) = tokio::time::timeout(POLL_IDLE, events.recv()).await {
+            let seq = event.seq;
+            collected.push(event);
+            let hit_limit = limit.is_some_and(|max| collected.len() >= max);
+            if seq >= last_event || hit_limit {
+                break;
+            }
+        }
+        if let (Some(agent), Some(last)) = (&agent, collected.last()) {
+            client.ack_events(agent.clone(), last.seq).await?;
+        }
+    }
+    print_events_batch(json, &collected, last_event);
+    Ok(true)
+}
+
+fn print_events_batch(json: bool, events: &[Event], last_event: u64) {
+    if json {
+        let items: Vec<serde_json::Value> = events
+            .iter()
+            .map(|event| {
+                json!({
+                    "seq": event.seq,
+                    "kind": event.kind,
+                    "change": event.change,
+                    "detail": event.detail,
+                })
+            })
+            .collect();
+        let body = json!({
+            "schema": EVENTS_SCHEMA,
+            "events": items,
+            "last_event": last_event,
+        });
+        println!("{body}");
+        return;
+    }
+    if events.is_empty() {
+        println!("no new events (last event {last_event})");
+        return;
+    }
+    for event in events {
+        print_event(false, event);
+    }
 }
 
 fn print_event(json: bool, event: &Event) {

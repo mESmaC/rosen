@@ -146,6 +146,12 @@
     },
     {
       "$ref": "#/$defs/rosen.server.relay~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.events~1v1"
+    },
+    {
+      "$ref": "#/$defs/rosen.run~1v1"
     }
   ],
   "$defs": {
@@ -1801,6 +1807,13 @@
         },
         "diff": {
           "$ref": "#/$defs/Diff"
+        },
+        "unsnapshotted": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Workspace paths not yet stored on the server when the diff ran."
         }
       },
       "required": [
@@ -1950,6 +1963,18 @@
                 "string",
                 "null"
               ]
+            },
+            "conflict_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "next_commands": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           },
           "required": [
@@ -2211,6 +2236,31 @@
         "bytes_sent": {
           "type": "integer",
           "minimum": 0
+        },
+        "files": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FileSummary"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Post-commit summary of files changed against the change's parent (included by `rosen commit`)."
+        },
+        "land_check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LandCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Land gate verdicts right after `rosen commit`."
         }
       },
       "required": [
@@ -3728,6 +3778,34 @@
               "type": "null"
             }
           ]
+        },
+        "next_action": {
+          "type": "string",
+          "description": "What needs to happen next for this change (for example `commit`, `apply_rebase`, `resolve_conflicts`, `rebase_and_resolve_conflicts`, `approve`, `submit_receipt`, `land`, `unblock_parent` or `none`)."
+        },
+        "actor": {
+          "enum": [
+            "agent",
+            "velocity",
+            "owner",
+            null
+          ],
+          "description": "Who is responsible for `next_action`, or null when the change is closed."
+        },
+        "affected_head": {
+          "$ref": "#/$defs/ObjectId",
+          "description": "The head tree that `next_action` applies to."
+        },
+        "conflict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StatusConflict"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Structured details when the change holds open stored conflicts."
         }
       },
       "required": [
@@ -3938,12 +4016,14 @@
           ]
         },
         "recheck_mode": {
+          "description": "How a receipt is reused after the base moves: `reach` reuses across lands with disjoint build-unit reach; `merge` reuses whenever the merge onto the new base is clean.",
           "enum": [
             "reach",
             "merge"
           ]
         },
         "tier": {
+          "description": "Review tier derived from the diff against the parent: `prose` (UTF-8 docs only; skips pre-land checks), `normal` (ordinary code), or `sensitive` (touches configured sensitive paths).",
           "enum": [
             "prose",
             "normal",
@@ -3951,6 +4031,7 @@
           ]
         },
         "reach": {
+          "description": "Build units the change's edits reach (unit names, or `all` when touching shared build inputs), used to decide whether a receipt stays valid across other lands.",
           "oneOf": [
             {
               "type": "array",
@@ -4780,6 +4861,153 @@
         "channel"
       ],
       "additionalProperties": false
+    },
+    "FileSummary": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "added",
+            "deleted",
+            "modified"
+          ]
+        },
+        "binary": {
+          "type": "boolean"
+        },
+        "lines_added": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lines_removed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "path",
+        "status",
+        "binary",
+        "lines_added",
+        "lines_removed"
+      ],
+      "additionalProperties": false
+    },
+    "StatusConflict": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "base_applied": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "needs_naming_again": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "paths",
+        "base_applied",
+        "needs_naming_again"
+      ],
+      "additionalProperties": false
+    },
+    "rosen.events/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.events/v1"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "seq": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string"
+              },
+              "change": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "detail": {}
+            },
+            "required": [
+              "seq",
+              "kind",
+              "change",
+              "detail"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "last_event": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "schema",
+        "events",
+        "last_event"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "events --once"
+      ]
+    },
+    "rosen.run/v1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "rosen.run/v1"
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "output": {
+          "type": "string"
+        },
+        "log": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "exit_code",
+        "success",
+        "output",
+        "log"
+      ],
+      "additionalProperties": false,
+      "x-commands": [
+        "mcp run"
+      ]
     }
   }
 }

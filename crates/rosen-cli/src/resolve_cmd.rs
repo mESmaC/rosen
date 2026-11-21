@@ -114,11 +114,23 @@ fn print_answer(json: bool, answer: &ConflictsResolved) {
     }
     if answer.open_paths.is_empty() {
         println!("change {} has no open conflicts", answer.change);
+        if crate::managed::is_managed() {
+            println!("next: name the change again with `rosen commit -m \"<message>\"`");
+        }
     } else {
         let open = answer.open_paths.join(" ");
         println!(
             "change {} still has open conflicts in: {open}",
             answer.change
+        );
+        let quoted: Vec<String> = answer
+            .open_paths
+            .iter()
+            .map(|p| crate::managed::shell_quote(p))
+            .collect();
+        println!(
+            "next: resolve them, then run `rosen resolve {}`",
+            quoted.join(" ")
         );
     }
 }

@@ -29,11 +29,13 @@ A workspace is any directory `rosen change new --workspace` made; commands
 run inside one use its change when no change is given.
 
 Environment:
-  ROSEN_AGENT     your agent identity (owner, author, submitter); defaults
-                  to the OS user name
-  ROSEN_CHANGE    the change `claim`, `share`, `wait`, `release` and
-                  `status` act on when no --change is given
-  ROSEN_ENDPOINT  the daemon's pipe name or socket path
+  ROSEN_AGENT              your agent identity (owner, author, submitter);
+                           defaults to the OS user name
+  ROSEN_CHANGE             the change `claim`, `share`, `wait`, `release`,
+                           `diff` and `status` act on when no --change is given
+  ROSEN_MANAGED_WORKSPACE  set with ROSEN_CHANGE when an external host (such as
+                           Velocity) manages the workspace, watcher and landing
+  ROSEN_ENDPOINT           the daemon's pipe name or socket path
 
 Output:
   Text is for people. With --json each command prints one JSON object per
@@ -118,13 +120,19 @@ pub enum Command {
     /// Create, list, inspect or abandon changes.
     #[command(subcommand)]
     Change(ChangeCommand),
-    /// Record a named snapshot of the current workspace.
+    /// Record a named snapshot of the current workspace and report the
+    /// post-commit file summary and land check in one response.
     ///
     /// While `rosen workspace watch` (or Velocity) watches a workspace, its
     /// writes are snapshotted within 2 s; commit to give a point in the
     /// change's history a message. Commit scans the whole workspace and
     /// sends only files that differ from the last snapshot, skipping paths
     /// the workspace's .gitignore files ignore unless already tracked.
+    ///
+    /// The response includes `files` (every file added, modified or deleted
+    /// in this change against its parent, with line counts) and `land_check`
+    /// (merge, approval, receipt, stack, `tier`, `reach` and `recheck_mode`)
+    /// so you do not need to call `status` before and after committing.
     Commit {
         /// Message describing the snapshot.
         #[arg(short, long)]
@@ -134,8 +142,31 @@ pub enum Command {
         #[arg(long, value_name = "DIR")]
         workspace: Option<PathBuf>,
     },
-    /// Show a change: its state, head, conflicts and path claims, and for a
-    /// local workspace, what is not yet stored on the server.
+    /// Show a change: what happens next (`next_action`, `actor`,
+    /// `affected_head`), its state, head, conflicts, path claims, land check
+    /// and local workspace state.
+    ///
+    /// Structured guidance fields:
+    /// - `next_action`: what needs to happen next (for example `commit`,
+    ///   `apply_rebase`, `resolve_conflicts`, `rebase_and_resolve_conflicts`,
+    ///   `approve`, `submit_receipt`, `land`, `unblock_parent` or `none`).
+    /// - `actor`: who acts next: `agent`, `velocity` or `owner` (or `null`
+    ///   when closed).
+    /// - `affected_head`: the head tree that `next_action` applies to.
+    /// - `conflict`: for stored conflicts, names the conflicting `paths`,
+    ///   whether the new base is applied in this workspace (`base_applied`),
+    ///   and whether the change must be named again (`needs_naming_again`).
+    ///
+    /// Land-check fields (`land_check`):
+    /// - `tier`: review tier from the diff against the parent: `prose`
+    ///   (UTF-8 docs only; skips pre-land checks), `normal` (ordinary code),
+    ///   or `sensitive` (touches paths listed under `sensitive` in rosen.toml).
+    /// - `reach`: build units the change's edits reach (unit names, or
+    ///   `"all"` when touching shared build inputs), used to decide whether
+    ///   a receipt stays valid across other lands.
+    /// - `recheck_mode`: how a receipt is reused when the base moves:
+    ///   `reach` (reusable across lands with disjoint `reach`) or `merge`
+    ///   (reusable whenever the merge onto the new base is clean).
     ///
     /// Inside a workspace (or with --workspace) it also scans every file,
     /// as `rosen workspace delete` would, and lists files that differ from
@@ -144,12 +175,15 @@ pub enum Command {
     /// workspace's last snapshot (apply it before relying on line numbers).
     /// Reads only: it never snapshots or changes a file.
     Status(StatusArgs),
-    /// Show a change's diff against its parent, as the server holds it.
+    /// Show a change's diff against its parent, including pending workspace
+    /// edits.
     ///
-    /// The server diffs the change's head, the tree of its latest snapshot
-    /// (or of its merge onto a new base after a rebase), against the base
-    /// commit or change it sits on. Edits made in the last 2 s may not be
-    /// snapshotted yet. Needs no workspace: `--change` diffs any change.
+    /// Inside the change's workspace, pending edits from the last 2 s are
+    /// snapshotted first so the diff is complete; any file that could not be
+    /// snapshotted is listed prominently in `unsnapshotted` (and as a warning
+    /// in text output). The server diffs the change's head against the base
+    /// commit or change it sits on. Needs no workspace: `--change` diffs any
+    /// change.
     Diff(ChangePaths),
     /// Show history of the base, a commit or a change, or of some paths.
     ///
@@ -183,12 +217,13 @@ pub enum Command {
     /// Record that a change edits paths another change has claimed. A share
     /// is never refused; it tells the holder its path is edited knowingly.
     Share(ClaimArgs),
-    /// Wait until no other change claims the paths, then exit.
+    /// Wait until no other change claims the paths, then exit; with `--park`,
+    /// record the wait and return at once.
     ///
-    /// Records the wait and blocks. A `released` event for your change wakes
-    /// it when the holder lands, is abandoned or releases the paths. Exits at
-    /// once for paths nobody claims.
-    Wait(ClaimArgs),
+    /// Records the wait and blocks unless `--park` is given. A `released`
+    /// event for your change wakes it when the holder lands, is abandoned or
+    /// releases the paths. Exits at once for paths nobody claims.
+    Wait(WaitArgs),
     /// Drop a change's claims, shares and waits on paths, waking any change
     /// waiting on them. `--all` drops every record the change holds.
     Release(ReleaseArgs),
@@ -213,9 +248,10 @@ pub enum Command {
     /// changes). After-land projects need neither. A stack lands bottom first.
     ///
     /// With --check, reports every gate a land would apply on the current
-    /// base (merge, approval, receipt and stack), with the review tier and
-    /// build-unit reach, and lands nothing. It exits unsuccessfully when the
-    /// change would not land.
+    /// base (merge, approval, receipt and stack), with `tier` (`prose`,
+    /// `normal` or `sensitive`), `reach` (build units reached, or `"all"`),
+    /// and `recheck_mode` (`reach` or `merge`), and lands nothing. It exits
+    /// unsuccessfully when the change would not land.
     Land {
         /// Change to land.
         change: String,
@@ -296,6 +332,13 @@ pub enum Command {
         /// storing a cursor. For dashboards and the Velocity view.
         #[arg(long)]
         all: bool,
+        /// Return pending events up to the server's latest sequence number
+        /// and exit instead of streaming indefinitely.
+        #[arg(long)]
+        once: bool,
+        /// With `--once`, return at most this many events.
+        #[arg(short = 'n', long, requires = "once")]
+        limit: Option<usize>,
     },
     /// Enroll this machine in a project, or list, approve and revoke the
     /// machines enrolled in it.
@@ -310,16 +353,18 @@ pub enum Command {
     /// For an agent host to start, not to run by hand: it speaks MCP on
     /// stdin and stdout until stdin closes. Each tool is one `rosen`
     /// command, named by its words joined with `_` (`change_new`), taking
-    /// the command's arguments by name and returning its `--json` output.
-    /// A command that fails or is refused comes back as an error result
-    /// holding its `rosen.error/v1` object.
+    /// the command's arguments by name and returning its versioned JSON as
+    /// `structuredContent` (plus a text copy for compatibility). A command
+    /// that fails or is refused comes back as an error result holding its
+    /// `rosen.error/v1` object.
     ///
-    /// The commands read $ROSEN_ENDPOINT, $ROSEN_AGENT and $ROSEN_CHANGE as
-    /// they do from a shell, so the host sets them for this server.
-    ///
-    /// Commands that run until something happens elsewhere (`wait`,
-    /// `events`, `workspace watch`), `run`, and the operator's commands
-    /// (`import`, `server start`, `machine`) are not offered.
+    /// The commands read $ROSEN_ENDPOINT, $ROSEN_AGENT, $ROSEN_CHANGE and
+    /// $ROSEN_MANAGED_WORKSPACE as they do from a shell, so the host sets
+    /// them for this server. `wait` parks (records the wait and returns at
+    /// once), `events` reads pending events once, and `run` runs in the
+    /// machine's run queue. `workspace watch` and the operator's commands
+    /// (`import`, `mirror`, `server start|stop|relay`, `machine`) are not
+    /// offered.
     Mcp(McpArgs),
     /// Run a command in its turn in this machine's run queue.
     ///
@@ -765,6 +810,25 @@ pub struct ClaimArgs {
     /// `/` everything under a directory.
     #[arg(required = true)]
     pub paths: Vec<String>,
+}
+
+/// Parameters for `rosen wait`: paths to wait on, and whether to park
+/// instead of blocking.
+#[derive(Debug, Args)]
+pub struct WaitArgs {
+    #[command(flatten)]
+    pub claim: ClaimArgs,
+    /// Record the wait and return at once (parking) instead of blocking until
+    /// released. The managing host wakes the agent on the `released` event.
+    #[arg(long)]
+    pub park: bool,
+}
+
+/// Builds the clap command tree, adapted for managed workspaces when `managed`
+/// is true.
+pub fn command(managed: bool) -> clap::Command {
+    use clap::CommandFactory;
+    crate::managed::configure_command(Cli::command(), managed)
 }
 
 /// What `rosen overlaps` queries: a change, a set of paths, or a change

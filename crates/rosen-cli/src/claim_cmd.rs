@@ -14,7 +14,7 @@ use crate::output::WAIT_SCHEMA;
 pub enum ClaimVerb {
     Claim { exclusive: bool },
     Share,
-    Wait,
+    Wait { park: bool },
     Release,
 }
 
@@ -35,7 +35,7 @@ pub async fn run(
     match verb {
         ClaimVerb::Claim { .. } => Ok(print_claim(json, &client.claim_paths(request).await?)),
         ClaimVerb::Share => share(json, &client, request).await,
-        ClaimVerb::Wait => wait(json, &client, request).await,
+        ClaimVerb::Wait { park } => wait(json, &client, request, park).await,
         ClaimVerb::Release => release(json, &client, request).await,
     }
 }
@@ -52,14 +52,26 @@ async fn share(json: bool, client: &Client, request: ClaimRequest) -> Result<Suc
     Ok(true)
 }
 
-async fn wait(json: bool, client: &Client, request: ClaimRequest) -> Result<Succeeded, Error> {
+async fn wait(
+    json: bool,
+    client: &Client,
+    request: ClaimRequest,
+    park: bool,
+) -> Result<Succeeded, Error> {
     let paths = request.paths.join(" ");
-    if !json {
-        eprintln!("waiting for the claims on {paths} to be released");
-    }
-    let outcome = client.wait_until_free(request).await?;
+    let outcome = if park {
+        client.wait_paths(request).await?
+    } else {
+        if !json {
+            eprintln!("waiting for the claims on {paths} to be released");
+        }
+        client.wait_until_free(request).await?
+    };
     if json {
         println!("{}", json!({ "schema": WAIT_SCHEMA, "wait": outcome }));
+    } else if park && !outcome.waiting_on.is_empty() {
+        println!("parked waiting on {paths} (cursor {})", outcome.cursor);
+        print_holders("claimed by", &outcome.waiting_on);
     } else {
         println!("free: {paths}");
     }

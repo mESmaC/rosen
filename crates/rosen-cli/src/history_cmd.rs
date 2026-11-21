@@ -3,8 +3,8 @@
 
 use crate::server::Succeeded;
 use rosen_client::protocol::{Diff, DiffRequest, FileDiff, LineKind, Log, LogEntry, LogRequest};
-use rosen_client::snapshot::WorkspaceMarker;
-use rosen_client::{Endpoint, Error};
+use rosen_client::snapshot::{pending_journal, SnapshotError, WorkspaceMarker};
+use rosen_client::{Client, Endpoint, Error};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -34,14 +34,57 @@ pub async fn diff(
     change: Option<&str>,
     paths: &[PathBuf],
 ) -> Result<Succeeded, Error> {
+    let target = change_of(change)?;
     let request = DiffRequest {
-        to: Some(change_of(change)?),
+        to: Some(target.clone()),
         paths: repository_paths(paths)?,
         ..DiffRequest::default()
     };
     let client = rosen_client::connect_or_start(endpoint).await?;
-    print_diff(json, &client.diff(request).await?);
+    let unsnapshotted = match matching_workspace(&target)? {
+        Some(root) => flush_workspace(&client, &root).await,
+        None => Vec::new(),
+    };
+    print_diff(json, &client.diff(request).await?, &unsnapshotted);
     Ok(true)
+}
+
+/// The current workspace root when its change matches `target`.
+fn matching_workspace(target: &str) -> Result<Option<PathBuf>, Error> {
+    let cwd = std::env::current_dir()?;
+    let Some(root) = WorkspaceMarker::find_root(&cwd) else {
+        return Ok(None);
+    };
+    let marker = WorkspaceMarker::read(&root)?;
+    let id = marker.change.to_string();
+    Ok((!target.is_empty() && (id == target || id.starts_with(target))).then_some(root))
+}
+
+/// Flushes pending edits in `root` so `rosen diff` sees writes from the last
+/// 2 s. If a flush cannot complete (for example a closed change or held file),
+/// returns the paths not yet stored on the server so they can be warned on.
+async fn flush_workspace(client: &Client, root: &Path) -> Vec<String> {
+    match client.snapshot_workspace(root, None).await {
+        Ok(report) => report.unreadable,
+        Err(_) => scan_unsnapshotted(client, root).await.unwrap_or_default(),
+    }
+}
+
+async fn scan_unsnapshotted(client: &Client, root: &Path) -> Result<Vec<String>, Error> {
+    let mut snapshotter = client.open_snapshotter(root).await?;
+    let pending = pending_journal(root)?;
+    tokio::task::spawn_blocking(move || {
+        let mut paths = snapshotter.uncaptured_paths()?;
+        if pending > 0 {
+            paths.extend(snapshotter.unuploaded_paths()?);
+            paths.sort();
+            paths.dedup();
+        }
+        Ok::<_, SnapshotError>(paths)
+    })
+    .await
+    .map_err(|err| Error::Unexpected(format!("workspace scan stopped: {err}")))?
+    .map_err(Error::from)
 }
 
 /// `--change`, then the workspace holding the current directory, then
@@ -141,10 +184,23 @@ fn landed_line(entry: &LogEntry) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("; "))
 }
 
-fn print_diff(json: bool, diff: &Diff) {
+fn print_diff(json: bool, diff: &Diff, unsnapshotted: &[String]) {
     if json {
-        println!("{}", json!({ "schema": DIFF_SCHEMA, "diff": diff }));
+        println!(
+            "{}",
+            json!({
+                "schema": DIFF_SCHEMA,
+                "diff": diff,
+                "unsnapshotted": unsnapshotted,
+            })
+        );
         return;
+    }
+    if !unsnapshotted.is_empty() {
+        println!(
+            "warning: files not yet snapshotted (excluded from diff): {}",
+            unsnapshotted.join(", ")
+        );
     }
     for file in &diff.files {
         print_file(file);

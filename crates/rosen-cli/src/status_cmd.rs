@@ -15,20 +15,20 @@ use crate::output::STATUS_SCHEMA;
 
 /// What a local workspace holds beyond the server's copy of its change.
 #[derive(Serialize)]
-struct WorkspaceState {
-    path: PathBuf,
+pub(crate) struct WorkspaceState {
+    pub(crate) path: PathBuf,
     /// The tree this workspace last stored or was written from.
-    stored_tree: ObjectId,
+    pub(crate) stored_tree: ObjectId,
     /// Snapshots captured offline and not yet acknowledged by the server.
-    journal_pending: usize,
+    pub(crate) journal_pending: usize,
     /// Files whose content differs from what the server holds: those the
     /// waiting journal records carry, and those edited on disk since the
     /// newest captured snapshot.
-    unsnapshotted: Vec<String>,
+    pub(crate) unsnapshotted: Vec<String>,
     /// The server moved the change head past this workspace's tree by a
     /// rebase, which is waiting to be applied (SPEC.md R2). A newer snapshot
     /// stored from another workspace of the change does not count.
-    rebase_waiting: bool,
+    pub(crate) rebase_waiting: bool,
 }
 
 pub async fn run(json: bool, endpoint: &Endpoint, args: &StatusArgs) -> Result<Succeeded, Error> {
@@ -61,6 +61,17 @@ pub async fn run(json: bool, endpoint: &Endpoint, args: &StatusArgs) -> Result<S
         Some(root) => Some(scan_workspace(&client, &root, &record).await?),
         None => None,
     };
+    let managed = crate::managed::is_managed();
+    let current_agent = std::env::var("ROSEN_AGENT")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let next = crate::status_next::derive(
+        &record,
+        gates.as_ref(),
+        local.as_ref(),
+        managed,
+        current_agent.as_deref(),
+    );
     if json {
         let body = json!({
             "schema": STATUS_SCHEMA,
@@ -68,10 +79,21 @@ pub async fn run(json: bool, endpoint: &Endpoint, args: &StatusArgs) -> Result<S
             "claims": claims,
             "workspace": local,
             "land_check": gates,
+            "next_action": next.next_action,
+            "actor": next.actor,
+            "affected_head": next.affected_head,
+            "conflict": next.conflict,
         });
         println!("{body}");
     } else {
-        print_text(&record, &claims, gates.as_ref(), local.as_ref());
+        print_text(
+            &record,
+            &claims,
+            gates.as_ref(),
+            local.as_ref(),
+            &next,
+            managed,
+        );
     }
     Ok(true)
 }
@@ -142,6 +164,8 @@ fn print_text(
     claims: &[PathClaim],
     gates: Option<&LandCheck>,
     local: Option<&WorkspaceState>,
+    next: &crate::status_next::NextStep,
+    managed: bool,
 ) {
     let change = &record.change;
     println!("change:    {}", change.id);
@@ -157,6 +181,7 @@ fn print_text(
     for conflict in &change.conflicts {
         println!("  {conflict}");
     }
+    print_next(record, next, managed);
     if let Some(gates) = gates {
         print_gates(gates);
     }
@@ -169,6 +194,48 @@ fn print_text(
         };
         println!("  {kind} {}", claim.path);
     }
+    print_workspace(local);
+}
+
+fn print_next(record: &ChangeRecord, next: &crate::status_next::NextStep, managed: bool) {
+    let actor = next.actor.map_or("none", crate::status_next::Actor::as_str);
+    println!(
+        "next:      {} (actor: {actor}, head: {})",
+        next.next_action, next.affected_head
+    );
+    let Some(conflict) = &next.conflict else {
+        return;
+    };
+    let applied = match conflict.base_applied {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    };
+    let naming = if conflict.needs_naming_again {
+        "yes"
+    } else {
+        "no"
+    };
+    let paths = if conflict.paths.is_empty() {
+        "(none listed)".to_owned()
+    } else {
+        conflict.paths.join(", ")
+    };
+    println!("conflict:  paths: {paths}; base applied: {applied}; needs naming again: {naming}");
+    let commands = crate::managed::conflict_commands(
+        &conflict.paths,
+        conflict.base_applied,
+        conflict.needs_naming_again,
+        &record.change.id.to_string(),
+        managed,
+    );
+    println!("commands:");
+    for cmd in commands {
+        println!("  {cmd}");
+    }
+}
+
+fn print_workspace(local: Option<&WorkspaceState>) {
     let Some(local) = local else { return };
     println!("workspace: {}", local.path.display());
     if local.journal_pending > 0 {
@@ -189,7 +256,7 @@ fn print_text(
 }
 
 /// The tier and land gate summary on the current base (R8 "Land check").
-fn print_gates(gates: &LandCheck) {
+pub(crate) fn print_gates(gates: &LandCheck) {
     let reach = crate::land_cmd::reach_text(&gates.reach);
     println!("tier:      {} (reach {reach})", gates.tier);
     for (gate, verdict) in crate::land_cmd::gate_lines(gates) {

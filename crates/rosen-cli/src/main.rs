@@ -10,6 +10,7 @@ mod import;
 mod land_cmd;
 mod machine_cmd;
 mod machine_list;
+mod managed;
 mod mcp;
 mod mcp_tools;
 mod mirror_cmd;
@@ -23,12 +24,13 @@ mod review_status;
 mod run_cmd;
 mod server;
 mod status_cmd;
+mod status_next;
 mod workspace_cmd;
 
 use std::process::ExitCode;
 
 use claim_cmd::ClaimVerb;
-use clap::Parser;
+use clap::FromArgMatches;
 use commands::{Cli, Command, ServerCommand, WorkspaceCommand};
 use rosen_client::Endpoint;
 
@@ -36,7 +38,12 @@ use rosen_client::Endpoint;
 const USAGE_EXIT: u8 = 2;
 
 fn main() -> ExitCode {
-    let cli = match Cli::try_parse() {
+    let managed = managed::is_managed();
+    let matches = match commands::command(managed).try_get_matches() {
+        Ok(matches) => matches,
+        Err(error) => return report_usage_error(&error),
+    };
+    let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => return report_usage_error(&error),
     };
@@ -45,8 +52,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let Some(command) = &cli.command else {
-        use clap::CommandFactory;
-        return report_usage_error(&Cli::command().error(
+        return report_usage_error(&commands::command(managed).error(
             clap::error::ErrorKind::MissingSubcommand,
             "a command is required",
         ));
@@ -107,9 +113,21 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
         Command::Server(ServerCommand::Relay { allow }) => {
             block_on(server::relay(json, &endpoint, allow))
         }
-        Command::Events { after, agent, all } => {
-            events(json, &endpoint, *after, agent.as_deref(), *all)
-        }
+        Command::Events {
+            after,
+            agent,
+            all,
+            once,
+            limit,
+        } => events(
+            json,
+            &endpoint,
+            *after,
+            agent.as_deref(),
+            *all,
+            *once,
+            *limit,
+        ),
         Command::Config(config) => block_on(config_cmd::run(json, &endpoint, config)),
         Command::Mirror(commands::MirrorCommand::Adopt { commit }) => {
             block_on(mirror_cmd::adopt(json, &endpoint, *commit))
@@ -194,19 +212,26 @@ fn history(
 }
 
 /// Streams events for one agent, or for the whole project with `--all`.
+/// With `--once`, drains pending events up to now and exits.
 fn events(
     json: bool,
     endpoint: &Endpoint,
     after: Option<u64>,
     agent: Option<&str>,
     all: bool,
+    once: bool,
+    limit: Option<usize>,
 ) -> rosen_client::Result<server::Succeeded> {
     let agent = if all {
         None
     } else {
         Some(change_cmd::resolve_owner(agent)?)
     };
-    block_on(server::stream_events(json, endpoint, agent, after))
+    if once {
+        block_on(server::poll_events(json, endpoint, agent, after, limit))
+    } else {
+        block_on(server::stream_events(json, endpoint, agent, after))
+    }
 }
 
 /// The claim, share, wait or release a command asks for, if it is one.
@@ -219,7 +244,7 @@ fn path_record_call(command: &Command) -> Option<(ClaimVerb, Option<&str>, &[Str
             paths,
         ),
         Command::Share(args) => (ClaimVerb::Share, args),
-        Command::Wait(args) => (ClaimVerb::Wait, args),
+        Command::Wait(args) => (ClaimVerb::Wait { park: args.park }, &args.claim),
         Command::Release(args) => {
             let change = args.change.as_deref();
             return Some((ClaimVerb::Release, change, &args.paths));

@@ -8,7 +8,7 @@ use crate::output::REBASE_SCHEMA;
 use crate::server::Succeeded;
 use rosen_client::protocol::ChangeRecord;
 use rosen_client::snapshot::WorkspaceMarker;
-use rosen_client::{Endpoint, Error};
+use rosen_client::{Client, Endpoint, Error};
 use rosen_core::ChangeParent;
 use serde_json::json;
 
@@ -23,7 +23,8 @@ pub async fn run(
         let change = crate::claim_cmd::change_of(change)?;
         let client = rosen_client::connect_or_start(endpoint).await?;
         let record = client.rebase_change(&change).await?;
-        print_answer(json, &record, None);
+        let conflicts = conflict_paths(&client, &record).await;
+        print_answer(json, &record, None, &conflicts);
         return Ok(true);
     };
     let owner = crate::change_cmd::resolve_owner(None)?;
@@ -33,17 +34,47 @@ pub async fn run(
     let report = client.snapshot_workspace(&root, None).await?;
     let record = client.rebase_change(&report.change.to_string()).await?;
     client.apply_rebase(&root, &owner).await?;
-    print_answer(json, &record, Some(&root));
+    let conflicts = conflict_paths(&client, &record).await;
+    print_answer(json, &record, Some(&root), &conflicts);
     Ok(true)
 }
 
-fn print_answer(json: bool, record: &ChangeRecord, workspace: Option<&Path>) {
+async fn conflict_paths(client: &Client, record: &ChangeRecord) -> Vec<String> {
+    if record.change.conflicts.is_empty() {
+        return Vec::new();
+    }
+    let gates = client.land_check(&record.change.id.to_string()).await.ok();
+    crate::status_next::stored_conflict_paths(gates.as_ref())
+}
+
+fn print_answer(
+    json: bool,
+    record: &ChangeRecord,
+    workspace: Option<&Path>,
+    conflict_paths: &[String],
+) {
+    let change = &record.change;
+    let managed = crate::managed::is_managed();
+    let commands = if change.conflicts.is_empty() {
+        Vec::new()
+    } else {
+        crate::managed::conflict_commands(
+            conflict_paths,
+            Some(workspace.is_some()),
+            crate::status_next::was_named(record),
+            &change.id.to_string(),
+            managed,
+        )
+    };
     if json {
-        let rebase = json!({ "change": record, "workspace": workspace });
+        let mut rebase = json!({ "change": record, "workspace": workspace });
+        if !change.conflicts.is_empty() {
+            rebase["conflict_paths"] = json!(conflict_paths);
+            rebase["next_commands"] = json!(commands);
+        }
         println!("{}", json!({ "schema": REBASE_SCHEMA, "rebase": rebase }));
         return;
     }
-    let change = &record.change;
     match change.parent {
         ChangeParent::Base(commit) => println!("rebased change {} onto {commit}", change.id),
         ChangeParent::Change(below) => println!("change {} stays on change {below}", change.id),
@@ -52,10 +83,21 @@ fn print_answer(json: bool, record: &ChangeRecord, workspace: Option<&Path>) {
         println!("wrote its head {} into {}", change.head, root.display());
     }
     if !change.conflicts.is_empty() {
-        println!(
-            "{} open conflict(s): combine both sides between the conflict markers, \
-             then run `rosen resolve <file>`",
-            change.conflicts.len()
-        );
+        print_conflicts(change.conflicts.len(), conflict_paths, &commands);
+    }
+}
+
+fn print_conflicts(count: usize, paths: &[String], commands: &[String]) {
+    if paths.is_empty() {
+        println!("{count} open conflict(s):");
+    } else {
+        println!("{count} open conflict(s) in:");
+        for path in paths {
+            println!("  {path}");
+        }
+    }
+    println!("Combine both sides between the conflict markers, then run:");
+    for cmd in commands {
+        println!("  {cmd}");
     }
 }
