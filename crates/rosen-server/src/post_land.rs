@@ -1,5 +1,6 @@
 //! Typed batch verification, separate from R8's post-land housekeeping.
 pub(crate) mod builds;
+pub mod deploy;
 pub mod failures;
 pub mod status;
 pub mod store;
@@ -31,6 +32,7 @@ fn open(state: &ServerState) -> Result<Connection, ErrorBody> {
     store::ensure_schema(&conn).map_err(internal)?;
     builds::ensure_schema(&conn).map_err(internal)?;
     failures::ensure_schema(&conn).map_err(internal)?;
+    deploy::ensure_schema(&conn).map_err(internal)?;
     Ok(conn)
 }
 
@@ -49,15 +51,15 @@ fn run(
     };
     if let Some((job, submitted)) = passed {
         validate(state, &ledger, &name, &job)?;
-        if !passed_job(&mut conn, &name, &job, &submitted).map_err(internal)? {
+        if !passed_job(state, &mut conn, &name, &job, &submitted)? {
             return Err(ErrorBody::new(
                 ErrorCode::InvalidArgument,
                 "commit is not a land",
             ));
         }
     }
-    state.events.deliver_staged();
     deliver(state, &conn)?;
+    state.events.deliver_staged();
     let kind = next_kind(state, &conn, &name, kind)?;
     let job = newest(&conn, &name, kind)?
         .map(|commit| job_at(state, commit, kind))
@@ -161,14 +163,34 @@ fn internal(err: impl std::fmt::Display) -> ErrorBody {
 }
 
 fn passed_job(
+    state: &ServerState,
     conn: &mut Connection,
     name: &str,
     job: &PostLandJob,
     submitted: &submitter::Submitted,
-) -> rusqlite::Result<bool> {
+) -> Result<bool, ErrorBody> {
     match job.kind {
-        CheckKind::Test => store::passed_by(conn, name, &job.commit, Some(submitted)),
-        CheckKind::Build => builds::passed(conn, name, &job.commit, Some(submitted)),
+        CheckKind::Test => {
+            let resolved = state
+                .project_config
+                .at_commit(&job.commit)
+                .map_err(internal)?;
+            let objects = state.config.objects_dir();
+            store::passed_by_with(conn, name, &job.commit, Some(submitted), |tx, prev, end| {
+                deploy::on_green_range(
+                    tx,
+                    &objects,
+                    name,
+                    prev,
+                    end,
+                    &job.commit,
+                    &resolved.config.deploy,
+                )
+            })
+        }
+        CheckKind::Build => {
+            builds::passed(conn, name, &job.commit, Some(submitted)).map_err(internal)
+        }
     }
 }
 

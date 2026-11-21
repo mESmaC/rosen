@@ -1,7 +1,9 @@
 //! External post-land checker calls (SPEC R12).
 use crate::connection::{unexpected, Client};
 use crate::Error;
-use rosen_protocol::{PostLandJob, PostLandStatus, PostLandWork, Request, Response};
+use rosen_protocol::{
+    DeployRecord, PostLandJob, PostLandStatus, PostLandWork, Request, Response, SubmitDeployResult,
+};
 
 impl Client {
     /// Build/lint jobs after landing, independently of the test prefix.
@@ -44,6 +46,14 @@ impl Client {
     pub async fn post_land_passed(&self, job: PostLandJob) -> Result<PostLandWork, Error> {
         match self.request(Request::PostLandPassed(job)).await? {
             Response::PostLand(work) => Ok(work),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Records the outcome of a `deploy_due` step run by an external checker (R12).
+    pub async fn deploy_result(&self, result: SubmitDeployResult) -> Result<DeployRecord, Error> {
+        match self.request(Request::DeployResult(result)).await? {
+            Response::DeployRecorded(record) => Ok(*record),
             other => Err(unexpected(other)),
         }
     }

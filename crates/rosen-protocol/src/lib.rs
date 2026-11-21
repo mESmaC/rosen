@@ -16,6 +16,7 @@ pub mod collapse;
 pub mod collapse_check;
 pub mod config;
 pub mod conflict;
+pub mod deploy;
 pub mod edits;
 pub mod frame;
 pub mod history;
@@ -48,6 +49,7 @@ pub use collapse::{CollapseHealth, FeedError, FeedHealth, FeedState, LedgerCurso
 pub use collapse_check::{CollapseCheckItem, CollapseCheckReport, CollapseCheckStatus};
 pub use config::{ConfigQuery, ConfigRecord};
 pub use conflict::{ConflictsResolved, ResolveConflicts, ResolvedPath};
+pub use deploy::{DeployRecord, DeployStatus, SubmitDeployResult};
 pub use edits::{EditRegions, EditSpan, PathEdit, Regions};
 pub use history::{
     Blame, BlameRange, BlameRequest, Diff, DiffHunk, DiffLine, DiffRequest, DirEntry, FileDiff,

@@ -235,6 +235,130 @@ async fn merge_mode_prioritizes_builds_and_starts_from_last_built() {
     assert_eq!(config.workspace_base, Some(b));
 }
 
+// Risk (R12, #441): a green range touching a deploy step's paths must emit
+// `deploy_due` once per range, none for docs-only lands, run steps one at a
+// time in order, skip pending steps covered by a newer green, and record
+// `deploy_result` from checkers.
+#[tokio::test(flavor = "multi_thread")]
+async fn deploy_steps_gate_on_paths_serialize_and_skip_superseded() {
+    let config = b"[deploy.server]\ncommand = \"deploy-server\"\npaths = [\"server/**\"]\n\
+        secrets = [\"DEPLOY_TOKEN\"]\nplatforms = [\"linux\"]\n\
+        [deploy.web]\ncommand = \"deploy-web\"\npaths = [\"web/**\"]\n";
+    let (_temp, state) = setup_files(&[("rosen.toml", config)]);
+    assert_deploy_config(&state, &["server", "web"]).await;
+
+    // Docs-only land goes green: no deploy_due.
+    let docs_commit = land_path(&state, "docs/readme.md", b"hello").await;
+    pass_next(&state, docs_commit).await;
+    assert!(deploy_events(&state, EventKind::DeployDue).is_empty());
+
+    // Land touching server/ and web/ goes green: only `server` is due first.
+    let c1 = land_paths(&state, &[("server/app.rs", b"v1"), ("web/index.js", b"v1")]).await;
+    pass_next(&state, c1).await;
+    let dues = deploy_events(&state, EventKind::DeployDue);
+    assert_eq!(dues.len(), 1);
+    assert_eq!(dues[0].detail["step"], "server");
+    assert_eq!(dues[0].detail["commit"], c1.to_string());
+    assert_eq!(
+        dues[0].detail["secrets"],
+        serde_json::json!(["DEPLOY_TOKEN"])
+    );
+    let server_id = dues[0].detail["id"].as_i64().unwrap();
+
+    // Newer green touching web/ skips pending (c1, web) while server is running.
+    let c2 = land_path(&state, "web/index.js", b"v2").await;
+    pass_next(&state, c2).await;
+    assert_eq!(deploy_events(&state, EventKind::DeployDue).len(), 1);
+
+    // Reporting server result records deploy_result and dispatches (c2, web).
+    let submit = SubmitDeployResult {
+        id: server_id,
+        step: "server".into(),
+        commit: c1,
+        status: DeployStatus::Passed,
+        output: "deployed".into(),
+        submitter: Some(AgentId::new("deployer").unwrap()),
+    };
+    let Response::DeployRecorded(rec) = call(&state, Request::DeployResult(submit.clone())).await
+    else {
+        panic!()
+    };
+    assert_eq!(rec.status, DeployStatus::Passed);
+    assert_eq!(rec.submitter.as_deref(), Some("deployer@server"));
+    call(&state, Request::DeployResult(submit)).await;
+    assert_eq!(deploy_events(&state, EventKind::DeployResult).len(), 1);
+
+    let dues = deploy_events(&state, EventKind::DeployDue);
+    assert_eq!(dues.len(), 2);
+    assert_eq!(dues[1].detail["step"], "web");
+    assert_eq!(dues[1].detail["commit"], c2.to_string());
+    assert_eq!(dues[1].detail["from"], docs_commit.to_string());
+}
+
+async fn assert_deploy_config(state: &Arc<ServerState>, expected: &[&str]) {
+    let Response::Config(shown) = call(state, Request::ConfigShow(ConfigQuery::default())).await
+    else {
+        panic!()
+    };
+    let names: Vec<&str> = shown
+        .config
+        .deploy
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(names, expected);
+}
+
+async fn pass_next(state: &Arc<ServerState>, expected_commit: ObjectId) {
+    let job = next(state).await.job.unwrap();
+    assert_eq!(job.commit, expected_commit);
+    call(state, Request::PostLandPassed(job)).await;
+}
+
+fn deploy_events(state: &ServerState, kind: EventKind) -> Vec<Event> {
+    state
+        .events
+        .after(0)
+        .into_iter()
+        .filter(|e| e.kind == kind)
+        .collect()
+}
+
+async fn land_path(state: &Arc<ServerState>, path: &str, bytes: &[u8]) -> ObjectId {
+    land_paths(state, &[(path, bytes)]).await
+}
+
+async fn land_paths(state: &Arc<ServerState>, files: &[(&str, &[u8])]) -> ObjectId {
+    let create = NewChange {
+        owner: AgentId::new("owner").unwrap(),
+        on: None,
+    };
+    let Response::Change(record) = call(state, Request::ChangeNew(create)).await else {
+        panic!()
+    };
+    let change = record.change.id.to_string();
+    for (path, bytes) in files {
+        let write = WorkspaceWrite {
+            change: change.clone(),
+            path: (*path).into(),
+            data: Some(WorkspaceBytes((*bytes).into())),
+        };
+        call(state, Request::WorkspaceWrite(write)).await;
+    }
+    let Response::Change(record) = call(
+        state,
+        Request::ChangeShow {
+            change: change.clone(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    approve_and_receipt(state, &change, record.change.head, current_base(state)).await;
+    land_named(state, change).await
+}
+
 async fn land_named(state: &Arc<ServerState>, change: String) -> ObjectId {
     let Response::Land(answer) = call(state, Request::Land { change }).await else {
         panic!()

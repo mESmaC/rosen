@@ -66,6 +66,11 @@
 - **Progress events.**
   Opening a session and each accepted bisection result publish one `bisect` event, staged with the change that causes it so it survives a restart.
   Its detail holds the session, kind, step, commit, result, submitter and time, and `progress`: `opened`, `step`, `culprit` or `flaky`.
+- **Deploy steps.**
+  `rosen.toml` may declare `[deploy.<name>]` steps, each with a single-line `command`, optional `paths` globs, `secrets` (names only, never values) and `platforms`.
+  When a full-test green checkpoint advances across a landed range touching a step's `paths` (or any range when `paths` is empty), the server queues the matching steps from the configuration at that green commit in declaration order, atomically with the checkpoint.
+  Steps for one project run one at a time and in order: the server publishes `deploy_due` for the next pending step only when none is running, and marks any pending older run of a step skipped when a newer green already covers it (or removes the step).
+  External checkers report each step's outcome (`passed`, `failed` or `skipped`) through `deploy_result`, which records the submitter and time, publishes a `deploy_result` event and dispatches the next pending step.
 - A flaky result is the checker's concern: a failure is confirmed only after the culprit fails twice and its parent passes.
   Required build reverts run immediately after confirmation; recovery retries an interrupted inverse.
 - **Accept when:** an after-land test failure is bisected, recorded and left landed; an after-land build failure is recorded and reverted, its change reopens with its work intact, and later independent work is preserved.

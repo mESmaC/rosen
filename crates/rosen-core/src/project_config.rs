@@ -90,6 +90,11 @@ pub struct ProjectConfig {
     /// machine. Ledger entries never go this way; the ledger push sends them.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub collapse_channel: bool,
+    /// Named steps an external checker runs after a post-land full-test green
+    /// checkpoint covers a range touching their paths (R12). Kept in source
+    /// declaration order; omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deploy: Vec<DeployStep>,
 }
 
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
@@ -121,6 +126,7 @@ impl Default for ProjectConfig {
             ledger_endpoint: None,
             collapse: None,
             collapse_channel: false,
+            deploy: Vec::new(),
         }
     }
 }
@@ -293,6 +299,91 @@ pub struct Mirror {
     pub remote: Option<String>,
 }
 
+/// One deploy step declared under `[deploy.<name>]` in `rosen.toml` (R12).
+///
+/// Steps run in declaration order, one at a time, after a post-land full-test
+/// green checkpoint covers a landed range touching `paths` (or any green range
+/// when `paths` is empty). `secrets` carries names only, never values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployStep {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub paths: Vec<PathPattern>,
+    #[serde(default)]
+    pub secrets: Vec<String>,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+}
+
+impl DeployStep {
+    /// Whether this step is due for a green landed range that touched `paths`.
+    /// An empty `paths` list is not limited to a subset and matches every range.
+    pub fn matches_any(&self, paths: &[String]) -> bool {
+        self.paths.is_empty()
+            || paths
+                .iter()
+                .any(|path| self.paths.iter().any(|pattern| pattern.matches(path)))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WrittenDeployStep {
+    command: String,
+    #[serde(default)]
+    paths: Vec<PathPattern>,
+    #[serde(default)]
+    secrets: Vec<String>,
+    #[serde(default)]
+    platforms: Vec<String>,
+}
+
+/// `[deploy]` as written in `rosen.toml`: named step tables, kept in their
+/// source declaration order using each key's TOML byte span.
+#[derive(Default)]
+struct WrittenDeploy(Vec<DeployStep>);
+
+impl<'de> Deserialize<'de> for WrittenDeploy {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct DeployVisitor;
+
+        impl<'de> Visitor<'de> for DeployVisitor {
+            type Value = WrittenDeploy;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a [deploy] table of named steps")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut entries: Vec<(usize, DeployStep)> = Vec::new();
+                while let Some((key, step)) =
+                    map.next_entry::<toml::Spanned<String>, WrittenDeployStep>()?
+                {
+                    let start = key.span().start;
+                    entries.push((
+                        start,
+                        DeployStep {
+                            name: key.into_inner(),
+                            command: step.command,
+                            paths: step.paths,
+                            secrets: step.secrets,
+                            platforms: step.platforms,
+                        },
+                    ));
+                }
+                entries.sort_by_key(|(start, _)| *start);
+                Ok(WrittenDeploy(
+                    entries.into_iter().map(|(_, step)| step).collect(),
+                ))
+            }
+        }
+
+        deserializer.deserialize_map(DeployVisitor)
+    }
+}
+
 /// Why a configuration file was not accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError(pub String);
@@ -391,6 +482,7 @@ struct WrittenProjectConfig {
     ledger_endpoint: Option<String>,
     collapse: Option<String>,
     collapse_channel: bool,
+    deploy: WrittenDeploy,
 }
 
 impl Default for WrittenProjectConfig {
@@ -413,6 +505,7 @@ impl Default for WrittenProjectConfig {
             ledger_endpoint: base.ledger_endpoint,
             collapse: base.collapse,
             collapse_channel: base.collapse_channel,
+            deploy: WrittenDeploy::default(),
         }
     }
 }
@@ -443,6 +536,7 @@ impl From<WrittenProjectConfig> for ProjectConfig {
             ledger_endpoint: written.ledger_endpoint,
             collapse: written.collapse,
             collapse_channel: written.collapse_channel,
+            deploy: written.deploy.0,
         }
     }
 }
@@ -523,6 +617,7 @@ impl ProjectConfig {
             )));
         }
         self.validate_generated()?;
+        self.validate_deploy()?;
         self.ignore
             .iter()
             .try_for_each(|line| single_line("ignore", line))?;
@@ -580,6 +675,27 @@ impl ProjectConfig {
         Ok(())
     }
 
+    fn validate_deploy(&self) -> Result<(), ConfigError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for step in &self.deploy {
+            deploy_step_name(&step.name)?;
+            if !seen.insert(step.name.as_str()) {
+                return Err(ConfigError(format!(
+                    "deploy step {:?} is defined more than once",
+                    step.name
+                )));
+            }
+            single_line(&format!("deploy.{}.command", step.name), &step.command)?;
+            for secret in &step.secrets {
+                secret_name(&step.name, secret)?;
+            }
+            for platform in &step.platforms {
+                platform_name(&step.name, platform)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Where the ledger push sends entries (R13): `ledger_endpoint`, or
     /// else the `ledgers` endpoint under `collapse`.
     pub fn ledger_push_url(&self) -> Option<String> {
@@ -622,6 +738,54 @@ fn single_line(key: &str, line: &str) -> Result<(), ConfigError> {
     if line.trim().is_empty() || line.chars().any(char::is_control) {
         return Err(ConfigError(format!(
             "{key} entry {line:?} must be one non-empty line with no control characters"
+        )));
+    }
+    Ok(())
+}
+
+const MAX_SECRET_NAME_LEN: usize = 128;
+const MAX_PLATFORM_LEN: usize = 64;
+
+fn deploy_step_name(name: &str) -> Result<(), ConfigError> {
+    if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(ConfigError(format!(
+            "deploy step name {name:?} must be non-empty with no spaces or control characters"
+        )));
+    }
+    Ok(())
+}
+
+/// Secret entries name secrets only, never values, so a committed `rosen.toml`
+/// cannot carry credentials and error messages never echo a pasted value.
+fn secret_name(step: &str, entry: &str) -> Result<(), ConfigError> {
+    if let Some((prefix, _)) = entry.split_once('=') {
+        return Err(ConfigError(format!(
+            "deploy.{step}.secrets entry {prefix:?}=*** must be a secret name, never a value"
+        )));
+    }
+    let valid_start = |c: char| c.is_ascii_alphabetic() || c == '_';
+    let valid_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-');
+    if entry.is_empty()
+        || entry.len() > MAX_SECRET_NAME_LEN
+        || !entry.chars().next().is_some_and(valid_start)
+        || !entry.chars().all(valid_char)
+    {
+        return Err(ConfigError(format!(
+            "deploy.{step}.secrets must list secret names only (letters, digits, '_' or '-'), never values"
+        )));
+    }
+    Ok(())
+}
+
+fn platform_name(step: &str, platform: &str) -> Result<(), ConfigError> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/');
+    if platform.is_empty()
+        || platform.len() > MAX_PLATFORM_LEN
+        || platform.starts_with('-')
+        || !platform.chars().all(allowed)
+    {
+        return Err(ConfigError(format!(
+            "deploy.{step}.platforms entry {platform:?} must be a non-empty platform name with no spaces or control characters"
         )));
     }
     Ok(())
@@ -936,5 +1100,51 @@ mod tests {
         ] {
             assert!(ProjectConfig::parse(bad).is_err(), "accepted {bad:?}");
         }
+    }
+
+    /// Risk (R12, #441): `[deploy]` steps run in declaration order with
+    /// secret names only; misordered steps, multiline commands, or embedded
+    /// secret values would run steps out of order or commit credentials.
+    #[test]
+    fn deploy_steps_preserve_order_and_validate() {
+        let cfg = ProjectConfig::parse(
+            "[deploy.zeta]\n\
+             command = \"deploy-zeta\"\n\
+             paths = [\"server/\"]\n\
+             secrets = [\"DEPLOY_TOKEN\", \"fly-key\"]\n\
+             platforms = [\"linux\", \"linux/amd64\"]\n\
+             [deploy.alpha]\n\
+             command = \"deploy-alpha\"\n",
+        )
+        .unwrap();
+        let names: Vec<&str> = cfg.deploy.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["zeta", "alpha"]);
+        assert_eq!(
+            cfg.deploy[0].paths,
+            vec![PathPattern::new("server/**").unwrap()]
+        );
+        assert!(cfg.deploy[0].matches_any(&["server/src/main.rs".into()]));
+        assert!(!cfg.deploy[0].matches_any(&["docs/readme.md".into()]));
+        assert!(cfg.deploy[1].matches_any(&["docs/readme.md".into()]));
+
+        for bad in [
+            "[deploy.server]\ncommand = \"\"\n",
+            "[deploy.server]\ncommand = \"a\\nb\"\n",
+            "[deploy.server]\ncommand = \"ok\"\npaths = [\"../escape\"]\n",
+            "[deploy.server]\ncommand = \"ok\"\nsecrets = [\"TOKEN=supersecret\"]\n",
+            "[deploy.server]\ncommand = \"ok\"\nsecrets = [\"Bearer secret\"]\n",
+            "[deploy.server]\ncommand = \"ok\"\n[deploy.server.secrets]\nTOKEN = \"val\"\n",
+            "[deploy.server]\ncommand = \"ok\"\nplatforms = [\"-flag\"]\n",
+            "[deploy.server]\ncommand = \"ok\"\nplatforms = [\"linux macos\"]\n",
+            "[deploy.server]\ncommand = \"ok\"\nextra = 1\n",
+        ] {
+            assert!(ProjectConfig::parse(bad).is_err(), "accepted {bad:?}");
+        }
+        let err = ProjectConfig::parse(
+            "[deploy.server]\ncommand = \"ok\"\nsecrets = [\"TOKEN=supersecret\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.contains("supersecret"), "{err}");
     }
 }

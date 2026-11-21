@@ -88,8 +88,44 @@ pub fn passed_by(
     commit: &ObjectId,
     submitted: Option<&Submitted>,
 ) -> rusqlite::Result<bool> {
-    let (by, at) = (submitted.map(|s| &s.by), submitted.map(|s| s.at));
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let advanced = advance_green(&tx, name, commit, submitted)?;
+    tx.commit()?;
+    Ok(advanced.is_some())
+}
+
+/// Like [`passed_by`], running `on_advance(tx, prev_seq, end_seq)` inside the
+/// same write transaction whenever the green prefix moves forward.
+pub(super) fn passed_by_with(
+    conn: &mut Connection,
+    name: &str,
+    commit: &ObjectId,
+    submitted: Option<&Submitted>,
+    on_advance: impl FnOnce(&Connection, i64, i64) -> Result<(), rosen_protocol::ErrorBody>,
+) -> Result<bool, rosen_protocol::ErrorBody> {
+    let sql_err = |e: rusqlite::Error| {
+        rosen_protocol::ErrorBody::new(rosen_protocol::ErrorCode::Internal, e.to_string())
+    };
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_err)?;
+    let Some(range) = advance_green(&tx, name, commit, submitted).map_err(sql_err)? else {
+        return Ok(false);
+    };
+    if let Some((start, end)) = range {
+        on_advance(&tx, start, end)?;
+    }
+    tx.commit().map_err(sql_err)?;
+    Ok(true)
+}
+
+fn advance_green(
+    tx: &Connection,
+    name: &str,
+    commit: &ObjectId,
+    submitted: Option<&Submitted>,
+) -> rusqlite::Result<Option<Option<(i64, i64)>>> {
+    let (by, at) = (submitted.map(|s| &s.by), submitted.map(|s| s.at));
     let end: Option<i64> = tx
         .query_row(
             "SELECT seq FROM base_history WHERE ref_name=?1 AND commit_id=?2
@@ -98,7 +134,7 @@ pub fn passed_by(
             |r| r.get(0),
         )
         .optional()?;
-    let Some(end) = end else { return Ok(false) };
+    let Some(end) = end else { return Ok(None) };
     let start: i64 = tx.query_row(
         "SELECT COALESCE((SELECT seq FROM post_land_green WHERE ref_name=?1),0)",
         [name],
@@ -119,9 +155,9 @@ pub fn passed_by(
              submitter=excluded.submitter,submitted_at=excluded.submitted_at",
             params![name, end, commit.to_string(), by, at],
         )?;
+        return Ok(Some(Some((start, end))));
     }
-    tx.commit()?;
-    Ok(true)
+    Ok(Some(None))
 }
 
 /// One `green` notification still to publish for a landed change.

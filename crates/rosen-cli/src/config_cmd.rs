@@ -70,6 +70,7 @@ fn print_parts(config: &ProjectConfig) {
     print_build_units(config);
     print_check_set("pre-land check set", &config.checks.pre_land);
     print_check_set("post-land check set", &config.checks.post_land);
+    print_deploy(config);
     println!("warm pool size: {}", config.warm_pool.size);
     print_patterns("prepare commands", &config.prepare.commands);
     match &config.mirror.remote {
@@ -128,5 +129,26 @@ fn print_check_set(label: &str, set: &CheckSet) {
     }
     for command in &set.commands {
         println!("  {command}");
+    }
+}
+
+fn print_deploy(config: &ProjectConfig) {
+    if config.deploy.is_empty() {
+        println!("deploy steps: none");
+        return;
+    }
+    println!("deploy steps:");
+    for step in &config.deploy {
+        println!("  {}: {}", step.name, step.command);
+        if !step.paths.is_empty() {
+            let paths: Vec<String> = step.paths.iter().map(ToString::to_string).collect();
+            println!("    paths: {}", paths.join(", "));
+        }
+        if !step.secrets.is_empty() {
+            println!("    secrets: {}", step.secrets.join(", "));
+        }
+        if !step.platforms.is_empty() {
+            println!("    platforms: {}", step.platforms.join(", "));
+        }
     }
 }

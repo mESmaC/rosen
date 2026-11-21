@@ -76,7 +76,8 @@ pub async fn dispatch_from(
         }
         request @ (Request::PostLandPassed(_)
         | Request::PostLandFailed { .. }
-        | Request::BisectSubmit(_))
+        | Request::BisectSubmit(_)
+        | Request::DeployResult(_))
             if !state.is_shutting_down() =>
         {
             match origin_machine(state, origin).await {
@@ -97,6 +98,7 @@ async fn dispatch_result(state: &Arc<ServerState>, request: Request, machine: &s
             job.submitter.as_ref()
         }
         Request::BisectSubmit(result) => result.submitter.as_ref(),
+        Request::DeployResult(result) => result.submitter.as_ref(),
         _ => None,
     };
     let by = match Submitted::new(nick, machine) {
@@ -114,6 +116,9 @@ async fn dispatch_result(state: &Arc<ServerState>, request: Request, machine: &s
         Request::BisectSubmit(result) => {
             let session = result.job.session;
             crate::bisect::handle(state, session, Some((result, by))).await
+        }
+        Request::DeployResult(result) => {
+            crate::post_land::deploy::handle_result(state, result, by).await
         }
         _ => unreachable!("dispatch_from routes only checker results here"),
     }

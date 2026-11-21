@@ -745,7 +745,7 @@ pub enum WorkspaceCommand {
 pub enum ConfigCommand {
     /// Show the configuration in force: generated files, registration
     /// lists, sensitive paths, the pre-land and post-land check sets with
-    /// their commands, the warm pool size and the mirror remote.
+    /// their commands, deploy steps, the warm pool size and the mirror remote.
     ///
     /// The server reads it from the base, never from a change, so editing
     /// `rosen.toml` takes effect only once the edit lands. An invalid file

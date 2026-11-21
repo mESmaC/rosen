@@ -154,6 +154,12 @@ commands = ["cargo build --workspace"]
 
 [mirror]
 remote = "https://github.com/you/repo.git"
+
+[deploy.server]
+command = "deploy-server"
+paths = ["server/**"]
+secrets = ["DEPLOY_TOKEN"]
+platforms = ["linux"]
 ```
 
 `rosen config show` prints the configuration in force, and why the base's file was refused if it was. SPEC.md §2 describes build units and workspace-wide inputs, which decide when a receipt can be reused.

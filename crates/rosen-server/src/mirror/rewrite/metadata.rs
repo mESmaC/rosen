@@ -199,6 +199,7 @@ fn invalidate_checks(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    crate::post_land::deploy::invalidate_rewritten(conn)?;
     if exists(conn, "bisections")? {
         conn.execute(
             "UPDATE bisections SET phase='flaky',step=step+1,

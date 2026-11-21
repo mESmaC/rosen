@@ -230,6 +230,8 @@
         "released",
         "green",
         "built",
+        "deploy_due",
+        "deploy_result",
         "reverted",
         "revert_refused",
         "mirror",
@@ -1157,6 +1159,12 @@
         },
         "collapse_channel": {
           "type": "boolean"
+        },
+        "deploy": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeployStep"
+          }
         }
       },
       "required": [
@@ -1192,6 +1200,43 @@
       "required": [
         "paths",
         "dependencies"
+      ],
+      "additionalProperties": false
+    },
+    "DeployStep": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathPattern"
+          }
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "command",
+        "paths",
+        "secrets",
+        "platforms"
       ],
       "additionalProperties": false
     },

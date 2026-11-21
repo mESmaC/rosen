@@ -190,6 +190,8 @@ pub enum Request {
     },
     /// Marks the tested landed prefix green after the full check set passed.
     PostLandPassed(crate::post_land::PostLandJob),
+    /// Records the result of a `deploy_due` step posted by an external checker (R12).
+    DeployResult(crate::SubmitDeployResult),
     /// Last built and last green, open bisections and pending inverses (R12).
     /// Reads only: it never offers a job or moves a session.
     PostLandStatus,
@@ -380,6 +382,8 @@ pub enum Response {
     },
     MachineCredential(crate::MachineCredential),
     PostLand(crate::post_land::PostLandWork),
+    /// Boxed: `DeployRecord` holds several strings and hashes (`clippy::large_enum_variant`).
+    DeployRecorded(Box<crate::DeployRecord>),
     PostLandFailures(Vec<crate::PostLandFailure>),
     PostLandStatus(crate::PostLandStatus),
     Pong,
@@ -592,6 +596,10 @@ pub enum EventKind {
     Green,
     /// Build and lint passed through this commit; full tests have their own prefix.
     Built,
+    /// A `[deploy]` step is due after a green checkpoint covered its paths (R12).
+    DeployDue,
+    /// An external checker recorded the outcome of a `deploy_due` step (R12).
+    DeployResult,
     /// The change was reverted after failing post-land checks (R12).
     Reverted,
     /// An inverse was refused; detail names the culprit, base, overlaps and reason.
