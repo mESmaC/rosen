@@ -8,15 +8,22 @@
 //! Collapse links or expose credentials.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 const TEST_SECRET: &str = "tok_collapse_link_test_secret_98765";
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const GIT_TIMEOUT: Duration = Duration::from_secs(15);
+const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn rosen_bin() -> &'static str {
     env!("CARGO_BIN_EXE_rosen")
@@ -78,21 +85,110 @@ fn setup_git_config(dir: &Path) -> (PathBuf, PathBuf) {
     (gitconfig, cred_file)
 }
 
+fn apply_test_git_env(cmd: &mut Command, gitconfig: &Path) {
+    cmd.env("GIT_CONFIG_GLOBAL", gitconfig)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env_remove("GIT_ASKPASS")
+        .env_remove("SSH_ASKPASS")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT");
+}
+
+fn drain_pipe<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    if let Some(mut reader) = pipe {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = reader.read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+    } else {
+        let _ = tx.send(Vec::new());
+    }
+    rx
+}
+
+fn wait_with_timeout(mut child: Child, timeout: Duration, label: &str) -> Result<Output, String> {
+    let stdout_rx = drain_pipe(child.stdout.take());
+    let stderr_rx = drain_pipe(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| format!("{label}: wait failed: {err}"))?
+        {
+            let stdout = stdout_rx
+                .recv_timeout(PIPE_DRAIN_TIMEOUT)
+                .unwrap_or_default();
+            let stderr = stderr_rx
+                .recv_timeout(PIPE_DRAIN_TIMEOUT)
+                .unwrap_or_default();
+            return Ok(Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = stdout_rx
+                .recv_timeout(PIPE_DRAIN_TIMEOUT)
+                .unwrap_or_default();
+            let stderr = stderr_rx
+                .recv_timeout(PIPE_DRAIN_TIMEOUT)
+                .unwrap_or_default();
+            return Err(format!(
+                "{label} timed out after {timeout:?} (stdout: {:?}, stderr: {:?})",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn run_command_with_timeout(
+    mut cmd: Command,
+    stdin_data: Option<&str>,
+    timeout: Duration,
+    label: &str,
+) -> Result<Output, String> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = if stdin_data.is_some() {
+        cmd.stdin(Stdio::piped())
+    } else {
+        cmd.stdin(Stdio::null())
+    }
+    .spawn()
+    .map_err(|err| format!("{label}: spawn failed: {err}"))?;
+    if let Some(data) = stdin_data {
+        let payload = data.as_bytes().to_vec();
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&payload);
+        });
+    }
+    wait_with_timeout(child, timeout, label)
+}
+
 fn init_source_repo(repo: &Path, gitconfig: &Path) {
     let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .arg("-C")
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
             .arg(repo)
             .args(args)
-            .env("GIT_CONFIG_GLOBAL", gitconfig)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_AUTHOR_NAME", "Tester")
             .env("GIT_AUTHOR_EMAIL", "tester@example.com")
             .env("GIT_COMMITTER_NAME", "Tester")
-            .env("GIT_COMMITTER_EMAIL", "tester@example.com")
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?}: {out:?}");
+            .env("GIT_COMMITTER_EMAIL", "tester@example.com");
+        apply_test_git_env(&mut cmd, gitconfig);
+        let label = format!("git {args:?}");
+        let out = run_command_with_timeout(cmd, None, GIT_TIMEOUT, &label)
+            .unwrap_or_else(|err| panic!("{err}"));
+        assert!(out.status.success(), "{label}: {out:?}");
     };
     fs::create_dir_all(repo).unwrap();
     git(&["init", "--quiet", "-b", "main"]);
@@ -105,38 +201,162 @@ fn init_source_repo(repo: &Path, gitconfig: &Path) {
     git(&["commit", "--quiet", "-m", "initial"]);
 }
 
-fn spawn_server(bin: &Path, data_dir: &Path, endpoint: &str, gitconfig: &Path) -> Child {
-    let stderr_path = data_dir.with_file_name("server.stderr");
-    let stderr_file = fs::File::create(&stderr_path).expect("create server stderr log");
-    let mut child = Command::new(bin)
-        .args(["--data-dir"])
-        .arg(data_dir)
-        .args(["--endpoint", endpoint, "--mirror-owner"])
-        .env("GIT_CONFIG_GLOBAL", gitconfig)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .expect("spawn rosen-server");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait().unwrap() {
-            let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-            panic!("rosen-server exited early ({status}) on {endpoint:?}: {stderr}");
+struct ServerProcess {
+    child: Option<Child>,
+    stderr_path: PathBuf,
+}
+
+impl ServerProcess {
+    fn stderr(&self) -> String {
+        fs::read_to_string(&self.stderr_path).unwrap_or_default()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self.child.as_mut() {
+            Some(child) => child.try_wait(),
+            None => Ok(None),
         }
-        let probe = Command::new(rosen_bin())
-            .args(["--endpoint", endpoint, "server", "status"])
-            .output()
-            .unwrap();
-        if probe.status.success() {
-            return child;
+    }
+
+    fn kill_and_reap(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn stop_and_wait(
+        &mut self,
+        endpoint: &str,
+        gitconfig: &Path,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let stop_out = run_rosen_with_timeout(
+            endpoint,
+            gitconfig,
+            &["server", "stop"],
+            None,
+            None,
+            timeout,
+        )
+        .map_err(|err| format!("{err}; server stderr: {}", self.stderr()))?;
+        if !stop_out.status.success() {
+            return Err(format!(
+                "rosen server stop failed ({stop_out:?}); server stderr: {}",
+                self.stderr()
+            ));
+        }
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self
+                .try_wait()
+                .map_err(|err| format!("wait server exit: {err}"))?
+                .is_some()
+            {
+                self.child = None;
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        self.kill_and_reap();
+        Err(format!(
+            "rosen-server child did not exit within {timeout:?} after stop; stderr: {}",
+            self.stderr()
+        ))
+    }
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        self.kill_and_reap();
+    }
+}
+
+fn wait_for_server_ready(
+    server: &mut ServerProcess,
+    endpoint: &str,
+    gitconfig: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(status) = server
+            .try_wait()
+            .map_err(|err| format!("poll server: {err}"))?
+        {
+            return Err(format!(
+                "rosen-server exited early ({status}) on {endpoint:?}: {}",
+                server.stderr()
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let probe_timeout = remaining.min(PROBE_TIMEOUT);
+        let mut probe_cmd = Command::new(rosen_bin());
+        probe_cmd.args(["--endpoint", endpoint, "server", "status"]);
+        apply_test_git_env(&mut probe_cmd, gitconfig);
+        if let Ok(probe) =
+            run_command_with_timeout(probe_cmd, None, probe_timeout, "server status probe")
+        {
+            if probe.status.success() {
+                return Ok(());
+            }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-    panic!("rosen-server did not start within 10s on {endpoint:?}: {stderr}");
+    server.kill_and_reap();
+    Err(format!(
+        "rosen-server did not start within {timeout:?} on {endpoint:?}: {}",
+        server.stderr()
+    ))
+}
+
+fn spawn_server(bin: &Path, data_dir: &Path, endpoint: &str, gitconfig: &Path) -> ServerProcess {
+    let stderr_path = data_dir.with_file_name("server.stderr");
+    let stderr_file = fs::File::create(&stderr_path).expect("create server stderr log");
+    let mut cmd = Command::new(bin);
+    cmd.args(["--data-dir"])
+        .arg(data_dir)
+        .args(["--endpoint", endpoint, "--mirror-owner"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file));
+    apply_test_git_env(&mut cmd, gitconfig);
+    let child = cmd.spawn().expect("spawn rosen-server");
+    let mut server = ServerProcess {
+        child: Some(child),
+        stderr_path,
+    };
+    wait_for_server_ready(&mut server, endpoint, gitconfig, SPAWN_TIMEOUT)
+        .unwrap_or_else(|err| panic!("{err}"));
+    server
+}
+
+fn run_rosen_with_timeout(
+    endpoint: &str,
+    gitconfig: &Path,
+    args: &[&str],
+    stdin_data: Option<&str>,
+    token_env: Option<&str>,
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut cmd = Command::new(rosen_bin());
+    cmd.args(["--endpoint", endpoint])
+        .args(args)
+        .env("ROSEN_AGENT", "operator");
+    apply_test_git_env(&mut cmd, gitconfig);
+    match token_env {
+        Some(token) => {
+            cmd.env("ROSEN_COLLAPSE_TOKEN", token);
+        }
+        None => {
+            cmd.env_remove("ROSEN_COLLAPSE_TOKEN");
+        }
+    }
+    let label = format!("rosen {args:?}");
+    run_command_with_timeout(cmd, stdin_data, timeout, &label)
 }
 
 fn run_rosen(
@@ -146,34 +366,15 @@ fn run_rosen(
     stdin_data: Option<&str>,
     token_env: Option<&str>,
 ) -> Output {
-    let mut cmd = Command::new(rosen_bin());
-    cmd.args(["--endpoint", endpoint])
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", gitconfig)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("ROSEN_AGENT", "operator")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    match token_env {
-        Some(token) => {
-            cmd.env("ROSEN_COLLAPSE_TOKEN", token);
-        }
-        None => {
-            cmd.env_remove("ROSEN_COLLAPSE_TOKEN");
-        }
-    }
-    if let Some(data) = stdin_data {
-        let mut child = cmd.stdin(Stdio::piped()).spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(data.as_bytes())
-            .unwrap();
-        child.wait_with_output().unwrap()
-    } else {
-        cmd.stdin(Stdio::null()).output().unwrap()
-    }
+    run_rosen_with_timeout(
+        endpoint,
+        gitconfig,
+        args,
+        stdin_data,
+        token_env,
+        REQUEST_TIMEOUT,
+    )
+    .unwrap_or_else(|err| panic!("{err}"))
 }
 
 fn check_status(report: &Value, name: &str) -> String {
@@ -301,7 +502,7 @@ fn collapse_link_and_unlink_round_trip_with_live_server() {
     let (gitconfig, cred_file) = setup_git_config(&root);
     init_source_repo(&source_repo, &gitconfig);
 
-    let mut child = spawn_server(&server, &data_dir, &endpoint, &gitconfig);
+    let mut server = spawn_server(&server, &data_dir, &endpoint, &gitconfig);
     let import_out = run_rosen(
         &endpoint,
         &gitconfig,
@@ -315,9 +516,83 @@ fn collapse_link_and_unlink_round_trip_with_live_server() {
     verify_unlink_preserves_creds_and_config(&endpoint, &gitconfig, &cred_file);
     verify_env_relink_and_forget_credentials(&endpoint, &gitconfig, &cred_file);
 
-    let _ = run_rosen(&endpoint, &gitconfig, &["server", "stop"], None, None);
-    let _ = child.wait();
+    server
+        .stop_and_wait(&endpoint, &gitconfig, SHUTDOWN_TIMEOUT)
+        .unwrap_or_else(|err| panic!("server stop failed: {err}"));
     let _ = fs::remove_dir_all(&root);
+}
+
+/// Risk (#438): a deliberately broken server (one that never listens, or on
+/// Unix accepts connections and stalls without answering) must fail fast
+/// inside the test timeouts instead of hanging CI until the job limit.
+#[test]
+fn broken_server_fails_fast_within_timeout() {
+    let root = unique_dir("broken");
+    let endpoint = endpoint_for(&root, "collapse-broken");
+    let (gitconfig, _) = setup_git_config(&root);
+    let stderr_path = root.join("server.stderr");
+    fs::write(&stderr_path, "").unwrap();
+
+    // `rosen mcp` with a held-open stdin pipe stays alive without serving the
+    // daemon endpoint, acting as a cross-platform deliberately broken server.
+    let mut child = Command::new(rosen_bin())
+        .args(["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn hung dummy server");
+    let _keep_stdin_open = child.stdin.take();
+    let mut server = ServerProcess {
+        child: Some(child),
+        stderr_path,
+    };
+
+    let started = Instant::now();
+    let err = wait_for_server_ready(&mut server, &endpoint, &gitconfig, Duration::from_secs(2))
+        .expect_err("broken server must fail readiness check");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "readiness timeout took too long: {:?} ({err})",
+        started.elapsed()
+    );
+    assert!(err.contains("did not start within"), "{err}");
+
+    #[cfg(unix)]
+    verify_wedged_socket_times_out(&endpoint, &gitconfig);
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+fn verify_wedged_socket_times_out(endpoint: &str, gitconfig: &Path) {
+    use std::os::unix::net::UnixListener;
+    let listener = UnixListener::bind(endpoint).expect("bind silent unix socket");
+    let (done_tx, done_rx) = mpsc::channel();
+    let accept_thread = std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let _ = done_rx.recv_timeout(Duration::from_secs(10));
+            drop(stream);
+        }
+    });
+    let started = Instant::now();
+    let err = run_rosen_with_timeout(
+        endpoint,
+        gitconfig,
+        &["server", "status"],
+        None,
+        None,
+        Duration::from_secs(2),
+    )
+    .expect_err("wedged socket must fail fast");
+    let _ = done_tx.send(());
+    let _ = accept_thread.join();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "request timeout took too long: {:?} ({err})",
+        started.elapsed()
+    );
+    assert!(err.contains("timed out"), "{err}");
 }
 
 fn verify_link_with_stdin_and_land(endpoint: &str, gitconfig: &Path, cred_file: &Path) {

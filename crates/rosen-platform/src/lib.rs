@@ -100,7 +100,10 @@ pub fn process_may_be_running(pid: u32) -> bool {
 }
 
 /// Signal zero probes existence without sending a signal. Permission errors
-/// and every other uncertainty keep the process's staging directories.
+/// and every other uncertainty keep the process's staging directories. A
+/// zombie has already exited and released its resources, waiting only to be
+/// reaped by its parent, so it counts as not running (matching Windows'
+/// `STILL_ACTIVE` check while a handle remains open, #438).
 #[cfg(unix)]
 #[allow(unsafe_code)]
 pub fn process_may_be_running(pid: u32) -> bool {
@@ -111,11 +114,89 @@ pub fn process_may_be_running(pid: u32) -> bool {
         return true;
     }
     // SAFETY: a positive pid selects one process; signal zero sends nothing.
-    (unsafe { libc::kill(pid, 0) != -1 })
-        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    if unsafe { libc::kill(pid, 0) } == -1 {
+        return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    }
+    !is_zombie(pid)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn is_zombie(pid: libc::pid_t) -> bool {
+    // SAFETY: `proc_bsdinfo` is a plain C data buffer; zero is valid for all
+    // integer fields.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // Passing `arg = 1` enables XNU's `findzomb` fallback (`proc_find_zombref`
+    // in `bsd/kern/proc_info.c`), since `proc_find` alone skips zombies.
+    // SAFETY: `info` is a valid writable buffer of `size` bytes for the
+    // synchronous call.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            1,
+            std::ptr::from_mut(&mut info).cast(),
+            size,
+        )
+    };
+    written == size && info.pbi_status == libc::SZOMB
+}
+
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: libc::pid_t) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some((_, rest)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    matches!(
+        rest.trim_start().as_bytes().first(),
+        Some(b'Z' | b'X' | b'x')
+    )
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn is_zombie(_pid: libc::pid_t) -> bool {
+    false
 }
 
 #[cfg(not(any(windows, unix)))]
 pub fn process_may_be_running(_pid: u32) -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// Risk (#438): `rosen server stop` polls `process_may_be_running` until
+    /// the daemon exits. If an exited child not yet reaped by its parent (a
+    /// zombie on Unix, or an open handle on Windows) still reports as running,
+    /// `server stop` deadlocks when called before the parent reaps the child.
+    #[test]
+    fn exited_unreaped_child_is_not_running() {
+        assert!(process_may_be_running(std::process::id()));
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn short-lived child");
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_may_be_running(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "exited unreaped child {pid} still reported as running"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let status = child.wait().expect("reap child");
+        assert!(status.success(), "child failed: {status}");
+    }
 }

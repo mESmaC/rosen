@@ -12,11 +12,17 @@ use rosen_protocol::{
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
 
 /// The client build name sent in the handshake.
 pub const CLIENT_NAME: &str = concat!("rosen-client ", env!("CARGO_PKG_VERSION"));
+
+/// How long a client waits for the server to answer its hello, matching the
+/// server's own handshake limit so a wedged socket fails fast instead of
+/// blocking forever (#438).
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Events buffered for a subscriber that has not read them yet. When it is full
 /// the reader waits, which in turn slows the server's sends to this client.
@@ -167,11 +173,19 @@ async fn handshake(
         client: CLIENT_NAME.to_owned(),
         credential: None,
     };
-    write_frame(writer, &hello).await.map_err(Error::Io)?;
-    match read_frame::<_, ServerFrame>(reader)
-        .await
-        .map_err(Error::Io)?
-    {
+    let reply = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        write_frame(writer, &hello).await?;
+        read_frame::<_, ServerFrame>(reader).await
+    })
+    .await
+    .map_err(|_| {
+        Error::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("server did not complete handshake within {HANDSHAKE_TIMEOUT:?}"),
+        ))
+    })?
+    .map_err(Error::Io)?;
+    match reply {
         Some(ServerFrame::Welcome { version, server }) => Ok((version, server)),
         Some(ServerFrame::Reject { reason, supported }) => {
             Err(Error::Rejected { reason, supported })
