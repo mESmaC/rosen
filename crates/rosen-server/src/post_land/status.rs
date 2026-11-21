@@ -2,9 +2,10 @@
 //! It runs on the registry's read-only WAL connections, so it never offers
 //! a job, moves a session or waits behind a land's write.
 use crate::ServerState;
-use rosen_core::ObjectId;
+use rosen_core::{ObjectId, Platform};
 use rosen_protocol::{
-    CheckKind, ErrorBody, ErrorCode, Outcome, PendingInverse, PostLandStatus, Response,
+    CheckKind, ErrorBody, ErrorCode, Outcome, PendingInverse, PlatformStatus, PostLandStatus,
+    Response,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::sync::Arc;
@@ -16,33 +17,48 @@ fn internal(error: impl std::fmt::Display) -> ErrorBody {
 }
 
 pub async fn handle(state: &Arc<ServerState>) -> Outcome {
+    match snapshot(state).await {
+        Ok(status) => Outcome::Ok(Response::PostLandStatus(status)),
+        Err(error) => Outcome::Error(error),
+    }
+}
+
+/// Read-only snapshot of post-land checkpoints, per-platform coverage, open
+/// bisections and pending inverses.
+pub async fn snapshot(state: &Arc<ServerState>) -> Result<PostLandStatus> {
     let state = Arc::clone(state);
-    let work = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let mut answer = None;
         state
             .changes
             .with_read(|conn| {
-                answer = Some(read(conn));
+                answer = Some(read(&state, conn));
                 Ok(())
             })
             .map_err(internal)?;
         answer.unwrap_or_else(|| Err(internal("status read did not run")))
-    });
-    match work.await {
-        Ok(Ok(status)) => Outcome::Ok(Response::PostLandStatus(status)),
-        Ok(Err(error)) => Outcome::Error(error),
-        Err(error) => Outcome::Error(internal(error)),
-    }
+    })
+    .await
+    .map_err(internal)?
+}
+
+/// Per-platform checkpoints and live checker coverage for `rosen server status`.
+pub async fn platforms_snapshot(state: &Arc<ServerState>) -> Vec<PlatformStatus> {
+    snapshot(state)
+        .await
+        .map(|status| status.platforms)
+        .unwrap_or_default()
 }
 
 /// Startup installs every table read here. A server that has never run
 /// post-land work may still lack some, which reads as nothing recorded.
-fn read(conn: &Connection) -> Result<PostLandStatus> {
+fn read(state: &ServerState, conn: &Connection) -> Result<PostLandStatus> {
     let Some((name, base)) = project_base(conn)? else {
         return Ok(PostLandStatus {
             base: None,
             last_built: None,
             last_green: None,
+            platforms: Vec::new(),
             sessions: Vec::new(),
             pending_inverses: Vec::new(),
         });
@@ -58,6 +74,7 @@ fn read(conn: &Connection) -> Result<PostLandStatus> {
     } else {
         None
     };
+    let platforms = read_platforms(state, conn, &name, &base, has("post_land_platform_green")?)?;
     let checkpoints = has("post_land_green")? && has("post_land_build_green")?;
     let sessions = if checkpoints && has("bisection_steps")? {
         crate::bisect::sessions(conn, &name)?
@@ -73,9 +90,53 @@ fn read(conn: &Connection) -> Result<PostLandStatus> {
         base: Some(base),
         last_built,
         last_green,
+        platforms,
         sessions,
         pending_inverses,
     })
+}
+
+fn read_platforms(
+    state: &ServerState,
+    conn: &Connection,
+    name: &str,
+    base: &ObjectId,
+    has_table: bool,
+) -> Result<Vec<PlatformStatus>> {
+    let Ok(resolved) = state.project_config.at_commit(base) else {
+        return Ok(Vec::new());
+    };
+    let pre = &resolved.config.checks.pre_land.platforms;
+    let post = &resolved.config.checks.post_land.platforms;
+    let mut ordered: Vec<Platform> = Vec::new();
+    for platform in pre.iter().chain(post.iter()) {
+        if !ordered.contains(platform) {
+            ordered.push(platform.clone());
+        }
+    }
+    let mut list = Vec::with_capacity(ordered.len());
+    for target in ordered {
+        let key = target.as_str();
+        let last_built = if has_table {
+            super::platforms::checkpoint(conn, name, key, CheckKind::Build).map_err(internal)?
+        } else {
+            None
+        };
+        let last_green = if has_table {
+            super::platforms::checkpoint(conn, name, key, CheckKind::Test).map_err(internal)?
+        } else {
+            None
+        };
+        list.push(PlatformStatus {
+            platform: key.to_owned(),
+            last_built,
+            last_green,
+            required_build: pre.contains(&target),
+            required_test: post.contains(&target),
+            checkers: state.checkers.matching(&target),
+        });
+    }
+    Ok(list)
 }
 
 /// The project's base ref and tip, as `Ledger::project_base` reads them,
@@ -111,9 +172,12 @@ fn pending_inverses(conn: &Connection, name: &str) -> Result<Vec<PendingInverse>
     } else {
         ""
     };
+    let has_platform =
+        super::submitter::has_column(conn, "post_land_failures", "platform").map_err(internal)?;
+    let platform_col = if has_platform { "f.platform" } else { "''" };
     let mut query = conn
         .prepare(&format!(
-            "SELECT f.commit_id,f.change_id,f.kind,r.base,r.paths,r.overlapping,r.reason,
+            "SELECT f.commit_id,f.change_id,f.kind,{platform_col},r.base,r.paths,r.overlapping,r.reason,
              (SELECT MIN(refused_at) FROM revert_refusals WHERE culprit=f.commit_id)
              FROM post_land_failures f
              JOIN base_history h ON h.ref_name=?1 AND h.commit_id=f.commit_id
@@ -129,11 +193,12 @@ fn pending_inverses(conn: &Connection, name: &str) -> Result<Vec<PendingInverse>
                 culprit: r.get(0)?,
                 change: r.get(1)?,
                 kind: r.get(2)?,
-                base: r.get(3)?,
-                paths: r.get(4)?,
-                overlapping: r.get(5)?,
-                reason: r.get(6)?,
-                first_refused_at: r.get(7)?,
+                platform: r.get(3)?,
+                base: r.get(4)?,
+                paths: r.get(5)?,
+                overlapping: r.get(6)?,
+                reason: r.get(7)?,
+                first_refused_at: r.get(8)?,
             })
         })
         .map_err(internal)?;
@@ -144,6 +209,7 @@ struct Row {
     culprit: String,
     change: String,
     kind: String,
+    platform: String,
     base: Option<String>,
     paths: Option<String>,
     overlapping: Option<String>,
@@ -161,6 +227,7 @@ impl Row {
             } else {
                 CheckKind::Test
             },
+            platform: (!self.platform.is_empty()).then_some(self.platform),
             attempted_base: self
                 .base
                 .map(|base| base.parse().map_err(internal))

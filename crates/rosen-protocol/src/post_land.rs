@@ -48,6 +48,10 @@ pub struct PostLandJob {
     pub priority: CheckPriority,
     /// Configuration in force at this landed commit, including commands.
     pub check_set: CheckSet,
+    /// Required target platform this job checks (from `check_set.platforms`).
+    /// Absent when the check set runs on any platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// The checker's nick, set when it reports this job's result. The server
     /// records it with the machine from the connection, never from the
     /// request (R14), so it may not hold `@`. An offered job carries none.
@@ -62,6 +66,9 @@ pub struct PostLandFailure {
     pub change: String,
     pub commit: ObjectId,
     pub kind: CheckKind,
+    /// Platform on which the failure was confirmed; absent for any-platform checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     pub output: String,
     pub requires_revert: bool,
     pub revert: Option<ObjectId>,
@@ -97,6 +104,9 @@ pub struct PendingInverse {
     pub culprit: ObjectId,
     pub change: String,
     pub kind: CheckKind,
+    /// Platform on which the failure was confirmed; absent for any-platform checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// The base of the latest refused attempt; absent before any refusal.
     pub attempted_base: Option<ObjectId>,
     pub paths: Vec<String>,
@@ -106,6 +116,32 @@ pub struct PendingInverse {
     pub first_refused_at: Option<i64>,
 }
 
+/// One live checker connection matching a platform (R12, #440).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectedChecker {
+    /// Machine ID (`"server"` on the local transport, or the enrolled machine ID).
+    pub machine: String,
+    /// Platform reported by the checker (OS and architecture, e.g. `macos-arm64`).
+    pub platform: String,
+}
+
+/// Per-platform post-land checkpoints and live checker coverage (R12, #440).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformStatus {
+    /// Configured platform target (e.g. `"windows"`, `"macos"`, `"linux"`).
+    pub platform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_built: Option<Checkpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_green: Option<Checkpoint>,
+    #[serde(default)]
+    pub required_build: bool,
+    #[serde(default)]
+    pub required_test: bool,
+    #[serde(default)]
+    pub checkers: Vec<ConnectedChecker>,
+}
+
 /// The read-only answer to [`crate::Request::PostLandStatus`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostLandStatus {
@@ -113,6 +149,9 @@ pub struct PostLandStatus {
     pub base: Option<ObjectId>,
     pub last_built: Option<Checkpoint>,
     pub last_green: Option<Checkpoint>,
+    /// Per-platform checkpoints and live checker coverage, when configured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<PlatformStatus>,
     pub sessions: Vec<crate::BisectSession>,
     pub pending_inverses: Vec<PendingInverse>,
 }

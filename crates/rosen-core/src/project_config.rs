@@ -6,6 +6,7 @@
 //! or point the mirror somewhere else before it has landed.
 
 use crate::claim::PathPattern;
+use crate::platform::Platform;
 use crate::receipt::PRE_LAND_CHECK_SET;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -215,6 +216,10 @@ struct WrittenCheckSet {
     name: Option<String>,
     #[serde(default)]
     commands: Vec<String>,
+    #[serde(default)]
+    platforms: Vec<Platform>,
+    #[serde(default)]
+    platform_commands: BTreeMap<Platform, Vec<String>>,
 }
 
 impl WrittenCheckSet {
@@ -222,6 +227,8 @@ impl WrittenCheckSet {
         CheckSet {
             name: self.name.unwrap_or_else(|| default.to_owned()),
             commands: self.commands,
+            platforms: self.platforms,
+            platform_commands: self.platform_commands,
         }
     }
 }
@@ -253,6 +260,12 @@ pub struct CheckSet {
     /// Shell commands, run in order from the repository root.
     #[serde(default)]
     pub commands: Vec<String>,
+    /// Required platforms (`["windows", "macos", "linux"]`). Empty means any platform (R12).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<Platform>,
+    /// Additional commands appended when running on matching platforms (R12).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub platform_commands: BTreeMap<Platform, Vec<String>>,
 }
 
 impl CheckSet {
@@ -260,7 +273,51 @@ impl CheckSet {
         CheckSet {
             name: name.to_owned(),
             commands: Vec::new(),
+            platforms: Vec::new(),
+            platform_commands: BTreeMap::new(),
         }
+    }
+
+    /// Commands a checker on `platform` runs: the shared `commands` followed
+    /// by any `platform_commands` entries matching `platform`.
+    pub fn commands_for(&self, platform: Option<&Platform>) -> Vec<String> {
+        let mut all = self.commands.clone();
+        if let Some(platform) = platform {
+            for (target, extra) in &self.platform_commands {
+                if platform.matches(target) {
+                    all.extend(extra.iter().cloned());
+                }
+            }
+        }
+        all
+    }
+
+    /// The required platform entry in `self.platforms` that `checker` satisfies,
+    /// preferring an architecture-specific match over an OS-only one.
+    pub fn matching_target(&self, checker: &Platform) -> Option<&Platform> {
+        self.platforms
+            .iter()
+            .find(|target| target.arch().is_some() && checker.matches(target))
+            .or_else(|| self.platforms.iter().find(|target| checker.matches(target)))
+    }
+
+    fn validate(&self, key: &str) -> Result<(), ConfigError> {
+        check_set_name(key, &self.name)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for platform in &self.platforms {
+            if !seen.insert(platform) {
+                return Err(ConfigError(format!(
+                    "{key}.platforms lists {platform:?} more than once"
+                )));
+            }
+        }
+        for (platform, commands) in &self.platform_commands {
+            let subkey = format!("{key}.platform_commands.{platform}");
+            commands
+                .iter()
+                .try_for_each(|line| single_line(&subkey, line))?;
+        }
+        Ok(())
     }
 }
 
@@ -606,8 +663,8 @@ impl ProjectConfig {
 
     fn validate(&self) -> Result<(), ConfigError> {
         let checks = &self.checks;
-        check_set_name("checks.pre_land", &checks.pre_land.name)?;
-        check_set_name("checks.post_land", &checks.post_land.name)?;
+        checks.pre_land.validate("checks.pre_land")?;
+        checks.post_land.validate("checks.post_land")?;
         // A shared name would let a post-land run's receipt pass as a
         // pre-land one.
         if checks.pre_land.name == checks.post_land.name {
@@ -1097,6 +1154,49 @@ mod tests {
             "[generated.commands]\n\"*.lock\" = \"a\"\n\"Cargo.lock\" = \"b\"\n",
             "registration_lists = [\"Cargo.lock\"]\n[generated.commands]\n\"Cargo.lock\" = \"a\"\n",
             "[generated]\nunknown = []\n",
+        ] {
+            assert!(ProjectConfig::parse(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    /// Risk (#440): per-platform check sets govern which checkers run which
+    /// commands and when the base goes green; duplicate/unknown platforms or
+    /// empty-field serialization drift would break matching or golden schemas.
+    #[test]
+    fn check_set_platforms_and_platform_commands_validate() {
+        let config = ProjectConfig::parse(
+            "[checks.post_land]\n\
+             platforms = [\"windows\", \"macos\", \"linux\"]\n\
+             commands = [\"cargo test --workspace\"]\n\
+             [checks.post_land.platform_commands]\n\
+             macos = [\"cd proofs && lake build --wfail\"]\n",
+        )
+        .unwrap();
+        let post = &config.checks.post_land;
+        assert_eq!(post.platforms.len(), 3);
+        let mac_arm = Platform::parse("macos-arm64").unwrap();
+        let win_x64 = Platform::parse("windows-x86_64").unwrap();
+        assert_eq!(post.matching_target(&mac_arm).unwrap().as_str(), "macos");
+        assert_eq!(
+            post.commands_for(Some(&mac_arm)),
+            vec![
+                "cargo test --workspace".to_owned(),
+                "cd proofs && lake build --wfail".to_owned(),
+            ]
+        );
+        assert_eq!(
+            post.commands_for(Some(&win_x64)),
+            vec!["cargo test --workspace".to_owned()]
+        );
+
+        let default_toml = toml::to_string(&ProjectConfig::default().checks.post_land).unwrap();
+        assert!(!default_toml.contains("platforms"));
+        assert!(!default_toml.contains("platform_commands"));
+
+        for bad in [
+            "[checks.post_land]\nplatforms = [\"windows\", \"windows\"]\n",
+            "[checks.post_land]\nplatforms = [\"solaris\"]\n",
+            "[checks.post_land.platform_commands]\nmacos = [\"\"]\n",
         ] {
             assert!(ProjectConfig::parse(bad).is_err(), "accepted {bad:?}");
         }

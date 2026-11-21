@@ -31,6 +31,7 @@ mod overlaps;
 mod path_claims;
 mod piece_claim_fixtures;
 mod post_land;
+mod post_land_platforms;
 mod project_config;
 mod rebase;
 mod receipt_signatures;

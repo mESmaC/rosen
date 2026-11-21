@@ -13,9 +13,10 @@ use serde_json::{json, Map, Value};
 /// - `import`, `mirror`, `server start|stop|relay`, `collapse link|unlink` are
 ///   operator-only: the host that starts this server has already started the
 ///   project's server, and an agent must not stop it or handle push tokens.
-const NOT_TOOLS: [&str; 11] = [
+const NOT_TOOLS: [&str; 12] = [
     "mcp",
     "workspace watch",
+    "checker run",
     "import",
     "server start",
     "server stop",

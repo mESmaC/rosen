@@ -2,10 +2,11 @@
 //! talk to the daemon directly rather than through a project operation.
 
 use rosen_client::protocol::{
-    CollapseHealth, Event, FeedHealth, FeedState, RelayKind, RelaySetting, ServerStatus,
+    CollapseHealth, Event, FeedHealth, FeedState, PlatformStatus, RelayKind, RelaySetting,
+    ServerStatus,
 };
 use rosen_client::{Client, Endpoint, Error};
-use rosen_core::AgentId;
+use rosen_core::{AgentId, Platform};
 use serde_json::json;
 
 use crate::output::EVENTS_SCHEMA;
@@ -107,6 +108,7 @@ fn print_status_json(status: &ServerStatus) {
         "mirror_proactive_auth": status.mirror_proactive_auth,
         "relay": status.relay,
         "collapse": status.collapse,
+        "platforms": status.platforms,
         "commit": status.commit,
         "executable": status.executable,
     });
@@ -151,6 +153,58 @@ fn print_status_text(status: &ServerStatus) {
     if let Some(collapse) = &status.collapse {
         print_collapse_health(collapse);
     }
+    if !status.platforms.is_empty() {
+        println!("post-land platforms:");
+        for platform in &status.platforms {
+            println!("  {}", platform_status_line(platform));
+        }
+    }
+}
+
+/// Formats one platform's checkpoint and checker coverage line, including
+/// `"<Platform>: no checker"` when no matching checker is connected (R12, #440).
+pub(crate) fn platform_status_line(status: &PlatformStatus) -> String {
+    let label = Platform::display_label(&status.platform);
+    let checkpoint = platform_checkpoint_summary(status);
+    if status.checkers.is_empty() {
+        return match checkpoint {
+            Some(cp) => format!("{label}: no checker ({cp})"),
+            None => format!("{label}: no checker"),
+        };
+    }
+    let state = checkpoint.unwrap_or_else(|| "pending".to_owned());
+    let checkers: Vec<String> = status
+        .checkers
+        .iter()
+        .map(|c| format!("{} [{}]", c.machine, c.platform))
+        .collect();
+    let noun = if checkers.len() == 1 {
+        "checker"
+    } else {
+        "checkers"
+    };
+    format!(
+        "{label}: {state} ({} {noun}: {})",
+        checkers.len(),
+        checkers.join(", ")
+    )
+}
+
+fn platform_checkpoint_summary(status: &PlatformStatus) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(built) = &status.last_built {
+        if status.required_build {
+            parts.push(format!("built {}", &built.commit.to_hex()[..12]));
+        }
+    }
+    if let Some(green) = &status.last_green {
+        parts.push(format!("green {}", &green.commit.to_hex()[..12]));
+    } else if parts.is_empty() {
+        if let Some(built) = &status.last_built {
+            parts.push(format!("built {}", &built.commit.to_hex()[..12]));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 fn print_collapse_health(collapse: &CollapseHealth) {
@@ -493,6 +547,43 @@ mod tests {
         assert_eq!(
             feed_health_line("seq", &current),
             "current (seq 45, last ok 2023-11-14 22:15:20 UTC)"
+        );
+    }
+
+    /// Risk (#440): status must call out coverage gaps explicitly as
+    /// `"macOS: no checker"` when no checker for a required platform is connected.
+    #[test]
+    fn platform_status_line_reports_no_checker_and_connected_checkpoints() {
+        use rosen_client::protocol::{Checkpoint, ConnectedChecker};
+        let missing = PlatformStatus {
+            platform: "macos".into(),
+            last_built: None,
+            last_green: None,
+            required_build: false,
+            required_test: true,
+            checkers: Vec::new(),
+        };
+        assert_eq!(platform_status_line(&missing), "macOS: no checker");
+
+        let commit = "1111111111111111111111111111111111111111".parse().unwrap();
+        let connected = PlatformStatus {
+            platform: "windows".into(),
+            last_built: None,
+            last_green: Some(Checkpoint {
+                commit,
+                submitter: Some("checker@server".into()),
+                at: Some(1_700_000_000_000),
+            }),
+            required_build: false,
+            required_test: true,
+            checkers: vec![ConnectedChecker {
+                machine: "server".into(),
+                platform: "windows-x86_64".into(),
+            }],
+        };
+        assert_eq!(
+            platform_status_line(&connected),
+            "Windows: green 111111111111 (1 checker: server [windows-x86_64])"
         );
     }
 }

@@ -39,12 +39,21 @@ pub fn start(
     post_land::validate(state, &ledger, &name, job)?;
     let mut conn = crate::metadata::open(&state.config.metadata_path()).map_err(super::internal)?;
     post_land::store::ensure_schema(&conn).map_err(super::internal)?;
+    post_land::platforms::ensure_schema(&conn).map_err(super::internal)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(super::internal)?;
     let boundary = search_boundary(&tx, &name, job)?;
     let range = (boundary, job.commit);
-    let answer = super::begin_kind_in(&tx, &name, range, output, job.kind, by)?;
+    let answer = super::begin_for_in(
+        &tx,
+        &name,
+        range,
+        output,
+        job.kind,
+        job.platform.as_deref(),
+        by,
+    )?;
     tx.commit().map_err(super::internal)?;
     Ok(answer)
 }
@@ -54,7 +63,7 @@ fn search_boundary(
     name: &str,
     job: &PostLandJob,
 ) -> Result<ObjectId, ErrorBody> {
-    let green = match post_land::last_green(conn, name, job.kind)? {
+    let green = match post_land::last_green_for(conn, name, job.kind, job.platform.as_deref())? {
         Some(green) => green,
         None => {
             // No initial commit is assumed tested: confirmation will run the
@@ -71,10 +80,14 @@ fn search_boundary(
         }
     };
     match job.kind {
-        rosen_protocol::CheckKind::Test => {
-            post_land::failures::test_boundary(conn, name, green, job.commit)
-                .map_err(super::internal)
-        }
+        rosen_protocol::CheckKind::Test => post_land::failures::test_boundary(
+            conn,
+            name,
+            green,
+            job.commit,
+            job.platform.as_deref(),
+        )
+        .map_err(super::internal),
         rosen_protocol::CheckKind::Build => Ok(green),
     }
 }

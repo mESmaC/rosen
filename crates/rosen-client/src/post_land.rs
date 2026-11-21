@@ -41,6 +41,30 @@ impl Client {
         }
     }
 
+    /// Offers the newest untested landed commit matching `platform` (R12, #440).
+    pub async fn post_land_next_for(&self, platform: &str) -> Result<PostLandWork, Error> {
+        let request = Request::PostLandNextFor {
+            platform: platform.to_owned(),
+            kind: rosen_protocol::CheckKind::Test,
+        };
+        match self.request(request).await? {
+            Response::PostLand(work) => Ok(work),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Build/lint jobs after landing matching `platform` (R12, #440).
+    pub async fn post_land_build_next_for(&self, platform: &str) -> Result<PostLandWork, Error> {
+        let request = Request::PostLandNextFor {
+            platform: platform.to_owned(),
+            kind: rosen_protocol::CheckKind::Build,
+        };
+        match self.request(request).await? {
+            Response::PostLand(work) => Ok(work),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Submit only after all commands in the offered check set passed.
     /// Failures go to the bisection interface and never advance green.
     pub async fn post_land_passed(&self, job: PostLandJob) -> Result<PostLandWork, Error> {
@@ -56,5 +80,20 @@ impl Client {
             Response::DeployRecorded(record) => Ok(*record),
             other => Err(unexpected(other)),
         }
+    }
+
+    /// Materialises landed `commit`'s tree into `dest` for a checker to run in
+    /// (R12, #440). Fetches missing objects into the local store first.
+    pub async fn materialise_commit(
+        &self,
+        commit: rosen_core::ObjectId,
+        dest: &std::path::Path,
+    ) -> Result<crate::workspace::Report, Error> {
+        self.ensure_local(commit).await?;
+        let store = self.local_store().await?;
+        let tree = rosen_store::ObjectStore::read_commit(&store, &commit)
+            .map_err(|err| Error::Workspace(err.into()))?
+            .tree;
+        self.materialise_build_tree(tree, dest).await
     }
 }

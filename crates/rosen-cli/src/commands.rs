@@ -101,6 +101,9 @@ pub enum Command {
     /// Link, unlink or verify a Collapse repository connection.
     #[command(name = "collapse", subcommand)]
     Collapse(CollapseCommand),
+    /// Run a headless post-land checker on an enrolled machine (R12, R14).
+    #[command(name = "checker", subcommand)]
+    Checker(CheckerCommand),
     /// Import a git repository; its default branch becomes the base.
     ///
     /// Copies every commit, tree and blob reachable from the branch into the
@@ -998,6 +1001,37 @@ pub struct CollapseUnlinkArgs {
     pub owner: Option<String>,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum CheckerCommand {
+    /// Run a long-lived post-land checker on this machine without Velocity (R12, R14).
+    ///
+    /// Connects to the local Rosen daemon, reports this machine's platform (OS
+    /// and architecture) when taking jobs, runs each check command through
+    /// `rosen run` with the `verify` class (or `landing` for merge-mode builds),
+    /// bisects failures, and posts results back to the server.
+    Run(CheckerRunArgs),
+}
+
+/// Parameters for `rosen checker run`.
+#[derive(Debug, Args)]
+pub struct CheckerRunArgs {
+    /// Platform to report to the server (for example `macos`, `macos-arm64`,
+    /// `linux-x86_64`, `windows-x86_64`). Defaults to this machine's OS and
+    /// architecture.
+    #[arg(long, value_name = "PLATFORM")]
+    pub platform: Option<String>,
+    /// Checker nick recorded with submitted results (`<nick>@<machine>`).
+    /// Defaults to $ROSEN_AGENT, then `checker`.
+    #[arg(long, value_name = "AGENT")]
+    pub nick: Option<String>,
+    /// Scratch directory for materialising commits and caching build output.
+    #[arg(long, value_name = "DIR")]
+    pub work_dir: Option<PathBuf>,
+    /// Process pending jobs and open bisections until idle, then exit.
+    #[arg(long)]
+    pub once: bool,
+}
+
 impl Command {
     /// The command path as typed, for example `change new`, used to name the
     /// client operation and in error messages.
@@ -1009,6 +1043,7 @@ impl Command {
             Command::Collapse(CollapseCommand::Check) => "collapse check",
             Command::Collapse(CollapseCommand::Link(_)) => "collapse link",
             Command::Collapse(CollapseCommand::Unlink(_)) => "collapse unlink",
+            Command::Checker(CheckerCommand::Run(_)) => "checker run",
             Command::Import { .. } => "import",
             Command::Change(sub) => sub.path(),
             Command::Commit { .. } => "commit",

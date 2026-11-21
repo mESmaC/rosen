@@ -34,6 +34,8 @@ pub struct Pending {
     pub presence: bool,
     /// The relay's allowed kinds (R14), which may have changed.
     pub relay: bool,
+    /// Per-platform post-land checkpoints and live checker coverage (R12, #440).
+    pub platforms: bool,
     /// The presence document goes with this pass even unchanged, if any
     /// member is joined and anything else goes.
     pub refresh_presence: bool,
@@ -61,6 +63,7 @@ impl Pending {
             machines: true,
             presence: true,
             relay: true,
+            platforms: true,
             everything: true,
             scanned_to: cursor,
             urgent_since: Some(Instant::now()),
@@ -76,6 +79,7 @@ impl Pending {
             && !self.machines
             && !self.presence
             && !self.relay
+            && !self.platforms
             && !self.everything
     }
 
@@ -85,6 +89,12 @@ impl Pending {
         // Revoking the `collapse` machine turns the relay off.
         self.relay = true;
         self.quiet_since = Some(Instant::now());
+    }
+
+    /// Marks per-platform checkpoints or connected checker coverage changed.
+    pub fn platforms_changed(&mut self) {
+        self.platforms = true;
+        self.urgent_since.get_or_insert_with(Instant::now);
     }
 
     /// Reads events after `scanned_to` and marks what they make dirty;
@@ -132,6 +142,17 @@ impl Pending {
             EventKind::Landed | EventKind::Review | EventKind::Green | EventKind::Reverted
         ) {
             self.coverage = true;
+            marked = true;
+        }
+        if matches!(
+            event.kind,
+            EventKind::Landed
+                | EventKind::Built
+                | EventKind::Green
+                | EventKind::PostLandFailure
+                | EventKind::Reverted
+        ) {
+            self.platforms = true;
             marked = true;
         }
         if event.kind == EventKind::Landed {

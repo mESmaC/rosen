@@ -59,12 +59,27 @@ pub fn begin_kind_in(
     kind: rosen_protocol::CheckKind,
     opened_by: Option<&Submitted>,
 ) -> Result<BisectState> {
+    begin_for_in(conn, name, range, output, kind, None, opened_by)
+}
+
+/// Per-platform variant of [`begin_kind_in`]: each required platform runs an
+/// independent bisection session for a failing batch (R12, #440).
+pub fn begin_for_in(
+    conn: &Connection,
+    name: &str,
+    range: (ObjectId, ObjectId),
+    output: &str,
+    kind: rosen_protocol::CheckKind,
+    platform: Option<&str>,
+    opened_by: Option<&Submitted>,
+) -> Result<BisectState> {
     let (green, failed) = range;
+    let platform_key = platform.unwrap_or("");
     storage::ensure_schema(conn).map_err(internal)?;
     if let Some(id) = conn
         .query_row(
-            "SELECT id FROM bisections WHERE ref_name=?1 AND failed=?2 AND kind=?3",
-            params![name, failed.to_string(), kind.as_str()],
+            "SELECT id FROM bisections WHERE ref_name=?1 AND failed=?2 AND kind=?3 AND platform=?4",
+            params![name, failed.to_string(), kind.as_str(), platform_key],
             |r| r.get(0),
         )
         .optional()
@@ -72,7 +87,7 @@ pub fn begin_kind_in(
     {
         return storage::load(conn, id)?.state();
     }
-    let (boundary, known_output) = known::context(conn, name, green, failed, kind)?;
+    let (boundary, known_output) = known::context(conn, name, green, failed, kind, platform)?;
     let commits = interval(conn, name, boundary, failed)?;
     let high = commits.len() - 1;
     let phase = if known_output.as_deref() == Some(output) {
@@ -84,7 +99,8 @@ pub fn begin_kind_in(
     };
     conn.execute(
         "INSERT INTO bisections
-        (ref_name,failed,commits,low,high,phase,step,output,kind,known_output) VALUES (?1,?2,?3,0,?4,?5,0,?6,?7,?8)",
+        (ref_name,failed,commits,low,high,phase,step,output,kind,known_output,platform)
+        VALUES (?1,?2,?3,0,?4,?5,0,?6,?7,?8,?9)",
         params![
             name,
             failed.to_string(),
@@ -93,7 +109,8 @@ pub fn begin_kind_in(
             phase,
             output,
             kind.as_str(),
-            known_output
+            known_output,
+            platform_key
         ],
     )
     .map_err(internal)?;
@@ -217,7 +234,13 @@ pub async fn handle(
 
 fn apply_confirmed(state: &crate::ServerState, answer: &BisectState) -> Result<()> {
     if let Some(culprit) = &answer.culprit {
-        crate::post_land::failures::apply(state, answer.id, answer.kind, culprit)?;
+        crate::post_land::failures::apply(
+            state,
+            answer.id,
+            answer.kind,
+            answer.platform.as_deref(),
+            culprit,
+        )?;
     }
     Ok(())
 }

@@ -74,6 +74,7 @@ impl CacheState {
             mirror_proactive_auth: None,
             relay: None,
             collapse: None,
+            platforms: Vec::new(),
             commit: crate::BUILD_COMMIT.map(str::to_owned),
             executable: crate::executable(),
         }

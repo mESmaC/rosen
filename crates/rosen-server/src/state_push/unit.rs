@@ -21,6 +21,8 @@ pub enum Section {
     Channel,
     /// The action kinds the relay runs (R14): one object, not a list.
     Relay,
+    /// Per-platform post-land checkpoints and live checker coverage (R12, #440): one object.
+    Platforms,
 }
 
 impl Section {
@@ -36,6 +38,7 @@ impl Section {
             Section::Presence => "presence",
             Section::Channel => "channel",
             Section::Relay => "relay",
+            Section::Platforms => "platforms",
         }
     }
 }

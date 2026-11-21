@@ -17,6 +17,12 @@ pub fn print(json_output: bool, status: &PostLandStatus) {
     }
     println!("last built   {}", checkpoint(status.last_built.as_ref()));
     println!("last green   {}", checkpoint(status.last_green.as_ref()));
+    if !status.platforms.is_empty() {
+        println!("platforms:");
+        for platform in &status.platforms {
+            println!("  {}", crate::server::platform_status_line(platform));
+        }
+    }
     if status.sessions.is_empty() {
         println!("no bisection in progress");
     }
@@ -59,8 +65,13 @@ fn print_session(session: &BisectSession) {
             .map_or(0, |step| step.step + 1);
         format!("step {current} of {}", session.planned_steps)
     };
+    let platform = session
+        .platform
+        .as_deref()
+        .map(|p| format!(" ({})", rosen_core::Platform::display_label(p)))
+        .unwrap_or_default();
     println!(
-        "bisecting {} failure {} (session {}): {} commit(s) after {} up to {}, {progress}",
+        "bisecting {} failure{platform} {} (session {}): {} commit(s) after {} up to {}, {progress}",
         session.kind.as_str(),
         short(&session.failing),
         session.id,

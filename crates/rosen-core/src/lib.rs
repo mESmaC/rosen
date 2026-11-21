@@ -11,6 +11,7 @@ pub mod hash;
 pub mod history;
 pub mod object;
 pub mod piece;
+pub mod platform;
 pub mod project_config;
 pub mod receipt;
 pub mod review;
@@ -23,6 +24,7 @@ pub use hash::{ObjectHasher, ObjectId};
 pub use history::{CommitGraph, LandedCommit, LandedTrailers, ReceiptTrailer};
 pub use object::{Blob, Commit, FileMode, Object, ObjectKind, Signature, Tree, TreeEntry};
 pub use piece::{decide as decide_piece, piece_key, PieceDecision};
+pub use platform::Platform;
 pub use project_config::{
     ConfigError, DeployStep, ProjectConfig, RecheckMode, ReviewMode, CONFIG_PATH,
 };

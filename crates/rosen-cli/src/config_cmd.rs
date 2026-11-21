@@ -124,11 +124,20 @@ fn print_patterns(label: &str, patterns: &[impl std::fmt::Display]) {
 
 fn print_check_set(label: &str, set: &CheckSet) {
     println!("{label}: {}", set.name);
-    if set.commands.is_empty() {
+    if !set.platforms.is_empty() {
+        let names: Vec<&str> = set.platforms.iter().map(|p| p.as_str()).collect();
+        println!("  platforms: {}", names.join(", "));
+    }
+    if set.commands.is_empty() && set.platform_commands.is_empty() {
         println!("  (no commands configured)");
     }
     for command in &set.commands {
         println!("  {command}");
+    }
+    for (platform, commands) in &set.platform_commands {
+        for command in commands {
+            println!("  [{platform}] {command}");
+        }
     }
 }
 

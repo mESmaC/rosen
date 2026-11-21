@@ -15,7 +15,7 @@ use super::facts::Stores;
 use super::store::{Cursor, StateStore};
 use super::unit::{Delivery, Section, Unit};
 use super::{change_doc, PushError};
-use super::{log_lines, machines_doc, review_docs};
+use super::{log_lines, machines_doc, platforms_doc, review_docs};
 use crate::collapse_health::Feed;
 use crate::ledger_push::send::{self, Credential, SendFailure};
 use crate::ServerState;
@@ -251,6 +251,13 @@ async fn build(
     }
     if pending.config {
         units.extend(review_docs::config(state).await.map_err(PushError::Store)?);
+    }
+    if pending.platforms {
+        units.extend(
+            platforms_doc::build(state)
+                .await
+                .map_err(PushError::Store)?,
+        );
     }
     Ok(units)
 }

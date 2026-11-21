@@ -64,10 +64,10 @@ pub fn newest(conn: &Connection, name: &str) -> rusqlite::Result<Option<ObjectId
             "SELECT commit_id FROM base_history WHERE ref_name=?1 AND change_id IS NOT NULL
          AND seq > COALESCE((SELECT seq FROM post_land_green WHERE ref_name=?1),0)
          AND seq > COALESCE((SELECT MAX(h.seq) FROM post_land_failures f
-             JOIN bisections b ON b.kind=f.kind AND b.phase='done'
+             JOIN bisections b ON b.kind=f.kind AND b.platform=f.platform AND b.phase='done'
                  AND json_extract(b.commits,'$[' || b.high || '][0]')=f.commit_id
              JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
-             WHERE b.ref_name=?1 AND f.kind='test' AND f.requires_revert=0),0)
+             WHERE b.ref_name=?1 AND b.platform='' AND f.kind='test' AND f.requires_revert=0),0)
          ORDER BY seq DESC LIMIT 1",
             [name],
             |r| r.get(0),
@@ -125,7 +125,6 @@ fn advance_green(
     commit: &ObjectId,
     submitted: Option<&Submitted>,
 ) -> rusqlite::Result<Option<Option<(i64, i64)>>> {
-    let (by, at) = (submitted.map(|s| &s.by), submitted.map(|s| s.at));
     let end: Option<i64> = tx
         .query_row(
             "SELECT seq FROM base_history WHERE ref_name=?1 AND commit_id=?2
@@ -135,6 +134,20 @@ fn advance_green(
         )
         .optional()?;
     let Some(end) = end else { return Ok(None) };
+    Ok(Some(advance_in(tx, name, end, commit, submitted)?))
+}
+
+/// Advances the overall test green checkpoint and stages green deliveries in an
+/// existing write transaction. Returns `Some((prev_seq, end_seq))` when the
+/// green prefix moved forward.
+pub(super) fn advance_in(
+    tx: &Connection,
+    name: &str,
+    end: i64,
+    commit: &ObjectId,
+    submitted: Option<&Submitted>,
+) -> rusqlite::Result<Option<(i64, i64)>> {
+    let (by, at) = (submitted.map(|s| &s.by), submitted.map(|s| s.at));
     let start: i64 = tx.query_row(
         "SELECT COALESCE((SELECT seq FROM post_land_green WHERE ref_name=?1),0)",
         [name],
@@ -155,9 +168,9 @@ fn advance_green(
              submitter=excluded.submitter,submitted_at=excluded.submitted_at",
             params![name, end, commit.to_string(), by, at],
         )?;
-        return Ok(Some(Some((start, end))));
+        return Ok(Some((start, end)));
     }
-    Ok(Some(None))
+    Ok(None)
 }
 
 /// One `green` notification still to publish for a landed change.

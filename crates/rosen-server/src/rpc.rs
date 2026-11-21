@@ -85,6 +85,18 @@ pub async fn dispatch_from(
                 Err(refused) => Outcome::Error(refused),
             }
         }
+        Request::PostLandNext if !state.is_shutting_down() => {
+            let platform =
+                matches!(origin, crate::receipts::Origin::Local).then(rosen_core::Platform::host);
+            crate::post_land::handle_for(state, None, rosen_protocol::CheckKind::Test, platform)
+                .await
+        }
+        Request::PostLandBuildNext if !state.is_shutting_down() => {
+            let platform =
+                matches!(origin, crate::receipts::Origin::Local).then(rosen_core::Platform::host);
+            crate::post_land::handle_for(state, None, rosen_protocol::CheckKind::Build, platform)
+                .await
+        }
         request => dispatch_unpaused(state, request).await,
     }
 }
@@ -167,6 +179,12 @@ async fn dispatch_unpaused(state: &Arc<ServerState>, request: Request) -> Outcom
         Request::PostLandBuildNext => {
             crate::post_land::handle(state, None, rosen_protocol::CheckKind::Build).await
         }
+        Request::PostLandNextFor { platform, kind } => {
+            match rosen_core::Platform::parse(&platform) {
+                Ok(parsed) => crate::post_land::handle_for(state, None, kind, Some(parsed)).await,
+                Err(err) => Outcome::Error(ErrorBody::new(ErrorCode::InvalidArgument, err)),
+            }
+        }
         Request::PostLandFailures { change } => {
             crate::post_land::failures::handle(state, change).await
         }
@@ -241,7 +259,10 @@ async fn dispatch_project(state: &Arc<ServerState>, request: Request) -> Outcome
         Request::Status => {
             let relay = crate::relay::setting(state).await;
             let collapse = crate::collapse_health::snapshot(state).await;
-            Outcome::Ok(Response::Status(Box::new(status(state, relay, collapse))))
+            let platforms = crate::post_land::status::platforms_snapshot(state).await;
+            Outcome::Ok(Response::Status(Box::new(status(
+                state, relay, collapse, platforms,
+            ))))
         }
         Request::CollapseCheck => crate::collapse_check::handle(state).await,
         Request::Shutdown => {
@@ -382,6 +403,7 @@ fn status(
     state: &ServerState,
     relay: Option<rosen_protocol::RelaySetting>,
     collapse: Option<rosen_protocol::CollapseHealth>,
+    platforms: Vec<rosen_protocol::PlatformStatus>,
 ) -> ServerStatus {
     let network = state.network_status();
     ServerStatus {
@@ -400,6 +422,7 @@ fn status(
         mirror_proactive_auth: Some(state.mirror_proactive_auth.is_enabled()),
         relay,
         collapse,
+        platforms,
         commit: crate::BUILD_COMMIT.map(str::to_owned),
         executable: crate::executable(),
     }

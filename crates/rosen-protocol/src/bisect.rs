@@ -10,6 +10,9 @@ pub struct BisectJob {
     pub commit: ObjectId,
     #[serde(default)]
     pub kind: crate::post_land::CheckKind,
+    /// Target platform for per-platform bisection; absent for any-platform checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +38,9 @@ pub struct BisectState {
     pub id: i64,
     #[serde(default)]
     pub kind: crate::post_land::CheckKind,
+    /// Target platform for per-platform bisection; absent for any-platform checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     pub job: Option<BisectJob>,
     /// Present only after two culprit failures and a fresh passing parent.
     pub culprit: Option<BisectCulprit>,
@@ -71,6 +77,9 @@ pub struct BisectStep {
 pub struct BisectSession {
     pub id: i64,
     pub kind: crate::post_land::CheckKind,
+    /// Target platform for per-platform bisection; absent for any-platform checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// The green or built commit (or recorded culprit) the search starts after.
     pub lower: ObjectId,
     pub failing: ObjectId,

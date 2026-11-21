@@ -179,6 +179,13 @@ pub enum Request {
     PostLandNext,
     /// Build/lint jobs use an independent verification prefix (R12).
     PostLandBuildNext,
+    /// Offers the newest untested landed commit matching `platform` (R12, #440).
+    PostLandNextFor {
+        /// The checker's platform (OS and architecture, e.g. `macos-arm64`).
+        platform: String,
+        #[serde(default)]
+        kind: crate::post_land::CheckKind,
+    },
     /// Confirmed failures, optionally belonging to one change.
     PostLandFailures {
         change: Option<String>,
@@ -506,6 +513,10 @@ pub struct ServerStatus {
     /// daemon.
     #[serde(default)]
     pub collapse: Option<crate::CollapseHealth>,
+    /// Per-platform post-land checkpoints and live checker coverage (R12, #440).
+    /// Empty when no check set names required platforms or on a cache daemon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<crate::PlatformStatus>,
     /// The git commit the daemon was built from, lowercase hex. `server`
     /// carries the crate version, which every commit shares, so this is what
     /// tells one build from another. Absent when the build could not tell.

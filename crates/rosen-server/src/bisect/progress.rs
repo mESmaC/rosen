@@ -47,9 +47,10 @@ pub(super) fn opened(
         params![session.id, by.map(|s| &s.by), by.map(|s| s.at)],
     )
     .map_err(super::internal)?;
-    let detail = opened_detail(
+    let detail = opened_detail_for(
         session.id,
         session.kind,
+        session.platform.as_deref(),
         failed,
         by,
         session.commits[0].0,
@@ -59,6 +60,7 @@ pub(super) fn opened(
 }
 
 /// Event detail published when a bisection session opens (R9, R12).
+#[cfg(test)]
 pub(crate) fn opened_detail(
     session: i64,
     kind: CheckKind,
@@ -67,14 +69,30 @@ pub(crate) fn opened_detail(
     lower: ObjectId,
     interval: usize,
 ) -> serde_json::Value {
+    opened_detail_for(session, kind, None, failed, by, lower, interval)
+}
+
+pub(crate) fn opened_detail_for(
+    session: i64,
+    kind: CheckKind,
+    platform: Option<&str>,
+    failed: ObjectId,
+    by: Option<&Submitted>,
+    lower: ObjectId,
+    interval: usize,
+) -> serde_json::Value {
     let (who, at) = submitter::detail(by);
-    serde_json::json!({
+    let mut detail = serde_json::json!({
         "session": session, "kind": kind, "progress": "opened",
         "step": null, "commit": failed, "result": "failed",
         "submitter": who, "at": at,
         "lower": lower, "interval": interval,
         "planned_steps": planned_steps(interval),
-    })
+    });
+    if let Some(platform) = platform {
+        detail["platform"] = serde_json::json!(platform);
+    }
+    detail
 }
 
 /// Records one accepted result and stages its `bisect` event, in the
@@ -123,13 +141,17 @@ pub(crate) fn accepted_detail(
         (None, false) => "step",
     };
     let (who, at) = submitter::detail(by);
-    serde_json::json!({
+    let mut detail = serde_json::json!({
         "session": job.session, "kind": job.kind, "progress": progress,
         "step": job.step, "commit": job.commit,
         "result": if passed { "passed" } else { "failed" },
         "submitter": who, "at": at, "planned_steps": planned,
         "culprit": after.culprit.as_ref().map(|c| c.commit),
-    })
+    });
+    if let Some(platform) = &job.platform {
+        detail["platform"] = serde_json::json!(platform);
+    }
+    detail
 }
 
 /// Bisection progress is for the project view: it concerns no change's
@@ -215,18 +237,41 @@ fn unsubmitted(step: u64, commit: Option<ObjectId>, state: StepState) -> BisectS
 /// flaky while its failing batch is still above its kind's checkpoint.
 /// Reads only, so it runs on a read-only connection.
 pub fn sessions(conn: &Connection, name: &str) -> Result<Vec<BisectSession>, ErrorBody> {
-    let mut query = conn
-        .prepare(
-            "SELECT b.id,b.failed,b.opened_by,b.opened_at FROM bisections b
-             WHERE b.ref_name=?1 AND (b.phase IN ('search','confirm','parent')
-             OR (b.phase='flaky' AND (SELECT seq FROM base_history
-                 WHERE ref_name=?1 AND commit_id=b.failed) > COALESCE(
-                 (SELECT seq FROM post_land_green WHERE ref_name=?1 AND b.kind='test'),
-                 (SELECT seq FROM post_land_build_green WHERE ref_name=?1 AND b.kind='build'),
-                 0)))
-             ORDER BY b.id",
-        )
-        .map_err(super::internal)?;
+    let has_platform = submitter::has_column(conn, "bisections", "platform")
+        .map_err(super::internal)?
+        && conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table'
+                 AND name='post_land_platform_green')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(super::internal)?;
+    let sql = if has_platform {
+        "SELECT b.id,b.failed,b.opened_by,b.opened_at FROM bisections b
+         WHERE b.ref_name=?1 AND (b.phase IN ('search','confirm','parent')
+         OR (b.phase='flaky' AND (SELECT seq FROM base_history
+             WHERE ref_name=?1 AND commit_id=b.failed) > COALESCE(
+             CASE WHEN b.platform != '' THEN
+                 (SELECT seq FROM post_land_platform_green
+                  WHERE ref_name=?1 AND platform=b.platform AND kind=b.kind)
+             ELSE
+                 COALESCE(
+                     (SELECT seq FROM post_land_green WHERE ref_name=?1 AND b.kind='test'),
+                     (SELECT seq FROM post_land_build_green WHERE ref_name=?1 AND b.kind='build'))
+             END, 0)))
+         ORDER BY b.id"
+    } else {
+        "SELECT b.id,b.failed,b.opened_by,b.opened_at FROM bisections b
+         WHERE b.ref_name=?1 AND (b.phase IN ('search','confirm','parent')
+         OR (b.phase='flaky' AND (SELECT seq FROM base_history
+             WHERE ref_name=?1 AND commit_id=b.failed) > COALESCE(
+             (SELECT seq FROM post_land_green WHERE ref_name=?1 AND b.kind='test'),
+             (SELECT seq FROM post_land_build_green WHERE ref_name=?1 AND b.kind='build'),
+             0)))
+         ORDER BY b.id"
+    };
+    let mut query = conn.prepare(sql).map_err(super::internal)?;
     let rows = query
         .query_map([name], |r| {
             Ok((
@@ -246,6 +291,7 @@ pub fn sessions(conn: &Connection, name: &str) -> Result<Vec<BisectSession>, Err
         sessions.push(BisectSession {
             id,
             kind: session.kind,
+            platform: session.platform.clone(),
             lower: session.commits[0].0,
             failing: failed.parse().map_err(super::internal)?,
             interval: interval as u64,

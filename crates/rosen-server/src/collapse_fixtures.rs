@@ -712,10 +712,12 @@ fn bisect_events(
         step: 2,
         commit: commit_1,
         kind: CheckKind::Test,
+        platform: None,
     };
     let after = BisectState {
         id: 1,
         kind: CheckKind::Test,
+        platform: None,
         job: None,
         culprit: Some(culprit),
         flaky: false,

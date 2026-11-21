@@ -114,6 +114,8 @@ pub async fn serve_with_access(
         subscription: None,
         refused: Arc::new(Notify::new()),
         machine_agent: None,
+        checker: None,
+        machine_id: None,
     };
     let writer_finished = tokio::select! {
         _ = session.read_frames(&mut reader) => false,
@@ -192,6 +194,8 @@ async fn write_frames(
 
 struct Session {
     machine_agent: Option<(String, String)>,
+    checker: Option<crate::post_land::checkers::CheckerGuard>,
+    machine_id: Option<String>,
     state: Arc<ServerState>,
     access: Access,
     outbox: Outbox,
@@ -268,6 +272,7 @@ impl Session {
                 self.outbox.send(response.into()).await.is_ok()
             }
             Ok(ClientFrame::Request { id, request }) => {
+                self.track_checker(&request).await;
                 let work = if large_request(&request) {
                     let slot = self.state.transfers.large_requests.clone().acquire_owned();
                     tokio::select! {
@@ -389,7 +394,54 @@ impl Session {
         self.subscription = Some(tokio::spawn(stream));
     }
 
+    async fn track_checker(&mut self, request: &Request) {
+        let platform = match request {
+            Request::PostLandNextFor { platform, .. } => {
+                let Ok(parsed) = rosen_core::Platform::parse(platform) else {
+                    return;
+                };
+                parsed
+            }
+            Request::PostLandNext | Request::PostLandBuildNext if self.access == Access::Local => {
+                rosen_core::Platform::host()
+            }
+            _ => return,
+        };
+        let Some(machine) = self.resolve_machine_id().await else {
+            return;
+        };
+        if self
+            .checker
+            .as_ref()
+            .is_some_and(|guard| guard.matches_entry(&machine, &platform))
+        {
+            return;
+        }
+        self.checker = Some(self.state.checkers.register(machine, platform));
+    }
+
+    async fn resolve_machine_id(&mut self) -> Option<String> {
+        if let Some(id) = &self.machine_id {
+            return Some(id.clone());
+        }
+        let id = match (self.access, &self.credential) {
+            (Access::Local, _) => crate::machines::signing::SERVER_MACHINE.to_owned(),
+            (Access::Network, Some(credential)) => {
+                let dir = self.state.config.data_dir.clone();
+                let cred = credential.clone();
+                tokio::task::spawn_blocking(move || crate::machines::machine_of(&dir, &cred))
+                    .await
+                    .ok()?
+                    .ok()??
+            }
+            (Access::Network, None) => return None,
+        };
+        self.machine_id = Some(id.clone());
+        Some(id)
+    }
+
     fn close(mut self) {
+        self.checker = None;
         if let Some((machine, nick)) = self.machine_agent.take() {
             crate::machines::manage::leave(&self.state, &machine, &nick);
         }

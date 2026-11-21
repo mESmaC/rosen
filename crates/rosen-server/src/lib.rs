@@ -107,6 +107,8 @@ pub struct ServerState {
     pub relay_wake: Arc<relay::Wake>,
     /// Live health of the Collapse state feed, ledger push and relay (#434).
     pub collapse: collapse_health::Tracker,
+    /// Live connected checkers by reported platform (R12, #440).
+    pub checkers: Arc<post_land::checkers::CheckerRegistry>,
     /// Shared requests and mirror/recovery work; an operator rewrite takes
     /// exclusive access so no operation can retain an obsolete base view.
     pub maintenance: tokio::sync::RwLock<()>,
@@ -148,6 +150,7 @@ impl ServerState {
             mirror_proactive_auth: mirror::proactive_auth::ProactiveAuth::default(),
             relay_wake: Arc::default(),
             collapse: collapse_health::Tracker::default(),
+            checkers: Arc::default(),
             maintenance: tokio::sync::RwLock::new(()),
             open_connections: AtomicU64::new(0),
             requests_in_flight: AtomicU64::new(0),

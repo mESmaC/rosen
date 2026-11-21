@@ -1,6 +1,7 @@
 //! `rosen`: the Rosen command-line tool, a thin layer over `rosen-client`.
 
 mod change_cmd;
+mod checker_cmd;
 mod claim_cmd;
 mod collapse_cmd;
 mod collapse_config;
@@ -149,6 +150,9 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
         }
         Command::Collapse(commands::CollapseCommand::Unlink(args)) => {
             block_on(collapse_cmd::unlink(json, &endpoint, args))
+        }
+        Command::Checker(commands::CheckerCommand::Run(args)) => {
+            block_on(checker_cmd::run(json, &endpoint, args))
         }
         Command::Machine(command) => block_on(machine_cmd::run(json, &endpoint, command)),
         Command::Mcp(args) => {

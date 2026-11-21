@@ -140,5 +140,8 @@ fn body(through: u64, items: &[(Section, Value)]) -> Vec<u8> {
     if let Some((_, relay)) = items.iter().find(|(kind, _)| *kind == Section::Relay) {
         envelope.insert(Section::Relay.key().into(), relay.clone());
     }
+    if let Some((_, platforms)) = items.iter().find(|(kind, _)| *kind == Section::Platforms) {
+        envelope.insert(Section::Platforms.key().into(), platforms.clone());
+    }
     serde_json::to_vec(&Value::Object(envelope)).unwrap_or_default()
 }

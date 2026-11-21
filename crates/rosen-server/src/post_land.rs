@@ -1,12 +1,15 @@
 //! Typed batch verification, separate from R8's post-land housekeeping.
 pub(crate) mod builds;
+pub(crate) mod checkers;
 pub mod deploy;
 pub mod failures;
+pub(crate) mod platforms;
 pub mod status;
 pub mod store;
 pub mod submitter;
 
 use crate::{landing::Ledger, ServerState};
+use rosen_core::Platform;
 use rosen_protocol::{
     CheckKind, CheckPriority, ErrorBody, ErrorCode, EventKind, Outcome, PostLandJob, PostLandWork,
     Response,
@@ -18,8 +21,17 @@ use std::sync::{Arc, Mutex, PoisonError};
 pub type Passed = (PostLandJob, submitter::Submitted);
 
 pub async fn handle(state: &Arc<ServerState>, passed: Option<Passed>, kind: CheckKind) -> Outcome {
+    handle_for(state, passed, kind, None).await
+}
+
+pub async fn handle_for(
+    state: &Arc<ServerState>,
+    passed: Option<Passed>,
+    kind: CheckKind,
+    checker_platform: Option<Platform>,
+) -> Outcome {
     let state = Arc::clone(state);
-    match tokio::task::spawn_blocking(move || run(&state, passed, kind)).await {
+    match tokio::task::spawn_blocking(move || run(&state, passed, kind, checker_platform)).await {
         Ok(Ok(work)) => Outcome::Ok(Response::PostLand(work)),
         Ok(Err(err)) => Outcome::Error(err),
         Err(err) => Outcome::Error(internal(err)),
@@ -31,6 +43,7 @@ fn open(state: &ServerState) -> Result<Connection, ErrorBody> {
     let conn = crate::metadata::open(&state.config.metadata_path()).map_err(internal)?;
     store::ensure_schema(&conn).map_err(internal)?;
     builds::ensure_schema(&conn).map_err(internal)?;
+    platforms::ensure_schema(&conn).map_err(internal)?;
     failures::ensure_schema(&conn).map_err(internal)?;
     deploy::ensure_schema(&conn).map_err(internal)?;
     Ok(conn)
@@ -40,6 +53,7 @@ fn run(
     state: &ServerState,
     passed: Option<Passed>,
     kind: CheckKind,
+    mut checker_platform: Option<Platform>,
 ) -> Result<PostLandWork, ErrorBody> {
     let mut conn = open(state)?;
     let ledger = Ledger::open(&state.config.metadata_path()).map_err(internal)?;
@@ -51,31 +65,166 @@ fn run(
     };
     if let Some((job, submitted)) = passed {
         validate(state, &ledger, &name, &job)?;
-        if !passed_job(state, &mut conn, &name, &job, &submitted)? {
-            return Err(ErrorBody::new(
-                ErrorCode::InvalidArgument,
-                "commit is not a land",
-            ));
+        if checker_platform.is_none() {
+            checker_platform = job
+                .platform
+                .as_deref()
+                .and_then(|raw| Platform::parse(raw).ok());
         }
+        record_pass(state, &mut conn, &name, &job, &submitted)?;
     }
     deliver(state, &conn)?;
     state.events.deliver_staged();
-    let kind = next_kind(state, &conn, &name, kind)?;
-    let job = newest(&conn, &name, kind)?
-        .map(|commit| job_at(state, commit, kind))
-        .transpose()?;
+    offer_next(state, &conn, &name, kind, checker_platform.as_ref())
+}
+
+fn record_pass(
+    state: &ServerState,
+    conn: &mut Connection,
+    name: &str,
+    job: &PostLandJob,
+    submitted: &submitter::Submitted,
+) -> Result<(), ErrorBody> {
+    let accepted = match job.platform.as_deref() {
+        Some(target) => {
+            let required = required_platforms(state, job.kind, &job.commit)?;
+            let objects = state.config.objects_dir();
+            let ok = platforms::passed_with(
+                conn,
+                name,
+                target,
+                job.kind,
+                &job.commit,
+                &required,
+                Some(submitted),
+                |tx, prev, end, green_commit| {
+                    let resolved = state
+                        .project_config
+                        .at_commit(green_commit)
+                        .map_err(internal)?;
+                    deploy::on_green_range(
+                        tx,
+                        &objects,
+                        name,
+                        prev,
+                        end,
+                        green_commit,
+                        &resolved.config.deploy,
+                    )
+                },
+            )?;
+            if ok {
+                state.checkers.bump_version();
+            }
+            ok
+        }
+        None => passed_job(state, conn, name, job, submitted)?,
+    };
+    if !accepted {
+        return Err(ErrorBody::new(
+            ErrorCode::InvalidArgument,
+            "commit is not a land",
+        ));
+    }
+    Ok(())
+}
+
+fn required_platforms(
+    state: &ServerState,
+    kind: CheckKind,
+    commit: &rosen_core::ObjectId,
+) -> Result<Vec<Platform>, ErrorBody> {
+    let base = state
+        .project_config
+        .at_base()
+        .map_err(internal)?
+        .map(|(_, r)| check_set_for(&r.config, kind).platforms.clone())
+        .unwrap_or_default();
+    if !base.is_empty() {
+        return Ok(base);
+    }
+    let at_commit = state.project_config.at_commit(commit).map_err(internal)?;
+    Ok(check_set_for(&at_commit.config, kind).platforms.clone())
+}
+
+fn check_set_for(
+    config: &rosen_core::ProjectConfig,
+    kind: CheckKind,
+) -> &rosen_core::project_config::CheckSet {
+    match kind {
+        CheckKind::Test => &config.checks.post_land,
+        CheckKind::Build => &config.checks.pre_land,
+    }
+}
+
+fn offer_next(
+    state: &ServerState,
+    conn: &Connection,
+    name: &str,
+    requested: CheckKind,
+    checker_platform: Option<&Platform>,
+) -> Result<PostLandWork, ErrorBody> {
+    let base_config = state
+        .project_config
+        .at_base()
+        .map_err(internal)?
+        .map(|(_, r)| r.config);
+    let kind = next_kind_for(
+        base_config.as_deref(),
+        conn,
+        name,
+        requested,
+        checker_platform,
+    )?;
+    let target = resolve_target(base_config.as_deref(), kind, checker_platform);
+    let job = match target {
+        OfferTarget::Unsupported => None,
+        OfferTarget::Any => newest_for(conn, name, kind, None)?
+            .map(|commit| job_at(state, commit, kind, None))
+            .transpose()?,
+        OfferTarget::Platform(target) => newest_for(conn, name, kind, Some(target.as_str()))?
+            .map(|commit| job_at(state, commit, kind, Some(&target)))
+            .transpose()?,
+    };
     Ok(PostLandWork {
         job,
-        last_green: last_green(&conn, &name, kind)?,
+        last_green: last_green(conn, name, kind)?,
     })
+}
+
+enum OfferTarget {
+    Any,
+    Platform(Platform),
+    Unsupported,
+}
+
+fn resolve_target(
+    config: Option<&rosen_core::ProjectConfig>,
+    kind: CheckKind,
+    checker_platform: Option<&Platform>,
+) -> OfferTarget {
+    let Some(config) = config else {
+        return OfferTarget::Any;
+    };
+    let set = check_set_for(config, kind);
+    if set.platforms.is_empty() {
+        return OfferTarget::Any;
+    }
+    match checker_platform.and_then(|checker| set.matching_target(checker)) {
+        Some(target) => OfferTarget::Platform(target.clone()),
+        None => OfferTarget::Unsupported,
+    }
 }
 
 fn job_at(
     state: &ServerState,
     commit: rosen_core::ObjectId,
     kind: CheckKind,
+    target: Option<&Platform>,
 ) -> Result<PostLandJob, ErrorBody> {
     let config = state.project_config.at_commit(&commit).map_err(internal)?;
+    let mut check_set = check_set_for(&config.config, kind).clone();
+    check_set.commands = check_set.commands_for(target);
     Ok(PostLandJob {
         commit,
         kind,
@@ -86,10 +235,8 @@ fn job_at(
         } else {
             CheckPriority::Verify
         },
-        check_set: match kind {
-            CheckKind::Test => config.config.checks.post_land.clone(),
-            CheckKind::Build => config.config.checks.pre_land.clone(),
-        },
+        check_set,
+        platform: target.map(|p| p.as_str().to_owned()),
         submitter: None,
     })
 }
@@ -111,7 +258,13 @@ pub fn validate(
             "commit was never on the base",
         ));
     }
-    let expected = job_at(state, job.commit, job.kind)?;
+    let config = state
+        .project_config
+        .at_commit(&job.commit)
+        .map_err(internal)?;
+    let configured = check_set_for(&config.config, job.kind);
+    let target = validate_platform(configured, job.platform.as_deref())?;
+    let expected = job_at(state, job.commit, job.kind, target.as_ref())?;
     if expected.check_set != job.check_set {
         return Err(ErrorBody::new(
             ErrorCode::InvalidArgument,
@@ -119,6 +272,36 @@ pub fn validate(
         ));
     }
     Ok(())
+}
+
+fn validate_platform(
+    configured: &rosen_core::project_config::CheckSet,
+    platform: Option<&str>,
+) -> Result<Option<Platform>, ErrorBody> {
+    if configured.platforms.is_empty() {
+        if platform.is_some() {
+            return Err(ErrorBody::new(
+                ErrorCode::InvalidArgument,
+                "check set does not configure per-platform jobs",
+            ));
+        }
+        return Ok(None);
+    }
+    let Some(raw) = platform else {
+        return Err(ErrorBody::new(
+            ErrorCode::InvalidArgument,
+            "job must name a configured platform",
+        ));
+    };
+    let parsed =
+        Platform::parse(raw).map_err(|err| ErrorBody::new(ErrorCode::InvalidArgument, err))?;
+    if !configured.platforms.contains(&parsed) {
+        return Err(ErrorBody::new(
+            ErrorCode::InvalidArgument,
+            format!("platform {raw:?} is not configured for this check set"),
+        ));
+    }
+    Ok(Some(parsed))
 }
 
 /// Crash replay may duplicate a notification, as R9 permits, but cannot lose it.
@@ -199,6 +382,19 @@ pub fn last_green(
     name: &str,
     kind: CheckKind,
 ) -> Result<Option<rosen_core::ObjectId>, ErrorBody> {
+    last_green_for(conn, name, kind, None)
+}
+
+pub fn last_green_for(
+    conn: &Connection,
+    name: &str,
+    kind: CheckKind,
+    platform: Option<&str>,
+) -> Result<Option<rosen_core::ObjectId>, ErrorBody> {
+    if let Some(platform) = platform {
+        platforms::ensure_schema(conn).map_err(internal)?;
+        return platforms::last_green(conn, name, platform, kind).map_err(internal);
+    }
     match kind {
         CheckKind::Test => store::last_green(conn, name),
         CheckKind::Build => {
@@ -209,11 +405,15 @@ pub fn last_green(
     .map_err(internal)
 }
 
-fn newest(
+fn newest_for(
     conn: &Connection,
     name: &str,
     kind: CheckKind,
+    platform: Option<&str>,
 ) -> Result<Option<rosen_core::ObjectId>, ErrorBody> {
+    if let Some(platform) = platform {
+        return platforms::newest(conn, name, platform, kind).map_err(internal);
+    }
     match kind {
         CheckKind::Test => store::newest(conn, name),
         CheckKind::Build => builds::newest(conn, name),
@@ -222,25 +422,29 @@ fn newest(
 }
 
 /// Merge-mode projects offer urgent build work before the full-test queue.
-fn next_kind(
-    state: &ServerState,
+fn next_kind_for(
+    config: Option<&rosen_core::ProjectConfig>,
     conn: &Connection,
     name: &str,
     requested: CheckKind,
+    checker_platform: Option<&Platform>,
 ) -> Result<CheckKind, ErrorBody> {
-    let merge = state
-        .project_config
-        .at_base()
-        .map_err(internal)?
-        .is_some_and(|(_, r)| r.config.recheck == rosen_core::RecheckMode::Merge);
-    if requested == CheckKind::Test
-        && merge
-        && builds::newest(conn, name).map_err(internal)?.is_some()
-    {
-        Ok(CheckKind::Build)
-    } else {
-        Ok(requested)
+    let merge = config.is_some_and(|c| c.recheck == rosen_core::RecheckMode::Merge);
+    if requested != CheckKind::Test || !merge {
+        return Ok(requested);
     }
+    let has_build = match resolve_target(config, CheckKind::Build, checker_platform) {
+        OfferTarget::Any => newest_for(conn, name, CheckKind::Build, None)?.is_some(),
+        OfferTarget::Platform(target) => {
+            newest_for(conn, name, CheckKind::Build, Some(target.as_str()))?.is_some()
+        }
+        OfferTarget::Unsupported => false,
+    };
+    Ok(if has_build {
+        CheckKind::Build
+    } else {
+        requested
+    })
 }
 
 /// Keep new work off unbuilt tips. Until the first build passes, use the

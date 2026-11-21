@@ -4,6 +4,7 @@ use rosen_protocol::{BisectCulprit, BisectJob, BisectState, ErrorBody, ErrorCode
 pub(super) struct Session {
     pub id: i64,
     pub kind: rosen_protocol::CheckKind,
+    pub platform: Option<String>,
     pub commits: Vec<(ObjectId, Option<String>)>,
     pub low: usize,
     pub high: usize,
@@ -44,11 +45,13 @@ impl Session {
         Ok(BisectState {
             id: self.id,
             kind: self.kind,
+            platform: self.platform.clone(),
             job: self.job_index().map(|index| BisectJob {
                 session: self.id,
                 step: self.step,
                 commit: self.commits[index].0,
                 kind: self.kind,
+                platform: self.platform.clone(),
             }),
             culprit,
             flaky: self.phase == "flaky",

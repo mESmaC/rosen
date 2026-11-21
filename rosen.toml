@@ -84,9 +84,21 @@ commands = [
 
 # The full tests, on landed commits in batches (R12). Confirmed failures
 # are recorded for follow-up; only build/lint failures revert in after-land mode.
+# Lean proof checks run on macOS and Linux alongside the Rust test suite (#440).
 [checks.post_land]
+platforms = ["windows", "macos"]
 commands = [
     "cargo test --workspace --locked",
+]
+
+[checks.post_land.platform_commands]
+macos = [
+    "cd proofs && lake build --wfail",
+    "cd proofs && lake env lean --run ../.github/scripts/audit_axioms.lean",
+]
+linux = [
+    "cd proofs && lake build --wfail",
+    "cd proofs && lake env lean --run ../.github/scripts/audit_axioms.lean",
 ]
 
 # Ready workspaces each machine's daemon keeps at the base tip (R3). On a

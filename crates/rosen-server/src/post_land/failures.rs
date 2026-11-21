@@ -19,9 +19,38 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         kind TEXT NOT NULL CHECK(kind IN ('build','test')), output TEXT NOT NULL, requires_revert INTEGER NOT NULL, revert TEXT);",
     )?;
     unique_culprits(conn)?;
+    migrate_platform(conn)?;
     super::submitter::add_columns(conn, "post_land_failures")?;
     // The status read lists refusals on a read-only connection.
     crate::landing::revert_refused::ensure_schema(conn)
+}
+
+fn migrate_platform(conn: &Connection) -> rusqlite::Result<()> {
+    let has_index: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type='index' AND name='post_land_failure_culprit_platform')",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_index {
+        return Ok(());
+    }
+    if conn.is_autocommit() {
+        let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        migrate_platform(&tx)?;
+        return tx.commit();
+    }
+    super::submitter::add_column(
+        conn,
+        "post_land_failures",
+        "platform",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS post_land_failure_culprit;
+         CREATE UNIQUE INDEX IF NOT EXISTS post_land_failure_culprit_platform
+             ON post_land_failures(commit_id, kind, platform);",
+    )
 }
 
 fn unique_culprits(conn: &Connection) -> rusqlite::Result<()> {
@@ -59,16 +88,18 @@ pub fn test_boundary(
     name: &str,
     green: rosen_core::ObjectId,
     failed: rosen_core::ObjectId,
+    platform: Option<&str>,
 ) -> rusqlite::Result<rosen_core::ObjectId> {
     ensure_schema(conn)?;
+    let platform = platform.unwrap_or("");
     let id: String = conn.query_row(
         "SELECT h.commit_id FROM base_history h WHERE h.ref_name=?1
          AND (h.commit_id=?2 OR (
              h.seq < (SELECT seq FROM base_history WHERE ref_name=?1 AND commit_id=?3)
              AND EXISTS (SELECT 1 FROM post_land_failures f WHERE f.commit_id=h.commit_id
-                 AND f.kind='test' AND f.requires_revert=0)))
+                 AND f.kind='test' AND f.platform=?4 AND f.requires_revert=0)))
          ORDER BY h.seq DESC LIMIT 1",
-        params![name, green.to_string(), failed.to_string()],
+        params![name, green.to_string(), failed.to_string(), platform],
         |r| r.get(0),
     )?;
     id.parse().map_err(|e| {
@@ -80,6 +111,7 @@ pub fn apply(
     state: &ServerState,
     session: i64,
     kind: CheckKind,
+    platform: Option<&str>,
     culprit: &BisectCulprit,
 ) -> Result<()> {
     // Post-land policy takes effect at the landed commit, like its check commands.
@@ -93,7 +125,7 @@ pub fn apply(
     let mut conn = crate::metadata::open(&state.config.metadata_path()).map_err(internal)?;
     ensure_schema(&conn).map_err(internal)?;
     crate::bisect::ensure_schema(&conn).map_err(internal)?;
-    record(&mut conn, session, kind, culprit, must_revert)?;
+    record(&mut conn, session, kind, platform, culprit, must_revert)?;
     state.events.deliver_staged();
     if must_revert {
         if let Err(error) = revert_recorded(state, &conn, culprit.commit, &culprit.output) {
@@ -112,6 +144,7 @@ fn record(
     conn: &mut Connection,
     session: i64,
     kind: CheckKind,
+    platform: Option<&str>,
     culprit: &BisectCulprit,
     must_revert: bool,
 ) -> Result<()> {
@@ -119,16 +152,18 @@ fn record(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(internal)?;
     let (submitter, at) = confirmed_by(&tx, session)?;
+    let platform_key = platform.unwrap_or("");
     let inserted = tx
         .execute(
             "INSERT OR IGNORE INTO post_land_failures
-        (session,change_id,commit_id,kind,output,requires_revert,submitter,submitted_at)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        (session,change_id,commit_id,kind,platform,output,requires_revert,submitter,submitted_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 session,
                 culprit.change,
                 culprit.commit.to_string(),
                 kind.as_str(),
+                platform_key,
                 culprit.output,
                 must_revert,
                 submitter,
@@ -138,10 +173,11 @@ fn record(
         .map_err(internal)?;
     if inserted != 0 {
         let change: ChangeId = culprit.change.parse().map_err(internal)?;
-        let detail = event_detail(
+        let detail = event_detail_for(
             session,
             culprit,
             kind,
+            platform,
             must_revert,
             submitter.as_deref(),
             at,
@@ -156,6 +192,7 @@ fn record(
 }
 
 /// Event detail published when a confirmed post-land failure is recorded (R9, R12).
+#[cfg(test)]
 pub(crate) fn event_detail(
     session: i64,
     culprit: &BisectCulprit,
@@ -164,7 +201,19 @@ pub(crate) fn event_detail(
     submitter: Option<&str>,
     at: Option<i64>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    event_detail_for(session, culprit, kind, None, requires_revert, submitter, at)
+}
+
+pub(crate) fn event_detail_for(
+    session: i64,
+    culprit: &BisectCulprit,
+    kind: CheckKind,
+    platform: Option<&str>,
+    requires_revert: bool,
+    submitter: Option<&str>,
+    at: Option<i64>,
+) -> serde_json::Value {
+    let mut detail = serde_json::json!({
         "session": session,
         "culprit": culprit.commit,
         "kind": kind,
@@ -172,7 +221,11 @@ pub(crate) fn event_detail(
         "requires_revert": requires_revert,
         "submitter": submitter,
         "at": at,
-    })
+    });
+    if let Some(platform) = platform {
+        detail["platform"] = serde_json::json!(platform);
+    }
+    detail
 }
 
 /// Who submitted the result that confirmed `session`'s culprit: its last
@@ -212,7 +265,7 @@ pub async fn handle(state: &Arc<ServerState>, change: Option<String>) -> Outcome
 fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>> {
     let mut query = conn
         .prepare(
-            "SELECT session,change_id,commit_id,kind,output,revert,requires_revert,
+            "SELECT session,change_id,commit_id,kind,platform,output,revert,requires_revert,
         submitter,submitted_at
         FROM post_land_failures WHERE (?1 IS NULL OR change_id=?1) ORDER BY session",
         )
@@ -224,15 +277,16 @@ fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>>
                 r.get(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
-                r.get(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, bool>(6)?,
-                (r.get(7)?, r.get(8)?),
+                r.get::<_, String>(4)?,
+                r.get(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, bool>(7)?,
+                (r.get(8)?, r.get(9)?),
             ))
         })
         .map_err(internal)?;
     rows.map(|row| {
-        let (session, change, commit, kind, output, revert, requires_revert, by) =
+        let (session, change, commit, kind, platform, output, revert, requires_revert, by) =
             row.map_err(internal)?;
         let (submitter, submitted_at) = by;
         Ok(PostLandFailure {
@@ -244,6 +298,7 @@ fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>>
             } else {
                 CheckKind::Test
             },
+            platform: (!platform.is_empty()).then_some(platform),
             output,
             requires_revert,
             revert: revert.map(|id| id.parse().map_err(internal)).transpose()?,
