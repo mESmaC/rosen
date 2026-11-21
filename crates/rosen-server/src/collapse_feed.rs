@@ -16,6 +16,7 @@ use std::sync::Arc;
 use rosen_protocol::{CollapseResetReport, ErrorBody, ErrorCode, EventKind, Outcome, Response};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::json;
+use tokio::sync::watch;
 
 use crate::collapse_health::Feed;
 use crate::ledger_push::send::{self, SendFailure};
@@ -28,6 +29,43 @@ CREATE TABLE IF NOT EXISTS collapse_feed (
     feed_id TEXT    NOT NULL
 );
 ";
+
+/// Tracks `ServerState::subscribe_collapse_reset` by generation counter so
+/// awaiting a reset inside `tokio::select!` never consumes the watch seen-bit
+/// before the push loop clears its diverged/stopped session state.
+pub(crate) struct ResetWatch {
+    rx: watch::Receiver<u64>,
+    seen: u64,
+}
+
+impl ResetWatch {
+    pub(crate) fn new(mut rx: watch::Receiver<u64>) -> Self {
+        let seen = *rx.borrow_and_update();
+        Self { rx, seen }
+    }
+
+    pub(crate) fn pending(&self) -> bool {
+        *self.rx.borrow() != self.seen
+    }
+
+    pub(crate) fn take(&mut self) -> bool {
+        let current = *self.rx.borrow_and_update();
+        if current != self.seen {
+            self.seen = current;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) async fn changed(&mut self) -> bool {
+        let seen = self.seen;
+        self.rx
+            .wait_for(|&generation| generation != seen)
+            .await
+            .is_ok()
+    }
+}
 
 /// Generates a random 128-bit lowercase hex feed ID.
 pub fn generate_feed_id() -> Result<String, String> {

@@ -34,6 +34,7 @@ pub use cursor::{Cursor, Cursors, Held, PerLedger};
 pub use entries::{rfc3339_utc, MAX_BODY, MAX_ENTRIES};
 pub use send::SendFailure;
 
+use crate::collapse_feed::ResetWatch;
 use crate::collapse_health::{Feed, Tracker};
 use crate::events::EventLog;
 use crate::landing::Ledger;
@@ -129,12 +130,11 @@ struct Reconciled {
 /// Sends new ledger entries until shutdown is requested.
 pub async fn run(state: Arc<ServerState>) {
     let mut wake = state.events.watch();
-    let mut reset = state.subscribe_collapse_reset();
+    let mut reset = ResetWatch::new(state.subscribe_collapse_reset());
     let mut session = Session::default();
     let mut failures: u32 = 0;
     loop {
-        if reset.has_changed().unwrap_or(false) {
-            let _ = *reset.borrow_and_update();
+        if reset.take() {
             session.reconciled = None;
             session.stopped = None;
             session.diverged = None;
@@ -164,7 +164,7 @@ async fn finish_pass(
     state: &Arc<ServerState>,
     session: &mut Session,
     wake: &mut watch::Receiver<u64>,
-    reset: &mut watch::Receiver<u64>,
+    reset: &mut ResetWatch,
     failures: &mut u32,
     seen: u64,
     outcome: Result<Pushed, PushError>,
@@ -647,13 +647,13 @@ pub(crate) async fn in_force(config: &ServerConfig) -> Result<Option<Arc<Project
 async fn wait_for_news(
     state: &Arc<ServerState>,
     wake: &mut watch::Receiver<u64>,
-    reset: &mut watch::Receiver<u64>,
+    reset: &mut ResetWatch,
     seen: u64,
     sending: bool,
 ) -> bool {
     let mut seen = seen;
     loop {
-        if reset.has_changed().unwrap_or(false) {
+        if reset.pending() {
             return true;
         }
         // Marked before the read: an event announced after this wakes the
@@ -671,11 +671,8 @@ async fn wait_for_news(
                     return false;
                 }
             }
-            changed = reset.changed() => {
-                if changed.is_err() {
-                    return false;
-                }
-                return true;
+            ok = reset.changed() => {
+                return ok;
             }
             () = state.shutdown_requested() => return false,
         }

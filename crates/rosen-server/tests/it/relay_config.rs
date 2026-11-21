@@ -339,6 +339,16 @@ fn seed_legacy_oversized(state: &ServerState, root: &str) {
     }
 }
 
+fn unposted_count(state: &ServerState) -> i64 {
+    let conn = rusqlite::Connection::open(state.config.metadata_path()).unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM relay_actions WHERE posted = 0",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
 fn assert_oversized_results(q: &Queue, state: &ServerState) {
     assert_eq!(q.rejected.get(&1).map(Vec::as_slice), Some(&[400][..]));
     assert_eq!(q.rejected.get(&2).map(Vec::as_slice), Some(&[413][..]));
@@ -357,15 +367,7 @@ fn assert_oversized_results(q: &Queue, state: &ServerState) {
         .ends_with("..."));
     assert_eq!(q.results[&5]["state"], "done");
     assert_eq!(q.results[&5]["result"]["status"], "revoked");
-    let conn = rusqlite::Connection::open(state.config.metadata_path()).unwrap();
-    let unposted: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM relay_actions WHERE posted = 0",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(unposted, 0);
+    assert_eq!(unposted_count(state), 0);
 }
 
 // Risk (R14, #443): Collapse rejects result POST bodies over 16,384 bytes with
@@ -402,7 +404,9 @@ async fn oversized_outcomes_and_400_413_never_block_later_actions() {
     tokio::spawn(serve(listener, Arc::clone(&queue)));
     let relay = tokio::spawn(rosen_server::relay::run(Arc::clone(&state)));
     let start = Instant::now();
-    while queue.lock().unwrap().results.len() < 5 {
+    // Wait until the relay has both delivered all 5 results and marked every
+    // row posted in SQLite before aborting it.
+    while queue.lock().unwrap().results.len() < 5 || unposted_count(&state) > 0 {
         assert!(start.elapsed() < Duration::from_secs(60), "no results");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

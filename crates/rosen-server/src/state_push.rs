@@ -46,6 +46,7 @@ use tokio::time::Instant;
 
 pub use store::Cursor;
 
+use crate::collapse_feed::ResetWatch;
 use crate::collapse_health::Feed as CollapseFeed;
 use crate::ledger_push::{retry_delay, send, sleep_unless_shutdown};
 use crate::ServerState;
@@ -172,12 +173,11 @@ impl Session {
 /// Sends dirty documents until shutdown is requested.
 pub async fn run(state: Arc<ServerState>) {
     let mut wake = state.events.watch();
-    let mut reset = state.subscribe_collapse_reset();
+    let mut reset = ResetWatch::new(state.subscribe_collapse_reset());
     let mut session = Session::default();
     let mut failures: u32 = 0;
     loop {
-        if reset.has_changed().unwrap_or(false) {
-            let _ = *reset.borrow_and_update();
+        if reset.take() {
             session.clear_after_reset();
             failures = 0;
         }
@@ -204,7 +204,7 @@ async fn finish_step(
     state: &Arc<ServerState>,
     session: &mut Session,
     wake: &mut watch::Receiver<u64>,
-    reset: &mut watch::Receiver<u64>,
+    reset: &mut ResetWatch,
     failures: &mut u32,
     seen: u64,
     outcome: Result<Step, PushError>,
@@ -254,7 +254,7 @@ async fn finish_error(
     state: &Arc<ServerState>,
     session: &mut Session,
     wake: &mut watch::Receiver<u64>,
-    reset: &mut watch::Receiver<u64>,
+    reset: &mut ResetWatch,
     failures: &mut u32,
     seen: u64,
     error: PushError,
@@ -578,7 +578,7 @@ async fn scan(
 async fn wait_for_news(
     state: &ServerState,
     wake: &mut watch::Receiver<u64>,
-    reset: &mut watch::Receiver<u64>,
+    reset: &mut ResetWatch,
     until: Option<Instant>,
 ) -> bool {
     let deadline = async {
@@ -589,7 +589,7 @@ async fn wait_for_news(
     };
     tokio::select! {
         changed = wake.changed() => changed.is_ok(),
-        changed = reset.changed() => changed.is_ok(),
+        ok = reset.changed() => ok,
         () = deadline => true,
         () = state.shutdown_requested() => false,
     }
@@ -600,11 +600,11 @@ async fn wait_for_news(
 async fn wait_for_land(
     state: &Arc<ServerState>,
     wake: &mut watch::Receiver<u64>,
-    reset: &mut watch::Receiver<u64>,
+    reset: &mut ResetWatch,
     seen: u64,
 ) -> bool {
     loop {
-        if reset.has_changed().unwrap_or(false) {
+        if reset.pending() {
             return true;
         }
         let reading = Arc::clone(state);
