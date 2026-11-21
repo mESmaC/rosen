@@ -1,6 +1,8 @@
 //! The wire answer to R8's land check: the engine's verdicts ([`GateCheck`]),
 //! with each refusal worded by the same functions a land's answer uses.
 
+use std::collections::BTreeMap;
+
 use rosen_core::Change;
 use rosen_protocol::{
     ApprovalGate, ErrorBody, LandCheck, LandReach, LandRefusal, LandStatus, LandedSince, MergeGate,
@@ -110,11 +112,17 @@ fn refusal(
                 reason: refusal.code().to_owned(),
                 message,
                 paths,
+                merged_tree: None,
+                commands: BTreeMap::new(),
+                log: None,
             }
         }
-        Some(CheckRefusal::Regenerate { change, paths }) => {
-            regeneration_status(*change, paths.clone())
-        }
+        Some(CheckRefusal::Regenerate {
+            change,
+            paths,
+            merged_tree,
+            commands,
+        }) => regeneration_status(*change, paths.clone(), Some(*merged_tree), commands.clone()),
         Some(CheckRefusal::Oversize { limit, files }) => {
             super::size_limit::status(*limit, files.clone())
         }
@@ -122,6 +130,9 @@ fn refusal(
             reason: "conflict_markers".into(),
             message: land_body(LandError::ConflictMarkers(markers.to_vec())).message,
             paths: markers.to_vec(),
+            merged_tree: None,
+            commands: BTreeMap::new(),
+            log: None,
         },
         None => return Ok(None),
     };
@@ -129,6 +140,9 @@ fn refusal(
         reason,
         message,
         paths,
+        merged_tree,
+        commands,
+        log,
     } = status
     else {
         return Err(internal(
@@ -139,6 +153,9 @@ fn refusal(
         reason,
         message,
         paths,
+        merged_tree,
+        commands,
+        log,
     }))
 }
 
@@ -165,9 +182,18 @@ fn merge_gate(merge: MergeCheck, stored: Vec<StoredConflict>, markers: Vec<Strin
         MergeCheck::Clean(_) => MergeGate::Clean,
         MergeCheck::StoredConflicts => MergeGate::Conflicts { conflicts: stored },
         MergeCheck::Conflicted { change, paths } => MergeGate::MergeConflict { change, paths },
-        MergeCheck::Regenerate { change, paths } => {
-            MergeGate::RegenerationRequired { change, paths }
-        }
+        MergeCheck::Regenerate {
+            change,
+            paths,
+            merged_tree,
+            commands,
+            ..
+        } => MergeGate::RegenerationRequired {
+            change,
+            paths,
+            merged_tree: Some(merged_tree),
+            commands,
+        },
         MergeCheck::Oversize { limit, files } => MergeGate::OversizeFiles {
             limit,
             files: files

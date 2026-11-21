@@ -6,6 +6,7 @@
 //! compare-and-swap transaction. After repeated contention, a request waits
 //! for an exclusive retry turn so other lands cannot keep beating it.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock, Weak};
 use std::time::Duration;
 
@@ -314,8 +315,33 @@ impl LandingService {
     fn decide(&self, engine: &Arc<Landing>, id: &ChangeId) -> Result<Decided, ErrorBody> {
         let mut timing = super::timing::Timing::new(id, "decision");
         let decision = match engine.decide(id) {
-            Err(LandError::RegenerationRequired { change, paths }) => {
-                return Ok(Ok(regeneration_status(change, paths)))
+            Err(LandError::RegenerationRequired {
+                change,
+                paths,
+                merged_tree,
+                commands,
+            }) => {
+                return Ok(Ok(regeneration_status(
+                    change,
+                    paths,
+                    merged_tree,
+                    commands,
+                )))
+            }
+            Err(LandError::RegenerationFailed {
+                change,
+                paths,
+                merged_tree,
+                commands,
+                log,
+            }) => {
+                return Ok(Ok(regeneration_failed_status(
+                    change,
+                    paths,
+                    merged_tree,
+                    commands,
+                    log,
+                )))
             }
             Err(LandError::OversizeFiles { limit, files }) => {
                 return Ok(Ok(super::size_limit::status(limit, files)))
@@ -513,16 +539,38 @@ impl LandingService {
     }
 }
 
-pub(super) fn regeneration_status(change: ChangeId, paths: Vec<String>) -> LandStatus {
-    let message = LandError::RegenerationRequired {
-        change,
-        paths: paths.clone(),
-    }
-    .to_string();
+pub(super) fn regeneration_status(
+    change: ChangeId,
+    paths: Vec<String>,
+    merged_tree: Option<TreeId>,
+    commands: BTreeMap<String, String>,
+) -> LandStatus {
+    let message = super::regenerate::required_message(change, &paths, merged_tree, &commands);
     LandStatus::Refused {
         reason: "regeneration_required".into(),
         message,
         paths,
+        merged_tree,
+        commands,
+        log: None,
+    }
+}
+
+pub(super) fn regeneration_failed_status(
+    change: ChangeId,
+    paths: Vec<String>,
+    merged_tree: TreeId,
+    commands: BTreeMap<String, String>,
+    log: String,
+) -> LandStatus {
+    let message = super::regenerate::failed_message(change, &paths, merged_tree, &commands, &log);
+    LandStatus::Refused {
+        reason: "regeneration_failed".into(),
+        message,
+        paths,
+        merged_tree: Some(merged_tree),
+        commands,
+        log: Some(log),
     }
 }
 
@@ -545,6 +593,9 @@ fn refusal_status(
         reason: refusal.code().to_owned(),
         message,
         paths,
+        merged_tree: None,
+        commands: BTreeMap::new(),
+        log: None,
     })
 }
 
@@ -787,6 +838,54 @@ impl Merger for Adapters {
         .map_err(|err| LandError::Backend(err.to_string()))?;
         Ok(merged.into())
     }
+
+    fn regenerate_layer_live(
+        &self,
+        change: &ChangeId,
+        policy_base: &CommitId,
+        merged_tree: TreeId,
+        paths: Vec<String>,
+        current: &dyn Fn() -> LandResult<bool>,
+    ) -> LandResult<Option<TreeId>> {
+        let state = self.state()?;
+        let outcome =
+            super::regenerate::regenerate_tree(&state, policy_base, merged_tree, &paths, &|| {
+                current().map_err(|err| err.to_string())
+            })
+            .map_err(LandError::Backend)?;
+        match outcome {
+            super::regenerate::RegenOutcome::Regenerated(tree) => Ok(Some(tree)),
+            super::regenerate::RegenOutcome::Cancelled => Ok(None),
+            super::regenerate::RegenOutcome::MissingCommands { commands } => {
+                Err(LandError::RegenerationRequired {
+                    change: *change,
+                    paths,
+                    merged_tree: Some(merged_tree),
+                    commands,
+                })
+            }
+            super::regenerate::RegenOutcome::Failed { commands, log } => {
+                Err(LandError::RegenerationFailed {
+                    change: *change,
+                    paths,
+                    merged_tree,
+                    commands,
+                    log,
+                })
+            }
+        }
+    }
+
+    fn regeneration_info(
+        &self,
+        policy_base: &CommitId,
+        merged_tree: TreeId,
+        paths: &[String],
+    ) -> LandResult<super::RegenerationInfo> {
+        let state = self.state()?;
+        super::regenerate::inspect(&state, policy_base, merged_tree, paths)
+            .map_err(LandError::Backend)
+    }
 }
 
 impl CommitWriter for Adapters {
@@ -854,6 +953,7 @@ pub(super) fn land_body(err: LandError) -> ErrorBody {
         | LandError::RevertConflict { .. }
         | LandError::ConflictMarkers(_)
         | LandError::RegenerationRequired { .. }
+        | LandError::RegenerationFailed { .. }
         | LandError::OversizeFiles { .. } => ErrorCode::Refused,
         LandError::Store(_) | LandError::Backend(_) => ErrorCode::Internal,
     };

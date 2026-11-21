@@ -58,6 +58,12 @@ fn print_parts(config: &ProjectConfig) {
     println!("recheck: {}", config.recheck.as_str());
     println!("maximum landed file size: {} bytes", config.max_file_size);
     print_patterns("generated files", &config.generated);
+    if !config.generated_commands.is_empty() {
+        println!("generated commands:");
+        for (pattern, command) in &config.generated_commands {
+            println!("  {pattern} = {command}");
+        }
+    }
     print_patterns("registration lists", &config.registration_lists);
     print_patterns("sensitive paths", &config.sensitive);
     print_patterns("ignored paths", &config.ignore);

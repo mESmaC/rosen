@@ -161,8 +161,10 @@ const EXIT_ALREADY_RUNNING: u8 = 3;
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse();
-    // Each project has its own daemon: their warm pools take turns (R3).
+    // Each project has its own daemon: their warm pools and landing
+    // regenerations take turns in the machine's run queue (R3, #428).
     rosen_client::run_queue::queue_prepares();
+    rosen_server::enable_run_queue();
     // Clients on this machine open the object store at the data dir that
     // `status` reports (SPEC R3), so it must not depend on the daemon's cwd.
     let data_dir = std::path::absolute(&args.data_dir).unwrap_or_else(|_| args.data_dir.clone());

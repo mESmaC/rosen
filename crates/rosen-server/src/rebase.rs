@@ -50,7 +50,7 @@ pub fn rebase(state: &ServerState, change: &str) -> HistoryResult<ChangeRecord> 
         ));
     }
     let ctx = history::open(state)?;
-    let merged = history::merge::merge_result(&ctx, change)?;
+    let merged = history::merge::merge_result_for_rebase(&ctx, change)?;
     if merged.head != before.change.head {
         return Err(HistoryError::Refused("head moved; retry the rebase".into()));
     }
@@ -58,19 +58,27 @@ pub fn rebase(state: &ServerState, change: &str) -> HistoryResult<ChangeRecord> 
         Some(tree) => (tree, Vec::new(), merged.regenerate),
         None => marked(&ctx, &before.change, &merged.base)?,
     };
+    let regenerate_commands = if regenerate.is_empty() {
+        std::collections::BTreeMap::new()
+    } else if !merged.regenerate_commands.is_empty() {
+        merged.regenerate_commands
+    } else {
+        let config = state.project_config.at_commit(&merged.base)?.config;
+        crate::landing::regenerate::RegenPlan::for_paths(&config, &regenerate).commands
+    };
     let paths: Vec<String> = conflicts.iter().map(|(path, _)| path.clone()).collect();
     // Staged with the rebase, so a stop after it commits cannot lose them (R9).
     let id = before.change.id;
-    let mut events = vec![Staged::about(
-        EventKind::Rebased,
-        id,
-        serde_json::json!({
-            "onto": merged.base,
-            "tree": tree,
-            "regenerate": regenerate,
-            "conflicts": paths,
-        }),
-    )];
+    let mut detail = serde_json::json!({
+        "onto": merged.base,
+        "tree": tree,
+        "regenerate": regenerate,
+        "conflicts": paths,
+    });
+    if !regenerate_commands.is_empty() {
+        detail["regenerate_commands"] = serde_json::json!(regenerate_commands);
+    }
+    let mut events = vec![Staged::about(EventKind::Rebased, id, detail)];
     if !paths.is_empty() {
         let detail = serde_json::json!({ "paths": paths, "onto": merged.base });
         events.push(Staged::about(EventKind::Conflict, id, detail));

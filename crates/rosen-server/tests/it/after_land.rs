@@ -570,16 +570,193 @@ async fn generated_merge_refuses_until_owner_rebases_and_regenerates() {
         reason,
         paths,
         message,
+        merged_tree,
+        commands,
+        log,
     } = answer.outcome
     else {
         panic!()
     };
     assert_eq!(reason, "regeneration_required");
     assert_eq!(paths, vec!["artifact.lock"]);
-    assert!(message.contains(&id) && message.contains("rosen rebase"));
+    let expected_tree = preview.tree.unwrap();
+    assert_eq!(merged_tree, Some(expected_tree));
+    assert!(commands.is_empty());
+    assert!(log.is_none());
+    assert!(
+        message.contains(&id)
+            && message.contains("rosen rebase")
+            && message.contains(&expected_tree.to_string())
+    );
     assert_eq!(ledger.base("main").unwrap(), Some(base));
     assert!(state.changes.show(&id).unwrap().change.conflicts.is_empty());
     assert_generated_repair(&state, &id).await;
+}
+
+// Risk (R5/R8, #428): registered `[generated.commands]` must run on the merged
+// inputs at land and include only regenerated paths, never stray command output.
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_generated_command_regenerates_at_land() {
+    #[cfg(windows)]
+    let cmd = "copy /b base.txt+owner.txt artifact.lock >NUL & echo stray > stray.tmp";
+    #[cfg(not(windows))]
+    let cmd = "cat base.txt owner.txt > artifact.lock && echo stray > stray.tmp";
+    let config =
+        format!("review = \"after-land\"\n[generated.commands]\n\"artifact.lock\" = {cmd:?}\n");
+    let temp = tempfile::tempdir().unwrap();
+    let state = setup_with_config(temp.path(), config.as_bytes());
+    let id = new_change(&state).await;
+    write_file(&state, &id, "owner.txt", b"OWNER").await;
+    write_artifact(&state, &id, b"stale owner").await;
+    let base_change = new_change(&state).await;
+    write_file(&state, &base_change, "base.txt", b"BASE+").await;
+    write_artifact(&state, &base_change, b"stale base").await;
+    let Response::Land(base_land) = call(
+        &state,
+        Request::Land {
+            change: base_change,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(matches!(base_land.outcome, LandStatus::Landed { .. }));
+    state.landing.settle();
+
+    let Response::LandCheck(check) = call(&state, Request::LandCheck { change: id.clone() }).await
+    else {
+        panic!()
+    };
+    assert!(check.landable);
+    let MergeGate::RegenerationRequired {
+        paths,
+        merged_tree,
+        commands,
+        ..
+    } = check.merge
+    else {
+        panic!("{check:?}")
+    };
+    assert_eq!(paths, vec!["artifact.lock"]);
+    assert!(merged_tree.is_some());
+    assert_eq!(commands.get("artifact.lock").map(String::as_str), Some(cmd));
+
+    let Response::Land(answer) = call(&state, Request::Land { change: id }).await else {
+        panic!()
+    };
+    let LandStatus::Landed { commit, .. } = answer.outcome else {
+        panic!("{answer:?}")
+    };
+    state.landing.settle();
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let tree = store
+        .read_tree(&store.read_commit(&commit).unwrap().tree)
+        .unwrap();
+    let artifact = tree
+        .entries()
+        .iter()
+        .find(|e| e.name == b"artifact.lock")
+        .unwrap();
+    assert_eq!(store.read_blob(&artifact.id).unwrap().data, b"BASE+OWNER");
+    assert!(tree.entries().iter().all(|e| e.name != b"stray.tmp"));
+}
+
+// Risk (R5/R8, #428): a failing generator command must refuse the land with
+// paths, merged input tree, registered command and output log, without moving base.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_generated_command_refuses_with_log() {
+    let cmd = "echo regen-boom && exit 1";
+    let config =
+        format!("review = \"after-land\"\n[generated.commands]\n\"artifact.lock\" = {cmd:?}\n");
+    let temp = tempfile::tempdir().unwrap();
+    let state = setup_with_config(temp.path(), config.as_bytes());
+    let id = new_change(&state).await;
+    write_artifact(&state, &id, b"owner").await;
+    let (_, _, base) = land_bytes(&state, "artifact.lock", b"base").await;
+
+    let Response::Land(answer) = call(&state, Request::Land { change: id }).await else {
+        panic!()
+    };
+    let LandStatus::Refused {
+        reason,
+        paths,
+        merged_tree,
+        commands,
+        log,
+        ..
+    } = answer.outcome
+    else {
+        panic!("{answer:?}")
+    };
+    assert_eq!(reason, "regeneration_failed");
+    assert_eq!(paths, vec!["artifact.lock"]);
+    assert!(merged_tree.is_some());
+    assert_eq!(commands.get("artifact.lock").map(String::as_str), Some(cmd));
+    assert!(log.as_deref().unwrap_or("").contains("regen-boom"));
+    let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
+    assert_eq!(ledger.base("main").unwrap(), Some(base));
+}
+
+fn setup_with_config(path: &std::path::Path, config: &[u8]) -> Arc<ServerState> {
+    let state = ServerState::new(ServerConfig {
+        data_dir: path.into(),
+        endpoint: Endpoint::new("after-land-regen"),
+        warm_pool_dir: None,
+    });
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let blob = store.put_blob(config).unwrap();
+    let tree = store
+        .put_tree(
+            &Tree::new(vec![
+                TreeEntry::new(FileMode::Regular, "rosen.toml", blob).unwrap()
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+    let who = Signature::new("test", "test@test", 0);
+    let root = store
+        .put_commit(&Commit {
+            tree,
+            parents: vec![],
+            author: who.clone(),
+            committer: who,
+            extra_headers: vec![],
+            message: b"base\n".to_vec(),
+        })
+        .unwrap();
+    Ledger::open(&state.config.metadata_path())
+        .unwrap()
+        .init_base("main", &root)
+        .unwrap();
+    state
+}
+
+async fn new_change(state: &Arc<ServerState>) -> String {
+    let Response::Change(record) = call(
+        state,
+        Request::ChangeNew(NewChange {
+            owner: AgentId::new("owner").unwrap(),
+            on: None,
+        }),
+    )
+    .await
+    else {
+        panic!()
+    };
+    record.change.id.to_string()
+}
+
+async fn write_file(state: &Arc<ServerState>, id: &str, path: &str, data: &[u8]) {
+    call(
+        state,
+        Request::WorkspaceWrite(WorkspaceWrite {
+            change: id.into(),
+            path: path.into(),
+            data: Some(WorkspaceBytes(data.into())),
+        }),
+    )
+    .await;
 }
 
 async fn assert_generated_repair(state: &Arc<ServerState>, id: &str) {

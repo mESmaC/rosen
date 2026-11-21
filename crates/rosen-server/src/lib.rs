@@ -43,6 +43,7 @@ pub mod uploads;
 pub mod workspaces;
 
 use events::EventLog;
+pub use landing::regenerate::enable_run_queue;
 use network::{Identity, NetworkOptions};
 use rosen_protocol::Endpoint;
 use std::net::SocketAddr;
@@ -90,6 +91,7 @@ pub struct ServerState {
     pub(crate) transfers: load_limits::TransferLimits,
     pub(crate) overlap_edits: overlaps::edits::Cache,
     pub(crate) merge_results: history::merge::MergeCache,
+    pub(crate) regenerations: landing::regenerate::RegenCache,
     /// Wakes the mirror task when the base appears without a land, as an
     /// import does (SPEC R1). A wake during a push is kept for the next wait.
     pub mirror_wake: tokio::sync::Notify,
@@ -128,6 +130,7 @@ impl ServerState {
             transfers: load_limits::TransferLimits::default(),
             overlap_edits: overlaps::edits::Cache::default(),
             merge_results: history::merge::MergeCache::default(),
+            regenerations: landing::regenerate::RegenCache::default(),
             events: EventLog::open(config.metadata_path()),
             config,
             started: Instant::now(),
@@ -346,6 +349,12 @@ impl ServerConfig {
     pub fn slices_dir(&self) -> PathBuf {
         self.data_dir.join("slices")
     }
+
+    /// Scratch directories for server-side generated-artifact regeneration
+    /// at land (R5, R8, #428). Cleared on start and removed after each run.
+    pub fn regen_scratch_dir(&self) -> PathBuf {
+        self.data_dir.join("regen-tmp")
+    }
 }
 
 /// Binds the endpoint and serves until shutdown is requested. Fails with
@@ -364,6 +373,7 @@ pub async fn serve_with(config: &ServerConfig, options: NetworkOptions) -> std::
     // Only once the endpoint is this server's: a daemon that loses a start
     // race must not remove the copies the winner is serving.
     object_slices::clear(&config.slices_dir());
+    landing::regenerate::clear_scratch(&config.regen_scratch_dir());
     // Created with the project's first server start (R14), so the
     // fingerprint daemons pin never changes.
     let identity = Identity::load_or_create(&config.data_dir)?;

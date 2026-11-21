@@ -74,6 +74,20 @@ fn cached_merge(
 }
 
 pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer> {
+    merge_result_mode(ctx, change, true)
+}
+
+/// Computes a change's merge result without running registered generator
+/// commands, for `rosen rebase` (R2, R5).
+pub(crate) fn merge_result_for_rebase(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer> {
+    merge_result_mode(ctx, change, false)
+}
+
+fn merge_result_mode(
+    ctx: &Ctx,
+    change: &str,
+    run_generators: bool,
+) -> HistoryResult<MergeResultAnswer> {
     let Revision::Change(change) = Revision::resolve(ctx, Some(change))? else {
         return Err(HistoryError::Invalid(
             "a merge result is computed for a change; name a change ID".into(),
@@ -86,9 +100,15 @@ pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer>
         )));
     }
     let base = base_commit(ctx)?;
-    let merged = merge_stack_onto(ctx, &change, &base)?;
-    // A generator run changes the tree. Only the owner's repaired head can
-    // be certified; this provisional base artifact must not bind a receipt.
+    let (merged, regenerate_commands, regenerate_log) = if run_generators {
+        merge_stack_regenerating(ctx, &change, &base)?
+    } else {
+        let merged = merge_stack_onto(ctx, &change, &base)?;
+        let commands = registered_commands(ctx, &base, &merged.regenerate)?;
+        (merged, commands, None)
+    };
+    // A generator run changes the tree. Only a fully regenerated or clean tree
+    // can be certified; a provisional base artifact must not bind a receipt.
     if let Some(tree) = merged.tree.filter(|_| merged.regenerate.is_empty()) {
         crate::landing::Ledger::open(&ctx.state.config.metadata_path())
             .and_then(|ledger| ledger.remember_merge_result(&change.id, &change.head, &base, &tree))
@@ -101,7 +121,82 @@ pub fn merge_result(ctx: &Ctx, change: &str) -> HistoryResult<MergeResultAnswer>
         tree: merged.tree,
         conflicts: merged.conflicts,
         regenerate: merged.regenerate,
+        regenerate_commands,
+        regenerate_log,
     })
+}
+
+fn registered_commands(
+    ctx: &Ctx,
+    onto: &ObjectId,
+    paths: &[String],
+) -> HistoryResult<BTreeMap<String, String>> {
+    if paths.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let config = ctx.state.project_config.at_commit(onto)?.config;
+    Ok(crate::landing::regenerate::RegenPlan::for_paths(&config, paths).commands)
+}
+
+/// Like [`merge_stack_onto`], but runs registered `[generated.commands]` on
+/// each layer that needs regeneration, matching the bottom-up order of a land.
+fn merge_stack_regenerating(
+    ctx: &Ctx,
+    change: &StackedChange,
+    onto: &ObjectId,
+) -> HistoryResult<(TreeMerge, BTreeMap<String, String>, Option<String>)> {
+    let (stack, _) = stack_root(ctx, change)?;
+    let unlanded = stack
+        .iter()
+        .position(|c| c.state == ChangeState::Landed)
+        .unwrap_or(stack.len());
+    let config = ctx.state.project_config.at_commit(onto)?.config;
+    let policy = |path: &str| policy_for(&config, path);
+    let mut tree = ctx.store.read_commit(onto)?.tree;
+    for layer in stack[..unlanded].iter().rev() {
+        let measured_from = built_on(ctx, layer)?;
+        let mut step = cached_merge(ctx, [measured_from, tree, layer.head], *onto, &policy)?;
+        let Some(merged) = step.tree else {
+            return Ok((step, BTreeMap::new(), None));
+        };
+        if step.regenerate.is_empty() {
+            tree = merged;
+            continue;
+        }
+        step.regenerate.sort();
+        step.regenerate.dedup();
+        let outcome = crate::landing::regenerate::regenerate_tree(
+            ctx.state,
+            onto,
+            merged,
+            &step.regenerate,
+            &|| Ok(true),
+        )
+        .map_err(HistoryError::Refused)?;
+        match outcome {
+            crate::landing::regenerate::RegenOutcome::Regenerated(regenerated) => {
+                tree = regenerated;
+            }
+            crate::landing::regenerate::RegenOutcome::MissingCommands { commands } => {
+                return Ok((step, commands, None));
+            }
+            crate::landing::regenerate::RegenOutcome::Failed { commands, log } => {
+                return Ok((step, commands, Some(log)));
+            }
+            crate::landing::regenerate::RegenOutcome::Cancelled => {
+                return Err(HistoryError::Refused("regeneration cancelled".into()));
+            }
+        }
+    }
+    Ok((
+        TreeMerge {
+            tree: Some(tree),
+            conflicts: Vec::new(),
+            regenerate: Vec::new(),
+        },
+        BTreeMap::new(),
+        None,
+    ))
 }
 
 /// Merges `change` and every unlanded change below it onto commit `onto`,

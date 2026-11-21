@@ -191,14 +191,22 @@ impl Landing {
                     trees.push(tree);
                     onto = tree;
                 }
-                MergeOutcome::Regenerate { paths, .. } => {
+                MergeOutcome::Regenerate { tree, paths } => {
                     if self.current_base()? != base {
                         return Ok(None);
                     }
-                    return Err(LandError::RegenerationRequired {
-                        change: facts.id,
+                    let Some(regenerated) = self.deps.merger.regenerate_layer_live(
+                        &facts.id,
+                        &base,
+                        tree,
                         paths,
-                    });
+                        &|| self.current_base().map(|current| current == base),
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    trees.push(regenerated);
+                    onto = regenerated;
                 }
                 MergeOutcome::Conflicted(paths) => {
                     if self.route_layer_conflicts(facts, &onto, paths)? == Routing::ChangeMoved {

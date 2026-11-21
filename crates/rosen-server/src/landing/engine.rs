@@ -249,11 +249,21 @@ impl Landing {
         };
         let tree = match outcome {
             MergeOutcome::Clean(tree) => Some(tree),
-            MergeOutcome::Regenerate { paths, .. } => {
-                return Err(LandError::RegenerationRequired {
-                    change: facts.id,
-                    paths,
-                });
+            MergeOutcome::Regenerate { tree, paths } => {
+                let info = self
+                    .deps
+                    .merger
+                    .regeneration_info(&receipt.base, tree, &paths)?;
+                if let Some(regenerated) = info.cached {
+                    Some(regenerated)
+                } else {
+                    return Err(LandError::RegenerationRequired {
+                        change: facts.id,
+                        paths,
+                        merged_tree: Some(tree),
+                        commands: info.commands,
+                    });
+                }
             }
             MergeOutcome::Conflicted(_) => None,
         };

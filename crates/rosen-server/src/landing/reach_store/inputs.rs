@@ -72,6 +72,7 @@ fn config_reach(
         || old.build_units != new.build_units
         || old.workspace_inputs != new.workspace_inputs
         || old.generated != new.generated
+        || old.generated_commands != new.generated_commands
         || old.registration_lists != new.registration_lists;
     Ok(if affects_build {
         graph.all()

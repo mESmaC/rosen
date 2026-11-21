@@ -1,6 +1,7 @@
 - `rosen land --check <change>` (`Request::LandCheck`) reports every gate a land of the change would apply on the current base, under the configuration at that base, and lands nothing.
   It answers the `review` and `recheck` modes, the review tier the land would record, the change's build-unit reach (the unit names, or `all`), the base and the head.
   It gives one verdict per gate: `merge` (`clean`, `conflicts`, `merge_conflict`, `regeneration_required`, `oversize_files`, `conflict_markers` or `not_checked`), `approval` (`held`, `needed` or `not_required`), `receipt` (`valid`, `reusable`, `stale`, `unbound`, `missing`, `not_required` or `not_checked`), and `stack`, the unlanded ancestors an atomic land would include.
+  For `regeneration_required`, the gate also names the merged input tree and any registered `[generated.commands]`; in `after-land` mode when every reported path has a registered command and no higher layer remains unmerged, `landable` is true without running the commands (#428).
   With a clean merge, `line_endings` lists each file the merge result holds in other line endings than the change gave it, with the newline it lands with (R5).
   `landable` is true when a land on that base would commit, barring a lost compare-and-swap; otherwise `refusal` carries the reason, message and paths the land would answer with, in the land's own order.
   The check reads the land's inputs through the land's own functions and decides with the same rule, so a land that follows on the same base never disagrees with it.

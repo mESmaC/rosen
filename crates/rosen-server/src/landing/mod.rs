@@ -22,6 +22,7 @@ pub mod reach;
 mod reach_store;
 mod readers;
 mod receipt_store;
+pub(crate) mod regenerate;
 mod restack;
 pub mod revert;
 pub(crate) mod revert_refused;
@@ -32,6 +33,7 @@ pub mod service;
 mod size_limit;
 mod timing;
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 pub use engine::{
@@ -183,6 +185,15 @@ pub enum LandError {
     RegenerationRequired {
         change: ChangeId,
         paths: Vec<String>,
+        merged_tree: Option<TreeId>,
+        commands: BTreeMap<String, String>,
+    },
+    RegenerationFailed {
+        change: ChangeId,
+        paths: Vec<String>,
+        merged_tree: TreeId,
+        commands: BTreeMap<String, String>,
+        log: String,
     },
     ConflictMarkers(Vec<String>),
     RevertConflict {
@@ -207,13 +218,30 @@ impl fmt::Display for LandError {
             LandError::UnknownChange(id) => write!(f, "unknown change {id}"),
             LandError::NoBase(name) => write!(f, "base ref {name} is not initialised"),
             LandError::InvalidReceipt(why) => write!(f, "invalid receipt: {why}"),
-            LandError::RegenerationRequired { change, paths } => write!(
-                f,
-                "change {change} requires regeneration of {}; its owner must apply \
-                 `rosen rebase` (landing its ancestors first if stacked), regenerate these files, \
-                 and name the repaired head before retrying",
-                paths.join(", ")
-            ),
+            LandError::RegenerationRequired {
+                change,
+                paths,
+                merged_tree,
+                commands,
+            } => f.write_str(&regenerate::required_message(
+                *change,
+                paths,
+                *merged_tree,
+                commands,
+            )),
+            LandError::RegenerationFailed {
+                change,
+                paths,
+                merged_tree,
+                commands,
+                log,
+            } => f.write_str(&regenerate::failed_message(
+                *change,
+                paths,
+                *merged_tree,
+                commands,
+                log,
+            )),
             LandError::ConflictMarkers(paths) => {
                 write!(
                     f,
@@ -296,6 +324,15 @@ pub trait ChangeBook: Send + Sync {
     fn release_claims(&self, id: &ChangeId) -> LandResult<()>;
 }
 
+/// Registered command coverage and any cached regeneration for a merged input
+/// tree, read without running commands (#428).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RegenerationInfo {
+    pub cached: Option<TreeId>,
+    pub all_registered: bool,
+    pub commands: BTreeMap<String, String>,
+}
+
 /// Three-way merge (SPEC R5): `head`'s edits since `merge_base`, onto `onto`.
 pub trait Merger: Send + Sync {
     fn merge(
@@ -326,6 +363,38 @@ pub trait Merger: Send + Sync {
         let [merge_base, onto, head, policy_base] = inputs;
         let result = self.merge_layer(merge_base, onto, head, policy_base)?;
         Ok(current()?.then_some(result))
+    }
+
+    /// Runs registered `[generated.commands]` on `merged_tree` during a live
+    /// land attempt (#428). Returns `Ok(None)` when `current()` becomes false
+    /// while waiting.
+    fn regenerate_layer_live(
+        &self,
+        change: &ChangeId,
+        policy_base: &CommitId,
+        merged_tree: TreeId,
+        paths: Vec<String>,
+        current: &dyn Fn() -> LandResult<bool>,
+    ) -> LandResult<Option<TreeId>> {
+        let _ = (policy_base, current);
+        Err(LandError::RegenerationRequired {
+            change: *change,
+            paths,
+            merged_tree: Some(merged_tree),
+            commands: BTreeMap::new(),
+        })
+    }
+
+    /// Read-only inspection of registered commands and any cached regeneration
+    /// for `merged_tree` (#428).
+    fn regeneration_info(
+        &self,
+        policy_base: &CommitId,
+        merged_tree: TreeId,
+        paths: &[String],
+    ) -> LandResult<RegenerationInfo> {
+        let _ = (policy_base, merged_tree, paths);
+        Ok(RegenerationInfo::default())
     }
 }
 

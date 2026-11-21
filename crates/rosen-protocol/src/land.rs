@@ -1,5 +1,7 @@
 //! Wire shapes for `rosen land` (SPEC R8 step 2, R10).
 
+use std::collections::BTreeMap;
+
 use rosen_core::{ChangeId, ObjectId};
 use serde::{Deserialize, Serialize};
 
@@ -36,14 +38,26 @@ pub enum LandStatus {
     Refused {
         /// Stable code agents branch on: `already_landed`, `abandoned`,
         /// `parent_unlanded`, `conflicts`, `unapproved`, `no_receipt`,
-        /// `receipt_stale`, `merge_conflict`, `oversize_files` or `needs_recheck`.
+        /// `receipt_stale`, `merge_conflict`, `regeneration_required`,
+        /// `regeneration_failed`, `oversize_files` or `needs_recheck`.
         reason: String,
         /// What to do next, for a human or an agent reading `--help` output.
         message: String,
-        /// Files whose merge conflicted, or whose blobs exceed the land limit.
-        /// For `oversize_files`, the message also gives each size in bytes.
+        /// Files whose merge conflicted, need regeneration, or exceed the land
+        /// limit. For `oversize_files`, the message also gives each size in bytes.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         paths: Vec<String>,
+        /// The merged input tree awaiting regeneration, for
+        /// `regeneration_required` and `regeneration_failed` (#428).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merged_tree: Option<ObjectId>,
+        /// Commands registered in `rosen.toml` `[generated.commands]` for
+        /// `paths`, when configured (#428).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        commands: BTreeMap<String, String>,
+        /// Command output log when `reason` is `regeneration_failed` (#428).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log: Option<String>,
     },
 }
 
@@ -101,6 +115,12 @@ pub struct LandRefusal {
     pub message: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_tree: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub commands: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
 }
 
 /// The build units a change's edits reach (SPEC §2 Reach), or `"all"`.
@@ -132,10 +152,14 @@ pub enum MergeGate {
         change: ChangeId,
         paths: Vec<String>,
     },
-    /// Generated files of `change` must be regenerated on the base (§3).
+    /// Generated files of `change` must be regenerated on the base (§3, #428).
     RegenerationRequired {
         change: ChangeId,
         paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merged_tree: Option<ObjectId>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        commands: BTreeMap<String, String>,
     },
     /// Files whose blobs exceed `max_file_size` (R1).
     OversizeFiles {

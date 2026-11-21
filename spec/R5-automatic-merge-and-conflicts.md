@@ -12,8 +12,10 @@
   `rosen land --check` and the land answer list each file the merge result holds in other line endings than the change gave it, with the newline it lands with.
   Reverts, restacks and snapshot merges keep every byte; Rosen reads no `core.autocrlf`.
 - Generated files listed in project configuration are regenerated, never merged.
-  When both sides change a generated path differently, the provisional merge keeps the target base's copy and reports the path for the owner to regenerate; Rosen runs no generators (D9).
-  Server rebases preserve these paths in the owner's rebase notice, including restacks after a parent lands.
+  When both sides change a generated path differently, the provisional merge keeps the target base's copy and reports the path for regeneration.
+  If the base's `rosen.toml` registers commands under `[generated.commands]` for every path needing regeneration, the server runs them on the merged tree in the run queue during `merge-result` and `land` and applies only those regenerated paths onto the merged tree (#428).
+  Otherwise (or if a command fails), the report names the exact paths, the merged input tree, any registered commands and (on failure) the command log.
+  Server rebases preserve these paths (and any registered commands) in the owner's rebase notice, including restacks after a parent lands.
   Registration lists keep both sides' additions.
 - A region that does not merge automatically becomes a stored conflict on the change, which records base, ours and theirs.
   A local workspace shows conflict markers once the rebase is applied (R2).

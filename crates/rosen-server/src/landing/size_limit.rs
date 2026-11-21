@@ -85,5 +85,8 @@ pub(super) fn status(limit: u64, files: OversizeFiles) -> LandStatus {
         reason: "oversize_files".into(),
         message: message(limit, &files),
         paths: files.into_iter().map(|(path, _)| path).collect(),
+        merged_tree: None,
+        commands: std::collections::BTreeMap::new(),
+        log: None,
     }
 }

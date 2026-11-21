@@ -38,11 +38,12 @@ fn checked_tree(
     }
     let ctx = crate::history::open(state)
         .map_err(|e| ErrorBody::new(ErrorCode::Internal, e.to_string()))?;
-    Ok(
-        crate::history::merge::merge_stack_onto(&ctx, change, &receipt.base)
-            .map_err(|e| ErrorBody::new(ErrorCode::Internal, e.to_string()))?
-            .tree,
-    )
+    let merged = crate::history::merge::merge_stack_onto(&ctx, change, &receipt.base)
+        .map_err(|e| ErrorBody::new(ErrorCode::Internal, e.to_string()))?;
+    if !merged.regenerate.is_empty() {
+        return Ok(None);
+    }
+    Ok(merged.tree)
 }
 
 /// Stores receipts in the landing ledger's tables of the metadata store.

@@ -3,6 +3,8 @@
 //! with none of its writes. It never marks a change ready, routes a merge
 //! conflict, publishes an event, stores a receipt or moves the base.
 
+use std::collections::BTreeMap;
+
 use rosen_core::ChangeState;
 
 use super::super::reach_store::{self, UnitsReached};
@@ -45,6 +47,12 @@ pub enum MergeCheck {
     Regenerate {
         change: ChangeId,
         paths: Vec<String>,
+        merged_tree: TreeId,
+        commands: BTreeMap<String, String>,
+        /// True when every reported path has a registered command and no higher
+        /// stack layer remains unmerged, so an after-land request will regenerate
+        /// and land automatically.
+        auto_at_land: bool,
     },
     Oversize {
         limit: u64,
@@ -82,6 +90,8 @@ pub enum CheckRefusal {
     Regenerate {
         change: ChangeId,
         paths: Vec<String>,
+        merged_tree: TreeId,
+        commands: BTreeMap<String, String>,
     },
     Oversize {
         limit: u64,
@@ -132,7 +142,13 @@ impl Landing {
             return Ok(None);
         }
         let receipt = self.receipt_state(&decided, &base, &merge, gathered.as_ref())?;
-        let refusal = first_refusal(&layers, &decided.id, &merge, gathered.as_ref());
+        let refusal = first_refusal(
+            &layers,
+            &decided.id,
+            policy.review,
+            &merge,
+            gathered.as_ref(),
+        );
         let reach = self.reach_of(&stack, &decided, &base, &merge)?;
         let approval = approval_check(&decided, policy.review);
         let mut ancestors: Vec<_> = stack.into_iter().zip(layers).collect();
@@ -192,23 +208,45 @@ impl Landing {
         if top.has_conflicts {
             return Ok(MergeCheck::StoredConflicts);
         }
-        let (trees, failed) = self.preview_layers(stack, base)?;
-        let check = match failed {
-            Some((layer, MergeOutcome::Conflicted(paths))) => MergeCheck::Conflicted {
-                change: stack[layer].id,
-                paths,
-            },
-            Some((layer, MergeOutcome::Regenerate { paths, .. })) => MergeCheck::Regenerate {
-                change: stack[layer].id,
-                paths,
-            },
-            Some((_, MergeOutcome::Clean(_))) | None => match self.check_file_sizes(base, &trees) {
-                Ok(()) => MergeCheck::Clean(*trees.last().expect("one tree per layer")),
-                Err(LandError::OversizeFiles { limit, files }) => {
-                    MergeCheck::Oversize { limit, files }
+        let mut trees = Vec::new();
+        let mut onto = *base;
+        for (index, facts) in stack.iter().enumerate() {
+            match self
+                .deps
+                .merger
+                .merge_layer(&facts.merge_base, &onto, &facts.head, base)?
+            {
+                MergeOutcome::Clean(tree) => {
+                    trees.push(tree);
+                    onto = tree;
                 }
-                Err(error) => return Err(error),
-            },
+                MergeOutcome::Conflicted(paths) => {
+                    return Ok(MergeCheck::Conflicted {
+                        change: facts.id,
+                        paths,
+                    });
+                }
+                MergeOutcome::Regenerate { tree, paths } => {
+                    let info = self.deps.merger.regeneration_info(base, tree, &paths)?;
+                    if let Some(regenerated) = info.cached {
+                        trees.push(regenerated);
+                        onto = regenerated;
+                        continue;
+                    }
+                    return Ok(MergeCheck::Regenerate {
+                        change: facts.id,
+                        paths,
+                        merged_tree: tree,
+                        commands: info.commands,
+                        auto_at_land: info.all_registered && index + 1 == stack.len(),
+                    });
+                }
+            }
+        }
+        let check = match self.check_file_sizes(base, &trees) {
+            Ok(()) => MergeCheck::Clean(*trees.last().expect("one tree per layer")),
+            Err(LandError::OversizeFiles { limit, files }) => MergeCheck::Oversize { limit, files },
+            Err(error) => return Err(error),
         };
         Ok(check)
     }
@@ -336,6 +374,7 @@ fn approval_check(top: &ChangeFacts, review: ReviewMode) -> ApprovalCheck {
 fn first_refusal(
     layers: &[Option<Refusal>],
     top: &ChangeId,
+    review: ReviewMode,
     merge: &MergeCheck,
     gathered: Option<&Gathered>,
 ) -> Option<CheckRefusal> {
@@ -353,9 +392,20 @@ fn first_refusal(
             CheckRefusal::Rule(Refusal::MergeConflict)
         }
         MergeCheck::Conflicted { .. } => CheckRefusal::Rule(Refusal::ParentUnlanded),
-        MergeCheck::Regenerate { change, paths } => CheckRefusal::Regenerate {
+        MergeCheck::Regenerate {
+            auto_at_land: true, ..
+        } if review == ReviewMode::AfterLand => return None,
+        MergeCheck::Regenerate {
+            change,
+            paths,
+            merged_tree,
+            commands,
+            ..
+        } => CheckRefusal::Regenerate {
             change: *change,
             paths: paths.clone(),
+            merged_tree: *merged_tree,
+            commands: commands.clone(),
         },
         MergeCheck::Oversize { limit, files } => CheckRefusal::Oversize {
             limit: *limit,

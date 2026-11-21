@@ -9,6 +9,8 @@
 //!   the letters k-z, so they never look like hex). A change reads as its
 //!   current head tree, sitting on its parent.
 
+use std::collections::BTreeMap;
+
 use rosen_core::{AgentId, ChangeId, ObjectId, ReceiptTrailer};
 use serde::{Deserialize, Serialize};
 
@@ -252,9 +254,16 @@ pub struct MergeResultAnswer {
     pub tree: Option<ObjectId>,
     /// Paths that did not merge automatically.
     pub conflicts: Vec<String>,
-    /// Generated files (project configuration) both sides changed. The tree
-    /// holds the base's version; the checker regenerates them on the merge
-    /// result before building, as Rosen runs no generators (R5, D9).
+    /// Generated files (project configuration) both sides changed that could
+    /// not be regenerated automatically. `tree` holds the merged input tree
+    /// with the base's copy of these files (R5, #428).
     #[serde(default)]
     pub regenerate: Vec<String>,
+    /// Commands registered in `rosen.toml` `[generated.commands]` for paths in
+    /// `regenerate`, when configured (#428).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub regenerate_commands: BTreeMap<String, String>,
+    /// Output log when a registered regeneration command failed (#428).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regenerate_log: Option<String>,
 }

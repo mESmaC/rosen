@@ -1,5 +1,7 @@
 - every change in the requested stack has no conflicts and merges cleanly.
-  A layer that requires generated-file regeneration refuses the entire land with `regeneration_required`, its owning change and paths, in either review mode; no prefix lands.
+  When a layer needs generated-file regeneration and the base's `rosen.toml` registers commands under `[generated.commands]` for every such path, the server materialises the merged input tree, runs the commands in the run queue (`landing` class), and applies only those regenerated paths onto the merged tree before continuing (#428).
+  If any registered command fails, the land is refused with `regeneration_failed`, naming the change, exact paths, merged input tree, registered commands and command output log; no prefix lands.
+  If any path needing regeneration has no registered command, the land is refused with `regeneration_required`, naming the owning change, exact paths, merged input tree and any registered commands, in either review mode; no prefix lands.
   Its owner applies a rebase, regenerates the reported paths on the merged inputs and snapshots the repaired head before retrying.
   A provisional merge tree awaiting regeneration cannot be recorded as a checked preview or certified by a receipt.
   Before writing each landed commit, the server also refuses any file in its final tree containing conflict marker lines, even if every conflict row was resolved or no row exists.

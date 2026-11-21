@@ -148,8 +148,25 @@ fn merge_text(merge: &MergeGate) -> String {
         MergeGate::MergeConflict { change, paths } => {
             format!("conflicts merging {change}: {}", paths.join(", "))
         }
-        MergeGate::RegenerationRequired { change, paths } => {
-            format!("regenerate in {change}: {}", paths.join(", "))
+        MergeGate::RegenerationRequired {
+            change,
+            paths,
+            merged_tree,
+            commands,
+        } => {
+            let tree = merged_tree
+                .map(|id| format!(" on {id}"))
+                .unwrap_or_default();
+            let cmds = if commands.is_empty() {
+                String::new()
+            } else {
+                let list: Vec<String> = commands
+                    .iter()
+                    .map(|(path, cmd)| format!("{path}: `{cmd}`"))
+                    .collect();
+                format!(" ({})", list.join("; "))
+            };
+            format!("regenerate in {change}{tree}: {}{cmds}", paths.join(", "))
         }
         MergeGate::OversizeFiles { limit, files } => {
             let listed: Vec<_> = files

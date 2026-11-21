@@ -7,7 +7,9 @@
 
 use crate::claim::PathPattern;
 use crate::receipt::PRE_LAND_CHECK_SET;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// Where the configuration lives in every commit's tree.
@@ -35,6 +37,11 @@ pub struct ProjectConfig {
     /// Files regenerated after a merge, never merged by hand (R5). They
     /// never count as an overlap (§2).
     pub generated: Vec<PathPattern>,
+    /// Commands registered in `[generated.commands]` to regenerate generated
+    /// files on the merged tree at land (R5, R8, #428). Every pattern here is
+    /// also treated as a generated file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub generated_commands: BTreeMap<PathPattern, String>,
     /// Files where both sides' additions are kept (R5). They never count as
     /// an overlap (§2).
     pub registration_lists: Vec<PathPattern>,
@@ -100,6 +107,7 @@ impl Default for ProjectConfig {
             build_units: Default::default(),
             workspace_inputs: Vec::new(),
             generated: Vec::new(),
+            generated_commands: BTreeMap::new(),
             registration_lists: Vec::new(),
             sensitive: Vec::new(),
             ignore: Vec::new(),
@@ -297,11 +305,153 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// `generated` as written in `rosen.toml`: either a list of path globs
+/// (`generated = [...]`) or a table (`[generated] paths = [...]` and/or
+/// `[generated.commands] "path" = "command"`).
+#[derive(Default)]
+struct WrittenGenerated {
+    paths: Vec<PathPattern>,
+    commands: BTreeMap<PathPattern, String>,
+}
+
+impl<'de> Deserialize<'de> for WrittenGenerated {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct GeneratedVisitor;
+
+        impl<'de> Visitor<'de> for GeneratedVisitor {
+            type Value = WrittenGenerated;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a list of path patterns or a [generated] table")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut paths = Vec::new();
+                while let Some(pattern) = seq.next_element()? {
+                    paths.push(pattern);
+                }
+                Ok(WrittenGenerated {
+                    paths,
+                    commands: BTreeMap::new(),
+                })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut paths = None;
+                let mut commands = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "paths" => {
+                            if paths.is_some() {
+                                return Err(de::Error::duplicate_field("paths"));
+                            }
+                            paths = Some(map.next_value()?);
+                        }
+                        "commands" => {
+                            if commands.is_some() {
+                                return Err(de::Error::duplicate_field("commands"));
+                            }
+                            commands = Some(map.next_value()?);
+                        }
+                        other => {
+                            return Err(de::Error::unknown_field(other, &["paths", "commands"]))
+                        }
+                    }
+                }
+                Ok(WrittenGenerated {
+                    paths: paths.unwrap_or_default(),
+                    commands: commands.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_any(GeneratedVisitor)
+    }
+}
+
+/// `rosen.toml` as written on disk, accepting both `generated = [...]` and
+/// `[generated.commands]` while refusing unknown keys.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WrittenProjectConfig {
+    build_units: BTreeMap<String, BuildUnit>,
+    workspace_inputs: Vec<PathPattern>,
+    generated: WrittenGenerated,
+    registration_lists: Vec<PathPattern>,
+    sensitive: Vec<PathPattern>,
+    ignore: Vec<String>,
+    review: ReviewMode,
+    recheck: RecheckMode,
+    checks: CheckSets,
+    warm_pool: WarmPool,
+    prepare: Prepare,
+    mirror: Mirror,
+    #[serde(default = "default_max_file_size")]
+    max_file_size: u64,
+    ledger_endpoint: Option<String>,
+    collapse: Option<String>,
+    collapse_channel: bool,
+}
+
+impl Default for WrittenProjectConfig {
+    fn default() -> Self {
+        let base = ProjectConfig::default();
+        Self {
+            build_units: base.build_units,
+            workspace_inputs: base.workspace_inputs,
+            generated: WrittenGenerated::default(),
+            registration_lists: base.registration_lists,
+            sensitive: base.sensitive,
+            ignore: base.ignore,
+            review: base.review,
+            recheck: base.recheck,
+            checks: base.checks,
+            warm_pool: base.warm_pool,
+            prepare: base.prepare,
+            mirror: base.mirror,
+            max_file_size: base.max_file_size,
+            ledger_endpoint: base.ledger_endpoint,
+            collapse: base.collapse,
+            collapse_channel: base.collapse_channel,
+        }
+    }
+}
+
+impl From<WrittenProjectConfig> for ProjectConfig {
+    fn from(written: WrittenProjectConfig) -> Self {
+        let mut generated = written.generated.paths;
+        for pattern in written.generated.commands.keys() {
+            if !generated.contains(pattern) {
+                generated.push(pattern.clone());
+            }
+        }
+        ProjectConfig {
+            build_units: written.build_units,
+            workspace_inputs: written.workspace_inputs,
+            generated,
+            generated_commands: written.generated.commands,
+            registration_lists: written.registration_lists,
+            sensitive: written.sensitive,
+            ignore: written.ignore,
+            review: written.review,
+            recheck: written.recheck,
+            checks: written.checks,
+            warm_pool: written.warm_pool,
+            prepare: written.prepare,
+            mirror: written.mirror,
+            max_file_size: written.max_file_size,
+            ledger_endpoint: written.ledger_endpoint,
+            collapse: written.collapse,
+            collapse_channel: written.collapse_channel,
+        }
+    }
+}
+
 impl ProjectConfig {
     /// Parses and validates a configuration file's text. Unknown keys are
     /// refused, so a misspelt `sensitive` cannot silently lower every tier.
     pub fn parse(text: &str) -> Result<ProjectConfig, ConfigError> {
-        let config: ProjectConfig = toml::from_str(text).map_err(|error| {
+        let written: WrittenProjectConfig = toml::from_str(text).map_err(|error| {
             let message = error.message().trim();
             match error.span() {
                 Some(span) => {
@@ -311,6 +461,7 @@ impl ProjectConfig {
                 None => ConfigError(message.to_owned()),
             }
         })?;
+        let config = ProjectConfig::from(written);
         config.validate()?;
         Ok(config)
     }
@@ -318,6 +469,16 @@ impl ProjectConfig {
     /// A generated file: regenerated after a merge, never merged (R5).
     pub fn is_generated(&self, path: &str) -> bool {
         matches_any(&self.generated, path)
+            || self.generated_commands.keys().any(|p| p.matches(path))
+    }
+
+    /// The command registered in `[generated.commands]` to regenerate `path`,
+    /// if any (R5, R8, #428).
+    pub fn generated_command(&self, path: &str) -> Option<&str> {
+        self.generated_commands
+            .iter()
+            .find(|(pattern, _)| pattern.matches(path))
+            .map(|(_, command)| command.as_str())
     }
 
     /// A registration list: both sides' additions are kept (R5).
@@ -334,8 +495,14 @@ impl ProjectConfig {
     /// The patterns whose paths never count as an overlap (§2), for
     /// comparing two globs with [`PathPattern::overlaps_outside`].
     pub fn uncounted_patterns(&self) -> Vec<PathPattern> {
-        let lists = self.generated.iter().chain(&self.registration_lists);
-        lists.cloned().collect()
+        let mut patterns = self.generated.clone();
+        for pattern in self.generated_commands.keys() {
+            if !patterns.contains(pattern) {
+                patterns.push(pattern.clone());
+            }
+        }
+        patterns.extend(self.registration_lists.iter().cloned());
+        patterns
     }
 
     /// Whether a change to `path` puts its change in the sensitive tier (R7).
@@ -355,19 +522,7 @@ impl ProjectConfig {
                 checks.pre_land.name
             )));
         }
-        // Each path must merge one way: regenerated, or with both sides'
-        // additions kept, never both.
-        for generated in &self.generated {
-            if let Some(list) = self
-                .registration_lists
-                .iter()
-                .find(|list| list.overlaps(generated))
-            {
-                return Err(ConfigError(format!(
-                    "generated {generated:?} and registration_lists {list:?} match the same paths"
-                )));
-            }
-        }
+        self.validate_generated()?;
         self.ignore
             .iter()
             .try_for_each(|line| single_line("ignore", line))?;
@@ -391,6 +546,38 @@ impl ProjectConfig {
             Some(url) => endpoint_url("collapse", url),
             None => Ok(()),
         }
+    }
+
+    fn validate_generated(&self) -> Result<(), ConfigError> {
+        let command_patterns: Vec<&PathPattern> = self.generated_commands.keys().collect();
+        for (index, pattern) in command_patterns.iter().enumerate() {
+            let command = &self.generated_commands[*pattern];
+            single_line("generated.commands", command)?;
+            // Two overlapping command patterns would make the command for a
+            // matching path ambiguous.
+            if let Some(other) = command_patterns[index + 1..]
+                .iter()
+                .find(|other| pattern.overlaps(other))
+            {
+                return Err(ConfigError(format!(
+                    "generated.commands {pattern:?} and {other:?} match the same paths"
+                )));
+            }
+        }
+        // Each path must merge one way: regenerated, or with both sides'
+        // additions kept, never both.
+        for generated in self.generated.iter().chain(self.generated_commands.keys()) {
+            if let Some(list) = self
+                .registration_lists
+                .iter()
+                .find(|list| list.overlaps(generated))
+            {
+                return Err(ConfigError(format!(
+                    "generated {generated:?} and registration_lists {list:?} match the same paths"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Where the ledger push sends entries (R13): `ledger_endpoint`, or
@@ -714,5 +901,40 @@ mod tests {
 ",
         );
         assert!(collapse.is_err(), "accepted a collapse root with a token");
+    }
+
+    /// Risk (#428): `[generated.commands]` registers shell commands the server
+    /// runs at land; overlapping patterns, multiline commands or registration-list
+    /// collisions would make command selection ambiguous or bypass config review.
+    #[test]
+    fn generated_commands_parse_and_validate() {
+        let array = ProjectConfig::parse("generated = [\"proofs/lake-manifest.json\"]\n").unwrap();
+        assert!(array.is_generated("proofs/lake-manifest.json"));
+        assert_eq!(array.generated_command("proofs/lake-manifest.json"), None);
+
+        let table = ProjectConfig::parse(
+            "[generated]\npaths = [\"proofs/lake-manifest.json\"]\n\
+             [generated.commands]\n\
+             \"Cargo.lock\" = \"cargo metadata --format-version 1\"\n",
+        )
+        .unwrap();
+        assert!(table.is_generated("proofs/lake-manifest.json"));
+        assert!(table.is_generated("Cargo.lock"));
+        assert!(!table.counts_for_overlap("Cargo.lock"));
+        assert_eq!(
+            table.generated_command("Cargo.lock"),
+            Some("cargo metadata --format-version 1")
+        );
+        assert_eq!(table.generated_command("proofs/lake-manifest.json"), None);
+
+        for bad in [
+            "[generated.commands]\n\"Cargo.lock\" = \"\"\n",
+            "[generated.commands]\n\"Cargo.lock\" = \"a\\nb\"\n",
+            "[generated.commands]\n\"*.lock\" = \"a\"\n\"Cargo.lock\" = \"b\"\n",
+            "registration_lists = [\"Cargo.lock\"]\n[generated.commands]\n\"Cargo.lock\" = \"a\"\n",
+            "[generated]\nunknown = []\n",
+        ] {
+            assert!(ProjectConfig::parse(bad).is_err(), "accepted {bad:?}");
+        }
     }
 }
