@@ -11,6 +11,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -28,15 +29,25 @@ fn server_bin() -> Option<PathBuf> {
 }
 
 fn unique_dir(label: &str) -> PathBuf {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % 0x10000;
+    // Keep the path short so Unix domain sockets inside it stay under macOS's
+    // 104-byte `sun_path` limit even under `/var/folders/.../T/`.
     let dir = std::env::temp_dir().join(format!(
-        "rosen-collapse-link-{label}-{}-{}",
+        "rc-{label}-{}-{}-{nonce:04x}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        NEXT.fetch_add(1, Ordering::SeqCst),
     ));
     fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     dir
 }
 
@@ -49,7 +60,7 @@ fn endpoint_for(dir: &Path, label: &str) -> String {
     #[cfg(not(windows))]
     {
         let _ = label;
-        dir.join("server.sock").to_string_lossy().into_owned()
+        dir.join("s.sock").to_string_lossy().into_owned()
     }
 }
 
@@ -95,6 +106,8 @@ fn init_source_repo(repo: &Path, gitconfig: &Path) {
 }
 
 fn spawn_server(bin: &Path, data_dir: &Path, endpoint: &str, gitconfig: &Path) -> Child {
+    let stderr_path = data_dir.with_file_name("server.stderr");
+    let stderr_file = fs::File::create(&stderr_path).expect("create server stderr log");
     let mut child = Command::new(bin)
         .args(["--data-dir"])
         .arg(data_dir)
@@ -102,11 +115,15 @@ fn spawn_server(bin: &Path, data_dir: &Path, endpoint: &str, gitconfig: &Path) -
         .env("GIT_CONFIG_GLOBAL", gitconfig)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
         .spawn()
         .expect("spawn rosen-server");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+            panic!("rosen-server exited early ({status}) on {endpoint:?}: {stderr}");
+        }
         let probe = Command::new(rosen_bin())
             .args(["--endpoint", endpoint, "server", "status"])
             .output()
@@ -118,7 +135,8 @@ fn spawn_server(bin: &Path, data_dir: &Path, endpoint: &str, gitconfig: &Path) -
     }
     let _ = child.kill();
     let _ = child.wait();
-    panic!("rosen-server did not start within 10s");
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    panic!("rosen-server did not start within 10s on {endpoint:?}: {stderr}");
 }
 
 fn run_rosen(
