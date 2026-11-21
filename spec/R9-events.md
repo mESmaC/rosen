@@ -9,11 +9,12 @@
 - A `rebased` event reports an installed rebase, including a stack restack or an owner-requested rebase.
   A clean overlap probe emits none.
   Claim-only overlaps receive the `landed` notice.
-- The event types are `snapshot`, `landed`, `rebased`, `conflict`, `updated`, `review`, `claim`, `released`, `green`, `built`, `deploy_due`, `deploy_result`, `reverted`, `revert_refused`, `post_land_failure`, `bisect`, `mirror`, `ledger_push` (R13) and `state_push`.
+- The event types are `snapshot`, `landed`, `rebased`, `conflict`, `updated`, `review`, `claim`, `released`, `green`, `built`, `deploy_due`, `deploy_result`, `reverted`, `revert_refused`, `post_land_failure`, `bisect`, `mirror`, `channel` (R13), `ledger_push` (R13), `state_push` and `relay` (R14).
 - Each event is delivered only to subscribers it concerns: the change's owner, its reviewers, changes stacked on it, and the holders of overlapping changes or claims.
 - An event's audience is fixed when it is published.
-  An event about no change, such as `mirror`, `ledger_push` or `state_push`, goes to every subscriber.
+  An event about no change, such as `mirror`, `ledger_push`, `state_push` or `relay`, goes to every subscriber.
   A `bisect` event concerns no agent and goes only to the project view.
+  A `channel` event goes to its named recipients, or only to the project view when none are named.
 - A subscriber names its agent.
   A subscription that names no agent is the project view: it gets every event and stores no cursor.
 - Delivery is at least once and resumes from a cursor after reconnect.
