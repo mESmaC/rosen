@@ -31,6 +31,10 @@ const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Timeout for one local `git config` read.
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long a doorbell HTTP 404 reads as "not yet published" after enabling
+/// the relay, while Collapse syncs and publishes the edge key (#447).
+const DOORBELL_PUBLISH_GRACE: Duration = Duration::from_secs(120);
+
 /// Read-only snapshot of the server's Collapse-relevant configuration.
 struct ServerSnapshot {
     has_base: bool,
@@ -44,6 +48,7 @@ struct ServerSnapshot {
     mirror_owner: bool,
     mirror_proactive_auth: bool,
     relay: RelaySetting,
+    relay_updated_at: Option<u64>,
     feed_id: Option<String>,
     local_event_seq: u64,
     local_ledger_seq: Held,
@@ -130,6 +135,19 @@ async fn run_checks(config: &ServerConfig, snapshot: &ServerSnapshot) -> Vec<Col
     )
     .await;
     let moved_root = state_moved_root.or(ledger_moved_root);
+    let state_reachable = matches!(
+        state_check.status,
+        CollapseCheckStatus::Pass | CollapseCheckStatus::Moved
+    );
+    let doorbell = DoorbellCheck {
+        collapse: snapshot.collapse.as_deref(),
+        state_url: snapshot.state_url.as_deref(),
+        credential: state_cred.as_ref(),
+        moved_root: moved_root.as_deref(),
+        relay: &snapshot.relay,
+        relay_updated_at: snapshot.relay_updated_at,
+        state_reachable,
+    };
     vec![
         check_mirror_owner(&config.data_dir, snapshot.mirror_owner),
         check_collapse_config(snapshot),
@@ -142,13 +160,7 @@ async fn run_checks(config: &ServerConfig, snapshot: &ServerSnapshot) -> Vec<Col
         state_check,
         ledger_check,
         check_relay_allow(&snapshot.relay),
-        check_relay_doorbell(
-            snapshot.collapse.as_deref(),
-            snapshot.state_url.as_deref(),
-            state_cred.as_ref(),
-            moved_root.as_deref(),
-        )
-        .await,
+        check_relay_doorbell(doorbell).await,
     ]
 }
 
@@ -166,6 +178,7 @@ fn read_snapshot(config: &ServerConfig, proactive: bool) -> Result<ServerSnapsho
         mirror_owner,
         mirror_proactive_auth: proactive,
         relay: RelaySetting::default(),
+        relay_updated_at: None,
         feed_id: None,
         local_event_seq: 0,
         local_ledger_seq: Held::default(),
@@ -176,7 +189,9 @@ fn read_snapshot(config: &ServerConfig, proactive: bool) -> Result<ServerSnapsho
     }
     let conn = open_read_only(&metadata)?;
     let stored_mirror = read_stored_mirror(&conn)?;
-    snapshot.relay = read_relay_setting(&conn)?;
+    let (relay, relay_updated_at) = read_relay_setting(&conn)?;
+    snapshot.relay = relay;
+    snapshot.relay_updated_at = relay_updated_at;
     snapshot.local_event_seq = collapse_feed::local_event_seq(&conn)?;
     snapshot.local_ledger_seq = collapse_feed::local_ledger_seq(&conn)?;
     snapshot.feed_id = collapse_feed::read_only(&conn)?;
@@ -251,13 +266,26 @@ fn read_stored_mirror(conn: &Connection) -> Result<Option<String>, String> {
     )
 }
 
-fn read_relay_setting(conn: &Connection) -> Result<RelaySetting, String> {
-    let allow: Option<String> = optional_table(
-        conn.query_row("SELECT allow FROM relay_setting WHERE id = 1", [], |row| {
-            row.get(0)
-        })
-        .optional(),
-    )?;
+fn read_relay_setting(conn: &Connection) -> Result<(RelaySetting, Option<u64>), String> {
+    let row: Option<(String, u64)> = match conn
+        .query_row(
+            "SELECT allow, updated_at FROM relay_setting WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+    {
+        Ok(value) => value,
+        Err(error) if error.to_string().contains("no such table") => None,
+        // Legacy metadata stores opened read-only before `updated_at` existed (#447).
+        Err(error) if error.to_string().contains("no such column") => optional_table(
+            conn.query_row("SELECT allow FROM relay_setting WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, 0u64))
+            })
+            .optional(),
+        )?,
+        Err(error) => return Err(error.to_string()),
+    };
     let status: Option<String> = optional_table(
         conn.query_row(
             "SELECT status FROM machines WHERE id = ?1",
@@ -266,15 +294,15 @@ fn read_relay_setting(conn: &Connection) -> Result<RelaySetting, String> {
         )
         .optional(),
     )?;
-    let allow = allow
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(RelayKind::parse)
-        .collect();
-    Ok(RelaySetting {
-        allow,
-        revoked: status.as_deref() == Some("revoked"),
-    })
+    let (allow_text, updated_at) = row.unwrap_or_default();
+    let allow = allow_text.split(',').filter_map(RelayKind::parse).collect();
+    Ok((
+        RelaySetting {
+            allow,
+            revoked: status.as_deref() == Some("revoked"),
+        },
+        (updated_at > 0).then_some(updated_at),
+    ))
 }
 
 fn check_mirror_owner(data_dir: &Path, is_owner: bool) -> CollapseCheckItem {
@@ -910,50 +938,137 @@ fn check_relay_allow(setting: &RelaySetting) -> CollapseCheckItem {
     pass("relay_allow", format!("allows {}", kinds.join(", ")))
 }
 
-async fn check_relay_doorbell(
-    collapse: Option<&str>,
-    state_url: Option<&str>,
-    credential: Option<&Credential>,
-    moved_root: Option<&str>,
-) -> CollapseCheckItem {
-    let Some(root) = collapse else {
+struct DoorbellCheck<'a> {
+    collapse: Option<&'a str>,
+    state_url: Option<&'a str>,
+    credential: Option<&'a Credential>,
+    moved_root: Option<&'a str>,
+    relay: &'a RelaySetting,
+    relay_updated_at: Option<u64>,
+    state_reachable: bool,
+}
+
+async fn check_relay_doorbell(input: DoorbellCheck<'_>) -> CollapseCheckItem {
+    let Some(root) = input.collapse else {
         return skipped("relay_doorbell", "no `collapse` root configured", None);
     };
+    if !input.relay.active() {
+        let detail = if input.relay.revoked {
+            "relay is off (the `collapse` machine is revoked)"
+        } else {
+            "relay is off (Collapse only publishes a doorbell when at least one action kind is allowed)"
+        };
+        return skipped("relay_doorbell", detail, None);
+    }
     let trimmed = root.trim_end_matches('/');
     let url = format!("{trimmed}/rosen/doorbell");
-    let cred_url = state_url.unwrap_or(&url);
-    match send::get_json_following(&url, credential).await {
+    let cred_url = input.state_url.unwrap_or(&url);
+    let has_auth = input.credential.is_some() || !proactive_auth::is_https(cred_url);
+    match send::get_json_following(&url, input.credential).await {
         Ok(accepted) => classify_doorbell(&url, accepted),
         Err(SendFailure::Failed {
             status: Some(404), ..
-        }) if moved_root
+        }) if input
+            .moved_root
             .is_some_and(|next| next != trimmed && send::same_origin(trimmed, next)) =>
         {
-            let new_url = format!("{}/rosen/doorbell", moved_root.unwrap());
-            match send::get_json_following(&new_url, credential).await {
-                Ok(accepted) => match doorbell_generation(&accepted.body) {
-                    Some(generation) => moved(
-                        "relay_doorbell",
-                        format!(
-                            "HTTP 404 at {url}; reachable at {new_url} (HTTP {}, generation {generation})",
-                            accepted.status
-                        ),
-                        send::moved_hint(&new_url),
-                    ),
-                    None => fail(
-                        "relay_doorbell",
-                        format!(
-                            "HTTP 404 at {url}; unexpected doorbell answer from {new_url} (HTTP {}): missing generation",
-                            accepted.status
-                        ),
-                        send::moved_hint(&new_url),
-                    ),
-                },
-                Err(failure) => endpoint_failure("relay_doorbell", &new_url, cred_url, credential, failure),
-            }
+            check_moved_doorbell(&url, cred_url, has_auth, &input).await
         }
-        Err(failure) => endpoint_failure("relay_doorbell", &url, cred_url, credential, failure),
+        Err(
+            failure @ SendFailure::Failed {
+                status: Some(404), ..
+            },
+        ) if input.state_reachable && has_auth => classify_doorbell_404(
+            &url,
+            cred_url,
+            input.credential,
+            input.relay_updated_at,
+            None,
+            failure,
+        ),
+        Err(failure) => {
+            endpoint_failure("relay_doorbell", &url, cred_url, input.credential, failure)
+        }
     }
+}
+
+async fn check_moved_doorbell(
+    old_url: &str,
+    cred_url: &str,
+    has_auth: bool,
+    input: &DoorbellCheck<'_>,
+) -> CollapseCheckItem {
+    let new_url = format!("{}/rosen/doorbell", input.moved_root.unwrap());
+    match send::get_json_following(&new_url, input.credential).await {
+        Ok(accepted) => match doorbell_generation(&accepted.body) {
+            Some(generation) => moved(
+                "relay_doorbell",
+                format!(
+                    "HTTP 404 at {old_url}; reachable at {new_url} (HTTP {}, generation {generation})",
+                    accepted.status
+                ),
+                send::moved_hint(&new_url),
+            ),
+            None => fail(
+                "relay_doorbell",
+                format!(
+                    "HTTP 404 at {old_url}; unexpected doorbell answer from {new_url} (HTTP {}): missing generation",
+                    accepted.status
+                ),
+                send::moved_hint(&new_url),
+            ),
+        },
+        Err(
+            failure @ SendFailure::Failed {
+                status: Some(404), ..
+            },
+        ) if has_auth => classify_doorbell_404(
+            &new_url,
+            cred_url,
+            input.credential,
+            input.relay_updated_at,
+            Some(send::moved_hint(&new_url)),
+            failure,
+        ),
+        Err(failure) => endpoint_failure(
+            "relay_doorbell",
+            &new_url,
+            cred_url,
+            input.credential,
+            failure,
+        ),
+    }
+}
+
+fn classify_doorbell_404(
+    url: &str,
+    cred_url: &str,
+    credential: Option<&Credential>,
+    relay_updated_at: Option<u64>,
+    moved_hint: Option<String>,
+    failure: SendFailure,
+) -> CollapseCheckItem {
+    if let Some(elapsed) = doorbell_grace_elapsed(relay_updated_at, crate::machines::now()) {
+        let hint = moved_hint.unwrap_or_else(|| {
+            "wait a minute for Collapse to publish the doorbell and re-run `rosen collapse check`"
+                .to_owned()
+        });
+        return skipped(
+            "relay_doorbell",
+            format!(
+                "doorbell not yet published at {url} (HTTP 404; relay enabled {elapsed}s ago; \
+                 actions still arrive via actions_pending)"
+            ),
+            Some(hint),
+        );
+    }
+    endpoint_failure("relay_doorbell", url, cred_url, credential, failure)
+}
+
+fn doorbell_grace_elapsed(relay_updated_at: Option<u64>, now_secs: u64) -> Option<u64> {
+    let updated_at = relay_updated_at?;
+    let elapsed = now_secs.saturating_sub(updated_at);
+    (elapsed <= DOORBELL_PUBLISH_GRACE.as_secs()).then_some(elapsed)
 }
 
 fn doorbell_generation(body: &str) -> Option<i64> {

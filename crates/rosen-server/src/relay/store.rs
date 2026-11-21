@@ -14,8 +14,9 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS relay_setting (
-    id    INTEGER PRIMARY KEY CHECK (id = 1),
-    allow TEXT    NOT NULL
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    allow      TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS relay_cursor (
     endpoint   TEXT    NOT NULL PRIMARY KEY,
@@ -78,6 +79,7 @@ impl RelayStore {
     pub fn open(data_dir: &Path) -> rusqlite::Result<Self> {
         let conn = crate::machines::open(data_dir)?;
         conn.execute_batch(SCHEMA)?;
+        ensure_updated_at(&conn)?;
         Ok(Self { conn })
     }
 
@@ -122,9 +124,10 @@ impl RelayStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
-            "INSERT INTO relay_setting (id, allow) VALUES (1, ?1)
-             ON CONFLICT (id) DO UPDATE SET allow = excluded.allow",
-            [text.join(",")],
+            "INSERT INTO relay_setting (id, allow, updated_at) VALUES (1, ?1, ?2)
+             ON CONFLICT (id) DO UPDATE
+             SET allow = excluded.allow, updated_at = excluded.updated_at",
+            params![text.join(","), now_secs],
         )?;
         if !kinds.is_empty() {
             tx.execute(
@@ -273,6 +276,22 @@ impl RelayStore {
         )?;
         Ok(())
     }
+}
+
+fn ensure_updated_at(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(relay_setting)")?;
+    let mut has_column = false;
+    for col in stmt.query_map([], |row| row.get::<_, String>(1))? {
+        if col? == "updated_at" {
+            has_column = true;
+        }
+    }
+    if !has_column {
+        conn.execute_batch(
+            "ALTER TABLE relay_setting ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

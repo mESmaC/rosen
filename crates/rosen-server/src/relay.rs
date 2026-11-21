@@ -132,6 +132,10 @@ struct Session {
     redirected: Option<(String, String)>,
     /// Whether actions a stopped server left running were settled.
     recovered: bool,
+    /// Whether a missing doorbell (404) already probed `/rosen/actions` once
+    /// for a rename redirect, so an instance without an edge does not wake
+    /// Collapse's origin every 20 s (#446, #447).
+    probed_missing_doorbell: bool,
 }
 
 /// Reads the doorbell and runs fetched actions until shutdown.
@@ -205,6 +209,7 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<(), Rel
     if !matches!(&session.remote, Some(remote) if remote.root == root) {
         session.remote = Some(connect(state, &root).await);
         session.recovered = false;
+        session.probed_missing_doorbell = false;
     }
     let mut active_root = match &session.redirected {
         Some((configured, target)) if configured == &root => target.clone(),
@@ -219,7 +224,14 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<(), Rel
             note_redirect(state, &remote.root, &mut active_root, Some((307, new_root)));
         }
     }
-    let outcome = run_step(state, remote, &mut active_root, &mut session.recovered).await;
+    let outcome = run_step(
+        state,
+        remote,
+        &mut active_root,
+        &mut session.recovered,
+        &mut session.probed_missing_doorbell,
+    )
+    .await;
     if active_root != root {
         session.redirected = Some((root, active_root));
     }
@@ -231,6 +243,7 @@ async fn run_step(
     remote: &Remote,
     active_root: &mut String,
     recovered: &mut bool,
+    probed_missing_doorbell: &mut bool,
 ) -> Result<(), RelayError> {
     post_unposted(state, remote, active_root).await?;
     let dir = state.config.data_dir.clone();
@@ -247,7 +260,14 @@ async fn run_step(
         state.collapse.record_idle(Feed::Relay, &remote.root, None);
         return Ok(());
     }
-    fetch_if_rung(state, remote, active_root, &setting).await
+    fetch_if_rung(
+        state,
+        remote,
+        active_root,
+        &setting,
+        probed_missing_doorbell,
+    )
+    .await
 }
 
 /// Fetches and runs the queue when the doorbell's generation changed since
@@ -257,13 +277,19 @@ async fn fetch_if_rung(
     remote: &Remote,
     active_root: &mut String,
     setting: &RelaySetting,
+    probed_missing_doorbell: &mut bool,
 ) -> Result<(), RelayError> {
     let forced = state.relay_wake.take_fetch();
-    let rung = poll_doorbell(state, remote, active_root).await;
+    let rung = poll_doorbell(state, remote, active_root, probed_missing_doorbell).await;
     let generation = match rung {
-        Ok(generation) => {
+        Ok(Some(generation)) => {
             state.collapse.record_success(Feed::Relay, &remote.root);
             Some(generation)
+        }
+        // Normal 404 ("no doorbell"): keep 20 s cadence and rely on `actions_pending` (#447).
+        Ok(None) => {
+            state.collapse.record_idle(Feed::Relay, &remote.root, None);
+            None
         }
         // The feed said actions wait; the doorbell can catch up later.
         Err(_) if forced => None,
@@ -274,7 +300,7 @@ async fn fetch_if_rung(
         move |store| store.cursor(&root)
     })
     .await?;
-    if forced || generation != cursor.generation {
+    if forced || matches!(generation, Some(current) if cursor.generation != Some(current)) {
         fetch(state, remote, active_root, setting, cursor.after).await?;
     }
     if let Some(generation) = generation {
@@ -288,32 +314,64 @@ async fn fetch_if_rung(
     Ok(())
 }
 
-/// Reads the doorbell, falling back to probing `/rosen/actions` for a
+/// Reads the doorbell, falling back to probing `/rosen/actions` once for a
 /// same-origin 307/308 when Collapse's edge doorbell Worker returns 404 for a
-/// renamed repository (#446).
+/// renamed repository (#446). A normal 404 (not yet published, no edge, or
+/// after a rename) returns `Ok(None)` so the relay keeps its 20 s cadence and
+/// falls back to `actions_pending` without publishing a failure (#447).
 async fn poll_doorbell(
     state: &ServerState,
     remote: &Remote,
     active_root: &mut String,
-) -> Result<i64, RelayError> {
+    probed_missing_doorbell: &mut bool,
+) -> Result<Option<i64>, RelayError> {
     match remote.doorbell_at(active_root).await {
         Ok((generation, moved)) => {
+            *probed_missing_doorbell = false;
             note_redirect(state, &remote.root, active_root, moved);
-            Ok(generation)
+            Ok(Some(generation))
         }
-        Err(
-            error @ RelayError::Send {
-                status: Some(404), ..
-            },
-        ) if *active_root == remote.root => {
-            if let Some((status, new_root)) = remote.probe_moved_root(active_root).await {
-                note_redirect(state, &remote.root, active_root, Some((status, new_root)));
-                let (generation, moved) = remote.doorbell_at(active_root).await?;
-                note_redirect(state, &remote.root, active_root, moved);
-                return Ok(generation);
+        Err(RelayError::Send {
+            status: Some(404),
+            no_credential: false,
+            ..
+        }) => {
+            if *active_root == remote.root && !*probed_missing_doorbell {
+                *probed_missing_doorbell = true;
+                if let Some((status, new_root)) = remote.probe_moved_root(active_root).await {
+                    note_redirect(state, &remote.root, active_root, Some((status, new_root)));
+                    return read_moved_doorbell(
+                        state,
+                        remote,
+                        active_root,
+                        probed_missing_doorbell,
+                    )
+                    .await;
+                }
             }
-            Err(error)
+            Ok(None)
         }
+        Err(error) => Err(error),
+    }
+}
+
+async fn read_moved_doorbell(
+    state: &ServerState,
+    remote: &Remote,
+    active_root: &mut String,
+    probed_missing_doorbell: &mut bool,
+) -> Result<Option<i64>, RelayError> {
+    match remote.doorbell_at(active_root).await {
+        Ok((generation, moved)) => {
+            *probed_missing_doorbell = false;
+            note_redirect(state, &remote.root, active_root, moved);
+            Ok(Some(generation))
+        }
+        Err(RelayError::Send {
+            status: Some(404),
+            no_credential: false,
+            ..
+        }) => Ok(None),
         Err(error) => Err(error),
     }
 }

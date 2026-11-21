@@ -2,10 +2,12 @@
 //! link (SPEC R1, R10, #435, #437).
 
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::time::Duration;
 
 use rosen_client::protocol::{
-    ChangeRecord, CollapseCheckReport, CollapseResetReport, ErrorCode, LandAnswer, LandStatus,
-    NewChange, ReadAnswer, ReadRequest, RelaySetting, SnapshotRequest,
+    ChangeRecord, CollapseCheckReport, CollapseCheckStatus, CollapseResetReport, ErrorCode,
+    LandAnswer, LandStatus, NewChange, ReadAnswer, ReadRequest, RelaySetting, SnapshotRequest,
 };
 use rosen_client::{Client, Endpoint, Error};
 use rosen_core::{AgentId, ProjectConfig, CONFIG_PATH};
@@ -88,9 +90,9 @@ async fn link_repo(
     } else {
         None
     };
-    let check = client.collapse_check().await?;
-
     let unlanded_change = !args.land && change.is_some();
+    let poll_doorbell = !land_failed && !unlanded_change && relay.active();
+    let check = check_waiting_for_doorbell(&client, poll_doorbell).await?;
     let ok = !land_failed && (unlanded_change || check.ok);
     print_link(
         json,
@@ -117,8 +119,8 @@ async fn reset_existing(json: bool, endpoint: &Endpoint) -> Result<Succeeded, Er
     let client = Client::connect(endpoint).await?;
     let reset = client.collapse_reset().await?;
     let status = client.status().await?;
-    let check = client.collapse_check().await?;
     let relay = status.relay.unwrap_or_default();
+    let check = check_waiting_for_doorbell(&client, relay.active()).await?;
     let repo = slug_from_collapse_root(&reset.collapse);
     let mirror_remote = check
         .mirror_remote
@@ -153,6 +155,64 @@ fn slug_from_collapse_root(root: &str) -> String {
     } else {
         trimmed.to_owned()
     }
+}
+
+/// How long `rosen collapse link` briefly polls `collapse check` while waiting
+/// for Collapse to publish `/rosen/doorbell` right after enabling the relay (#447).
+const DOORBELL_POLL_TIMEOUT: Duration = Duration::from_secs(10);
+const DOORBELL_POLL_INITIAL: Duration = Duration::from_millis(500);
+const DOORBELL_POLL_MAX: Duration = Duration::from_secs(2);
+
+fn doorbell_not_yet_published(report: &CollapseCheckReport) -> bool {
+    report.ok
+        && report.checks.iter().any(|item| {
+            item.name == "relay_doorbell"
+                && item.status == CollapseCheckStatus::Skipped
+                && item.detail.contains("not yet published")
+        })
+}
+
+async fn check_waiting_for_doorbell(
+    client: &Client,
+    poll: bool,
+) -> Result<CollapseCheckReport, Error> {
+    poll_doorbell_check(
+        poll,
+        DOORBELL_POLL_TIMEOUT,
+        DOORBELL_POLL_INITIAL,
+        DOORBELL_POLL_MAX,
+        || client.collapse_check(),
+    )
+    .await
+}
+
+async fn poll_doorbell_check<F, Fut>(
+    poll: bool,
+    timeout: Duration,
+    initial_delay: Duration,
+    max_delay: Duration,
+    mut check_once: F,
+) -> Result<CollapseCheckReport, Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<CollapseCheckReport, Error>>,
+{
+    let mut report = check_once().await?;
+    if !poll || !doorbell_not_yet_published(&report) {
+        return Ok(report);
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut delay = initial_delay;
+    while doorbell_not_yet_published(&report) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(delay.min(remaining)).await;
+        report = check_once().await?;
+        delay = (delay * 2).min(max_delay);
+    }
+    Ok(report)
 }
 
 /// Reverses `rosen collapse link`: opens and names a change removing `collapse`
@@ -444,5 +504,76 @@ fn print_check_lines(report: &CollapseCheckReport) {
             ),
             None => println!("{status:<7}  {:<24} {}", item.name, item.detail),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rosen_client::protocol::CollapseCheckItem;
+
+    fn report(ok: bool, status: CollapseCheckStatus, detail: &str) -> CollapseCheckReport {
+        CollapseCheckReport {
+            ok,
+            mirror_remote: None,
+            collapse: Some("https://api.collapse.sh/o/r".into()),
+            ledger_endpoint: None,
+            mirror_owner: true,
+            mirror_proactive_auth: false,
+            checks: vec![CollapseCheckItem {
+                name: "relay_doorbell".into(),
+                status,
+                detail: detail.into(),
+                hint: None,
+            }],
+        }
+    }
+
+    // Risk (R1, #447): `collapse link --land` runs immediately after `relay_set`
+    // before Collapse publishes `/rosen/doorbell`; it must poll briefly until
+    // published and skip polling when the relay is off or another check failed.
+    #[tokio::test]
+    async fn link_polls_briefly_while_doorbell_is_not_yet_published() {
+        let mut calls = 0usize;
+        let out = poll_doorbell_check(
+            true,
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            || {
+                calls += 1;
+                let res = if calls < 3 {
+                    report(
+                        true,
+                        CollapseCheckStatus::Skipped,
+                        "doorbell not yet published at https://api.collapse.sh/o/r/rosen/doorbell",
+                    )
+                } else {
+                    report(true, CollapseCheckStatus::Pass, "reachable (generation 0)")
+                };
+                async move { Ok(res) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert!(out.ok);
+        assert_eq!(out.checks[0].status, CollapseCheckStatus::Pass);
+
+        let mut off_calls = 0usize;
+        let off = poll_doorbell_check(
+            true,
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            || {
+                off_calls += 1;
+                async move { Ok(report(true, CollapseCheckStatus::Skipped, "relay is off")) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(off_calls, 1);
+        assert!(off.ok);
     }
 }

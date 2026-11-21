@@ -24,6 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[derive(Default)]
 struct MockCollapse {
     state_status: Option<u16>,
+    doorbell_status: Option<u16>,
     /// `(old_prefix, new_prefix, status)`: redirects `/state` and `/ledgers`,
     /// while old `/rosen/doorbell` returns 404 like Collapse's edge Worker.
     renamed: Option<(String, String, u16)>,
@@ -77,6 +78,9 @@ impl MockCollapse {
             );
         }
         if path.ends_with("/rosen/doorbell") {
+            if let Some(status) = self.doorbell_status {
+                return (status, None, json!({"error": "not found"}).to_string());
+            }
             return (200, None, json!({"generation": 5}).to_string());
         }
         (404, None, json!({"error": "not found"}).to_string())
@@ -322,6 +326,58 @@ fn collapse_check_passes_when_linked_and_pinpoints_each_failure() {
         Some("rosen collapse link new-org/new-repo --land")
     );
     mock.lock().unwrap().renamed = None;
+
+    // 4b. Doorbell 404: skipped when relay is off, "not yet published" within 2 min
+    // of enabling the relay, and fails after the grace window (#447).
+    {
+        let mut m = mock.lock().unwrap();
+        m.doorbell_status = Some(404);
+        m.requests.clear();
+    }
+    let _ = runtime.block_on(dispatch(&state, Request::RelaySet { allow: vec![] }));
+    let report = check(&runtime, &state);
+    assert!(report.ok, "{report:?}");
+    assert_eq!(
+        find(&report, "relay_allow").status,
+        CollapseCheckStatus::Skipped
+    );
+    assert_eq!(
+        find(&report, "relay_doorbell").status,
+        CollapseCheckStatus::Skipped
+    );
+    assert!(
+        !mock
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|(_, p)| p.ends_with("/rosen/doorbell")),
+        "doorbell must not be probed when relay is off"
+    );
+
+    let _ = runtime.block_on(dispatch(
+        &state,
+        Request::RelaySet {
+            allow: vec![RelayKind::Approve, RelayKind::Land],
+        },
+    ));
+    let report = check(&runtime, &state);
+    assert!(report.ok, "{report:?}");
+    let db = find(&report, "relay_doorbell");
+    assert_eq!(db.status, CollapseCheckStatus::Skipped, "{db:?}");
+    assert!(db.detail.contains("not yet published"), "{db:?}");
+
+    rusqlite::Connection::open(state.config.metadata_path())
+        .unwrap()
+        .execute("UPDATE relay_setting SET updated_at = 1 WHERE id = 1", [])
+        .unwrap();
+    let report = check(&runtime, &state);
+    assert!(!report.ok, "{report:?}");
+    assert_eq!(
+        find(&report, "relay_doorbell").status,
+        CollapseCheckStatus::Fail
+    );
+    mock.lock().unwrap().doorbell_status = None;
 
     // 5. Pointing `collapse` at a different repository fails `repo_match` with a hint.
     let mismatch_dir = tempfile::tempdir().unwrap();

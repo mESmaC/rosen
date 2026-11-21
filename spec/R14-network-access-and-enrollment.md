@@ -69,6 +69,7 @@ Machines join a project with no login, monitor or remote desktop on the joining 
     Collapse's edge answers it with a generation number without waking Collapse's origin.
     Only when the generation changed, or a state feed answer says `actions_pending`, does the server read `<collapse>/rosen/actions?after=<id>`.
     Same-origin 307 and 308 redirects are followed for the session (including recovering from a 404 on the old doorbell path when a repository was renamed), reporting `moved` health until `rosen.toml` updates.
+    A doorbell HTTP 404 (not yet published, no edge, or after a rename) is treated as no doorbell: the server keeps its 20 s cadence, falls back to `actions_pending`, and publishes no failure.
   - It runs only `approve` (`review approve` of the named head, so a stale head gets R7's refusal), `land` (every R8 gate) and `mark` (`review mark`, refused unless the change's current land is the named commit).
     Claims, messages, receipts, abandon, rebase, conflict resolution, machine and key commands other than `machine_revoke`, server settings and imports are never relayed.
     No relayed action creates a join key or approves a pending machine.

@@ -27,6 +27,8 @@ struct Queue {
     /// `(old_prefix, new_prefix)`: old doorbell returns 404 (like Collapse's
     /// edge Worker), while old actions/results return 307 to `new_prefix` (#446).
     renamed: Option<(String, String)>,
+    doorbell_404: bool,
+    doorbell_hits: usize,
 }
 
 impl Queue {
@@ -40,6 +42,10 @@ impl Queue {
             }
         }
         if path.ends_with("/rosen/doorbell") {
+            self.doorbell_hits += 1;
+            if self.doorbell_404 {
+                return (404, None, r#"{"error":"not found"}"#.into());
+            }
             return (
                 200,
                 None,
@@ -456,4 +462,66 @@ async fn relay_recovers_after_rename_404_doorbell_and_reports_moved() {
         Some("rosen collapse link new-org/new-repo --land")
     );
     assert_eq!(queue.lock().unwrap().results[&1]["state"], "done");
+}
+
+/// Risk (#447, R14): a doorbell 404 is normal right after turning the relay on
+/// or on an instance with no edge; treating it as a failure backs off to 5 min
+/// and floods relay failure events instead of falling back to `actions_pending`.
+#[tokio::test(flavor = "multi_thread")]
+async fn doorbell_404_publishes_no_failure_and_falls_back_to_actions_pending() {
+    let data = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!("http://{}/o/r", listener.local_addr().unwrap());
+    let base_text = format!("review = \"before-land\"\ncollapse = \"{root}\"\n");
+    let (state, base, blob) = setup(data.path(), &base_text);
+    let lowered = format!("review = \"after-land\"\ncollapse = \"{root}\"\n");
+    let queue = Arc::new(Mutex::new(Queue {
+        actions: vec![action(1, base, json!(blob), &lowered)],
+        doorbell_404: true,
+        ..Queue::default()
+    }));
+    tokio::spawn(serve(listener, Arc::clone(&queue)));
+    rosen_server::relay::set(&state, vec![RelayKind::Config]).await;
+    let relay = tokio::spawn(rosen_server::relay::run(Arc::clone(&state)));
+
+    let start = Instant::now();
+    loop {
+        let Response::Status(status) = call(&state, Request::Status).await else {
+            panic!()
+        };
+        let rel = &status.collapse.unwrap().relay;
+        if queue.lock().unwrap().doorbell_hits > 0 && rel.state != FeedState::Sending {
+            assert_eq!(rel.state, FeedState::Current, "{rel:?}");
+            assert!(rel.last_error.is_none(), "{rel:?}");
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "relay did not settle: {rel:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(queue.lock().unwrap().results.is_empty());
+
+    state.relay_wake.actions_pending();
+    let start = Instant::now();
+    while queue.lock().unwrap().results.is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(15), "no relay result");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    relay.abort();
+    assert_eq!(queue.lock().unwrap().results[&1]["state"], "done");
+
+    let conn = rusqlite::Connection::open(state.config.metadata_path()).unwrap();
+    let failed_events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind = 'relay' AND detail LIKE '%\"failed\"%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        failed_events, 0,
+        "doorbell 404 must publish no failure event"
+    );
 }
