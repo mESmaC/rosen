@@ -65,6 +65,9 @@
   Before each push, the server reads the mirror branch's tip.
   The push goes ahead when the branch is missing, is the commit this server last pushed, or is another commit the base holds, such as a push a crash kept it from recording; a tip equal to the base is recorded as pushed without a push.
   Any other tip means another writer pushed there: the server refuses with a `rejected` failure naming the tip, the commit it last pushed, the base and up to 20 commits the mirror has that the base lacks, and pushes nothing.
+- **Proactive HTTPS auth fallback.**
+  When an HTTPS mirror read fails with repository not found, the server retries once with `-c http.proactiveAuth=basic` when git is 2.46 or later, and reports that git must be upgraded or `http.<url>.proactiveAuth` set when git is older.
+  Once that retry succeeds, the server uses proactive basic auth for later mirror reads in its lifetime and reports it in `rosen server status`.
 - Each failed push publishes a `mirror` event with the error and the retry delay.
   Retries back off from 1 s to at most 5 min.
   A push the remote refused is marked `rejected`.

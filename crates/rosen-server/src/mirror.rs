@@ -23,6 +23,7 @@
 pub(crate) mod adopt;
 pub(crate) mod catch_up;
 pub mod owner;
+pub(crate) mod proactive_auth;
 mod push;
 pub mod rewrite;
 mod state;
@@ -88,7 +89,7 @@ pub async fn run(state: Arc<ServerState>) {
         let seen = state.events.announced_seq();
         let synced = {
             let _running = state.maintenance.read().await;
-            sync_once(&state.config).await
+            sync_state(&state).await
         };
         let keep_going = match synced {
             Ok(synced) => {
@@ -117,8 +118,22 @@ pub async fn run(state: Arc<ServerState>) {
     }
 }
 
-/// Brings the mirror up to the current base once.
+/// Brings the mirror up to the current base once without persisting
+/// proactive-auth fallback state across calls.
 pub async fn sync_once(config: &ServerConfig) -> Result<Synced, SyncError> {
+    sync_once_with(config, &proactive_auth::ProactiveAuth::default()).await
+}
+
+/// Brings the mirror up to the current base once using `state`'s lifetime
+/// proactive-auth memory.
+pub async fn sync_state(state: &ServerState) -> Result<Synced, SyncError> {
+    sync_once_with(&state.config, &state.mirror_proactive_auth).await
+}
+
+async fn sync_once_with(
+    config: &ServerConfig,
+    auth: &proactive_auth::ProactiveAuth,
+) -> Result<Synced, SyncError> {
     let reading = config.clone();
     let found = tokio::task::spawn_blocking(move || {
         Ok::<_, SyncError>((read_target(&reading)?, owner::is_owner(&reading.data_dir)))
@@ -140,13 +155,13 @@ pub async fn sync_once(config: &ServerConfig) -> Result<Synced, SyncError> {
         commit,
         failure,
     };
-    let remote_tip = tip_check::check(config, &target, &branch, &commit)
+    let remote_tip = tip_check::check(config, &target, &branch, &commit, auth)
         .await
         .map_err(failed)?;
     if remote_tip == tip_check::RemoteTip::Behind {
         let staging = config.mirror_staging_dir();
         let objects = config.objects_dir();
-        push::push(&staging, &objects, &target.remote, &branch, &commit)
+        push::push(&staging, &objects, &target.remote, &branch, &commit, auth)
             .await
             .map_err(failed)?;
     }

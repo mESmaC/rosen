@@ -11,6 +11,7 @@ use rosen_store::{LooseObjectStore, ObjectStore};
 use rusqlite::{params, TransactionBehavior};
 use serde_json::json;
 
+use super::proactive_auth::ProactiveAuth;
 use super::rewrite::remote::{name, run_bytes};
 use crate::events::{self, Staged};
 use crate::import::{copy_objects, filter_missing, GitSource};
@@ -44,9 +45,10 @@ async fn adopt(state: &Arc<ServerState>, remote_tip: ObjectId) -> Result<MirrorA
     let ref_name = format!("refs/heads/{branch}");
     let staging = tempfile::tempdir_in(std::path::absolute(&state.config.data_dir)?)?;
     super::push::prepare_staging(staging.path(), &state.config.objects_dir()).await?;
-    fetch_tip(staging.path(), &remote, &ref_name, remote_tip).await?;
+    let auth = &state.mirror_proactive_auth;
+    fetch_tip(staging.path(), &remote, &ref_name, remote_tip, auth).await?;
 
-    let ancestor = common_ancestor(staging.path(), &remote, base, remote_tip).await?;
+    let ancestor = common_ancestor(staging.path(), &remote, base, remote_tip, auth).await?;
     let mut answer = MirrorAdoption {
         base_ref: branch,
         old_base: base,
@@ -54,14 +56,14 @@ async fn adopt(state: &Arc<ServerState>, remote_tip: ObjectId) -> Result<MirrorA
         remote_tip,
     };
     if ancestor != remote_tip {
-        verify_ported(staging.path(), &remote, ancestor, base, remote_tip).await?;
+        verify_ported(staging.path(), &remote, ancestor, base, remote_tip, auth).await?;
         let objects = state.config.objects_dir();
         let repository = staging.path().to_path_buf();
         answer.new_base = tokio::task::spawn_blocking(move || {
             store_merge(&repository, &objects, ancestor, base, remote_tip)
         })
         .await??;
-        verify_remote_tip(staging.path(), &remote, &ref_name, remote_tip).await?;
+        verify_remote_tip(staging.path(), &remote, &ref_name, remote_tip, auth).await?;
         let publishing = Arc::clone(state);
         answer = tokio::task::spawn_blocking(move || {
             publish(&publishing, &answer)?;
@@ -74,8 +76,14 @@ async fn adopt(state: &Arc<ServerState>, remote_tip: ObjectId) -> Result<MirrorA
     Ok(answer)
 }
 
-async fn fetch_tip(staging: &Path, remote: &str, branch: &str, expected: ObjectId) -> Result<()> {
-    let actual = fetch_branch(staging, remote, branch).await?;
+async fn fetch_tip(
+    staging: &Path,
+    remote: &str,
+    branch: &str,
+    expected: ObjectId,
+    auth: &ProactiveAuth,
+) -> Result<()> {
+    let actual = fetch_branch(staging, remote, branch, auth).await?;
     ensure!(
         actual == expected,
         "mirror branch {branch} is at {actual}, expected {expected}; inspect the current tip and retry"
@@ -85,7 +93,12 @@ async fn fetch_tip(staging: &Path, remote: &str, branch: &str, expected: ObjectI
 
 /// Fetches the mirror's `branch` (a full ref name) into the staging
 /// repository and returns its tip.
-pub(super) async fn fetch_branch(staging: &Path, remote: &str, branch: &str) -> Result<ObjectId> {
+pub(super) async fn fetch_branch(
+    staging: &Path,
+    remote: &str,
+    branch: &str,
+    auth: &ProactiveAuth,
+) -> Result<ObjectId> {
     const FETCHED: &str = "refs/rosen-mirror-tip";
     let refspec = format!("{branch}:{FETCHED}");
     run_bytes(
@@ -101,9 +114,10 @@ pub(super) async fn fetch_branch(staging: &Path, remote: &str, branch: &str) -> 
             remote,
             &refspec,
         ],
+        auth,
     )
     .await?;
-    let output = run_bytes(staging, remote, &["rev-parse", "--verify", FETCHED]).await?;
+    let output = run_bytes(staging, remote, &["rev-parse", "--verify", FETCHED], auth).await?;
     Ok(std::str::from_utf8(&output)?.trim().parse()?)
 }
 
@@ -112,11 +126,13 @@ async fn common_ancestor(
     remote: &str,
     base: ObjectId,
     tip: ObjectId,
+    auth: &ProactiveAuth,
 ) -> Result<ObjectId> {
     let output = run_bytes(
         staging,
         remote,
         &["merge-base", "--all", &base.to_hex(), &tip.to_hex()],
+        auth,
     )
     .await
     .context("mirror and Rosen histories must share a common ancestor")?;
@@ -132,11 +148,12 @@ async fn verify_ported(
     ancestor: ObjectId,
     base: ObjectId,
     tip: ObjectId,
+    auth: &ProactiveAuth,
 ) -> Result<()> {
     // Compare raw paths, including non-UTF-8 names. A path that differs in
     // both comparisons still needs to be reconciled through a normal land.
-    let changed = diff_paths(staging, remote, ancestor, tip).await?;
-    let diverged = diff_paths(staging, remote, base, tip).await?;
+    let changed = diff_paths(staging, remote, ancestor, tip, auth).await?;
+    let diverged = diff_paths(staging, remote, base, tip, auth).await?;
     let diverged: HashSet<_> = diverged.split(|byte| *byte == 0).collect();
     if let Some(path) = changed
         .split(|byte| *byte == 0)
@@ -150,7 +167,13 @@ async fn verify_ported(
     Ok(())
 }
 
-async fn diff_paths(staging: &Path, remote: &str, from: ObjectId, to: ObjectId) -> Result<Vec<u8>> {
+async fn diff_paths(
+    staging: &Path,
+    remote: &str,
+    from: ObjectId,
+    to: ObjectId,
+    auth: &ProactiveAuth,
+) -> Result<Vec<u8>> {
     run_bytes(
         staging,
         remote,
@@ -165,6 +188,7 @@ async fn diff_paths(staging: &Path, remote: &str, from: ObjectId, to: ObjectId) 
             &from.to_hex(),
             &to.to_hex(),
         ],
+        auth,
     )
     .await
 }
@@ -200,11 +224,13 @@ async fn verify_remote_tip(
     remote: &str,
     branch: &str,
     expected: ObjectId,
+    auth: &ProactiveAuth,
 ) -> Result<()> {
     let output = run_bytes(
         staging,
         remote,
         &["ls-remote", "--refs", "--exit-code", "--", remote, branch],
+        auth,
     )
     .await?;
     ensure!(

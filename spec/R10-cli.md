@@ -20,4 +20,4 @@
 - `rosen server stop` asks the server to stop and returns once its process has exited, which is when its data directory is free for another server.
   It never starts a server, and succeeds when none is running.
   A stopping server refuses new work, answers the requests it is already running, a land included, and then exits.
-- `rosen server status` reports the git commit the server was built from and the path of its executable, since the version is the same for every commit.
+- `rosen server status` reports the git commit the server was built from and the path of its executable, since the version is the same for every commit, and whether HTTPS mirror reads are using proactive basic auth.

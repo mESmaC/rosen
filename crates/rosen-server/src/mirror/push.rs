@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use rosen_core::ObjectId;
 
+use super::proactive_auth::{self, ProactiveAuth};
 use crate::import::git_command;
 
 /// A push still running after this long is stopped and retried, so a hung
@@ -40,6 +41,7 @@ pub async fn push(
     remote: &str,
     branch: &str,
     commit: &ObjectId,
+    auth: &ProactiveAuth,
 ) -> Result<(), PushFailure> {
     let fail = |message: String| PushFailure {
         rejected: false,
@@ -54,6 +56,9 @@ pub async fn push(
         .map_err(|error| fail(format!("preparing {}: {error}", staging.display())))?;
     let refspec = format!("{}:refs/heads/{branch}", commit.to_hex());
     let mut command = tokio::process::Command::from(git_command(staging));
+    if auth.is_enabled() && proactive_auth::is_https(remote) {
+        command.args(proactive_auth::PROACTIVE_AUTH_ARGS);
+    }
     // `--` keeps a remote that starts with `-` from being read as an option.
     command
         .args(["push", "--porcelain", "--", remote, refspec.as_str()])

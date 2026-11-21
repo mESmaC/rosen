@@ -95,6 +95,9 @@ pub struct ServerState {
     /// Wakes the mirror task when the base appears without a land, as an
     /// import does (SPEC R1). A wake during a push is kept for the next wait.
     pub mirror_wake: tokio::sync::Notify,
+    /// Remembers that an HTTPS mirror read succeeded via proactive basic auth
+    /// so later reads in this server's lifetime use it directly (R1, #432).
+    pub(crate) mirror_proactive_auth: mirror::proactive_auth::ProactiveAuth,
     /// Wakes the Collapse action relay when its setting changes or a state
     /// feed answer says actions wait (R14).
     pub relay_wake: Arc<relay::Wake>,
@@ -136,6 +139,7 @@ impl ServerState {
             started: Instant::now(),
             network: OnceLock::new(),
             mirror_wake: tokio::sync::Notify::new(),
+            mirror_proactive_auth: mirror::proactive_auth::ProactiveAuth::default(),
             relay_wake: Arc::default(),
             maintenance: tokio::sync::RwLock::new(()),
             open_connections: AtomicU64::new(0),

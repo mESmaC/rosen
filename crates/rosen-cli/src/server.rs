@@ -95,6 +95,7 @@ fn print_status(json: bool, status: &ServerStatus) {
             "fingerprint": status.fingerprint,
             "upstream": status.upstream,
             "mirror_owner": status.mirror_owner,
+            "mirror_proactive_auth": status.mirror_proactive_auth,
             "relay": status.relay,
             "commit": status.commit,
             "executable": status.executable,
@@ -125,6 +126,9 @@ fn print_status(json: bool, status: &ServerStatus) {
         }
         if let Some(line) = mirror_owner_line(status.mirror_owner) {
             println!("{line}");
+        }
+        if status.mirror_proactive_auth == Some(true) {
+            println!("mirror reads: proactive basic auth (http.proactiveAuth=basic)");
         }
         if let Some(relay) = &status.relay {
             println!(

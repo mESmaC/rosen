@@ -13,6 +13,7 @@ use std::process::Stdio;
 use rosen_core::ObjectId;
 
 use super::catch_up::{count_between, listing};
+use super::proactive_auth::ProactiveAuth;
 use super::push::{hide_credentials, prepare_staging, PushFailure};
 use super::rewrite::remote::{name, run_bytes};
 use super::MirrorTarget;
@@ -36,6 +37,7 @@ pub(super) async fn check(
     target: &MirrorTarget,
     branch: &str,
     base: &ObjectId,
+    auth: &ProactiveAuth,
 ) -> Result<RemoteTip, PushFailure> {
     let remote = target.remote.as_str();
     let fail = |message: String| PushFailure {
@@ -48,7 +50,7 @@ pub(super) async fn check(
     prepare_staging(&staging, &config.objects_dir())
         .await
         .map_err(|error| fail(format!("preparing {}: {error}", staging.display())))?;
-    let Some(tip) = remote_tip(&staging, remote, branch)
+    let Some(tip) = remote_tip(&staging, remote, branch, auth)
         .await
         .map_err(|error| fail(error.to_string()))?
     else {
@@ -62,7 +64,10 @@ pub(super) async fn check(
     }
     Err(PushFailure {
         rejected: true,
-        message: hide_credentials(remote, &refusal(config, target, branch, tip, base).await),
+        message: hide_credentials(
+            remote,
+            &refusal(config, target, branch, tip, base, auth).await,
+        ),
     })
 }
 
@@ -72,9 +77,10 @@ async fn remote_tip(
     staging: &Path,
     remote: &str,
     branch: &str,
+    auth: &ProactiveAuth,
 ) -> anyhow::Result<Option<ObjectId>> {
     let full = format!("refs/heads/{branch}");
-    let output = run_bytes(staging, remote, &["ls-remote", "--", remote, &full]).await?;
+    let output = run_bytes(staging, remote, &["ls-remote", "--", remote, &full], auth).await?;
     let text = String::from_utf8(output)?;
     for line in text.lines() {
         if let Some((id, name)) = line.split_once('\t') {
@@ -105,12 +111,13 @@ async fn refusal(
     branch: &str,
     tip: ObjectId,
     base: &ObjectId,
+    auth: &ProactiveAuth,
 ) -> String {
     let last = target.pushed.map_or_else(
         || "this server has not recorded a push to it".to_owned(),
         |pushed| format!("this server last pushed {pushed}"),
     );
-    let remote_side = match remote_only(config, &target.remote, branch, tip, base).await {
+    let remote_side = match remote_only(config, &target.remote, branch, tip, base, auth).await {
         Ok(text) => text,
         Err(error) => format!("  (could not list them: {error})\n"),
     };
@@ -132,15 +139,16 @@ async fn remote_only(
     branch: &str,
     tip: ObjectId,
     base: &ObjectId,
+    auth: &ProactiveAuth,
 ) -> anyhow::Result<String> {
     let remote = name(config, stored_remote)?;
     let scratch = tempfile::tempdir_in(std::path::absolute(&config.data_dir)?)?;
     let repo = scratch.path();
     prepare_staging(repo, &config.objects_dir()).await?;
     let fetched =
-        super::adopt::fetch_branch(repo, &remote, &format!("refs/heads/{branch}")).await?;
-    let total = count_between(repo, &remote, *base, fetched).await?;
-    let mut text = listing(repo, &remote, *base, fetched, total).await?;
+        super::adopt::fetch_branch(repo, &remote, &format!("refs/heads/{branch}"), auth).await?;
+    let total = count_between(repo, &remote, *base, fetched, auth).await?;
+    let mut text = listing(repo, &remote, *base, fetched, total, auth).await?;
     if fetched != tip {
         text.push_str(&format!(
             "  (the branch moved to {fetched} while this was read)\n"

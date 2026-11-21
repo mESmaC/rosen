@@ -22,6 +22,7 @@ use rusqlite::{params, TransactionBehavior};
 use serde_json::json;
 
 use super::adopt::fetch_branch;
+use super::proactive_auth::ProactiveAuth;
 use super::rewrite::remote::{name, run_bytes};
 use crate::events::{self, Staged};
 use crate::import::{copy_objects, filter_missing, GitSource};
@@ -71,7 +72,8 @@ async fn fast_forward(state: &Arc<ServerState>) -> Result<MirrorCatchUp> {
     let staging = tempfile::tempdir_in(std::path::absolute(&state.config.data_dir)?)?;
     let repo = staging.path();
     super::push::prepare_staging(repo, &state.config.objects_dir()).await?;
-    let tip = fetch_branch(repo, &remote, &format!("refs/heads/{branch}")).await?;
+    let auth = &state.mirror_proactive_auth;
+    let tip = fetch_branch(repo, &remote, &format!("refs/heads/{branch}"), auth).await?;
     let mut answer = MirrorCatchUp {
         base_ref: branch,
         status: CatchUpStatus::UpToDate,
@@ -83,14 +85,14 @@ async fn fast_forward(state: &Arc<ServerState>) -> Result<MirrorCatchUp> {
         conflicted: Vec::new(),
         rebase_errors: Vec::new(),
     };
-    let only_base = count_between(repo, &remote, tip, base).await?;
-    let only_remote = count_between(repo, &remote, base, tip).await?;
+    let only_base = count_between(repo, &remote, tip, base, auth).await?;
+    let only_remote = count_between(repo, &remote, base, tip, auth).await?;
     match (only_base, only_remote) {
         (_, 0) if tip == base => {}
         // The mirror worker pushes the rest of the base as usual.
         (_, 0) => answer.status = CatchUpStatus::Ahead,
         (0, _) => answer = move_base(state, repo, &remote, &target.remote, answer).await?,
-        _ => bail!(diverged(repo, &remote, &answer, only_base, only_remote).await?),
+        _ => bail!(diverged(repo, &remote, &answer, only_base, only_remote, auth).await?),
     }
     state.mirror_wake.notify_one();
     Ok(answer)
@@ -105,7 +107,8 @@ async fn move_base(
     mut answer: MirrorCatchUp,
 ) -> Result<MirrorCatchUp> {
     let (base, tip) = (answer.old_base, answer.remote_tip);
-    answer.commits = first_parent_line(repo, remote, base, tip).await?;
+    answer.commits =
+        first_parent_line(repo, remote, base, tip, &state.mirror_proactive_auth).await?;
     let (source, objects) = (repo.to_path_buf(), state.config.objects_dir());
     tokio::task::spawn_blocking(move || store_objects(&source, &objects, base, tip)).await??;
     answer.status = CatchUpStatus::FastForwarded;
@@ -126,9 +129,10 @@ pub(super) async fn count_between(
     remote: &str,
     from: ObjectId,
     to: ObjectId,
+    auth: &ProactiveAuth,
 ) -> Result<u64> {
     let range = format!("{}..{}", from.to_hex(), to.to_hex());
-    let output = run_bytes(repo, remote, &["rev-list", "--count", &range]).await?;
+    let output = run_bytes(repo, remote, &["rev-list", "--count", &range], auth).await?;
     Ok(std::str::from_utf8(&output)?.trim().parse()?)
 }
 
@@ -139,12 +143,14 @@ async fn first_parent_line(
     remote: &str,
     base: ObjectId,
     tip: ObjectId,
+    auth: &ProactiveAuth,
 ) -> Result<Vec<ObjectId>> {
     let range = format!("{}..{}", base.to_hex(), tip.to_hex());
     let output = run_bytes(
         repo,
         remote,
         &["rev-list", "--first-parent", "--reverse", &range],
+        auth,
     )
     .await?;
     let commits = std::str::from_utf8(&output)?
@@ -231,10 +237,11 @@ async fn diverged(
     answer: &MirrorCatchUp,
     only_base: u64,
     only_remote: u64,
+    auth: &ProactiveAuth,
 ) -> Result<String> {
     let (base, tip) = (answer.old_base, answer.remote_tip);
-    let base_side = listing(repo, remote, tip, base, only_base).await?;
-    let remote_side = listing(repo, remote, base, tip, only_remote).await?;
+    let base_side = listing(repo, remote, tip, base, only_base, auth).await?;
+    let remote_side = listing(repo, remote, base, tip, only_remote, auth).await?;
     Ok(format!(
         "base {} and mirror branch {} have diverged; nothing was moved.\n\
          Rosen base {base} has {only_base} commit(s) the mirror lacks:\n{base_side}\
@@ -252,6 +259,7 @@ pub(super) async fn listing(
     from: ObjectId,
     to: ObjectId,
     total: u64,
+    auth: &ProactiveAuth,
 ) -> Result<String> {
     let range = format!("{}..{}", from.to_hex(), to.to_hex());
     let limit = format!("--max-count={LISTED}");
@@ -259,6 +267,7 @@ pub(super) async fn listing(
         repo,
         remote,
         &["log", "--no-decorate", "--format=  %H %s", &limit, &range],
+        auth,
     )
     .await?;
     let mut text = String::from_utf8_lossy(&output).into_owned();

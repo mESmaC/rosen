@@ -71,6 +71,7 @@ impl CacheState {
             fingerprint: None,
             upstream: Some(self.upstream.address.clone()),
             mirror_owner: None,
+            mirror_proactive_auth: None,
             relay: None,
             commit: crate::BUILD_COMMIT.map(str::to_owned),
             executable: crate::executable(),

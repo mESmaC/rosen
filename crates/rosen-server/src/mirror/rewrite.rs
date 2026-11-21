@@ -46,7 +46,8 @@ async fn repair(state: &Arc<ServerState>, paths: Vec<String>) -> Result<HistoryR
     // Relative local remotes have always been interpreted by git from the
     // mirror staging repository. Keep that meaning in the inspection repo.
     let remote_name = remote::name(&state.config, &target.remote)?;
-    let remote = remote::Remote::inspect(&state.config, &remote_name).await?;
+    let remote =
+        remote::Remote::inspect(&state.config, &remote_name, &state.mirror_proactive_auth).await?;
     if target
         .pushed
         .is_some_and(|id| !remote.commits.contains(&id))
@@ -71,7 +72,9 @@ async fn repair(state: &Arc<ServerState>, paths: Vec<String>) -> Result<HistoryR
             removing published content requires a separately coordinated mirror history rewrite and force-push. \
             For a secret, rotate/revoke it immediately; this command cannot unpublish it", published.join(", "));
     }
-    remote.unchanged(&remote_name).await?;
+    remote
+        .unchanged(&remote_name, &state.mirror_proactive_auth)
+        .await?;
     publish(state, branch, base, boundary, &mut rewrite).await
 }
 

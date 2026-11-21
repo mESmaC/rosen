@@ -386,6 +386,7 @@ fn status(state: &ServerState, relay: Option<rosen_protocol::RelaySetting>) -> S
         fingerprint: network.map(|(_, fingerprint)| fingerprint),
         upstream: None,
         mirror_owner: Some(crate::mirror::owner::is_owner(&state.config.data_dir)),
+        mirror_proactive_auth: Some(state.mirror_proactive_auth.is_enabled()),
         relay,
         commit: crate::BUILD_COMMIT.map(str::to_owned),
         executable: crate::executable(),

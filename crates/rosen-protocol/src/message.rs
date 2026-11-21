@@ -485,6 +485,11 @@ pub struct ServerStatus {
     /// server marked as its owner does. Absent on a cache daemon.
     #[serde(default)]
     pub mirror_owner: Option<bool>,
+    /// Whether HTTPS mirror reads are using proactive basic auth after a
+    /// not-found fallback succeeded in this server's lifetime (SPEC R1, #432).
+    /// Absent on a cache daemon.
+    #[serde(default)]
+    pub mirror_proactive_auth: Option<bool>,
     /// The Collapse action relay's setting (R14). Absent on a cache daemon.
     #[serde(default)]
     pub relay: Option<crate::RelaySetting>,
