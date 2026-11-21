@@ -138,9 +138,14 @@ fn record(
         .map_err(internal)?;
     if inserted != 0 {
         let change: ChangeId = culprit.change.parse().map_err(internal)?;
-        let detail = serde_json::json!({"session":session,"culprit":culprit.commit,
-            "kind":kind,"output":culprit.output,"requires_revert":must_revert,
-            "submitter":submitter,"at":at});
+        let detail = event_detail(
+            session,
+            culprit,
+            kind,
+            must_revert,
+            submitter.as_deref(),
+            at,
+        );
         crate::events::stage(
             &tx,
             &Staged::about(EventKind::PostLandFailure, change, detail),
@@ -148,6 +153,26 @@ fn record(
         .map_err(internal)?;
     }
     tx.commit().map_err(internal)
+}
+
+/// Event detail published when a confirmed post-land failure is recorded (R9, R12).
+pub(crate) fn event_detail(
+    session: i64,
+    culprit: &BisectCulprit,
+    kind: CheckKind,
+    requires_revert: bool,
+    submitter: Option<&str>,
+    at: Option<i64>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "session": session,
+        "culprit": culprit.commit,
+        "kind": kind,
+        "output": culprit.output,
+        "requires_revert": requires_revert,
+        "submitter": submitter,
+        "at": at,
+    })
 }
 
 /// Who submitted the result that confirmed `session`'s culprit: its last

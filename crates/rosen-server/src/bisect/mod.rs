@@ -2,7 +2,7 @@
 pub mod failure;
 mod known;
 mod model;
-mod progress;
+pub(crate) mod progress;
 mod storage;
 
 use crate::post_land::submitter::Submitted;

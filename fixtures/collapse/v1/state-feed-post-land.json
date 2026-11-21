@@ -18,9 +18,11 @@
       "time": 1700000001000
     },
     {
-      "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "change": null,
       "detail": {
-        "commit": "1111111111111111111111111111111111111111"
+        "at": 1700000000000,
+        "commit": "1111111111111111111111111111111111111111",
+        "submitter": "checker@agent-2"
       },
       "kind": "built",
       "seq": 2,
@@ -29,10 +31,9 @@
     {
       "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
       "detail": {
+        "at": 1700000000000,
         "commit": "1111111111111111111111111111111111111111",
-        "commits": [
-          "1111111111111111111111111111111111111111"
-        ]
+        "submitter": "checker@agent-2"
       },
       "kind": "green",
       "seq": 3,
@@ -41,10 +42,13 @@
     {
       "change": "llllllllllllllllllllllllllllllll",
       "detail": {
-        "commit": "2222222222222222222222222222222222222222",
+        "at": 1700000000000,
+        "culprit": "2222222222222222222222222222222222222222",
         "kind": "test",
         "output": "test failed\n",
         "requires_revert": false,
+        "session": 1,
+        "submitter": "checker@agent-2",
         "truncated": false
       },
       "kind": "post_land_failure",
@@ -54,9 +58,9 @@
     {
       "change": "llllllllllllllllllllllllllllllll",
       "detail": {
-        "commit": "2222222222222222222222222222222222222222",
+        "commit": "3333333333333333333333333333333333333333",
+        "culprit": "2222222222222222222222222222222222222222",
         "output": "build error\n",
-        "revert": "3333333333333333333333333333333333333333",
         "truncated": false
       },
       "kind": "reverted",
@@ -66,8 +70,15 @@
     {
       "change": "llllllllllllllllllllllllllllllll",
       "detail": {
-        "commit": "2222222222222222222222222222222222222222",
-        "reason": "merge_conflict"
+        "base": "3333333333333333333333333333333333333333",
+        "culprit": "2222222222222222222222222222222222222222",
+        "overlapping_commits": [
+          "3333333333333333333333333333333333333333"
+        ],
+        "paths": [
+          "a.txt"
+        ],
+        "reason": "revert conflicts in: a.txt"
       },
       "kind": "revert_refused",
       "seq": 6,
@@ -76,8 +87,17 @@
     {
       "change": null,
       "detail": {
-        "culprit": "2222222222222222222222222222222222222222",
-        "status": "culprit"
+        "at": 1700000000000,
+        "commit": "2222222222222222222222222222222222222222",
+        "interval": 1,
+        "kind": "test",
+        "lower": "1111111111111111111111111111111111111111",
+        "planned_steps": 2,
+        "progress": "opened",
+        "result": "failed",
+        "session": 1,
+        "step": null,
+        "submitter": "checker@agent-2"
       },
       "kind": "bisect",
       "seq": 7,
@@ -86,17 +106,52 @@
     {
       "change": null,
       "detail": {
+        "at": 1700000000000,
+        "commit": "1111111111111111111111111111111111111111",
+        "culprit": "2222222222222222222222222222222222222222",
+        "kind": "test",
+        "planned_steps": 2,
+        "progress": "culprit",
+        "result": "passed",
+        "session": 1,
+        "step": 2,
+        "submitter": "checker@agent-2"
+      },
+      "kind": "bisect",
+      "seq": 8,
+      "time": 1700000008000
+    },
+    {
+      "change": null,
+      "detail": {
+        "attempt": 1,
+        "branch": "main",
+        "commit": "1111111111111111111111111111111111111111",
+        "error": "connection refused",
+        "rejected": false,
+        "retry_in_ms": 1000,
+        "status": "failed"
+      },
+      "kind": "mirror",
+      "seq": 9,
+      "time": 1700000009000
+    },
+    {
+      "change": null,
+      "detail": {
+        "after_failures": 1,
+        "branch": "main",
         "commit": "1111111111111111111111111111111111111111",
         "status": "pushed"
       },
       "kind": "mirror",
-      "seq": 8,
-      "time": 1700000008000
+      "seq": 10,
+      "time": 1700000010000
     }
   ],
   "format": 1,
   "machines": [],
   "presence": [],
   "threads": [],
-  "through": 8
+  "through": 10
 }

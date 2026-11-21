@@ -80,7 +80,7 @@ pub fn rebase(state: &ServerState, change: &str) -> HistoryResult<ChangeRecord> 
     }
     let mut events = vec![Staged::about(EventKind::Rebased, id, detail)];
     if !paths.is_empty() {
-        let detail = serde_json::json!({ "paths": paths, "onto": merged.base });
+        let detail = crate::landing::conflict_routes::event_detail(&paths, merged.base);
         events.push(Staged::about(EventKind::Conflict, id, detail));
     }
     let record = state.changes.with_conn(|conn| {

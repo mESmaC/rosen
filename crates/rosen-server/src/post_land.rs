@@ -1,5 +1,5 @@
 //! Typed batch verification, separate from R8's post-land housekeeping.
-mod builds;
+pub(crate) mod builds;
 pub mod failures;
 pub mod status;
 pub mod store;
@@ -129,6 +129,15 @@ pub fn recover(state: &ServerState) -> Result<(), ErrorBody> {
 /// or startup recovery racing one) would both publish every row (#149).
 static DELIVERY: Mutex<()> = Mutex::new(());
 
+/// Event detail published when a landed change is marked green (R9, R12).
+pub(crate) fn green_detail(
+    commit: &str,
+    submitter: Option<&str>,
+    at: Option<i64>,
+) -> serde_json::Value {
+    serde_json::json!({ "commit": commit, "submitter": submitter, "at": at })
+}
+
 fn deliver(state: &ServerState, conn: &Connection) -> Result<(), ErrorBody> {
     // A pass that panicked left no partial state the next pass cannot redo.
     let _turn = DELIVERY.lock().unwrap_or_else(PoisonError::into_inner);
@@ -136,7 +145,7 @@ fn deliver(state: &ServerState, conn: &Connection) -> Result<(), ErrorBody> {
         let published = state.events.publish(
             EventKind::Green,
             Some(row.change),
-            serde_json::json!({ "commit": row.commit, "submitter": row.submitter, "at": row.at }),
+            green_detail(&row.commit, row.submitter.as_deref(), row.at),
         );
         if published == 0 {
             break;

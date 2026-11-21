@@ -51,8 +51,7 @@ pub(super) fn record(state: &ServerState, culprit: ObjectId, error: &LandError) 
         ],
     )?;
     if inserted != 0 {
-        let detail = serde_json::json!({"culprit":culprit,"base":base,
-            "overlapping_commits":overlapping,"paths":paths,"reason":error.to_string()});
+        let detail = event_detail(culprit, base, &overlapping, paths, &error.to_string());
         crate::events::stage(
             &tx,
             &Staged::about(EventKind::RevertRefused, change, detail),
@@ -61,6 +60,23 @@ pub(super) fn record(state: &ServerState, culprit: ObjectId, error: &LandError) 
     tx.commit()?;
     state.events.deliver_staged();
     Ok(())
+}
+
+/// Event detail published when an automatic revert is refused (R9, R12).
+pub(crate) fn event_detail(
+    culprit: ObjectId,
+    base: ObjectId,
+    overlapping: &[ObjectId],
+    paths: &[String],
+    reason: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "culprit": culprit,
+        "base": base,
+        "overlapping_commits": overlapping,
+        "paths": paths,
+        "reason": reason,
+    })
 }
 
 fn overlaps(

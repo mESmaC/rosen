@@ -51,12 +51,17 @@ pub fn failure_output(state: &ServerState, culprit: ObjectId) -> LandResult<Opti
     db::output(&conn, culprit)
 }
 
+/// Event detail published when an automatic revert lands (R9, R12).
+pub(crate) fn event_detail(culprit: &str, commit: &str, output: &str) -> serde_json::Value {
+    serde_json::json!({ "culprit": culprit, "commit": commit, "output": output })
+}
+
 /// Replays the outbox outside the registry mutex, since audience lookup reads it.
 pub fn recover(state: &ServerState) -> LandResult<()> {
     let conn = crate::metadata::open(&state.config.metadata_path())?;
     db::ensure_schema(&conn)?;
     for (culprit, change, commit, output) in db::pending(&conn)? {
-        let detail = serde_json::json!({"culprit":culprit,"commit":commit,"output":output});
+        let detail = event_detail(&culprit, &commit, &output);
         if state
             .events
             .publish(EventKind::Reverted, Some(change), detail)

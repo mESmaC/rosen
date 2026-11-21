@@ -73,13 +73,12 @@ pub fn passed(
         params![name, commit.to_string(), by, at],
     )?;
     if count > 0 {
-        let (submitter, at) = submitter::detail(submitted);
         crate::events::stage(
             &tx,
             &crate::events::Staged {
                 kind: rosen_protocol::EventKind::Built,
                 change: None,
-                detail: serde_json::json!({ "commit": commit, "submitter": submitter, "at": at }),
+                detail: event_detail(commit, submitted),
                 concern: Default::default(),
             },
         )?;
@@ -91,4 +90,10 @@ pub fn passed(
     )?;
     tx.commit()?;
     Ok(known)
+}
+
+/// Event detail published when a post-land build passes (R9, R12).
+pub(crate) fn event_detail(commit: &ObjectId, submitted: Option<&Submitted>) -> serde_json::Value {
+    let (submitter, at) = submitter::detail(submitted);
+    serde_json::json!({ "commit": commit, "submitter": submitter, "at": at })
 }

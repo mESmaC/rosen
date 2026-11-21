@@ -273,10 +273,14 @@ fn retry_delay(failures: u32) -> Duration {
     RETRY_START.saturating_mul(1 << doublings).min(RETRY_CAP)
 }
 
-/// Publishes a `mirror` event for a failed push (SPEC R1, R9).
-fn report_failure(state: &ServerState, error: &SyncError, attempt: u32, retry_in: Duration) {
+/// Event detail published for a failed mirror push (SPEC R1, R9).
+pub(crate) fn failure_detail(
+    error: &SyncError,
+    attempt: u32,
+    retry_in: Duration,
+) -> serde_json::Value {
     let retry_in_ms = u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX);
-    let detail = match error {
+    match error {
         SyncError::Store(message) => json!({
             "status": "failed",
             "attempt": attempt,
@@ -299,8 +303,22 @@ fn report_failure(state: &ServerState, error: &SyncError, attempt: u32, retry_in
             "rejected": failure.rejected,
             "error": failure.message,
         }),
-    };
+    }
+}
+
+/// Publishes a `mirror` event for a failed push (SPEC R1, R9).
+fn report_failure(state: &ServerState, error: &SyncError, attempt: u32, retry_in: Duration) {
+    let detail = failure_detail(error, attempt, retry_in);
     state.events.publish(EventKind::Mirror, None, detail);
+}
+
+/// Event detail published when this server is not the mirror owner (SPEC R1, R9).
+pub(crate) fn not_owner_detail(branch: &str, commit: &ObjectId) -> serde_json::Value {
+    json!({
+        "status": "not_owner",
+        "branch": branch,
+        "commit": commit.to_hex(),
+    })
 }
 
 /// Publishes a `mirror` event saying the base stays local because this
@@ -310,25 +328,27 @@ fn report_not_owner(state: &ServerState, branch: &str, commit: &ObjectId) {
     eprintln!(
         "rosen-server: not the mirror owner; base {branch} at {commit} is not pushed.          Start the project's authoritative server with --mirror-owner to push."
     );
-    let detail = json!({
-        "status": "not_owner",
+    let detail = not_owner_detail(branch, commit);
+    state.events.publish(EventKind::Mirror, None, detail);
+}
+
+/// Event detail published when the mirror recovers after failures (SPEC R1, R9).
+pub(crate) fn recovered_detail(synced: &Synced, failures: u32) -> Option<serde_json::Value> {
+    let (Synced::Pushed { branch, commit } | Synced::UpToDate { branch, commit }) = synced else {
+        return None;
+    };
+    Some(json!({
+        "status": "pushed",
         "branch": branch,
         "commit": commit.to_hex(),
-    });
-    state.events.publish(EventKind::Mirror, None, detail);
+        "after_failures": failures,
+    }))
 }
 
 /// Publishes a `mirror` event when the mirror is current again after
 /// failures, so whoever saw the failure knows it is over.
 fn report_recovered(state: &ServerState, synced: &Synced, failures: u32) {
-    let (Synced::Pushed { branch, commit } | Synced::UpToDate { branch, commit }) = synced else {
-        return;
-    };
-    let detail = json!({
-        "status": "pushed",
-        "branch": branch,
-        "commit": commit.to_hex(),
-        "after_failures": failures,
-    });
-    state.events.publish(EventKind::Mirror, None, detail);
+    if let Some(detail) = recovered_detail(synced, failures) {
+        state.events.publish(EventKind::Mirror, None, detail);
+    }
 }

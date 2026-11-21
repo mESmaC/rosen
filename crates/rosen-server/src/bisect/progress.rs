@@ -5,7 +5,7 @@ use crate::events::{Concern, Staged};
 use crate::post_land::submitter::{self, Submitted};
 use rosen_core::ObjectId;
 use rosen_protocol::{
-    BisectJob, BisectSession, BisectState, BisectStep, ErrorBody, EventKind, StepState,
+    BisectJob, BisectSession, BisectState, BisectStep, CheckKind, ErrorBody, EventKind, StepState,
 };
 use rusqlite::{params, Connection};
 
@@ -47,15 +47,34 @@ pub(super) fn opened(
         params![session.id, by.map(|s| &s.by), by.map(|s| s.at)],
     )
     .map_err(super::internal)?;
+    let detail = opened_detail(
+        session.id,
+        session.kind,
+        failed,
+        by,
+        session.commits[0].0,
+        session.commits.len() - 1,
+    );
+    stage(conn, detail)
+}
+
+/// Event detail published when a bisection session opens (R9, R12).
+pub(crate) fn opened_detail(
+    session: i64,
+    kind: CheckKind,
+    failed: ObjectId,
+    by: Option<&Submitted>,
+    lower: ObjectId,
+    interval: usize,
+) -> serde_json::Value {
     let (who, at) = submitter::detail(by);
-    let detail = serde_json::json!({
-        "session": session.id, "kind": session.kind, "progress": "opened",
+    serde_json::json!({
+        "session": session, "kind": kind, "progress": "opened",
         "step": null, "commit": failed, "result": "failed",
         "submitter": who, "at": at,
-        "lower": session.commits[0].0, "interval": session.commits.len() - 1,
-        "planned_steps": planned_steps(session.commits.len() - 1),
-    });
-    stage(conn, detail)
+        "lower": lower, "interval": interval,
+        "planned_steps": planned_steps(interval),
+    })
 }
 
 /// Records one accepted result and stages its `bisect` event, in the
@@ -87,20 +106,30 @@ pub(super) fn accepted(
         ],
     )
     .map_err(super::internal)?;
+    stage(conn, accepted_detail(job, passed, by, after, planned))
+}
+
+/// Event detail published when a bisection result is accepted (R9, R12).
+pub(crate) fn accepted_detail(
+    job: &BisectJob,
+    passed: bool,
+    by: Option<&Submitted>,
+    after: &BisectState,
+    planned: u64,
+) -> serde_json::Value {
     let progress = match (&after.culprit, after.flaky) {
         (Some(_), _) => "culprit",
         (None, true) => "flaky",
         (None, false) => "step",
     };
     let (who, at) = submitter::detail(by);
-    let detail = serde_json::json!({
+    serde_json::json!({
         "session": job.session, "kind": job.kind, "progress": progress,
         "step": job.step, "commit": job.commit,
         "result": if passed { "passed" } else { "failed" },
         "submitter": who, "at": at, "planned_steps": planned,
         "culprit": after.culprit.as_ref().map(|c| c.commit),
-    });
-    stage(conn, detail)
+    })
 }
 
 /// Bisection progress is for the project view: it concerns no change's

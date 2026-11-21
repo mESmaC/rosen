@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rosen_core::conflict::{Conflict, ConflictSet};
 use rosen_core::{
@@ -30,8 +31,9 @@ use rosen_store::{LooseObjectStore, ObjectStore};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::landing::Ledger;
+use crate::landing::{self, LandError, Ledger};
 use crate::ledger_push::{self, Session as LedgerSession};
+use crate::post_land::{self, submitter::Submitted};
 use crate::relay::{
     action,
     remote::{Fetched, Remote},
@@ -44,7 +46,7 @@ use crate::state_push::{
     log_lines, machines_doc, pass, review_docs,
     unit::{Section, Unit},
 };
-use crate::{channel, metadata, mirror, reviews, ServerConfig, ServerState};
+use crate::{bisect, channel, metadata, mirror, reviews, ServerConfig, ServerState};
 
 /// Wire schema version matching `state_push::batch::FORMAT = 1`.
 const SCHEMA_VERSION: &str = "v1";
@@ -406,7 +408,7 @@ fn store_conflict(state: &ServerState, id: ChangeId, onto: ObjectId) {
     state.events.publish(
         EventKind::Conflict,
         Some(id.to_string()),
-        json!({ "paths": ["a.rs"], "onto": onto }),
+        landing::conflict_routes::event_detail(&["a.rs".to_owned()], onto),
     );
 }
 
@@ -622,52 +624,153 @@ fn generate_state_feed_post_land() -> Value {
     single_batch(units, through, 0, &Stabilizer::default())
 }
 
-fn post_land_events(base: ObjectId) -> Vec<(EventKind, Option<&'static str>, Value)> {
-    vec![
+type EventSpec = (EventKind, Option<&'static str>, Value);
+
+fn post_land_events(base: ObjectId) -> Vec<EventSpec> {
+    let commit_1: ObjectId = COMMIT_1.parse().unwrap();
+    let commit_2: ObjectId = COMMIT_2.parse().unwrap();
+    let commit_3: ObjectId = COMMIT_3.parse().unwrap();
+    let submitted = Submitted {
+        by: "checker@agent-2".into(),
+        at: FIXED_MS,
+    };
+    let culprit = BisectCulprit {
+        commit: commit_2,
+        parent: commit_1,
+        change: CHANGE_B.into(),
+        output: "test failed\n".into(),
+    };
+    let paths = vec!["a.txt".to_owned()];
+    let mut events = vec![
         (
             EventKind::Conflict,
             Some(CHANGE_A),
-            json!({ "paths": ["a.txt"], "onto": base, "dropped": "stripped" }),
+            landing::conflict_routes::event_detail(&paths, base),
         ),
         (
             EventKind::Built,
-            Some(CHANGE_A),
-            json!({ "commit": COMMIT_1 }),
+            None,
+            post_land::builds::event_detail(&commit_1, Some(&submitted)),
         ),
         (
             EventKind::Green,
             Some(CHANGE_A),
-            json!({ "commit": COMMIT_1, "commits": [COMMIT_1] }),
+            post_land::green_detail(COMMIT_1, Some(&submitted.by), Some(submitted.at)),
         ),
         (
             EventKind::PostLandFailure,
             Some(CHANGE_B),
-            json!({
-                "commit": COMMIT_2,
-                "kind": "test",
-                "output": "test failed\n",
-                "requires_revert": false,
-            }),
+            post_land::failures::event_detail(
+                1,
+                &culprit,
+                CheckKind::Test,
+                false,
+                Some(&submitted.by),
+                Some(submitted.at),
+            ),
         ),
+    ];
+    events.extend(revert_events(commit_2, commit_3, &paths));
+    events.extend(bisect_events(commit_1, commit_2, &submitted, culprit));
+    events.extend(mirror_events(commit_1));
+    events
+}
+
+fn revert_events(commit_2: ObjectId, commit_3: ObjectId, paths: &[String]) -> Vec<EventSpec> {
+    let refusal = LandError::RevertConflict {
+        base: commit_3,
+        paths: paths.to_vec(),
+    };
+    vec![
         (
             EventKind::Reverted,
             Some(CHANGE_B),
-            json!({ "commit": COMMIT_2, "revert": COMMIT_3, "output": "build error\n" }),
+            landing::revert::event_detail(COMMIT_2, COMMIT_3, "build error\n"),
         ),
         (
             EventKind::RevertRefused,
             Some(CHANGE_B),
-            json!({ "commit": COMMIT_2, "reason": "merge_conflict" }),
+            landing::revert_refused::event_detail(
+                commit_2,
+                commit_3,
+                &[commit_3],
+                paths,
+                &refusal.to_string(),
+            ),
+        ),
+    ]
+}
+
+fn bisect_events(
+    commit_1: ObjectId,
+    commit_2: ObjectId,
+    submitted: &Submitted,
+    culprit: BisectCulprit,
+) -> Vec<EventSpec> {
+    let job = BisectJob {
+        session: 1,
+        step: 2,
+        commit: commit_1,
+        kind: CheckKind::Test,
+    };
+    let after = BisectState {
+        id: 1,
+        kind: CheckKind::Test,
+        job: None,
+        culprit: Some(culprit),
+        flaky: false,
+    };
+    vec![
+        (
+            EventKind::Bisect,
+            None,
+            bisect::progress::opened_detail(
+                1,
+                CheckKind::Test,
+                commit_2,
+                Some(submitted),
+                commit_1,
+                1,
+            ),
         ),
         (
             EventKind::Bisect,
             None,
-            json!({ "status": "culprit", "culprit": COMMIT_2 }),
+            bisect::progress::accepted_detail(
+                &job,
+                true,
+                Some(submitted),
+                &after,
+                bisect::planned_steps(1),
+            ),
+        ),
+    ]
+}
+
+fn mirror_events(commit_1: ObjectId) -> Vec<EventSpec> {
+    let push_error = mirror::SyncError::Push {
+        remote: "https://secret/repo.git".into(),
+        branch: "main".into(),
+        commit: commit_1,
+        failure: mirror::PushFailure {
+            rejected: false,
+            message: "connection refused".into(),
+        },
+    };
+    let synced = mirror::Synced::Pushed {
+        branch: "main".into(),
+        commit: commit_1,
+    };
+    vec![
+        (
+            EventKind::Mirror,
+            None,
+            mirror::failure_detail(&push_error, 1, Duration::from_secs(1)),
         ),
         (
             EventKind::Mirror,
             None,
-            json!({ "status": "pushed", "commit": COMMIT_1, "remote": "https://secret/repo.git" }),
+            mirror::recovered_detail(&synced, 1).expect("pushed mirror detail"),
         ),
     ]
 }

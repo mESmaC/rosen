@@ -46,12 +46,17 @@ pub(super) fn record(
             // The conflict event commits with the conflicts, so a stop before
             // it is stored cannot lose it (R9); the sink delivers it. `onto`
             // names the base merged in, which the conflicts table does not.
-            let detail = serde_json::json!({ "paths": paths, "onto": onto.to_hex() });
+            let detail = event_detail(paths, onto);
             crate::events::stage(&tx, &Staged::about(EventKind::Conflict, id, detail))?;
             tx.commit()?;
             Ok(Routing::Stored)
         })
         .map_err(error)
+}
+
+/// Event detail published when a land or rebase stores conflicts (R9).
+pub(crate) fn event_detail(paths: &[String], onto: ObjectId) -> serde_json::Value {
+    serde_json::json!({ "paths": paths, "onto": onto.to_hex() })
 }
 
 pub(super) fn paths(state: &ServerState, id: ChangeId) -> LandResult<Vec<String>> {
