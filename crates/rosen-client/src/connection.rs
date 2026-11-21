@@ -40,6 +40,15 @@ pub struct Client {
     next_id: AtomicU64,
     version: u32,
     server: String,
+    reader_task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        // Abort the background reader so its `ReadHalf` drops alongside
+        // `writer` and closes the underlying transport immediately.
+        self.reader_task.abort();
+    }
 }
 
 impl Client {
@@ -57,7 +66,7 @@ impl Client {
         let (version, server) = handshake(&mut reader, &mut writer).await?;
         let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
         let events: EventSender = Arc::new(Mutex::new(None));
-        tokio::spawn(route_frames(
+        let reader_task = tokio::spawn(route_frames(
             reader,
             Arc::clone(&pending),
             Arc::clone(&events),
@@ -69,6 +78,7 @@ impl Client {
             next_id: AtomicU64::new(1),
             version,
             server,
+            reader_task,
         })
     }
 

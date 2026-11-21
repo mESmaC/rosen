@@ -334,7 +334,7 @@ async fn overlapping_test_failures_are_recorded_once() {
     assert_eq!(failures(&state, &id).await.len(), 1);
     // Recreate pre-upgrade rows: a later session reported this same culprit.
     let conn = rusqlite::Connection::open(state.config.metadata_path()).unwrap();
-    conn.execute_batch("DROP INDEX post_land_failure_culprit")
+    conn.execute_batch("DROP INDEX post_land_failure_culprit_platform")
         .unwrap();
     conn.execute(
         "INSERT INTO post_land_failures(session,change_id,commit_id,kind,output,

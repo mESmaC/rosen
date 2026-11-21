@@ -19,25 +19,30 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         kind TEXT NOT NULL CHECK(kind IN ('build','test')), output TEXT NOT NULL, requires_revert INTEGER NOT NULL, revert TEXT);",
     )?;
     unique_culprits(conn)?;
-    migrate_platform(conn)?;
     super::submitter::add_columns(conn, "post_land_failures")?;
     // The status read lists refusals on a read-only connection.
     crate::landing::revert_refused::ensure_schema(conn)
 }
 
-fn migrate_platform(conn: &Connection) -> rusqlite::Result<()> {
-    let has_index: bool = conn.query_row(
+fn unique_culprits(conn: &Connection) -> rusqlite::Result<()> {
+    let has_current: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master
          WHERE type='index' AND name='post_land_failure_culprit_platform')",
         [],
         |r| r.get(0),
     )?;
-    if has_index {
+    let has_legacy: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type='index' AND name='post_land_failure_culprit')",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_current && !has_legacy {
         return Ok(());
     }
     if conn.is_autocommit() {
         let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-        migrate_platform(&tx)?;
+        unique_culprits(&tx)?;
         return tx.commit();
     }
     super::submitter::add_column(
@@ -46,38 +51,19 @@ fn migrate_platform(conn: &Connection) -> rusqlite::Result<()> {
         "platform",
         "TEXT NOT NULL DEFAULT ''",
     )?;
-    conn.execute_batch(
-        "DROP INDEX IF EXISTS post_land_failure_culprit;
-         CREATE UNIQUE INDEX IF NOT EXISTS post_land_failure_culprit_platform
-             ON post_land_failures(commit_id, kind, platform);",
-    )
-}
-
-fn unique_culprits(conn: &Connection) -> rusqlite::Result<()> {
-    let present: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master
-         WHERE type='index' AND name='post_land_failure_culprit')",
-        [],
-        |r| r.get(0),
-    )?;
-    if present {
-        return Ok(());
-    }
-    if conn.is_autocommit() {
-        let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-        unique_culprits(&tx)?;
-        return tx.commit();
-    }
-    // Keep the first report, including an inverse completed by a later session.
-    // Completed bisections retain batch coverage independently of this row.
+    // Keep the first report per (commit, kind, platform), including an inverse
+    // completed by a later session. Completed bisections retain batch coverage
+    // independently of this row.
     conn.execute_batch(
         "UPDATE post_land_failures AS f SET revert=(
             SELECT MAX(other.revert) FROM post_land_failures other
-            WHERE other.commit_id=f.commit_id AND other.kind=f.kind)
+            WHERE other.commit_id=f.commit_id AND other.kind=f.kind AND other.platform=f.platform)
          WHERE revert IS NULL;
          DELETE FROM post_land_failures WHERE session NOT IN (
-            SELECT MIN(session) FROM post_land_failures GROUP BY commit_id,kind);
-         CREATE UNIQUE INDEX post_land_failure_culprit ON post_land_failures(commit_id,kind);",
+            SELECT MIN(session) FROM post_land_failures GROUP BY commit_id, kind, platform);
+         DROP INDEX IF EXISTS post_land_failure_culprit;
+         CREATE UNIQUE INDEX IF NOT EXISTS post_land_failure_culprit_platform
+             ON post_land_failures(commit_id, kind, platform);",
     )
 }
 
