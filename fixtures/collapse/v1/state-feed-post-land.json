@@ -1,0 +1,102 @@
+{
+  "changes": [],
+  "channel": [],
+  "config": [],
+  "conflicts": [],
+  "coverage": [],
+  "events": [
+    {
+      "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "detail": {
+        "onto": "f3ae30820412461cc8698490105cf8c76c64d9fa",
+        "paths": [
+          "a.txt"
+        ]
+      },
+      "kind": "conflict",
+      "seq": 1,
+      "time": 1700000001000
+    },
+    {
+      "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "detail": {
+        "commit": "1111111111111111111111111111111111111111"
+      },
+      "kind": "built",
+      "seq": 2,
+      "time": 1700000002000
+    },
+    {
+      "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "detail": {
+        "commit": "1111111111111111111111111111111111111111",
+        "commits": [
+          "1111111111111111111111111111111111111111"
+        ]
+      },
+      "kind": "green",
+      "seq": 3,
+      "time": 1700000003000
+    },
+    {
+      "change": "llllllllllllllllllllllllllllllll",
+      "detail": {
+        "commit": "2222222222222222222222222222222222222222",
+        "kind": "test",
+        "output": "test failed\n",
+        "requires_revert": false,
+        "truncated": false
+      },
+      "kind": "post_land_failure",
+      "seq": 4,
+      "time": 1700000004000
+    },
+    {
+      "change": "llllllllllllllllllllllllllllllll",
+      "detail": {
+        "commit": "2222222222222222222222222222222222222222",
+        "output": "build error\n",
+        "revert": "3333333333333333333333333333333333333333",
+        "truncated": false
+      },
+      "kind": "reverted",
+      "seq": 5,
+      "time": 1700000005000
+    },
+    {
+      "change": "llllllllllllllllllllllllllllllll",
+      "detail": {
+        "commit": "2222222222222222222222222222222222222222",
+        "reason": "merge_conflict"
+      },
+      "kind": "revert_refused",
+      "seq": 6,
+      "time": 1700000006000
+    },
+    {
+      "change": null,
+      "detail": {
+        "culprit": "2222222222222222222222222222222222222222",
+        "status": "culprit"
+      },
+      "kind": "bisect",
+      "seq": 7,
+      "time": 1700000007000
+    },
+    {
+      "change": null,
+      "detail": {
+        "commit": "1111111111111111111111111111111111111111",
+        "status": "pushed"
+      },
+      "kind": "mirror",
+      "seq": 8,
+      "time": 1700000008000
+    }
+  ],
+  "format": 1,
+  "machines": [],
+  "presence": [],
+  "threads": [],
+  "through": 8
+}

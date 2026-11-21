@@ -1,0 +1,35 @@
+{
+  "changes": [],
+  "channel": [],
+  "config": [],
+  "conflicts": [],
+  "coverage": [
+    {
+      "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "commit": "1111111111111111111111111111111111111111",
+      "seq": 30,
+      "state": "unreviewed",
+      "tier": "prose"
+    },
+    {
+      "by": "reviewer@collapse",
+      "change": "llllllllllllllllllllllllllllllll",
+      "commit": "2222222222222222222222222222222222222222",
+      "seq": 30,
+      "state": "reviewed",
+      "tier": "normal",
+      "updated_at": 1700000009000
+    },
+    {
+      "change": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+      "removed": true,
+      "seq": 30
+    }
+  ],
+  "events": [],
+  "format": 1,
+  "machines": [],
+  "presence": [],
+  "threads": [],
+  "through": 30
+}

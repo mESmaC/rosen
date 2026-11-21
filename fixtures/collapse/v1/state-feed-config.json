@@ -1,0 +1,63 @@
+{
+  "changes": [],
+  "channel": [],
+  "config": [
+    {
+      "base_ref": "main",
+      "commit": "adb2f258fa57aa67f4d51ee0377bbb7f38a7b0b8",
+      "config": {
+        "build_units": {},
+        "checks": {
+          "post_land": {
+            "commands": [
+              "cargo test --workspace"
+            ],
+            "name": "post-land"
+          },
+          "pre_land": {
+            "commands": [
+              "cargo clippy --workspace --all-targets -- -D warnings"
+            ],
+            "name": "pre-land"
+          }
+        },
+        "collapse": "https://api.collapse.sh/example/project",
+        "collapse_channel": true,
+        "generated": [],
+        "ignore": [],
+        "mirror": {
+          "remote": "https://collapse.sh/example/project.git"
+        },
+        "prepare": {
+          "commands": []
+        },
+        "registration_lists": [],
+        "review": "after-land",
+        "sensitive": [],
+        "warm_pool": {
+          "size": 4
+        },
+        "workspace_inputs": []
+      },
+      "error": null,
+      "seq": 40,
+      "source": "adb2f258fa57aa67f4d51ee0377bbb7f38a7b0b8"
+    }
+  ],
+  "conflicts": [],
+  "coverage": [],
+  "events": [],
+  "format": 1,
+  "machines": [],
+  "presence": [],
+  "relay": {
+    "allow": [
+      "approve",
+      "land",
+      "mark",
+      "config"
+    ]
+  },
+  "threads": [],
+  "through": 40
+}

@@ -13,11 +13,11 @@
 //! One background task does all of it, off every request path, like the
 //! state feed it shares its sender and credential with.
 
-mod action;
+pub(crate) mod action;
 mod config_change;
 mod machine_revoke;
-mod remote;
-mod store;
+pub(crate) mod remote;
+pub(crate) mod store;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

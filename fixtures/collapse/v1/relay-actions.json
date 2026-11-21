@@ -1,0 +1,59 @@
+{
+  "method": "GET",
+  "path": "/rosen/actions?after=0",
+  "response": {
+    "actions": [
+      {
+        "account": "owner",
+        "arguments": {
+          "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+          "head": "3f880535de694fca4ea34d50845fb28e7ee987e5"
+        },
+        "expires_at": 1700000600000,
+        "id": 1,
+        "kind": "approve"
+      },
+      {
+        "account": "owner",
+        "arguments": {
+          "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk"
+        },
+        "expires_at": 1700000600000,
+        "id": 2,
+        "kind": "land"
+      },
+      {
+        "account": "owner",
+        "arguments": {
+          "change": "llllllllllllllllllllllllllllllll",
+          "commit": "1111111111111111111111111111111111111111",
+          "state": "reviewed"
+        },
+        "expires_at": 1700000600000,
+        "id": 3,
+        "kind": "mark"
+      },
+      {
+        "account": "owner",
+        "arguments": {
+          "base": "1111111111111111111111111111111111111111",
+          "expected_blob": "a810c72d2720d123f194f306be7339a735e15589",
+          "message": "rosen.toml: switch to after-land review",
+          "text": "review = \"after-land\"\ncollapse = \"https://api.collapse.sh/example/project\"\n"
+        },
+        "expires_at": 1700000600000,
+        "id": 4,
+        "kind": "config_change"
+      },
+      {
+        "account": "owner",
+        "arguments": {
+          "machine": "agent-lost"
+        },
+        "expires_at": 1700000600000,
+        "id": 5,
+        "kind": "machine_revoke"
+      }
+    ]
+  }
+}

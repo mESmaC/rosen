@@ -1,0 +1,164 @@
+{
+  "changes": [
+    {
+      "approvals": [
+        {
+          "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+          "created_at": 1700000001000,
+          "head": "2f1fd5eced8beb7261a1df2047e765d7aa58bbc4",
+          "id": 1,
+          "machine": "server",
+          "reviewer": "reviewer",
+          "valid": false
+        },
+        {
+          "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+          "created_at": 1700000002000,
+          "head": "51a82ffd4afe94d45e42797253ab513ff796f320",
+          "id": 2,
+          "machine": "collapse",
+          "reviewer": "maintainer",
+          "valid": true
+        }
+      ],
+      "claims": [],
+      "conflicts": [],
+      "created_at": 1700000000000,
+      "edits": [
+        {
+          "added": 2,
+          "path": "a.txt",
+          "regions": {
+            "kind": "lines",
+            "spans": [
+              {
+                "end": 3,
+                "start": 1
+              }
+            ]
+          },
+          "removed": 2
+        }
+      ],
+      "head": "51a82ffd4afe94d45e42797253ab513ff796f320",
+      "id": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "land_check": {
+        "approval": {
+          "head": "51a82ffd4afe94d45e42797253ab513ff796f320",
+          "reviewers": [
+            "maintainer@collapse"
+          ],
+          "status": "held"
+        },
+        "base": "bcbd9eafcdff2629d7ff09e27cac7021bdd147a3",
+        "base_ref": "main",
+        "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+        "head": "51a82ffd4afe94d45e42797253ab513ff796f320",
+        "landable": true,
+        "merge": {
+          "status": "clean"
+        },
+        "reach": [],
+        "receipt": {
+          "status": "not_required"
+        },
+        "recheck_mode": "reach",
+        "review_mode": "before-land",
+        "stack": [],
+        "tier": "prose"
+      },
+      "overlaps": [],
+      "owner": "alice@server",
+      "parent": {
+        "base": "bcbd9eafcdff2629d7ff09e27cac7021bdd147a3"
+      },
+      "receipt": null,
+      "seq": 20,
+      "snapshots": {
+        "count": 4,
+        "named": [
+          {
+            "at": 1700000000000,
+            "commit": "2222222222222222222222222222222222222222",
+            "title": "Address review"
+          },
+          {
+            "at": 1700000000000,
+            "commit": "1111111111111111111111111111111111111111",
+            "title": "Initial draft"
+          }
+        ]
+      },
+      "state": "open",
+      "threads": [
+        1,
+        2
+      ],
+      "title": "Address review",
+      "unavailable": {},
+      "updated_at": 1700000005000
+    }
+  ],
+  "channel": [],
+  "config": [],
+  "conflicts": [],
+  "coverage": [],
+  "events": [],
+  "format": 1,
+  "machines": [],
+  "presence": [],
+  "threads": [
+    {
+      "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "comments": [
+        {
+          "author": "reviewer",
+          "body": "Check line two",
+          "created_at": 1700000001000,
+          "head": "51a82ffd4afe94d45e42797253ab513ff796f320",
+          "id": 1
+        },
+        {
+          "author": "alice",
+          "body": "Updated line two",
+          "created_at": 1700000002000,
+          "head": "51a82ffd4afe94d45e42797253ab513ff796f320",
+          "id": 2
+        }
+      ],
+      "created_at": 1700000001000,
+      "head": "51a82ffd4afe94d45e42797253ab513ff796f320",
+      "id": 1,
+      "line": 2,
+      "opened_by": "reviewer",
+      "path": "a.txt",
+      "resolved_by": null,
+      "seq": 20,
+      "state": "open",
+      "updated_at": 1700000002000
+    },
+    {
+      "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "comments": [
+        {
+          "author": "reviewer",
+          "body": "Nit on line one",
+          "created_at": 1700000003000,
+          "head": "51a82ffd4afe94d45e42797253ab513ff796f320",
+          "id": 3
+        }
+      ],
+      "created_at": 1700000002000,
+      "head": "51a82ffd4afe94d45e42797253ab513ff796f320",
+      "id": 2,
+      "line": 1,
+      "opened_by": "reviewer",
+      "path": "a.txt",
+      "resolved_by": "alice",
+      "seq": 20,
+      "state": "resolved",
+      "updated_at": 1700000004000
+    }
+  ],
+  "through": 20
+}

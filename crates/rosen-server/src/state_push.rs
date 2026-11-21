@@ -24,16 +24,16 @@
 //! list goes only when it changed, after a minute with no further change
 //! or with whatever goes sooner, and presence likewise.
 
-mod batch;
-mod change_doc;
+pub(crate) mod batch;
+pub(crate) mod change_doc;
 mod dirty;
-mod facts;
-mod log_lines;
-mod machines_doc;
-mod pass;
-mod review_docs;
+pub(crate) mod facts;
+pub(crate) mod log_lines;
+pub(crate) mod machines_doc;
+pub(crate) mod pass;
+pub(crate) mod review_docs;
 mod store;
-mod unit;
+pub(crate) mod unit;
 
 use std::sync::Arc;
 use std::time::Duration;

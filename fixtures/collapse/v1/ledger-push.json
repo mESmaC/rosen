@@ -1,0 +1,30 @@
+{
+  "entries": [
+    {
+      "ledger": "discovery",
+      "machine": "agent-1",
+      "nick": "alice",
+      "sequence": 1,
+      "text": "Preflight lockfile check timed out",
+      "time": "2023-11-14T22:13:21.000Z",
+      "velocity_issue": "Fix preflight timeout"
+    },
+    {
+      "ledger": "past_work",
+      "machine": "agent-1",
+      "nick": "alice",
+      "sequence": 3,
+      "text": "Landed golden wire fixtures",
+      "time": "2023-11-14T22:13:23.000Z"
+    },
+    {
+      "ledger": "discovery",
+      "machine": "agent-1",
+      "nick": "alice",
+      "rosen_issue": "Publish golden wire fixtures",
+      "sequence": 4,
+      "text": "State feed envelope drifted",
+      "time": "2023-11-14T22:13:24.000Z"
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+{
+  "posts": [
+    {
+      "body": {
+        "result": {
+          "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+          "created_at": 1700000000000,
+          "head": "3f880535de694fca4ea34d50845fb28e7ee987e5",
+          "id": 2,
+          "machine": "collapse",
+          "reviewer": "owner",
+          "valid": true
+        },
+        "state": "done"
+      },
+      "kind": "approve",
+      "method": "POST",
+      "path": "/rosen/actions/1/result"
+    },
+    {
+      "body": {
+        "result": {
+          "base": "2222222222222222222222222222222222222222",
+          "base_ref": "main",
+          "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+          "outcome": {
+            "attempts": 1,
+            "commit": "2222222222222222222222222222222222222222",
+            "status": "landed"
+          }
+        },
+        "state": "done"
+      },
+      "kind": "land",
+      "method": "POST",
+      "path": "/rosen/actions/2/result"
+    },
+    {
+      "body": {
+        "result": {
+          "by": "owner@collapse",
+          "change": "llllllllllllllllllllllllllllllll",
+          "commit": "1111111111111111111111111111111111111111",
+          "state": "reviewed",
+          "tier": "prose",
+          "updated_at": 1700000000000
+        },
+        "state": "done"
+      },
+      "kind": "mark",
+      "method": "POST",
+      "path": "/rosen/actions/3/result"
+    },
+    {
+      "body": {
+        "result": {
+          "base": "1111111111111111111111111111111111111111",
+          "change": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+          "commit": "3333333333333333333333333333333333333333",
+          "head": "3ecb2bc0f25d125ad658477581a770831f8d5369",
+          "message": "rosen.toml: switch to after-land review",
+          "owner": "owner@collapse"
+        },
+        "state": "done"
+      },
+      "kind": "config_change",
+      "method": "POST",
+      "path": "/rosen/actions/4/result"
+    },
+    {
+      "body": {
+        "result": {
+          "by": "owner@collapse",
+          "id": "agent-lost",
+          "last_contact": 1699999880,
+          "name": "lost-laptop",
+          "role": "agent",
+          "running_agents": [],
+          "status": "revoked"
+        },
+        "state": "done"
+      },
+      "kind": "machine_revoke",
+      "method": "POST",
+      "path": "/rosen/actions/5/result"
+    },
+    {
+      "body": {
+        "result": {
+          "code": "not_found",
+          "command": "machine_revoke",
+          "error": "no machine \"ghost\"",
+          "schema": "rosen.error/v1"
+        },
+        "state": "refused"
+      },
+      "kind": "machine_revoke_refused",
+      "method": "POST",
+      "path": "/rosen/actions/6/result"
+    }
+  ]
+}

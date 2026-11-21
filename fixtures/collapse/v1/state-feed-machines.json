@@ -1,0 +1,77 @@
+{
+  "changes": [],
+  "channel": [],
+  "config": [],
+  "conflicts": [],
+  "coverage": [],
+  "events": [],
+  "format": 1,
+  "machines": [
+    {
+      "machines": [
+        {
+          "credential_expires_at": 1701728000,
+          "id": "agent-1",
+          "last_contact": 1699999920,
+          "name": "workstation",
+          "out_of_contact": false,
+          "requested_at": null,
+          "role": "agent",
+          "running_agents": [
+            "alice",
+            "bob"
+          ],
+          "status": "active"
+        },
+        {
+          "credential_expires_at": 1700864000,
+          "id": "agent-2",
+          "last_contact": 1699999380,
+          "name": "checker-box",
+          "out_of_contact": true,
+          "requested_at": null,
+          "role": "checker",
+          "running_agents": [],
+          "status": "active"
+        },
+        {
+          "credential_expires_at": null,
+          "id": "collapse",
+          "last_contact": 1699999920,
+          "name": "Collapse action relay",
+          "out_of_contact": false,
+          "requested_at": null,
+          "role": "agent",
+          "running_agents": [],
+          "status": "active"
+        },
+        {
+          "credential_expires_at": null,
+          "id": "pending-1",
+          "last_contact": 1699999680,
+          "name": "new-runner",
+          "out_of_contact": false,
+          "requested_at": 1699999700,
+          "role": "agent",
+          "running_agents": [],
+          "status": "pending"
+        },
+        {
+          "credential_expires_at": null,
+          "id": "revoked-1",
+          "last_contact": 1699996380,
+          "name": "old-laptop",
+          "out_of_contact": false,
+          "requested_at": null,
+          "role": "agent",
+          "running_agents": [],
+          "status": "revoked"
+        }
+      ],
+      "seq": 50
+    }
+  ],
+  "presence": [],
+  "threads": [],
+  "through": 50
+}

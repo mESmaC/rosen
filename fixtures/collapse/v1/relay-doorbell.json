@@ -1,0 +1,7 @@
+{
+  "method": "GET",
+  "path": "/rosen/doorbell",
+  "response": {
+    "generation": 5
+  }
+}

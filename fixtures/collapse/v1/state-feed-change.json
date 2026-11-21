@@ -1,0 +1,169 @@
+{
+  "changes": [
+    {
+      "approvals": [],
+      "claims": [
+        {
+          "kind": "notice",
+          "path": "a.rs",
+          "since": 1700000002000
+        },
+        {
+          "kind": "exclusive",
+          "path": "b.rs",
+          "since": 1700000002000
+        }
+      ],
+      "conflicts": [
+        "02c3b44a7b0a9cf2"
+      ],
+      "created_at": 1700000000000,
+      "edits": [
+        {
+          "added": 1,
+          "path": "a.rs",
+          "regions": {
+            "kind": "lines",
+            "spans": [
+              {
+                "end": 2,
+                "start": 1
+              }
+            ]
+          },
+          "removed": 1
+        }
+      ],
+      "head": "0172bab1a8804af594f70288dd362feec2f63dd3",
+      "id": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "land_check": {
+        "approval": {
+          "status": "needed"
+        },
+        "base": "3333333333333333333333333333333333333333",
+        "base_ref": "main",
+        "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+        "head": "0172bab1a8804af594f70288dd362feec2f63dd3",
+        "landable": false,
+        "merge": {
+          "conflicts": [
+            {
+              "id": "02c3b44a7b0a9cf2",
+              "path": "a.rs"
+            }
+          ],
+          "status": "conflicts"
+        },
+        "reach": "all",
+        "receipt": {
+          "status": "not_checked"
+        },
+        "recheck_mode": "reach",
+        "refusal": {
+          "message": "the change has stored conflicts; run `rosen rebase` in its workspace to get conflict markers on the current base, combine both sides, then run `rosen resolve`",
+          "paths": [
+            "a.rs"
+          ],
+          "reason": "conflicts"
+        },
+        "review_mode": "before-land",
+        "stack": [],
+        "tier": "normal"
+      },
+      "overlaps": [
+        {
+          "change": "llllllllllllllllllllllllllllllll",
+          "owner": "bob",
+          "paths": [
+            "a.rs"
+          ]
+        }
+      ],
+      "owner": "alice@server",
+      "parent": {
+        "base": "22bbe242234481cf0ebc2e82dbec8afc247cabc5"
+      },
+      "receipt": {
+        "base": "22bbe242234481cf0ebc2e82dbec8afc247cabc5",
+        "base_current": false,
+        "check_set": "pre-land",
+        "head": "0172bab1a8804af594f70288dd362feec2f63dd3",
+        "machine": "server",
+        "submitter": "checker"
+      },
+      "seq": 10,
+      "snapshots": {
+        "count": 2,
+        "named": [
+          {
+            "at": 1700000000000,
+            "commit": "1111111111111111111111111111111111111111",
+            "title": "Add feature"
+          }
+        ]
+      },
+      "state": "open",
+      "threads": [],
+      "title": "Add feature",
+      "unavailable": {},
+      "updated_at": 1700000005000
+    },
+    {
+      "created_at": 1700000000000,
+      "head": "e92d9d918ac885b8604e7847f4a66c4f9c404c9c",
+      "id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+      "landed": "3333333333333333333333333333333333333333",
+      "owner": "carol@server",
+      "parent": {
+        "base": "22bbe242234481cf0ebc2e82dbec8afc247cabc5"
+      },
+      "seq": 10,
+      "snapshots": {
+        "count": 2,
+        "named": [
+          {
+            "at": 1700000000000,
+            "commit": "2222222222222222222222222222222222222222",
+            "title": "Ship c.txt"
+          }
+        ]
+      },
+      "state": "landed",
+      "title": "Ship c.txt",
+      "updated_at": 1700000005000
+    }
+  ],
+  "channel": [],
+  "config": [],
+  "conflicts": [
+    {
+      "base": {
+        "text": "fn two() {}\n",
+        "truncated": false
+      },
+      "change": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "id": "02c3b44a7b0a9cf2",
+      "onto": "22bbe242234481cf0ebc2e82dbec8afc247cabc5",
+      "ours": {
+        "text": "fn ours() {}\n",
+        "truncated": false
+      },
+      "path": "a.rs",
+      "seq": 10,
+      "start_line": 2,
+      "state": "open",
+      "stored_at": 1700000004000,
+      "theirs": {
+        "text": "fn theirs() {}\n",
+        "truncated": false
+      }
+    }
+  ],
+  "coverage": [],
+  "events": [],
+  "format": 1,
+  "machines": [],
+  "presence": [],
+  "threads": [],
+  "through": 10
+}

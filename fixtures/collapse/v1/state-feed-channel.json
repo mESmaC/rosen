@@ -1,0 +1,94 @@
+{
+  "changes": [],
+  "channel": [
+    {
+      "detail": {
+        "line": "joined",
+        "member": {
+          "joined_at": 1700000000000,
+          "left_at": null,
+          "machine": "agent-1",
+          "member": "m-alice",
+          "mode": "open",
+          "nick": "alice"
+        }
+      },
+      "seq": 1,
+      "time": 1700000001000
+    },
+    {
+      "detail": {
+        "line": "mode",
+        "member": {
+          "joined_at": 1700000000000,
+          "left_at": null,
+          "machine": "agent-1",
+          "member": "m-alice",
+          "mode": "heads_down",
+          "nick": "alice"
+        }
+      },
+      "seq": 2,
+      "time": 1700000002000
+    },
+    {
+      "detail": {
+        "claim": {
+          "branch": "vel/issue-436",
+          "member": "m-alice",
+          "nick": "alice",
+          "piece": "issue:436",
+          "since": 1700000000000,
+          "task": "Publish golden wire fixtures"
+        },
+        "extended": false,
+        "line": "claim"
+      },
+      "seq": 3,
+      "time": 1700000003000
+    },
+    {
+      "detail": {
+        "line": "message",
+        "message": {
+          "from": "alice",
+          "intent": "inform",
+          "member": "m-alice",
+          "recipients": [],
+          "seq": 1,
+          "text": "Wire fixtures updated",
+          "time": 1700000000000,
+          "to": [
+            "alice"
+          ]
+        }
+      },
+      "seq": 4,
+      "time": 1700000004000
+    },
+    {
+      "detail": {
+        "line": "left",
+        "member": {
+          "joined_at": 1700000000000,
+          "left_at": 1700000000000,
+          "machine": "agent-1",
+          "member": "m-alice",
+          "mode": "heads_down",
+          "nick": "alice"
+        }
+      },
+      "seq": 6,
+      "time": 1700000006000
+    }
+  ],
+  "config": [],
+  "conflicts": [],
+  "coverage": [],
+  "events": [],
+  "format": 1,
+  "machines": [],
+  "presence": [],
+  "threads": [],
+  "through": 6
+}

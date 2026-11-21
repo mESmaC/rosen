@@ -68,3 +68,5 @@
     Messages and piece claims are sent only as channel lines with `collapse_channel = true`.
   - Without `collapse`, nothing is sent.
   - Only the mirror-owner server (R1) sends the state feed; any other server sends nothing to Collapse.
+  - Golden wire fixtures for wire schema `v1` (`"format": 1`) live in `fixtures/collapse/v1/`, covering each state-feed unit kind, the ledger push (R13) and the action relay (R14).
+    A drift test builds every shape with the real sender code and compares parsed JSON against those files, printing the full actual JSON on a mismatch and rewriting them when run with `UPDATE_FIXTURES=1`.

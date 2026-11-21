@@ -74,6 +74,7 @@
   `rosen collapse unlink [--land] [--forget-credentials]` reverses the `rosen.toml`, relay and proactive-auth steps and leaves stored credentials alone unless `--forget-credentials` is given.
   `rosen collapse check` reads the server's configuration without making changes and probes each requirement of a Collapse link: the mirror-owner mark, the `collapse` root in the base's `rosen.toml`, owner and name agreement between `collapse` and `[mirror]`, git push credential presence for `.git`, `/rosen/state` and `/ledgers` (never printing any token), a mirror `ls-remote` with and without proactive auth, empty-batch reads of `/rosen/state` and `/ledgers`, and the relay allow-list and `/rosen/doorbell` read.
   Each check reports `pass`, `fail` or `skipped` with a fix hint, and the command exits non-zero when any check fails.
+  Golden wire fixtures for wire schema `v1` (`"format": 1`) live in `fixtures/collapse/v1/`, covering the state feed (R9), ledger push (R13) and action relay (R14).
 - Each failed push publishes a `mirror` event with the error and the retry delay.
   Retries back off from 1 s to at most 5 min.
   A push the remote refused is marked `rejected`.

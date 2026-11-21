@@ -296,7 +296,7 @@ async fn extras(
 }
 
 /// The relay document: the kinds Collapse may offer its owner (R14).
-fn relay_unit(data_dir: &std::path::Path) -> rusqlite::Result<Unit> {
+pub(crate) fn relay_unit(data_dir: &std::path::Path) -> rusqlite::Result<Unit> {
     let allow = crate::relay::offered(data_dir)?;
     let item = serde_json::json!({ "allow": allow });
     Ok(Unit::new("relay".to_owned(), vec![(Section::Relay, item)]))
