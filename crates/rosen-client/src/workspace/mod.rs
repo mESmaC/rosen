@@ -470,7 +470,7 @@ impl Staging {
     /// Empties the staging directory for a second attempt.
     fn reset(&self) -> Result<(), MaterialiseError> {
         let io = |error| MaterialiseError::io(&self.path, error);
-        fs::remove_dir_all(&self.path).map_err(io)?;
+        rosen_platform::remove_dir_all(&self.path).map_err(io)?;
         fs::create_dir(&self.path).map_err(io)
     }
 

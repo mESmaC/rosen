@@ -12,6 +12,7 @@
 
   The refusal keeps the workspace and reports the total number and up to five examples when it names a set of files.
 - On Windows, final removal hashes write-excluded file handles and deletes those exact objects while excluding concurrent renames.
+  When Windows denies a delete on a read-only object, Rosen clears `FILE_ATTRIBUTE_READONLY` and retries across workspace deletion, staging sweeps and the warm pool.
   Junctions and symlinks are classified through handles opened without following reparse points, then removed through those same handles without traversing their targets.
   Ignored links need no stored content; other links must match their stored target text, and unknown reparse tags keep the workspace with a reason naming the path and tag.
   On Unix, best-effort removal opens files without following symlinks, verifies their stored blob IDs through those handles, isolates each selected file in a private directory relative to its opened parent, rechecks its device and inode against the held handle, rehashes it, and removes it with `unlinkat`.
@@ -29,5 +30,6 @@
   An automatic retry waits 1 s after the first refusal, then doubles the wait after each subsequent refusal up to 1 min.
   Each workspace has its own retry deadline; a change event can trigger cleanup of other workspaces without advancing that deadline.
   Cleanup passes on one machine run one at a time.
-  A cleanup interrupted after removing verified files finishes on retry.
+  A cleanup interrupted after removing verified files finishes on retry, falling back to stored `.gitignore` files when an earlier pass already removed them on disk.
+  Startup and cleanup passes also sweep leftover `.rosen-delete-*` folders owned by the project under known workspace roots, applying the same guard and per-folder retry backoff.
 - **Accept when:** no sequence of crashes, deletions, offline periods and reconnects loses an edit that was written to a workspace.

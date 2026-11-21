@@ -52,9 +52,14 @@ mod windows {
 
     const SHARE_READ: u32 = 1;
     const SHARE_WRITE: u32 = 2;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
     const DELETE: u32 = 0x0001_0000;
+    const GENERIC_READ: u32 = 0x8000_0000;
     const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const READONLY: u32 = 0x0001;
+    const DIRECTORY: u32 = 0x0010;
     const REPARSE_POINT: u32 = 0x400;
     const MOUNT_POINT_TAG: u32 = 0xa000_0003;
     const SYMLINK_TAG: u32 = 0xa000_000c;
@@ -64,8 +69,18 @@ mod windows {
         file: File,
     }
 
+    struct IgnoredEntry {
+        path: PathBuf,
+        rel: String,
+        is_link: bool,
+    }
+
     struct Plan {
+        /// Durable tracked files, links and `.rosen/` files pinned open.
         files: Vec<CheckedFile>,
+        /// Ignored build output deleted one handle at a time after all durable
+        /// files are verified, so large caches never pin 150k handles at once.
+        ignored: Vec<IgnoredEntry>,
         // Keep the checked directory identities pinned until each is empty.
         dirs: Vec<(PathBuf, File)>,
     }
@@ -76,6 +91,9 @@ mod windows {
         mut ignored: impl FnMut(&str, bool) -> bool,
     ) -> io::Result<()> {
         let mut plan = plan(root, expected, &mut ignored)?;
+        for entry in plan.ignored.drain(..) {
+            delete_ignored(entry)?;
+        }
         let (state, mut user): (Vec<_>, Vec<_>) = plan
             .files
             .drain(..)
@@ -139,6 +157,7 @@ mod windows {
         names.sort();
         Ok(names)
     }
+
     fn plan(
         root: &Path,
         expected: &BTreeMap<String, ObjectId>,
@@ -146,6 +165,7 @@ mod windows {
     ) -> io::Result<Plan> {
         let mut plan = Plan {
             files: Vec::new(),
+            ignored: Vec::new(),
             dirs: Vec::new(),
         };
         let mut pending = vec![root.to_path_buf()];
@@ -163,44 +183,71 @@ mod windows {
                 let rel = relative(root, &path)?;
                 let meta = fs::symlink_metadata(&path).map_err(|err| named(root, &path, err))?;
                 if meta.file_attributes() & REPARSE_POINT != 0 {
-                    plan.files.push(check_link(&path, rel, expected, ignored)?);
+                    plan_link(&path, rel, &meta, expected, ignored, &mut plan)?;
                 } else if meta.is_dir() {
                     pending.push(path);
+                } else if !rel.starts_with(".rosen/") && ignored(&rel, false) {
+                    plan.ignored.push(IgnoredEntry {
+                        path,
+                        rel,
+                        is_link: false,
+                    });
                 } else {
-                    // Ignore classification is fixed for this deletion plan;
-                    // ignored output is outside R4 durability requirements.
-                    let skip_hash = rel.starts_with(".rosen/") || ignored(&rel, false);
+                    let is_state = rel.starts_with(".rosen/");
                     plan.files
-                        .push(check_file(&path, rel, expected, skip_hash)?);
+                        .push(check_file(&path, rel, &meta, expected, is_state)?);
                 }
             }
         }
         Ok(plan)
     }
 
+    fn plan_link(
+        path: &Path,
+        rel: String,
+        meta: &fs::Metadata,
+        expected: &BTreeMap<String, ObjectId>,
+        ignored: &mut impl FnMut(&str, bool) -> bool,
+        plan: &mut Plan,
+    ) -> io::Result<()> {
+        let is_dir_link = meta.file_attributes() & DIRECTORY != 0;
+        let is_ignored = !rel.starts_with(".rosen/") && ignored(&rel, is_dir_link);
+        let checked = check_link(path, rel, meta, expected, is_ignored)?;
+        if is_ignored {
+            // Reparse tag is verified; drop the handle until the delete pass.
+            plan.ignored.push(IgnoredEntry {
+                path: path.to_path_buf(),
+                rel: checked.rel,
+                is_link: true,
+            });
+        } else {
+            plan.files.push(checked);
+        }
+        Ok(())
+    }
+
     fn check_link(
         path: &Path,
         rel: String,
+        meta: &fs::Metadata,
         expected: &BTreeMap<String, ObjectId>,
-        ignored: &mut impl FnMut(&str, bool) -> bool,
+        is_ignored: bool,
     ) -> io::Result<CheckedFile> {
+        let readonly = meta.file_attributes() & READONLY != 0;
         // Deny writes and renames until disposal, so classification and the
         // target text cannot change after we verify this exact link object.
-        let file = OpenOptions::new()
-            .access_mode(0x8000_0000 | DELETE)
-            .share_mode(SHARE_READ)
-            .custom_flags(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)
-            .open(path)
-            .map_err(|err| file_error(&rel, err))?;
-        let tag = rosen_platform::reparse_tag(&file).map_err(|err| file_error(&rel, err))?;
-        if !matches!(tag, Some(MOUNT_POINT_TAG | SYMLINK_TAG)) {
-            return Err(io::Error::other(format!(
-                "workspace kept; cannot verify reparse point: {rel} (tag {tag:?})"
-            )));
-        }
+        let file = open_for_delete(
+            path,
+            GENERIC_READ | DELETE,
+            SHARE_READ,
+            BACKUP_SEMANTICS | OPEN_REPARSE_POINT,
+            readonly,
+        )
+        .map_err(|err| file_error(&rel, err))?;
+        verify_reparse_tag(&file, &rel)?;
         // A directory link is a leaf: neither enumeration nor deletion ever
         // enters the target, which may belong to another workspace or store.
-        if !ignored(&rel, false) && !rel.starts_with(".rosen/") {
+        if !is_ignored && !rel.starts_with(".rosen/") {
             let target = fs::read_link(path).map_err(|err| file_error(&rel, err))?;
             let bytes = target.to_string_lossy().replace('\\', "/").into_bytes();
             if expected.get(&rel) != Some(&ObjectId::hash_object("blob", &bytes)) {
@@ -212,12 +259,27 @@ mod windows {
         Ok(CheckedFile { rel, file })
     }
 
+    fn verify_reparse_tag(file: &File, rel: &str) -> io::Result<()> {
+        let tag = rosen_platform::reparse_tag(file).map_err(|err| file_error(rel, err))?;
+        if !matches!(tag, Some(MOUNT_POINT_TAG | SYMLINK_TAG)) {
+            return Err(io::Error::other(format!(
+                "workspace kept; cannot verify reparse point: {rel} (tag {tag:?})"
+            )));
+        }
+        Ok(())
+    }
+
     fn pin_directory(path: &Path) -> io::Result<File> {
-        let file = OpenOptions::new()
-            .access_mode(0x8000_0000 | DELETE)
-            .share_mode(SHARE_READ | SHARE_WRITE)
-            .custom_flags(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)
-            .open(path)?;
+        let readonly = fs::symlink_metadata(path)
+            .map(|meta| meta.file_attributes() & READONLY != 0)
+            .unwrap_or(false);
+        let file = open_for_delete(
+            path,
+            GENERIC_READ | DELETE,
+            SHARE_READ | SHARE_WRITE,
+            BACKUP_SEMANTICS | OPEN_REPARSE_POINT,
+            readonly,
+        )?;
         let meta = file.metadata()?;
         if !meta.is_dir() || meta.file_attributes() & REPARSE_POINT != 0 {
             return Err(io::Error::other("not a plain directory"));
@@ -228,35 +290,32 @@ mod windows {
     fn check_file(
         path: &Path,
         rel: String,
+        meta: &fs::Metadata,
         expected: &BTreeMap<String, ObjectId>,
-        ignored: bool,
+        skip_hash: bool,
     ) -> io::Result<CheckedFile> {
-        if !ignored && !expected.contains_key(&rel) {
+        if !skip_hash && !expected.contains_key(&rel) {
             return Err(io::Error::other(format!(
                 "workspace kept; unstored file: {rel}"
             )));
         }
-        let mut options = OpenOptions::new();
-        options.custom_flags(OPEN_REPARSE_POINT);
-        if ignored {
-            options
-                .access_mode(DELETE)
-                .share_mode(SHARE_READ | SHARE_WRITE);
+        let readonly = meta.file_attributes() & READONLY != 0;
+        let (access, share) = if skip_hash {
+            (DELETE, SHARE_READ | SHARE_WRITE)
         } else {
             // Windows refuses this open if any writer or writable mapping
             // exists, and refuses new writers while this handle remains open.
-            options
-                .access_mode(0x8000_0000 | DELETE)
-                .share_mode(SHARE_READ);
-        }
-        let mut file = options.open(path).map_err(|err| file_error(&rel, err))?;
-        let meta = file.metadata().map_err(|err| file_error(&rel, err))?;
-        if !meta.is_file() || meta.file_attributes() & REPARSE_POINT != 0 {
+            (GENERIC_READ | DELETE, SHARE_READ)
+        };
+        let mut file = open_for_delete(path, access, share, OPEN_REPARSE_POINT, readonly)
+            .map_err(|err| file_error(&rel, err))?;
+        let handle_meta = file.metadata().map_err(|err| file_error(&rel, err))?;
+        if !handle_meta.is_file() || handle_meta.file_attributes() & REPARSE_POINT != 0 {
             return Err(io::Error::other(format!(
                 "workspace kept; not a plain file: {rel}"
             )));
         }
-        if !ignored {
+        if !skip_hash {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)
                 .map_err(|err| file_error(&rel, err))?;
@@ -269,6 +328,67 @@ mod windows {
         Ok(CheckedFile { rel, file })
     }
 
+    fn delete_ignored(entry: IgnoredEntry) -> io::Result<()> {
+        let flags = if entry.is_link {
+            BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+        } else {
+            OPEN_REPARSE_POINT
+        };
+        let file = match open_for_delete(&entry.path, DELETE, SHARE_READ | SHARE_WRITE, flags, true)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(file_error(&entry.rel, err)),
+        };
+        if let Some(tag) =
+            rosen_platform::reparse_tag(&file).map_err(|err| file_error(&entry.rel, err))?
+        {
+            if !matches!(tag, MOUNT_POINT_TAG | SYMLINK_TAG) {
+                return Err(io::Error::other(format!(
+                    "workspace kept; cannot verify reparse point: {} (tag Some({tag}))",
+                    entry.rel
+                )));
+            }
+        } else if !file
+            .metadata()
+            .map_err(|err| file_error(&entry.rel, err))?
+            .is_file()
+        {
+            return Err(io::Error::other(format!(
+                "workspace kept; not a plain file: {}",
+                entry.rel
+            )));
+        }
+        rosen_platform::delete_on_close(&file).map_err(|err| file_error(&entry.rel, err))?;
+        drop(file);
+        Ok(())
+    }
+
+    fn open_for_delete(
+        path: &Path,
+        base_access: u32,
+        share: u32,
+        flags: u32,
+        readonly: bool,
+    ) -> io::Result<File> {
+        let with_attrs = OpenOptions::new()
+            .access_mode(base_access | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+            .share_mode(share)
+            .custom_flags(flags)
+            .open(path);
+        match with_attrs {
+            Ok(file) => Ok(file),
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied && !readonly => {
+                OpenOptions::new()
+                    .access_mode(base_access)
+                    .share_mode(share)
+                    .custom_flags(flags)
+                    .open(path)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     fn delete_checked(entry: CheckedFile) -> io::Result<()> {
         // This uses the same handle that denied writes and renames during
         // hashing. No second open can introduce a sharing or pathname race.
@@ -276,6 +396,7 @@ mod windows {
         drop(entry.file);
         Ok(())
     }
+
     fn relative(root: &Path, path: &Path) -> io::Result<String> {
         let rel = path.strip_prefix(root).map_err(io::Error::other)?;
         rel.to_str()

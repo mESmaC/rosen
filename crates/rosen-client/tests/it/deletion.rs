@@ -29,9 +29,13 @@ async fn deletion_stores_edits_or_keeps_and_names_them() {
     #[cfg(windows)]
     writable_handle_keeps_workspace(&client, &dir.path().join("writable")).await;
     #[cfg(windows)]
+    readonly_git_packs_delete_cleanly(&client, dir.path()).await;
+    #[cfg(windows)]
     pnpm_junctions_leave_targets_untouched(&client, dir.path()).await;
     #[cfg(any(windows, unix))]
     interrupted_cleanup_finishes(&client, &data, &dir.path().join("interrupted")).await;
+    #[cfg(any(windows, unix))]
+    orphaned_staged_folders_finish_in_one_pass(&client, &data, dir.path()).await;
     daemon_cleans_closed_workspace(&client, &endpoint, &data, &dir.path().join("automatic")).await;
 }
 
@@ -231,6 +235,98 @@ async fn writable_handle_keeps_workspace(client: &Client, workspace: &Path) {
     assert_eq!(std::fs::read(kept.join("main.rs")).unwrap(), original);
     drop(writer);
 }
+#[cfg(windows)]
+fn set_readonly(path: &Path) {
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(path, perms).unwrap();
+}
+
+#[cfg(windows)]
+async fn readonly_git_packs_delete_cleanly(client: &Client, root: &Path) {
+    // R4 / #430: git pack files carry FILE_ATTRIBUTE_READONLY on Windows and
+    // must not strand `.rosen-delete-*` folders or warm-pool/staging trees.
+    let workspace = root.join("readonly-packs");
+    let change = new_workspace(client, &workspace).await;
+    let pack_dir = workspace.join("proofs/.lake/packages/aeneas/.git/objects/pack");
+    std::fs::create_dir_all(&pack_dir).unwrap();
+    for ext in ["idx", "pack", "rev"] {
+        let pack = pack_dir.join(format!("pack-55c6.{ext}"));
+        std::fs::write(&pack, b"pack bytes").unwrap();
+        set_readonly(&pack);
+    }
+    set_readonly(&workspace.join("main.rs"));
+    close_without_snapshot(client, &change).await;
+    client.workspace_delete(&workspace).await.unwrap();
+    assert!(!workspace.exists(), "read-only files kept the workspace");
+    let leftovers: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(&format!(".rosen-delete-{}-", change.change.id))
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "leftover staged dirs: {leftovers:?}");
+}
+
+#[cfg(any(windows, unix))]
+async fn orphaned_staged_folders_finish_in_one_pass(client: &Client, data: &Path, root: &Path) {
+    // R4 / #430: leftover `.rosen-delete-*` folders (even unregistered or
+    // missing `.gitignore` from an earlier interrupted pass) finish in one
+    // cleanup pass, while foreign-project folders stay untouched.
+    let workspace = root.join("orphaned-staged");
+    let change = new_workspace(client, &workspace).await;
+    let cache = workspace.join("proofs/.lake/config/0");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("lakefile.olean"), b"olean").unwrap();
+    #[cfg(windows)]
+    {
+        let pack = workspace.join("proofs/.lake/packages/Qq/.git/objects/pack/pack-00.idx");
+        std::fs::create_dir_all(pack.parent().unwrap()).unwrap();
+        std::fs::write(&pack, b"pack").unwrap();
+        set_readonly(&pack);
+    }
+    close_without_snapshot(client, &change).await;
+    // Remove registration and `.gitignore` to simulate a pre-upgrade orphan.
+    for entry in std::fs::read_dir(data.join("workspaces"))
+        .unwrap()
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "json")
+            && std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .contains(&change.change.id.to_string())
+        {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    std::fs::remove_file(workspace.join(".gitignore")).unwrap();
+    let staged = root.join(format!(
+        ".rosen-delete-{}-{}",
+        change.change.id,
+        "a".repeat(40)
+    ));
+    std::fs::rename(&workspace, &staged).unwrap();
+    let foreign = root.join(format!(
+        ".rosen-delete-{}-{}",
+        rosen_core::ChangeId::from_bytes([9; 16]),
+        "b".repeat(40)
+    ));
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("keep.txt"), b"other project").unwrap();
+    let reports = client.cleanup_workspaces().await.unwrap();
+    let finished = reports
+        .iter()
+        .find(|report| report.path.file_name() == staged.file_name());
+    assert!(finished.is_some_and(|r| r.error.is_none()), "{reports:?}");
+    assert!(!staged.exists(), "orphaned staged dir survived cleanup");
+    assert!(foreign.join("keep.txt").exists(), "foreign dir was removed");
+    std::fs::remove_dir_all(&foreign).unwrap();
+}
+
 /// Issue #90: a crash after verified removal deleted some tracked files of
 /// the staged directory must not leave a cleanup that refuses forever.
 #[cfg(any(windows, unix))]

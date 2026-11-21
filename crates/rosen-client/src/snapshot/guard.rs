@@ -1,9 +1,10 @@
 //! Final content verification before a workspace is deleted (SPEC.md R4).
 
-use super::ignore::{always_ignored, IgnoreRules};
+use super::ignore::{always_ignored, is_ignore_file, IgnoreRules};
 use super::index::Index;
 use super::{scan, upload, SnapshotError, Snapshotter, WorkspaceMarker};
-use std::collections::{BTreeMap, BTreeSet};
+use rosen_store::ObjectStore;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -58,7 +59,12 @@ impl Snapshotter {
             files: self.index.files.clone(),
             gitlinks: self.index.gitlinks.clone(),
         };
-        let candidates = relevant_files(&self.root, &self.index, &self.marker.ignore)?;
+        let candidates = relevant_files(
+            &self.root,
+            &self.index,
+            &self.marker.ignore,
+            &self.stored_ignores,
+        )?;
         scanned
             .files
             .retain(|path, _| !self.sparse.includes(path.as_bytes()) || candidates.contains(path));
@@ -101,9 +107,11 @@ fn relevant_files(
     root: &Path,
     index: &Index,
     project_ignore: &[String],
+    stored_ignores: &HashMap<String, String>,
 ) -> Result<BTreeSet<String>, SnapshotError> {
     // Ignored output never blocks deletion (SPEC R2, R4).
-    let mut ignore = IgnoreRules::new(root.to_path_buf(), project_ignore);
+    let mut ignore =
+        IgnoreRules::with_stored(root.to_path_buf(), project_ignore, stored_ignores.clone());
     let mut files = BTreeSet::new();
     let mut pending = vec![String::new()];
     while let Some(dir) = pending.pop() {
@@ -132,6 +140,8 @@ fn relevant_files(
                 if scan::walks_into(&rel, &mut ignore, index) {
                     pending.push(rel);
                 }
+            } else if is_dir_link(&kind) && !index.tracks(&rel) && ignore.is_ignored(&rel, true) {
+                continue;
             } else if scan::keeps_file(&rel, &mut ignore, index) {
                 if !kind.is_file() && !kind.is_symlink() {
                     return Err(invalid(
@@ -144,6 +154,17 @@ fn relevant_files(
         }
     }
     Ok(files)
+}
+
+#[cfg(windows)]
+fn is_dir_link(kind: &fs::FileType) -> bool {
+    use std::os::windows::fs::FileTypeExt;
+    kind.is_symlink_dir()
+}
+
+#[cfg(not(windows))]
+fn is_dir_link(_kind: &fs::FileType) -> bool {
+    false
 }
 
 fn check_nested_workspace(dir: &Path) -> Result<(), SnapshotError> {
@@ -186,6 +207,24 @@ impl Snapshotter {
 }
 
 impl Snapshotter {
+    /// Loads tracked `.gitignore` blobs from `store` as fallbacks for staged
+    /// deletion, where an interrupted pass may have removed `.gitignore` on
+    /// disk before reaching ignored build output (#430).
+    pub(crate) fn load_stored_ignores(&mut self, store: &dyn ObjectStore) {
+        self.stored_ignores.clear();
+        for (path, entry) in &self.index.files {
+            if !is_ignore_file(path) {
+                continue;
+            }
+            let dir = path.strip_suffix("/.gitignore").unwrap_or("");
+            if let Ok(blob) = store.read_blob(&entry.blob) {
+                if let Ok(text) = String::from_utf8(blob.data) {
+                    self.stored_ignores.insert(dir.to_owned(), text);
+                }
+            }
+        }
+    }
+
     /// Rechecks held bytes before platform-specific verified removal. The
     /// path-based scan above is advisory; Windows also excludes writers.
     pub(crate) fn remove_verified(&mut self) -> Result<(), SnapshotError> {
@@ -198,10 +237,14 @@ impl Snapshotter {
             .iter()
             .map(|(path, entry)| (path.clone(), entry.blob))
             .collect();
-        let mut ignore = IgnoreRules::new(self.root.clone(), &self.marker.ignore);
+        let mut ignore = IgnoreRules::with_stored(
+            self.root.clone(),
+            &self.marker.ignore,
+            self.stored_ignores.clone(),
+        );
         crate::workspace::delete::remove_verified(&self.root, &expected, |rel, is_dir| {
             if is_dir {
-                !scan::walks_into(rel, &mut ignore, &self.index)
+                !self.index.tracks(rel) && !scan::walks_into(rel, &mut ignore, &self.index)
             } else {
                 always_ignored(rel)
                     || (!self.index.tracks_under(rel)

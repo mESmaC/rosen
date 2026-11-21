@@ -77,7 +77,7 @@ async fn connected(
             .next_attempt()
             .is_some_and(|at| at <= Instant::now());
         if cleanup_due || retry_due {
-            cleanup(&client, retries).await?;
+            cleanup(pool, &client, retries).await?;
             cleanup_due = false;
         }
         let base = match refill(pool, &client).await {
@@ -235,16 +235,20 @@ async fn shrink(pool: &WarmPool, client: &Client) -> Result<bool, Error> {
     let configured = client.base_config().await?.warm_pool.size as usize;
     let mut state = pool.state.lock().await;
     state.size = state.requested.unwrap_or(configured);
+    let mut excess = Vec::new();
     while state.ready.len() > state.size {
-        let slot = state.ready.pop().expect("excess slot");
-        std::fs::remove_dir_all(slot.path)?;
+        excess.push(state.ready.pop().expect("excess slot"));
     }
-    if state.size > 0 {
+    let keep_running = state.size > 0;
+    drop(state);
+    for slot in excess {
+        remove_dir_all_blocking(slot.path).await?;
+    }
+    if keep_running {
         return Ok(true);
     }
-    drop(state);
     if let Some(slot) = pool.template.write().await.take() {
-        std::fs::remove_dir_all(slot.path)?;
+        remove_dir_all_blocking(slot.path).await?;
     }
     Ok(false)
 }
@@ -343,7 +347,7 @@ async fn sync_template(
     let path = template::path(&pool.state.lock().await.root);
     if path.exists() {
         // Left by a failed refresh or make; never handed to an agent.
-        std::fs::remove_dir_all(&path)?;
+        remove_dir_all_blocking(path.clone()).await?;
     }
     let report = client
         .materialise_tree(base.tree, &path, Options::default())
@@ -393,7 +397,7 @@ async fn refresh_ready(
                 Some(slot)
             } else {
                 // A failed partial refresh is never offered to an agent.
-                let _ = std::fs::remove_dir_all(&slot.path);
+                let _ = rosen_platform::remove_dir_all(&slot.path);
                 None
             }
         })
@@ -421,7 +425,7 @@ async fn drop_unprepared(pool: &WarmPool, base: &Base) -> Result<(), Error> {
     state.ready = keep;
     drop(state);
     for slot in stale {
-        std::fs::remove_dir_all(&slot.path)?;
+        remove_dir_all_blocking(slot.path).await?;
     }
     Ok(())
 }
@@ -510,7 +514,7 @@ async fn stop_template(pool: &WarmPool, why: Option<&str>) -> Result<(), Error> 
     );
     pool.state.lock().await.block_clones = false;
     if let Some(slot) = pool.template.write().await.take() {
-        std::fs::remove_dir_all(slot.path)?;
+        remove_dir_all_blocking(slot.path).await?;
     }
     Ok(())
 }
@@ -588,7 +592,7 @@ async fn prepare_next(pool: &WarmPool, base: &Base, linking: &mut LinkingPrepare
 /// link. `remove_dir_all` removes a link without following it, so nothing
 /// outside the workspace is touched; a failure only leaks the directory.
 fn drop_unsafe(path: &std::path::Path) {
-    if let Err(error) = std::fs::remove_dir_all(path) {
+    if let Err(error) = rosen_platform::remove_dir_all(path) {
         eprintln!("rosen warm pool: removing {}: {error}", path.display());
     }
 }
@@ -676,9 +680,16 @@ async fn run_prepare(pool: &WarmPool, path: &std::path::Path, base: &Base) -> Op
     }
 }
 
+async fn remove_dir_all_blocking(path: std::path::PathBuf) -> Result<(), Error> {
+    tokio::task::spawn_blocking(move || rosen_platform::remove_dir_all(&path))
+        .await
+        .map_err(|error| Error::Unexpected(error.to_string()))??;
+    Ok(())
+}
+
 async fn reset_ready_root(pool: &WarmPool) -> Result<(), Error> {
     let root = std::path::absolute(&pool.state.lock().await.root)?;
-    tokio::task::spawn_blocking(move || match std::fs::remove_dir_all(&root) {
+    tokio::task::spawn_blocking(move || match rosen_platform::remove_dir_all(&root) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
@@ -688,8 +699,30 @@ async fn reset_ready_root(pool: &WarmPool) -> Result<(), Error> {
     Ok(())
 }
 
-async fn cleanup(client: &Client, retries: &mut CleanupRetries) -> Result<(), Error> {
-    for report in client.cleanup_workspaces_with(retries, None).await? {
+async fn extra_cleanup_roots(pool: &WarmPool) -> Vec<std::path::PathBuf> {
+    let root = pool.state.lock().await.root.clone();
+    let data = std::path::absolute(&pool.data_dir).unwrap_or_else(|_| pool.data_dir.clone());
+    let abs_root = std::path::absolute(&root).unwrap_or(root);
+    if abs_root.starts_with(&data) {
+        return Vec::new();
+    }
+    abs_root
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .into_iter()
+        .collect()
+}
+
+async fn cleanup(
+    pool: &WarmPool,
+    client: &Client,
+    retries: &mut CleanupRetries,
+) -> Result<(), Error> {
+    let extra = extra_cleanup_roots(pool).await;
+    for report in client
+        .cleanup_workspaces_with(retries, None, &extra)
+        .await?
+    {
         if let Some(error) = report.error {
             eprintln!("rosen workspace cleanup {}: {error}", report.path.display());
         }

@@ -265,7 +265,7 @@ async fn catch_up(data_dir: &Path, mut slot: Slot, tree: ObjectId) -> Option<Slo
             Ok(()) => Some(slot),
             Err(error) => {
                 eprintln!("rosen warm pool: catching a slot up for a take: {error}");
-                let _ = std::fs::remove_dir_all(&slot.path);
+                let _ = rosen_platform::remove_dir_all(&slot.path);
                 None
             }
         }

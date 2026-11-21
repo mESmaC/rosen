@@ -73,13 +73,13 @@ pub(super) fn create_marked(dir: &Path) -> io::Result<bool> {
 /// Called once `dir` is renamed into place: the published workspace must
 /// carry no evidence that would let a sweep take it for staging.
 pub(super) fn unmark(dir: &Path) {
-    let _ = fs::remove_file(marker_of(dir));
+    let _ = rosen_platform::remove_file(&marker_of(dir));
 }
 
 /// Removes unpublished staging `dir` and then its marker. The marker stays
 /// while any of `dir` does, so a later sweep finishes the removal.
 pub(super) fn remove_marked(dir: &Path) {
-    if fs::remove_dir_all(dir).is_ok() {
+    if rosen_platform::remove_dir_all(dir).is_ok() {
         unmark(dir);
     }
 }
@@ -169,7 +169,7 @@ fn remove_abandoned(marker: &Path, budget: &Budget) {
         // can at worst unmark a newer build, which only leaks that build.
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             if !rosen_platform::process_may_be_running(pid) {
-                let _ = fs::remove_file(marker);
+                let _ = rosen_platform::remove_file(marker);
             }
             return;
         }

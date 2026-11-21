@@ -179,7 +179,7 @@ impl Drop for GitSource {
         if let Some(clone) = &self.temporary_clone {
             // Best effort: a leftover clone in the scratch directory wastes
             // space but loses nothing.
-            let _ = std::fs::remove_dir_all(clone);
+            let _ = rosen_platform::remove_dir_all(clone);
         }
     }
 }

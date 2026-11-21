@@ -25,6 +25,10 @@ pub struct IgnoreRules {
     root: PathBuf,
     /// The project's ignore list, rooted at the workspace root.
     project: Option<Gitignore>,
+    /// Stored `.gitignore` contents by workspace-relative directory, used as a
+    /// fallback when resuming deletion of a staged directory whose `.gitignore`
+    /// was already removed on disk (#430).
+    stored: HashMap<String, String>,
     /// Parsed `.gitignore` per workspace-relative directory, or `None` where
     /// the directory has none. Filled lazily as paths are checked.
     per_dir: HashMap<String, Option<Gitignore>>,
@@ -33,9 +37,14 @@ pub struct IgnoreRules {
 impl IgnoreRules {
     /// `project` is the project configuration's ignore list (SPEC R2).
     pub fn new(root: PathBuf, project: &[String]) -> Self {
+        Self::with_stored(root, project, HashMap::new())
+    }
+
+    pub fn with_stored(root: PathBuf, project: &[String], stored: HashMap<String, String>) -> Self {
         Self {
             project: project_rules(&root, project),
             root,
+            stored,
             per_dir: HashMap::new(),
         }
     }
@@ -98,12 +107,17 @@ impl IgnoreRules {
             self.root.join(dir)
         };
         let file = dir_path.join(".gitignore");
-        if !file.is_file() {
-            return None;
+        if file.is_file() {
+            let mut builder = GitignoreBuilder::new(&dir_path);
+            // A malformed line is skipped, as git skips it; the rest still apply.
+            let _ = builder.add(&file);
+            return builder.build().ok();
         }
+        let stored = self.stored.get(dir)?;
         let mut builder = GitignoreBuilder::new(&dir_path);
-        // A malformed line is skipped, as git skips it; the rest still apply.
-        let _ = builder.add(&file);
+        for line in stored.lines() {
+            let _ = builder.add_line(None, line);
+        }
         builder.build().ok()
     }
 }

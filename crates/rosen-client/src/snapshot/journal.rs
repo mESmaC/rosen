@@ -390,7 +390,7 @@ impl Journal {
     /// any other way without reference counts.
     fn clear_blobs(&self) -> io::Result<()> {
         for dir in ["objects", INFLATED] {
-            match fs::remove_dir_all(self.dir.join(dir)) {
+            match rosen_platform::remove_dir_all(&self.dir.join(dir)) {
                 Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
                 _ => {}
             }

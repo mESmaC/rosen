@@ -69,7 +69,34 @@ impl Client {
             path,
             kept: None,
         };
-        write_record(&dir, &record)
+        write_record(&dir, &record)?;
+        if let Some(parent) = record.path.parent() {
+            let _ = self.record_workspace_root(parent).await;
+        }
+        Ok(())
+    }
+
+    /// Parent directories where this daemon has registered workspaces, so
+    /// orphaned `.rosen-delete-*` folders are still swept after every
+    /// registration in that directory is gone (#430).
+    pub(super) async fn workspace_roots(&self) -> Result<Vec<PathBuf>, Error> {
+        let file = self.workspace_roots_file().await?;
+        let Some(bytes) = read_listed(&file).await? else {
+            return Ok(Vec::new());
+        };
+        Ok(serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    async fn record_workspace_root(&self, parent: &Path) -> Result<(), Error> {
+        let file = self.workspace_roots_file().await?;
+        let mut roots = self.workspace_roots().await.unwrap_or_default();
+        let parent = parent.to_path_buf();
+        if roots.contains(&parent) {
+            return Ok(());
+        }
+        roots.push(parent);
+        let bytes = serde_json::to_vec(&roots).map_err(std::io::Error::other)?;
+        write_atomic(&file, &bytes)
     }
 
     /// Records why automatic cleanup kept the workspace, or clears it with
@@ -128,6 +155,10 @@ impl Client {
     async fn workspace_registry(&self) -> Result<PathBuf, Error> {
         Ok(PathBuf::from(self.status().await?.data_dir).join("workspaces"))
     }
+
+    async fn workspace_roots_file(&self) -> Result<PathBuf, Error> {
+        Ok(PathBuf::from(self.status().await?.data_dir).join("workspace-roots.json"))
+    }
 }
 
 /// Tries of a record read that Windows denies while the file is being
@@ -167,9 +198,16 @@ fn record_file(dir: &Path, record: &WorkspaceRecord) -> Result<PathBuf, Error> {
 fn write_record(dir: &Path, record: &WorkspaceRecord) -> Result<(), Error> {
     let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
     let file = record_file(dir, record)?;
+    write_atomic(&file, &bytes)
+}
+
+fn write_atomic(file: &Path, bytes: &[u8]) -> Result<(), Error> {
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let temp = file.with_extension(format!("{}.tmp", std::process::id()));
     let mut output = std::fs::File::create(&temp)?;
-    output.write_all(&bytes)?;
+    output.write_all(bytes)?;
     output.sync_all()?;
     drop(output);
     std::fs::rename(temp, file)?;

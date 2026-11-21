@@ -40,7 +40,7 @@ use rosen_core::{ChangeId, ObjectId, SnapshotKind};
 use rosen_protocol::{Request, Response, SnapshotOutcome, SnapshotRequest};
 use rosen_store::{ObjectStore, StoreError};
 use scan::ScanOutcome;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use upload::ChangedBlob;
 
@@ -109,6 +109,9 @@ pub struct Snapshotter {
     marker: WorkspaceMarker,
     index: Index,
     ignore: ignore::IgnoreRules,
+    /// Stored `.gitignore` contents loaded only during staged cleanup so a
+    /// partial deletion that already removed `.gitignore` still ignores caches.
+    stored_ignores: HashMap<String, String>,
     sparse: Sparse,
     /// Trees the server is known to hold, so they are never sent again.
     known_trees: HashSet<ObjectId>,
@@ -178,6 +181,7 @@ impl Snapshotter {
         })?;
         Ok(Self {
             ignore: ignore::IgnoreRules::new(root.clone(), &marker.ignore),
+            stored_ignores: HashMap::new(),
             sparse,
             known_trees,
             root,
@@ -346,6 +350,7 @@ impl Snapshotter {
         self.fallback.clear();
         self.replaced.clear();
         self.ignore = ignore::IgnoreRules::new(self.root.clone(), &marker.ignore);
+        self.stored_ignores.clear();
         self.sparse = Sparse::paths(&marker.sparse)
             .map_err(|err| SnapshotError::io(&self.root, std::io::Error::other(err.to_string())))?;
         self.marker = marker;

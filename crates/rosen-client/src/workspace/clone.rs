@@ -164,12 +164,12 @@ pub fn clear_for_tree(
 /// Removes one file, link or whole directory tree without following links.
 fn remove_entry(path: &Path, meta: &fs::Metadata) -> Result<(), MaterialiseError> {
     let removed = if meta.is_dir() {
-        fs::remove_dir_all(path)
+        rosen_platform::remove_dir_all(path)
     } else {
         // A Windows directory link or junction is removed as a directory.
-        fs::remove_file(path).or_else(|error| {
+        rosen_platform::remove_file(path).or_else(|error| {
             if meta.file_type().is_symlink() {
-                fs::remove_dir(path)
+                rosen_platform::remove_dir(path)
             } else {
                 Err(error)
             }

@@ -7,38 +7,7 @@ pub use rename::rename_noreplace;
 #[cfg(windows)]
 mod windows_delete;
 #[cfg(windows)]
-pub use windows_delete::reparse_tag;
-
-/// Marks the exact held file for deletion when its handles close.
-///
-/// Callers can open the file denying write/delete sharing before hashing it,
-/// then delete that same file without reopening a replaceable pathname.
-#[cfg(windows)]
-#[allow(unsafe_code)]
-pub fn delete_on_close(file: &std::fs::File) -> std::io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
-    };
-    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
-    // SAFETY: File owns a live Windows handle for the entire call. The
-    // initialized repr(C) buffer matches FileDispositionInfo exactly; its
-    // address and size remain valid until the synchronous call returns.
-    // The kernel checks DELETE access; no caller can supply a raw pointer.
-    let success = unsafe {
-        SetFileInformationByHandle(
-            file.as_raw_handle().cast(),
-            FileDispositionInfo,
-            std::ptr::from_ref(&disposition).cast(),
-            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
-        )
-    };
-    if success == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
+pub use windows_delete::{delete_on_close, remove_dir, remove_dir_all, remove_file, reparse_tag};
 
 #[cfg(not(windows))]
 pub fn delete_on_close(_file: &std::fs::File) -> std::io::Result<()> {
@@ -46,6 +15,21 @@ pub fn delete_on_close(_file: &std::fs::File) -> std::io::Result<()> {
         std::io::ErrorKind::Unsupported,
         "this platform has no verified handle-deletion primitive",
     ))
+}
+
+#[cfg(not(windows))]
+pub fn remove_file(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
+#[cfg(not(windows))]
+pub fn remove_dir(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::remove_dir(path)
+}
+
+#[cfg(not(windows))]
+pub fn remove_dir_all(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::remove_dir_all(path)
 }
 
 /// Sends everything this process writes to standard error from now on,

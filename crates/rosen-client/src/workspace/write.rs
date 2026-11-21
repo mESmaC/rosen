@@ -4,7 +4,7 @@
 //! store or to another workspace, so a tool writing a file in place changes
 //! only that one file (SPEC.md R3, hardlinks are never used).
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -66,7 +66,7 @@ fn write_symlink(path: &Path, target: &[u8]) -> io::Result<()> {
 /// the tree may name a file the source workspace never held.
 pub fn remove_file(root: &Path, path: &[u8]) -> Result<(), MaterialiseError> {
     let path = disk_path(root, path);
-    match fs::remove_file(&path) {
+    match rosen_platform::remove_file(&path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
             Err(MaterialiseError::io(&path, error))
         }

@@ -4,13 +4,15 @@ use super::registry::WorkspaceRecord;
 use crate::snapshot::{Snapshotter, WorkspaceMarker};
 use crate::{Client, Error};
 use rosen_core::{ChangeId, ChangeState};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::time::Instant;
 
 const CLEANUP_RETRY_MIN: Duration = Duration::from_secs(1);
 const CLEANUP_RETRY_MAX: Duration = Duration::from_secs(60);
+const STAGING_PREFIX: &str = ".rosen-delete-";
 
 /// A refused cleanup is reported per workspace, so one busy owner cannot
 /// stop cleanup of unrelated landed changes.
@@ -97,11 +99,10 @@ impl Client {
                 staged.display()
             )));
         }
-        let mut staged_lease = staged_result?;
-        staged_lease.remove_verified()?;
+        let staged_lease = staged_result?;
+        remove_verified_blocking(staged_lease).await?;
         // Both directories are gone. Their lease files go while still held
         // exclusive, so no writer is left locking a removed file.
-        staged_lease.close_deleted();
         original_lease.close_deleted();
         self.unregister_workspace(&record).await?;
         Ok(())
@@ -159,11 +160,13 @@ impl Client {
     }
 
     /// Reconciles durable registrations after startup or a change event:
-    /// deletes the workspaces of landed and abandoned changes (R4). A refusal
-    /// is kept on the registration, so `rosen workspace list` and
-    /// `Session::workspaces` report why the workspace is still there.
+    /// deletes the workspaces of landed and abandoned changes (R4) and
+    /// finishes leftover `.rosen-delete-*` folders under known workspace
+    /// roots (#430). A refusal is kept on the registration, so
+    /// `rosen workspace list` and `Session::workspaces` report why the
+    /// workspace is still there.
     pub async fn cleanup_workspaces(&self) -> Result<Vec<CleanupReport>, Error> {
-        self.cleanup_workspaces_with(&mut CleanupRetries::default(), None)
+        self.cleanup_workspaces_with(&mut CleanupRetries::default(), None, &[])
             .await
     }
 
@@ -171,7 +174,7 @@ impl Client {
         &self,
         change: ChangeId,
     ) -> Result<Vec<CleanupReport>, Error> {
-        self.cleanup_workspaces_with(&mut CleanupRetries::default(), Some(change))
+        self.cleanup_workspaces_with(&mut CleanupRetries::default(), Some(change), &[])
             .await
     }
 
@@ -179,51 +182,165 @@ impl Client {
         &self,
         retries: &mut CleanupRetries,
         only_change: Option<ChangeId>,
+        extra_roots: &[PathBuf],
     ) -> Result<Vec<CleanupReport>, Error> {
         let _cleanup = self.cleanup_lock().await?;
         let records = self.workspace_list().await?;
+        let mut scan_roots: BTreeSet<PathBuf> = extra_roots.iter().cloned().collect();
+        scan_roots.extend(self.workspace_roots().await?);
+        let mut handled_staged = HashSet::new();
+        for record in &records {
+            if let Some(parent) = record.path.parent() {
+                scan_roots.insert(parent.to_path_buf());
+            }
+            if let Ok(staged) = staging_path(record) {
+                if let Ok(canonical) = std::fs::canonicalize(&staged) {
+                    handled_staged.insert(canonical);
+                }
+                handled_staged.insert(staged);
+            }
+        }
         let mut previous = std::mem::take(retries);
         let mut reports = Vec::new();
         for record in records {
-            let key = (record.change, record.path.clone());
-            if only_change.is_some_and(|change| change != record.change)
-                || previous.is_deferred(&key, Instant::now())
-            {
+            self.cleanup_registered(record, &mut previous, retries, only_change, &mut reports)
+                .await;
+        }
+        self.cleanup_orphaned(
+            &scan_roots,
+            &mut handled_staged,
+            &mut previous,
+            retries,
+            only_change,
+            &mut reports,
+        )
+        .await;
+        Ok(reports)
+    }
+
+    async fn cleanup_registered(
+        &self,
+        record: WorkspaceRecord,
+        previous: &mut CleanupRetries,
+        retries: &mut CleanupRetries,
+        only_change: Option<ChangeId>,
+        reports: &mut Vec<CleanupReport>,
+    ) {
+        let key = (record.change, record.path.clone());
+        if only_change.is_some_and(|change| change != record.change)
+            || previous.is_deferred(&key, Instant::now())
+        {
+            retries.pending.extend(previous.pending.remove_entry(&key));
+            return;
+        }
+        let result = self.cleanup_workspace(&record).await;
+        if result.is_err() {
+            // Schedule from the end of the attempt. Hashing a large
+            // workspace can itself take longer than the retry interval.
+            let retry = CleanupRetry::after_refusal(previous.pending.remove(&key), Instant::now());
+            retries.pending.insert(key, retry);
+        }
+        let kept = match &result {
+            Ok(_) => None,
+            Err(err) => Some(err.to_string()),
+        };
+        // A finished cleanup already removed the registration. A lost
+        // server connection says nothing about the workspace, so it
+        // neither records nor clears a reason.
+        let unreachable = matches!(result, Err(Error::Disconnected | Error::NotRunning(_)));
+        if !matches!(result, Ok(true)) && !unreachable {
+            if let Err(err) = self.set_kept_reason(&record, kept.clone()).await {
+                eprintln!(
+                    "rosen workspace cleanup {}: recording reason: {err}",
+                    record.path.display()
+                );
+            }
+        }
+        if !matches!(result, Ok(false)) {
+            reports.push(CleanupReport {
+                path: record.path,
+                error: kept,
+            });
+        }
+    }
+
+    async fn cleanup_orphaned(
+        &self,
+        scan_roots: &BTreeSet<PathBuf>,
+        handled_staged: &mut HashSet<PathBuf>,
+        previous: &mut CleanupRetries,
+        retries: &mut CleanupRetries,
+        only_change: Option<ChangeId>,
+        reports: &mut Vec<CleanupReport>,
+    ) {
+        let roots: Vec<PathBuf> = scan_roots.iter().cloned().collect();
+        let staged_dirs = tokio::task::spawn_blocking(move || find_staged_dirs(&roots))
+            .await
+            .unwrap_or_default();
+        for (change, path) in staged_dirs {
+            if only_change.is_some_and(|only| only != change) {
+                continue;
+            }
+            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+            if !handled_staged.insert(canonical.clone()) {
+                continue;
+            }
+            let key = (change, canonical.clone());
+            if previous.is_deferred(&key, Instant::now()) {
                 retries.pending.extend(previous.pending.remove_entry(&key));
                 continue;
             }
-            let result = self.cleanup_workspace(&record).await;
-            if result.is_err() {
-                // Schedule from the end of the attempt. Hashing a large
-                // workspace can itself take longer than the retry interval.
-                let retry =
-                    CleanupRetry::after_refusal(previous.pending.remove(&key), Instant::now());
-                retries.pending.insert(key, retry);
-            }
-            let kept = match &result {
-                Ok(_) => None,
-                Err(err) => Some(err.to_string()),
-            };
-            // A finished cleanup already removed the registration. A lost
-            // server connection says nothing about the workspace, so it
-            // neither records nor clears a reason.
-            let unreachable = matches!(result, Err(Error::Disconnected | Error::NotRunning(_)));
-            if !matches!(result, Ok(true)) && !unreachable {
-                if let Err(err) = self.set_kept_reason(&record, kept.clone()).await {
-                    eprintln!(
-                        "rosen workspace cleanup {}: recording reason: {err}",
-                        record.path.display()
-                    );
+            match self.cleanup_orphaned_staged(change, &canonical).await {
+                Ok(true) => reports.push(CleanupReport {
+                    path: canonical,
+                    error: None,
+                }),
+                Ok(false) => {}
+                Err(err) => {
+                    let retry =
+                        CleanupRetry::after_refusal(previous.pending.remove(&key), Instant::now());
+                    retries.pending.insert(key, retry);
+                    reports.push(CleanupReport {
+                        path: canonical,
+                        error: Some(err.to_string()),
+                    });
                 }
             }
-            if !matches!(result, Ok(false)) {
-                reports.push(CleanupReport {
-                    path: record.path,
-                    error: kept,
-                });
-            }
         }
-        Ok(reports)
+    }
+
+    async fn cleanup_orphaned_staged(
+        &self,
+        change: ChangeId,
+        staged: &Path,
+    ) -> Result<bool, Error> {
+        if !staged.try_exists()? {
+            return Ok(false);
+        }
+        reject_symlink(staged)?;
+        match self.change_show(&change.to_string()).await {
+            Ok(_) => {}
+            // Multiple projects can share a parent directory; ignore staged
+            // deletions that belong to another server's change.
+            Err(Error::Server(body)) if body.code == rosen_protocol::ErrorCode::NotFound => {
+                return Ok(false);
+            }
+            Err(err) => return Err(err),
+        }
+        if !WorkspaceMarker::path(staged).try_exists()? {
+            remove_empty_staged_shell(staged)?;
+            return Ok(true);
+        }
+        if WorkspaceMarker::read(staged)?.change != change {
+            return Err(kept(format!(
+                "staged directory change does not match {}",
+                staged.display()
+            )));
+        }
+        self.check_workspace_boundary(staged).await?;
+        let staged_lease = self.verify_workspace_durable(staged, true).await?;
+        remove_verified_blocking(staged_lease).await?;
+        Ok(true)
     }
 
     async fn cleanup_workspace(&self, record: &WorkspaceRecord) -> Result<bool, Error> {
@@ -235,32 +352,103 @@ impl Client {
             return Ok(false);
         }
         let change = self.change_show(&record.change.to_string()).await?;
+        if staged_exists {
+            if original_exists {
+                // Only refuse when the original path still belongs to this
+                // change (or cannot be identified); a new change reusing the
+                // folder name must not strand the earlier staged deletion.
+                let same_change =
+                    WorkspaceMarker::read(&record.path).map_or(true, |m| m.change == record.change);
+                if same_change {
+                    return Err(kept(format!(
+                        "both original and staged workspace exist: {}",
+                        staged.display()
+                    )));
+                }
+            } else {
+                self.check_workspace_boundary(&record.path).await?;
+            }
+            verify_registration(&staged, record)?;
+            self.check_workspace_boundary(&staged).await?;
+            let staged_lease = self.verify_workspace_durable(&staged, true).await?;
+            remove_verified_blocking(staged_lease).await?;
+            self.unregister_workspace(record).await?;
+            return Ok(true);
+        }
         if !matches!(
             change.change.state,
             ChangeState::Landed | ChangeState::Abandoned
         ) {
             return Ok(false);
         }
-        if staged_exists {
-            if original_exists {
-                return Err(kept(format!(
-                    "both original and staged workspace exist: {}",
-                    staged.display()
-                )));
-            }
-            verify_registration(&staged, record)?;
-            self.check_workspace_boundary(&record.path).await?;
-            self.check_workspace_boundary(&staged).await?;
-            let mut staged_lease = self.verify_workspace_durable(&staged, true).await?;
-            staged_lease.remove_verified()?;
-            staged_lease.close_deleted();
-            self.unregister_workspace(record).await?;
-        } else {
-            verify_registration(&record.path, record)?;
-            self.delete_locked(&record.path).await?;
-        }
+        verify_registration(&record.path, record)?;
+        self.delete_locked(&record.path).await?;
         Ok(true)
     }
+}
+
+async fn remove_verified_blocking(mut lease: Snapshotter) -> Result<(), Error> {
+    tokio::task::spawn_blocking(move || {
+        lease.remove_verified()?;
+        lease.close_deleted();
+        Ok::<_, crate::snapshot::SnapshotError>(())
+    })
+    .await
+    .map_err(|err| Error::Unexpected(format!("workspace removal stopped: {err}")))??;
+    Ok(())
+}
+
+fn find_staged_dirs(roots: &[PathBuf]) -> Vec<(ChangeId, PathBuf)> {
+    let mut found = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(change) = parse_staging_name(&entry.file_name()) else {
+                continue;
+            };
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                found.push((change, entry.path()));
+            }
+        }
+    }
+    found.sort_by(|a, b| a.1.cmp(&b.1));
+    found
+}
+
+fn parse_staging_name(name: &OsStr) -> Option<ChangeId> {
+    let text = name.to_str()?;
+    let rest = text.strip_prefix(STAGING_PREFIX)?;
+    let (change, identity) = rest.rsplit_once('-')?;
+    if identity.len() != 40 || !identity.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    change.parse().ok()
+}
+
+/// Removes a `.rosen-delete-*` whose marker was already deleted at the very
+/// end of removal, only if nothing remains except at most an empty `.rosen`.
+fn remove_empty_staged_shell(staged: &Path) -> Result<(), Error> {
+    let mut has_state_dir = false;
+    for entry in std::fs::read_dir(staged)? {
+        let entry = entry?;
+        if entry.file_name() == OsStr::new(crate::snapshot::STATE_DIR)
+            && entry.file_type()?.is_dir()
+        {
+            if std::fs::read_dir(entry.path())?.next().is_some() {
+                return Err(kept("staged directory has no workspace marker"));
+            }
+            has_state_dir = true;
+        } else {
+            return Err(kept("staged directory has no workspace marker"));
+        }
+    }
+    if has_state_dir {
+        rosen_platform::remove_dir(&staged.join(crate::snapshot::STATE_DIR))?;
+    }
+    rosen_platform::remove_dir(staged)?;
+    Ok(())
 }
 
 fn staging_path(record: &WorkspaceRecord) -> Result<PathBuf, Error> {
@@ -269,7 +457,7 @@ fn staging_path(record: &WorkspaceRecord) -> Result<PathBuf, Error> {
         .parent()
         .ok_or_else(|| kept("cannot delete a root"))?;
     let id = record.identity()?;
-    Ok(parent.join(format!(".rosen-delete-{}-{id}", record.change)))
+    Ok(parent.join(format!("{STAGING_PREFIX}{}-{id}", record.change)))
 }
 
 fn verify_registration(root: &Path, record: &WorkspaceRecord) -> Result<(), Error> {
@@ -305,6 +493,11 @@ fn hold_if_durable(
             "unuploaded files",
             &scan.unuploaded_paths()?,
         )));
+    }
+    if staged {
+        // A partial deletion may have removed `.gitignore` on disk before
+        // failing; fall back to the stored tree's ignore files (#430).
+        scan.load_stored_ignores(store);
     }
     let paths = if staged {
         scan.unstored_paths_on_disk()?

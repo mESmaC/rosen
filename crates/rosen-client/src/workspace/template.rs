@@ -129,7 +129,7 @@ pub(super) async fn refresh_in_place(
         Ok(()) => Some(slot),
         Err(error) => {
             eprintln!("rosen warm pool: template refresh failed: {error}");
-            let _ = std::fs::remove_dir_all(&slot.path);
+            let _ = rosen_platform::remove_dir_all(&slot.path);
             None
         }
     })
