@@ -108,6 +108,7 @@ fn setup(path: &std::path::Path, config: &str) -> (Arc<ServerState>, ObjectId, O
         .unwrap()
         .init_base("main", &base)
         .unwrap();
+    rosen_server::mirror::owner::mark(path).unwrap();
     (state, base, blob)
 }
 

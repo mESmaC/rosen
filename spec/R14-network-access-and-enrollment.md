@@ -84,6 +84,7 @@ Machines join a project with no login, monitor or remote desktop on the joining 
     A failed post is retried with the state feed's backoff, and a restarted server re-posts stored outcomes.
     An action a stopped server left running is settled at the next start: by the approval or mark it stored, if any, and otherwise by one run.
   - Each outcome, setting change and failure to reach Collapse publishes a `relay` event to every subscriber.
+  - Only the mirror-owner server (R1) polls Collapse or runs relayed actions, so a copied data directory keeping the allow-list sends nothing and runs no relayed action.
 - **One enrollment for Rosen and Velocity.**
   Velocity's cross-system dispatch uses the same join key, so one command adds a machine to both (§9).
 - **Accept when:** a headless machine joins from one command with no interactive step; a revoked machine's next request is refused; and a daemon that meets a certificate other than the key's fingerprint never sends the key.

@@ -123,14 +123,23 @@ fn print_status(json: bool, status: &ServerStatus) {
         if let Some(upstream) = &status.upstream {
             println!("cache for: {upstream}");
         }
-        match status.mirror_owner {
-            Some(true) => println!("mirror: pushes (mirror owner)"),
-            Some(false) => println!("mirror: never pushes (not the mirror owner)"),
-            None => {}
+        if let Some(line) = mirror_owner_line(status.mirror_owner) {
+            println!("{line}");
         }
         if let Some(relay) = &status.relay {
-            println!("collapse relay: {}", relay_line(relay));
+            println!(
+                "collapse relay: {}",
+                status_relay_line(relay, status.mirror_owner)
+            );
         }
+    }
+}
+
+fn mirror_owner_line(mirror_owner: Option<bool>) -> Option<&'static str> {
+    match mirror_owner {
+        Some(true) => Some("mirror: pushes (mirror owner)"),
+        Some(false) => Some("mirror: never pushes (not the mirror owner; Collapse state not sent)"),
+        None => None,
     }
 }
 
@@ -177,6 +186,14 @@ fn relay_line(setting: &RelaySetting) -> String {
         (false, true) => "off".to_owned(),
         (false, false) => format!("runs {}", kinds.join(", ")),
     }
+}
+
+fn status_relay_line(setting: &RelaySetting, mirror_owner: Option<bool>) -> String {
+    if mirror_owner == Some(false) && setting.active() {
+        let kinds: Vec<&str> = setting.allow.iter().map(|kind| kind.as_str()).collect();
+        return format!("off (not the mirror owner; allows {})", kinds.join(", "));
+    }
+    relay_line(setting)
 }
 
 /// Prints events as they arrive until the server goes away. For an agent,
@@ -289,5 +306,33 @@ fn print_event(json: bool, event: &Event) {
     } else {
         let change = event.change.as_deref().unwrap_or("-");
         println!("{} {:?} {} {}", event.seq, event.kind, change, event.detail);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Risk (#433): an operator inspecting a non-owner server needs to see
+    /// directly that neither mirror pushes nor Collapse state or relay run.
+    #[test]
+    fn non_owner_status_reports_collapse_state_not_sent() {
+        let mirror = mirror_owner_line(Some(false)).unwrap();
+        assert!(
+            mirror.contains("not the mirror owner; Collapse state not sent"),
+            "{mirror}"
+        );
+        let setting = RelaySetting {
+            allow: vec![RelayKind::Config, RelayKind::Approve],
+            revoked: false,
+        };
+        assert_eq!(
+            status_relay_line(&setting, Some(false)),
+            "off (not the mirror owner; allows config, approve)"
+        );
+        assert_eq!(
+            status_relay_line(&setting, Some(true)),
+            "runs config, approve"
+        );
     }
 }

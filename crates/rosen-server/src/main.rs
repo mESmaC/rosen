@@ -65,14 +65,16 @@ struct Args {
     log: Option<PathBuf>,
 
     /// Mark this server as the project's mirror owner, the only server that
-    /// pushes the base to the `[mirror]` remote (SPEC R1). The mark is kept
-    /// in the data directory, so later starts push without the flag. A
-    /// daemon a client starts is marked when $ROSEN_MIRROR_OWNER names its
-    /// data directory.
+    /// pushes the base to the `[mirror]` remote, sends the Collapse state feed
+    /// and ledger entries, and runs relayed Collapse actions (SPEC R1, #433).
+    /// The mark is kept in the data directory, so later starts push without
+    /// the flag. A daemon a client starts is marked when $ROSEN_MIRROR_OWNER
+    /// names its data directory.
     #[arg(long, conflicts_with = "not_mirror_owner")]
     mirror_owner: bool,
 
-    /// Remove the mirror owner mark, so this server stops pushing.
+    /// Remove the mirror owner mark, so this server stops pushing and sending
+    /// to Collapse.
     #[arg(long)]
     not_mirror_owner: bool,
 }

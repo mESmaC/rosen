@@ -50,6 +50,8 @@ const RETRY_CAP: Duration = Duration::from_secs(5 * 60);
 pub enum Pushed {
     /// The base's configuration names no ledger endpoint.
     NotConfigured,
+    /// This server is not the mirror owner, so nothing is sent (#433).
+    NotOwner,
     /// The endpoint answered 410 earlier; nothing is sent until it changes.
     Stopped { endpoint: String },
     /// The endpoint holds every entry; `sent` entries went in this pass.
@@ -135,6 +137,10 @@ pub async fn run(state: Arc<ServerState>) {
 
 /// Brings the endpoint up to the ledgers once.
 pub async fn push_once(state: &ServerState, session: &mut Session) -> Result<Pushed, PushError> {
+    if !crate::mirror::owner::is_owner_async(state.config.data_dir.clone()).await {
+        session.reconciled = None;
+        return Ok(Pushed::NotOwner);
+    }
     let Some(endpoint) = configured_endpoint(&state.config).await? else {
         return Ok(Pushed::NotConfigured);
     };
@@ -152,6 +158,12 @@ pub async fn push_to(
     endpoint: &str,
     session: &mut Session,
 ) -> Result<Pushed, PushError> {
+    // Only the mirror owner sends ledger entries (#433): another server's
+    // sequence numbers would collide and hide the owner's entries.
+    if !crate::mirror::owner::is_owner_async(config.data_dir.clone()).await {
+        session.reconciled = None;
+        return Ok(Pushed::NotOwner);
+    }
     let fresh = !matches!(&session.reconciled, Some(known) if known.endpoint == endpoint);
     let credential = match &session.reconciled {
         Some(known) if !fresh => known.credential.clone(),

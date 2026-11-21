@@ -67,3 +67,4 @@
   - Receipt signatures, machine credentials and their hashes, join keys, network addresses, certificate fingerprints and the data directory are never sent.
     Messages and piece claims are sent only as channel lines with `collapse_channel = true`.
   - Without `collapse`, nothing is sent.
+  - Only the mirror-owner server (R1) sends the state feed; any other server sends nothing to Collapse.

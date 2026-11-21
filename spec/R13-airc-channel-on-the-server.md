@@ -62,4 +62,5 @@ Rosen is its store and its authority.
   - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `ledger_push` event (R9); the first success after failures publishes one too.
     HTTP 410 (the endpoint's repository is archived) stops sending until the endpoint changes or the server restarts.
   - Without `ledger_endpoint` or `collapse`, nothing is sent.
+  - Only the mirror-owner server (R1) pushes ledger entries; any other server sends nothing.
 - **Accept when:** two agents on different machines that claim the same piece or an exclusive path at the same moment never both succeed; an event or message reaches its recipient on another machine within 1 s while both machines reach the server; and no two machines ever see different claim holders.

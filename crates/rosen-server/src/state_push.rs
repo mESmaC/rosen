@@ -167,6 +167,12 @@ pub async fn run(state: Arc<ServerState>) {
 
 /// Reads new events and sends a pass when one is due.
 async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<Step, PushError> {
+    // Only the mirror owner sends to Collapse (#433): a second server or
+    // copied data directory counts its own event sequences and would collide.
+    if !crate::mirror::owner::is_owner_async(state.config.data_dir.clone()).await {
+        session.target = None;
+        return Ok(Step::WaitForLand);
+    }
     let Some(Feed { endpoint, channel }) = configured_feed(state, session).await? else {
         session.target = None;
         return Ok(Step::WaitForLand);

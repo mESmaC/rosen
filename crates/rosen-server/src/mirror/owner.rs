@@ -1,13 +1,16 @@
-//! Which server owns the mirror (SPEC R1, #401).
+//! Which server owns the mirror and Collapse feeds (SPEC R1, #401, #433).
 //!
-//! Every server for a project reads the same `[mirror]` setting, so a
-//! second setup, another machine's server or a server an agent starts for
-//! a test would all push to one remote. Only the server marked as the
-//! mirror owner pushes; the others keep the setting and never push.
+//! Every server for a project reads the same `[mirror]` and `collapse`
+//! settings, so a second setup, another machine's server or a server an
+//! agent starts for a test would all push to one remote and send colliding
+//! Collapse sequences. Only the server marked as the mirror owner pushes
+//! the mirror, sends the Collapse state feed and ledger entries, and runs
+//! the Collapse action relay; the others keep the settings and send nothing.
 //!
 //! The mark is a file in the data directory holding that directory's own
-//! canonical path. A copied data directory carries the file but not the
-//! path, so a copy of the project never pushes until someone marks it.
+//! canonical path. A copied data directory carries the file (and any relay
+//! allow-list) but not the path, so a copy of the project never pushes,
+//! sends to Collapse or runs relayed actions until someone marks it.
 
 use std::path::{Path, PathBuf};
 
@@ -42,6 +45,15 @@ pub fn is_owner(data_dir: &Path) -> bool {
         return false;
     };
     canonical(data_dir).is_ok_and(|own| same_dir(Path::new(marked.trim()), &own))
+}
+
+/// Runs [`is_owner`] on the blocking pool so background tasks do not touch
+/// the file system on an async worker. Fails closed (`false`) if the task
+/// cannot complete.
+pub async fn is_owner_async(data_dir: PathBuf) -> bool {
+    tokio::task::spawn_blocking(move || is_owner(&data_dir))
+        .await
+        .unwrap_or(false)
 }
 
 /// True when the `ROSEN_MIRROR_OWNER` value `named` is `data_dir`.

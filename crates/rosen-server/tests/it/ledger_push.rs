@@ -108,6 +108,7 @@ fn sent_sequences(intake: &Mutex<Intake>) -> Vec<u64> {
 #[test]
 fn ledger_push_sends_only_ordinary_entries_and_catches_up_after_an_outage() {
     let data = tempfile::tempdir().unwrap();
+    rosen_server::mirror::owner::mark(data.path()).unwrap();
     let state = ServerState::new(ServerConfig {
         data_dir: data.path().to_path_buf(),
         endpoint: Endpoint::new("rosen-ledger-push-test-unused"),

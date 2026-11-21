@@ -161,6 +161,7 @@ fn setup(path: &std::path::Path, collapse: &str, extra: &str) -> Arc<ServerState
         .unwrap();
     let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
     ledger.init_base("main", &root).unwrap();
+    rosen_server::mirror::owner::mark(path).unwrap();
     state
 }
 
@@ -379,4 +380,135 @@ async fn channel_lines_go_once_in_order_without_ledger_entries() {
     let kinds: Vec<Value> = lines.iter().map(|l| l["detail"]["line"].clone()).collect();
     assert_eq!(kinds, [json!("joined"), json!("message")]);
     feed.abort();
+}
+
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), to).unwrap();
+        }
+    }
+}
+
+async fn serve_spy(listener: tokio::net::TcpListener, paths: Arc<Mutex<Vec<String>>>) {
+    while let Ok((mut socket, _)) = listener.accept().await {
+        let mut buf = [0u8; 4096];
+        let n = socket.read(&mut buf).await.unwrap_or(0);
+        let path = String::from_utf8_lossy(&buf[..n])
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("")
+            .to_owned();
+        paths.lock().unwrap().push(path);
+        let body = r#"{"highest_sequence":0,"generation":1,"actions":[]}"#;
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = socket.write_all(reply.as_bytes()).await;
+    }
+}
+
+fn append_discovery(state: &ServerState, text: &str) {
+    let entry = AppendEntry {
+        ledger: ChannelLedger::Discovery,
+        author: Author::User,
+        text: text.into(),
+        velocity_issue: None,
+    };
+    channel::run(&state.events, ChannelRequest::Append(entry)).unwrap();
+}
+
+/// Sets up a marked owner server in `orig` with `collapse`, a relay
+/// allow-list, a ledger entry and an open change, then copies the whole
+/// data directory into `copy` (including `mirror-owner`).
+async fn copy_owner_project(
+    orig: &std::path::Path,
+    copy: &std::path::Path,
+    root: &str,
+) -> (Arc<ServerState>, String) {
+    let first = {
+        let state = setup(orig, root, "");
+        rosen_server::relay::set(&state, vec![RelayKind::Config, RelayKind::Approve]).await;
+        append_discovery(&state, "from owner");
+        change_editing(&state, "a.txt").await
+    };
+    copy_dir(orig, copy);
+    assert!(copy.join("mirror-owner").is_file());
+    assert!(!rosen_server::mirror::owner::is_owner(copy));
+    let copy_state = ServerState::new(ServerConfig {
+        data_dir: copy.into(),
+        endpoint: Endpoint::new("state-push-copy"),
+        warm_pool_dir: None,
+    });
+    assert!(rosen_server::relay::setting(&copy_state)
+        .await
+        .unwrap()
+        .active());
+    (copy_state, first)
+}
+
+/// Risk (#433): a server started on a copied data directory inherits
+/// `rosen.toml`, credentials and the relay allow-list; without the
+/// mirror-owner gate it sends colliding sequences and runs relayed actions.
+#[tokio::test(flavor = "multi_thread")]
+async fn copied_data_dir_sends_nothing_to_collapse_and_runs_no_relay() {
+    let (orig, copy) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!("http://{}/o/r", listener.local_addr().unwrap());
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    tokio::spawn(serve_spy(listener, Arc::clone(&paths)));
+
+    let (copy_state, first) = copy_owner_project(orig.path(), copy.path(), &root).await;
+    let Response::Status(status) = call(&copy_state, Request::Status).await else {
+        panic!()
+    };
+    assert_eq!(status.mirror_owner, Some(false));
+
+    let feed = tokio::spawn(rosen_server::state_push::run(Arc::clone(&copy_state)));
+    let ledger = tokio::spawn(rosen_server::ledger_push::run(Arc::clone(&copy_state)));
+    let relay = tokio::spawn(rosen_server::relay::run(Arc::clone(&copy_state)));
+
+    append_discovery(&copy_state, "from copy");
+    call(&copy_state, Request::Land { change: first }).await;
+    copy_state.relay_wake.actions_pending();
+
+    let mut session = rosen_server::ledger_push::Session::default();
+    let not_owner = rosen_server::ledger_push::Pushed::NotOwner;
+    assert_eq!(
+        rosen_server::ledger_push::push_once(&copy_state, &mut session)
+            .await
+            .unwrap(),
+        not_owner
+    );
+    let url = format!("{root}/ledgers");
+    assert_eq!(
+        rosen_server::ledger_push::push_to(&copy_state.config, &url, &mut session)
+            .await
+            .unwrap(),
+        not_owner
+    );
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    for task in [feed, ledger, relay] {
+        task.abort();
+    }
+    assert!(
+        paths.lock().unwrap().is_empty(),
+        "copy contacted Collapse: {:?}",
+        paths.lock().unwrap()
+    );
+    let all = ChangeFilter {
+        owner: None,
+        state: None,
+    };
+    let Response::Changes(changes) = call(&copy_state, Request::ChangeList(all)).await else {
+        panic!()
+    };
+    assert_eq!(changes.len(), 1);
 }

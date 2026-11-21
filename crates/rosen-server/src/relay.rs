@@ -165,6 +165,13 @@ pub async fn run(state: Arc<ServerState>) {
 /// Posts outcomes Collapse lacks, then, while the relay is on, reads the
 /// doorbell and fetches and runs actions when it rang.
 async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<(), RelayError> {
+    // Only the mirror owner talks to Collapse (#433): a copied data
+    // directory keeps the relay allow-list and would otherwise run actions.
+    if !crate::mirror::owner::is_owner_async(state.config.data_dir.clone()).await {
+        session.remote = None;
+        state.relay_wake.take_fetch();
+        return Ok(());
+    }
     let Some(root) = configured_root(state, session).await? else {
         return Ok(());
     };
