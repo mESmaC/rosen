@@ -276,7 +276,7 @@ async fn conflicting_change_16370(
         let snap = SnapshotRequest {
             change: rec.change.id.to_string(),
             tree,
-            from: None,
+            from: Some(rec.change.head),
             message: None,
         };
         call(state, Request::Snapshot(snap)).await;
