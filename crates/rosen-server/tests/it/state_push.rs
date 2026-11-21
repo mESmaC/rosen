@@ -469,6 +469,10 @@ async fn copied_data_dir_sends_nothing_to_collapse_and_runs_no_relay() {
         panic!()
     };
     assert_eq!(status.mirror_owner, Some(false));
+    let collapse = status.collapse.expect("collapse health reported");
+    assert_eq!(collapse.state_feed.state, FeedState::NotOwner);
+    assert_eq!(collapse.ledger_push.state, FeedState::NotOwner);
+    assert_eq!(collapse.relay.state, FeedState::NotOwner);
 
     let feed = tokio::spawn(rosen_server::state_push::run(Arc::clone(&copy_state)));
     let ledger = tokio::spawn(rosen_server::ledger_push::run(Arc::clone(&copy_state)));
@@ -511,4 +515,114 @@ async fn copied_data_dir_sends_nothing_to_collapse_and_runs_no_relay() {
         panic!()
     };
     assert_eq!(changes.len(), 1);
+}
+
+async fn status_of(state: &Arc<ServerState>) -> ServerStatus {
+    let Response::Status(status) = call(state, Request::Status).await else {
+        panic!()
+    };
+    *status
+}
+
+async fn until_status(
+    state: &Arc<ServerState>,
+    limit: Duration,
+    ready: impl Fn(&ServerStatus) -> bool,
+) -> ServerStatus {
+    let start = Instant::now();
+    loop {
+        let status = status_of(state).await;
+        if ready(&status) {
+            return status;
+        }
+        assert!(
+            start.elapsed() < limit,
+            "status never converged: {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn state_push_events(state: &ServerState) -> Vec<Event> {
+    state
+        .events
+        .page(0, None, 500)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|e| e.kind == EventKind::StatePush)
+        .collect()
+}
+
+/// Risk (#434, R9, R10): a revoked Collapse token or 410 stop must be
+/// visible in `server status` with the prior success time and HTTP status,
+/// and return to `current` with a `state_push` `sent` event once restored.
+#[tokio::test(flavor = "multi_thread")]
+async fn server_status_reports_collapse_401_recovery_and_410_stop() {
+    let data = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!("http://{}/o/r", listener.local_addr().unwrap());
+    let intake = Arc::new(Mutex::new(Intake::default()));
+    tokio::spawn(serve(listener, Arc::clone(&intake)));
+    let state = setup(data.path(), &root, "");
+    let _first = change_editing(&state, "a.txt").await;
+    let feed = tokio::spawn(rosen_server::state_push::run(Arc::clone(&state)));
+    let wait = Duration::from_secs(30);
+
+    let ok = until_status(&state, wait, |s| {
+        s.collapse.as_ref().is_some_and(|c| {
+            c.state_feed.state == FeedState::Current && c.state_feed.last_success_at.is_some()
+        })
+    })
+    .await;
+    let first_ok = ok.collapse.as_ref().unwrap().state_feed.last_success_at;
+    assert!(ok.collapse.as_ref().unwrap().state_feed.cursor.is_some());
+
+    // Revoke the token (HTTP 401) and create new work.
+    intake.lock().unwrap().failing = Some(401);
+    let _second = change_editing(&state, "b.txt").await;
+    let failing = until_status(&state, wait, |s| {
+        s.collapse
+            .as_ref()
+            .is_some_and(|c| c.state_feed.state == FeedState::Failing)
+    })
+    .await;
+    let sf = &failing.collapse.as_ref().unwrap().state_feed;
+    assert_eq!(sf.last_success_at, first_ok);
+    assert!(sf.backlog > 0 && sf.next_retry_at.is_some(), "{sf:?}");
+    assert_eq!(sf.last_error.as_ref().unwrap().http_status, Some(401));
+
+    // Approve a new token: status returns to current and publishes `sent`.
+    intake.lock().unwrap().failing = None;
+    let recovered = until_status(&state, wait, |s| {
+        s.collapse
+            .as_ref()
+            .is_some_and(|c| c.state_feed.state == FeedState::Current && c.state_feed.backlog == 0)
+    })
+    .await;
+    let sf = &recovered.collapse.as_ref().unwrap().state_feed;
+    assert!(
+        sf.last_error.is_none() && sf.next_retry_at.is_none() && sf.last_success_at >= first_ok
+    );
+    let events = state_push_events(&state);
+    assert!(events
+        .iter()
+        .any(|e| e.detail["status"] == "failed" && e.detail["http_status"] == 401));
+    assert!(events
+        .iter()
+        .any(|e| e.detail["status"] == "sent" && e.detail["after_failures"].as_u64() >= Some(1)));
+
+    // HTTP 410 stops sending.
+    intake.lock().unwrap().failing = Some(410);
+    let _third = change_editing(&state, "c.txt").await;
+    let stopped = until_status(&state, wait, |s| {
+        s.collapse
+            .as_ref()
+            .is_some_and(|c| c.state_feed.state == FeedState::Stopped)
+    })
+    .await;
+    let sf = &stopped.collapse.as_ref().unwrap().state_feed;
+    assert_eq!(sf.last_error.as_ref().unwrap().http_status, Some(410));
+    assert!(sf.next_retry_at.is_none());
+    feed.abort();
 }

@@ -2460,6 +2460,17 @@
                 }
               ]
             },
+            "collapse": {
+              "description": "Health of the Collapse state feed, ledger push and action relay; null when the base names no collapse root or on a cache daemon.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CollapseHealth"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "commit": {
               "description": "The git commit the server was built from; null when its build could not tell.",
               "anyOf": [
@@ -3908,6 +3919,91 @@
         "revoked": { "type": "boolean" }
       },
       "required": ["allow", "revoked"],
+      "additionalProperties": false
+    },
+    "FeedState": {
+      "type": "string",
+      "enum": ["sending", "current", "failing", "stopped", "not_owner", "no_credential"]
+    },
+    "FeedError": {
+      "type": "object",
+      "properties": {
+        "http_status": {
+          "anyOf": [
+            { "type": "integer", "minimum": 100, "maximum": 599 },
+            { "type": "null" }
+          ]
+        },
+        "message": { "type": "string" },
+        "at": { "type": "integer" }
+      },
+      "required": ["http_status", "message", "at"],
+      "additionalProperties": false
+    },
+    "LedgerCursors": {
+      "type": "object",
+      "properties": {
+        "discovery": { "type": "integer", "minimum": 0 },
+        "past_work": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["discovery", "past_work"],
+      "additionalProperties": false
+    },
+    "FeedHealth": {
+      "type": "object",
+      "properties": {
+        "state": { "$ref": "#/$defs/FeedState" },
+        "last_success_at": {
+          "anyOf": [
+            { "type": "integer" },
+            { "type": "null" }
+          ]
+        },
+        "cursor": {
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "ledger_cursors": {
+          "anyOf": [
+            { "$ref": "#/$defs/LedgerCursors" },
+            { "type": "null" }
+          ]
+        },
+        "doorbell_generation": {
+          "anyOf": [
+            { "type": "integer" },
+            { "type": "null" }
+          ]
+        },
+        "backlog": { "type": "integer", "minimum": 0 },
+        "last_error": {
+          "anyOf": [
+            { "$ref": "#/$defs/FeedError" },
+            { "type": "null" }
+          ]
+        },
+        "next_retry_at": {
+          "anyOf": [
+            { "type": "integer" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "required": ["state", "last_success_at", "cursor", "backlog", "last_error", "next_retry_at"],
+      "additionalProperties": false
+    },
+    "CollapseHealth": {
+      "description": "Health of the Collapse state feed, ledger push and action relay (R9, R10).",
+      "type": "object",
+      "properties": {
+        "root": { "type": "string" },
+        "state_feed": { "$ref": "#/$defs/FeedHealth" },
+        "ledger_push": { "$ref": "#/$defs/FeedHealth" },
+        "relay": { "$ref": "#/$defs/FeedHealth" }
+      },
+      "required": ["root", "state_feed", "ledger_push", "relay"],
       "additionalProperties": false
     },
     "rosen.server.relay/v1": {

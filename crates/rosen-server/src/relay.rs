@@ -28,6 +28,7 @@ use rosen_protocol::{ErrorBody, ErrorCode, EventKind, Outcome, RelayKind, RelayS
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 
+use crate::collapse_health::Feed;
 use crate::ledger_push::{retry_delay, send};
 use crate::ServerState;
 use action::{Call, Done};
@@ -74,8 +75,12 @@ pub enum RelayError {
         endpoint: String,
         status: Option<u16>,
         message: String,
+        no_credential: bool,
     },
 }
+
+const STOPPED_MESSAGE: &str = "the endpoint's repository is archived or deleted; the relay calls \
+                               it no more until collapse changes or the server restarts";
 
 /// The setting as stored, for `server status`; `None` if unreadable.
 pub async fn setting(state: &Arc<ServerState>) -> Option<RelaySetting> {
@@ -138,6 +143,9 @@ pub async fn run(state: Arc<ServerState>) {
             }
             Err(RelayError::Gone { endpoint }) => {
                 report_stopped(&state, &endpoint);
+                state
+                    .collapse
+                    .record_stopped(Feed::Relay, &endpoint, STOPPED_MESSAGE);
                 session.stopped = Some(endpoint);
                 failures = 0;
                 DOORBELL_EVERY
@@ -147,7 +155,12 @@ pub async fn run(state: Arc<ServerState>) {
                 session.remote = None;
                 failures = failures.saturating_add(1);
                 let delay = retry_delay(failures).max(DOORBELL_EVERY);
+                let root = session
+                    .configured
+                    .as_ref()
+                    .and_then(|(root, _)| root.as_deref());
                 report_failure(&state, &error, failures, delay);
+                record_failure(&state, root, &error, delay);
                 delay
             }
         };
@@ -179,6 +192,7 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<(), Rel
         return Ok(());
     }
     session.stopped = None;
+    let _in_flight = state.collapse.begin(Feed::Relay, &root);
     if !matches!(&session.remote, Some(remote) if remote.root == root) {
         session.remote = Some(connect(state, &root).await);
         session.recovered = false;
@@ -196,6 +210,7 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<(), Rel
     if !setting.active() {
         // A feed answer while off asks for nothing this server will run.
         state.relay_wake.take_fetch();
+        state.collapse.record_idle(Feed::Relay, &root, None);
         return Ok(());
     }
     fetch_if_rung(state, remote, &setting).await
@@ -211,7 +226,10 @@ async fn fetch_if_rung(
     let forced = state.relay_wake.take_fetch();
     let rung = remote.doorbell().await;
     let generation = match rung {
-        Ok(generation) => Some(generation),
+        Ok(generation) => {
+            state.collapse.record_success(Feed::Relay, &remote.root);
+            Some(generation)
+        }
         // The feed said actions wait; the doorbell can catch up later.
         Err(_) if forced => None,
         Err(error) => return Err(error),
@@ -244,6 +262,7 @@ async fn fetch(
 ) -> Result<(), RelayError> {
     loop {
         let actions = remote.actions(after).await?;
+        state.collapse.record_success(Feed::Relay, &remote.root);
         if actions.is_empty() {
             return Ok(());
         }
@@ -373,6 +392,7 @@ async fn post(
     result: &str,
 ) -> Result<(), RelayError> {
     remote.post_result(id, outcome, result).await?;
+    state.collapse.record_success(Feed::Relay, &remote.root);
     let root = remote.root.clone();
     with_store(state, move |store| store.posted(&root, id)).await
 }
@@ -498,6 +518,32 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| error.to_string())
 }
 
+fn record_failure(state: &ServerState, root: Option<&str>, error: &RelayError, retry_in: Duration) {
+    let (endpoint, status, message, no_credential) = match error {
+        RelayError::Store(message) => (root, None, message.as_str(), false),
+        RelayError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone", false),
+        RelayError::Send {
+            endpoint,
+            status,
+            message,
+            no_credential,
+        } => (
+            root.or(Some(endpoint.as_str())),
+            *status,
+            message.as_str(),
+            *no_credential,
+        ),
+    };
+    state.collapse.record_failure(
+        Feed::Relay,
+        endpoint,
+        status,
+        message,
+        retry_in,
+        no_credential,
+    );
+}
+
 /// Publishes a `relay` event for a failed step (R9, R14).
 fn report_failure(state: &ServerState, error: &RelayError, attempt: u32, retry_in: Duration) {
     let retry_in_ms = u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX);
@@ -508,6 +554,7 @@ fn report_failure(state: &ServerState, error: &RelayError, attempt: u32, retry_i
             endpoint,
             status,
             message,
+            ..
         } => (Some(endpoint.as_str()), *status, message.as_str()),
     };
     report(
@@ -530,8 +577,7 @@ fn report_stopped(state: &ServerState, endpoint: &str) {
             "status": "stopped",
             "endpoint": endpoint,
             "http_status": 410,
-            "error": "the endpoint's repository is archived or deleted; the relay calls it \
-                      no more until collapse changes or the server restarts",
+            "error": STOPPED_MESSAGE,
         }),
     );
 }

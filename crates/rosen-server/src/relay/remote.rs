@@ -125,6 +125,9 @@ impl Remote {
                 endpoint: self.root.clone(),
             },
             SendFailure::Failed { status, message } => {
+                let no_credential = self.root.starts_with("https://")
+                    && self.credential.is_none()
+                    && matches!(status, Some(401 | 403 | 404));
                 let message = match (&self.credential, status) {
                     (None, Some(401 | 403 | 404)) => format!(
                         "{message} (git's credential helper holds no token for {})",
@@ -136,6 +139,7 @@ impl Remote {
                     endpoint: url.to_owned(),
                     status,
                     message,
+                    no_credential,
                 }
             }
         }

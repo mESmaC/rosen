@@ -16,6 +16,7 @@ use super::store::{Cursor, StateStore};
 use super::unit::{Delivery, Section, Unit};
 use super::{change_doc, PushError};
 use super::{log_lines, machines_doc, review_docs};
+use crate::collapse_health::Feed;
 use crate::ledger_push::send::{self, Credential, SendFailure};
 use crate::ServerState;
 
@@ -54,6 +55,9 @@ impl Target {
         match failure {
             SendFailure::Gone => PushError::Gone { endpoint },
             SendFailure::Failed { status, message } => {
+                let no_credential = endpoint.starts_with("https://")
+                    && self.credential.is_none()
+                    && matches!(status, Some(401 | 403));
                 let message = match (&self.credential, status) {
                     (None, Some(401 | 403)) => {
                         format!("{message} (git's credential helper holds no token for {endpoint})")
@@ -64,6 +68,7 @@ impl Target {
                     endpoint,
                     status,
                     message,
+                    no_credential,
                 }
             }
         }
@@ -122,6 +127,9 @@ pub async fn send(
         let last = index + 1 == count;
         let through = if last { seq } else { cursor.delivered };
         let held = target.post(batch.body).await?;
+        state
+            .collapse
+            .record_success(Feed::StateFeed, &target.endpoint);
         if held < through {
             return Err(lost(target, cursor, through, held).await);
         }

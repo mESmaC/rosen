@@ -21,3 +21,4 @@
   It never starts a server, and succeeds when none is running.
   A stopping server refuses new work, answers the requests it is already running, a land included, and then exits.
 - `rosen server status` reports the git commit the server was built from and the path of its executable, since the version is the same for every commit, and whether HTTPS mirror reads are using proactive basic auth.
+  When the base names a `collapse` root, it also reports the health of the state feed, ledger push and action relay (`sending`, `current`, `failing`, `stopped`, `not_owner` or `no_credential`, with last success time, cursor, backlog, last error and next retry time).

@@ -12,6 +12,7 @@ pub mod cache;
 pub mod changes;
 pub mod channel;
 pub mod claims;
+pub mod collapse_health;
 pub mod conflict_resolve;
 pub mod conflicts;
 pub mod connection;
@@ -101,6 +102,8 @@ pub struct ServerState {
     /// Wakes the Collapse action relay when its setting changes or a state
     /// feed answer says actions wait (R14).
     pub relay_wake: Arc<relay::Wake>,
+    /// Live health of the Collapse state feed, ledger push and relay (#434).
+    pub collapse: collapse_health::Tracker,
     /// Shared requests and mirror/recovery work; an operator rewrite takes
     /// exclusive access so no operation can retain an obsolete base view.
     pub maintenance: tokio::sync::RwLock<()>,
@@ -141,6 +144,7 @@ impl ServerState {
             mirror_wake: tokio::sync::Notify::new(),
             mirror_proactive_auth: mirror::proactive_auth::ProactiveAuth::default(),
             relay_wake: Arc::default(),
+            collapse: collapse_health::Tracker::default(),
             maintenance: tokio::sync::RwLock::new(()),
             open_connections: AtomicU64::new(0),
             requests_in_flight: AtomicU64::new(0),

@@ -235,7 +235,8 @@ async fn dispatch_project(state: &Arc<ServerState>, request: Request) -> Outcome
         Request::Ping => Outcome::Ok(Response::Pong),
         Request::Status => {
             let relay = crate::relay::setting(state).await;
-            Outcome::Ok(Response::Status(Box::new(status(state, relay))))
+            let collapse = crate::collapse_health::snapshot(state).await;
+            Outcome::Ok(Response::Status(Box::new(status(state, relay, collapse))))
         }
         Request::Shutdown => {
             state.request_shutdown();
@@ -371,7 +372,11 @@ pub(crate) fn change_error_code(err: &ChangeError) -> ErrorCode {
     }
 }
 
-fn status(state: &ServerState, relay: Option<rosen_protocol::RelaySetting>) -> ServerStatus {
+fn status(
+    state: &ServerState,
+    relay: Option<rosen_protocol::RelaySetting>,
+    collapse: Option<rosen_protocol::CollapseHealth>,
+) -> ServerStatus {
     let network = state.network_status();
     ServerStatus {
         server: SERVER_NAME.to_owned(),
@@ -388,6 +393,7 @@ fn status(state: &ServerState, relay: Option<rosen_protocol::RelaySetting>) -> S
         mirror_owner: Some(crate::mirror::owner::is_owner(&state.config.data_dir)),
         mirror_proactive_auth: Some(state.mirror_proactive_auth.is_enabled()),
         relay,
+        collapse,
         commit: crate::BUILD_COMMIT.map(str::to_owned),
         executable: crate::executable(),
     }

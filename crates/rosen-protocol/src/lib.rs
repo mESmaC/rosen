@@ -12,6 +12,7 @@ pub use bisect::{
 };
 pub mod channel;
 pub mod claim;
+pub mod collapse;
 pub mod config;
 pub mod conflict;
 pub mod edits;
@@ -42,6 +43,7 @@ pub use claim::{
     ClaimFilter, ClaimHolder, ClaimKind, ClaimOutcome, ClaimRequest, OverlapAnswer, OverlapQuery,
     OverlapRecord, PathClaim, ReleaseOutcome, ShareOutcome, WaitOutcome, WokenWait,
 };
+pub use collapse::{CollapseHealth, FeedError, FeedHealth, FeedState, LedgerCursors};
 pub use config::{ConfigQuery, ConfigRecord};
 pub use conflict::{ConflictsResolved, ResolveConflicts, ResolvedPath};
 pub use edits::{EditRegions, EditSpan, PathEdit, Regions};

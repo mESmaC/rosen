@@ -34,6 +34,7 @@ pub use cursor::{Cursor, Cursors, Held, PerLedger};
 pub use entries::{rfc3339_utc, MAX_BODY, MAX_ENTRIES};
 pub use send::SendFailure;
 
+use crate::collapse_health::{Feed, Tracker};
 use crate::landing::Ledger;
 use crate::project_config;
 use crate::{ServerConfig, ServerState};
@@ -73,8 +74,12 @@ pub enum PushError {
         endpoint: String,
         status: Option<u16>,
         message: String,
+        no_credential: bool,
     },
 }
+
+const STOPPED_MESSAGE: &str = "the endpoint's repository is archived or deleted; nothing more is \
+                               sent until ledger_endpoint changes or the server restarts";
 
 /// What the task remembers between passes.
 #[derive(Debug, Default)]
@@ -110,6 +115,9 @@ pub async fn run(state: Arc<ServerState>) {
                 if failures > 0 {
                     report_recovered(&state, &pushed, failures);
                 }
+                if let Pushed::Current { endpoint, .. } = &pushed {
+                    state.collapse.record_idle(Feed::LedgerPush, endpoint, None);
+                }
                 failures = 0;
                 // Without an endpoint only a land can change the outcome.
                 let sending = matches!(pushed, Pushed::Current { .. });
@@ -117,6 +125,9 @@ pub async fn run(state: Arc<ServerState>) {
             }
             Err(PushError::Gone { endpoint }) => {
                 report_stopped(&state, &endpoint);
+                state
+                    .collapse
+                    .record_stopped(Feed::LedgerPush, &endpoint, STOPPED_MESSAGE);
                 session.stopped = Some(endpoint);
                 failures = 0;
                 wait_for_news(&state, &mut wake, seen, false).await
@@ -126,6 +137,7 @@ pub async fn run(state: Arc<ServerState>) {
                 failures = failures.saturating_add(1);
                 let delay = retry_delay(failures);
                 report_failure(&state, &error, failures, delay);
+                record_failure(&state, &error, delay);
                 sleep_unless_shutdown(&state, delay).await
             }
         };
@@ -148,7 +160,7 @@ pub async fn push_once(state: &ServerState, session: &mut Session) -> Result<Pus
         return Ok(Pushed::Stopped { endpoint });
     }
     session.stopped = None;
-    push_to(&state.config, &endpoint, session).await
+    push_to_with(&state.config, &endpoint, session, Some(&state.collapse)).await
 }
 
 /// Sends every entry `endpoint` lacks, one batch at a time. Public so a
@@ -158,32 +170,23 @@ pub async fn push_to(
     endpoint: &str,
     session: &mut Session,
 ) -> Result<Pushed, PushError> {
+    push_to_with(config, endpoint, session, None).await
+}
+
+async fn push_to_with(
+    config: &ServerConfig,
+    endpoint: &str,
+    session: &mut Session,
+    tracker: Option<&Tracker>,
+) -> Result<Pushed, PushError> {
     // Only the mirror owner sends ledger entries (#433): another server's
     // sequence numbers would collide and hide the owner's entries.
     if !crate::mirror::owner::is_owner_async(config.data_dir.clone()).await {
         session.reconciled = None;
         return Ok(Pushed::NotOwner);
     }
-    let fresh = !matches!(&session.reconciled, Some(known) if known.endpoint == endpoint);
-    let credential = match &session.reconciled {
-        Some(known) if !fresh => known.credential.clone(),
-        _ => send::credential(&config.data_dir, endpoint).await,
-    };
-    let target = Target::new(config, endpoint, credential);
-    let mut held = Held::default();
-    if fresh {
-        held = target.send(entries::empty_body()).await?;
-        target
-            .update(move |cursors| {
-                cursors.reconcile(&held);
-                true
-            })
-            .await?;
-        session.reconciled = Some(Reconciled {
-            endpoint: endpoint.to_owned(),
-            credential: target.credential.clone(),
-        });
-    }
+    let _in_flight = tracker.map(|t| t.begin(Feed::LedgerPush, endpoint));
+    let (target, mut held) = prepare_target(config, endpoint, session, tracker).await?;
     let mut sent = 0;
     loop {
         let batch = target.next_batch().await?;
@@ -200,6 +203,9 @@ pub async fn push_to(
             target.update(move |cursors| cursors.skip(&extent)).await?
         } else {
             held = target.send(batch.body).await?;
+            if let Some(t) = tracker {
+                t.record_success(Feed::LedgerPush, endpoint);
+            }
             sent += batch.count;
             target
                 .update(move |cursors| cursors.acknowledge(&extent, &held))
@@ -209,6 +215,38 @@ pub async fn push_to(
             return Err(target.failure(None, lost_batch(&extent, &held)));
         }
     }
+}
+
+async fn prepare_target(
+    config: &ServerConfig,
+    endpoint: &str,
+    session: &mut Session,
+    tracker: Option<&Tracker>,
+) -> Result<(Target, Held), PushError> {
+    let fresh = !matches!(&session.reconciled, Some(known) if known.endpoint == endpoint);
+    let credential = match &session.reconciled {
+        Some(known) if !fresh => known.credential.clone(),
+        _ => send::credential(&config.data_dir, endpoint).await,
+    };
+    let target = Target::new(config, endpoint, credential);
+    let mut held = Held::default();
+    if fresh {
+        held = target.send(entries::empty_body()).await?;
+        if let Some(t) = tracker {
+            t.record_success(Feed::LedgerPush, endpoint);
+        }
+        target
+            .update(move |cursors| {
+                cursors.reconcile(&held);
+                true
+            })
+            .await?;
+        session.reconciled = Some(Reconciled {
+            endpoint: endpoint.to_owned(),
+            credential: target.credential.clone(),
+        });
+    }
+    Ok((target, held))
 }
 
 /// One endpoint and what reaching it needs.
@@ -242,6 +280,9 @@ impl Target {
     }
 
     fn failure(&self, status: Option<u16>, message: String) -> PushError {
+        let no_credential = self.endpoint.starts_with("https://")
+            && self.credential.is_none()
+            && matches!(status, Some(401 | 403));
         let message = match (&self.credential, status) {
             (None, Some(401 | 403)) => format!(
                 "{message} (git's credential helper holds no token for {})",
@@ -253,6 +294,7 @@ impl Target {
             endpoint: self.endpoint.clone(),
             status,
             message,
+            no_credential,
         }
     }
 
@@ -389,6 +431,32 @@ pub(crate) fn retry_delay(failures: u32) -> Duration {
     RETRY_START.saturating_mul(1 << doublings).min(RETRY_CAP)
 }
 
+fn record_failure(state: &ServerState, error: &PushError, retry_in: Duration) {
+    let (endpoint, status, message, no_credential) = match error {
+        PushError::Store(message) => (None, None, message.as_str(), false),
+        PushError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone", false),
+        PushError::Send {
+            endpoint,
+            status,
+            message,
+            no_credential,
+        } => (
+            Some(endpoint.as_str()),
+            *status,
+            message.as_str(),
+            *no_credential,
+        ),
+    };
+    state.collapse.record_failure(
+        Feed::LedgerPush,
+        endpoint,
+        status,
+        message,
+        retry_in,
+        no_credential,
+    );
+}
+
 /// Publishes a `ledger_push` event for a failed pass (R13, R9).
 fn report_failure(state: &ServerState, error: &PushError, attempt: u32, retry_in: Duration) {
     let retry_in_ms = u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX);
@@ -399,6 +467,7 @@ fn report_failure(state: &ServerState, error: &PushError, attempt: u32, retry_in
             endpoint,
             status,
             message,
+            ..
         } => (Some(endpoint.as_str()), *status, message.as_str()),
     };
     let detail = json!({
@@ -419,8 +488,7 @@ fn report_stopped(state: &ServerState, endpoint: &str) {
         "status": "stopped",
         "endpoint": endpoint,
         "http_status": 410,
-        "error": "the endpoint's repository is archived or deleted; nothing more is sent \
-                  until ledger_endpoint changes or the server restarts",
+        "error": STOPPED_MESSAGE,
     });
     state.events.publish(EventKind::LedgerPush, None, detail);
 }

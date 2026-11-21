@@ -493,6 +493,11 @@ pub struct ServerStatus {
     /// The Collapse action relay's setting (R14). Absent on a cache daemon.
     #[serde(default)]
     pub relay: Option<crate::RelaySetting>,
+    /// Health of the Collapse state feed, ledger push and action relay (R9,
+    /// R10, #434). Absent when the base names no `collapse` root or on a cache
+    /// daemon.
+    #[serde(default)]
+    pub collapse: Option<crate::CollapseHealth>,
     /// The git commit the daemon was built from, lowercase hex. `server`
     /// carries the crate version, which every commit shares, so this is what
     /// tells one build from another. Absent when the build could not tell.

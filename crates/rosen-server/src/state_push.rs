@@ -45,6 +45,7 @@ use tokio::time::Instant;
 
 pub use store::Cursor;
 
+use crate::collapse_health::Feed as CollapseFeed;
 use crate::ledger_push::{retry_delay, send, sleep_unless_shutdown};
 use crate::ServerState;
 use dirty::Pending;
@@ -79,17 +80,31 @@ pub enum PushError {
         endpoint: String,
         status: Option<u16>,
         message: String,
+        no_credential: bool,
     },
 }
+
+const STOPPED_MESSAGE: &str = "the endpoint's repository is archived or deleted; nothing more is \
+                               sent until collapse changes or the server restarts";
 
 /// What one step decided.
 enum Step {
     /// Nothing to send before `until`, or before the next event.
-    Wait { until: Option<Instant> },
+    Wait {
+        until: Option<Instant>,
+        endpoint: String,
+        delivered: u64,
+        empty: bool,
+    },
     /// No endpoint, or a stopped one: only a land can change that.
     WaitForLand,
     /// A pass was sent; look again at once.
-    Sent,
+    Sent {
+        endpoint: String,
+        sent: usize,
+        delivered: u64,
+        scanned_to: u64,
+    },
 }
 
 /// What the base's configuration asks the feed to do.
@@ -129,38 +144,79 @@ pub async fn run(state: Arc<ServerState>) {
     loop {
         // Events after this point wake the next wait.
         let seen = *wake.borrow_and_update();
-        let keep_going = match step(&state, &mut session).await {
-            Ok(step) => {
-                if failures > 0 && matches!(step, Step::Sent | Step::Wait { .. }) {
-                    report(
-                        &state,
-                        json!({ "status": "recovered", "after_failures": failures }),
-                    );
-                    failures = 0;
-                }
-                match step {
-                    Step::Sent => true,
-                    Step::Wait { until } => wait_for_news(&state, &mut wake, until).await,
-                    Step::WaitForLand => wait_for_land(&state, &mut wake, seen).await,
-                }
-            }
-            Err(PushError::Gone { endpoint }) => {
-                report_stopped(&state, &endpoint);
-                session.stopped = Some(endpoint);
-                session.target = None;
-                failures = 0;
-                wait_for_land(&state, &mut wake, seen).await
-            }
-            Err(error) => {
-                session.target = None;
-                failures = failures.saturating_add(1);
-                let delay = retry_delay(failures);
-                report_failure(&state, &error, failures, delay);
-                sleep_unless_shutdown(&state, delay).await
-            }
-        };
-        if !keep_going {
+        let outcome = step(&state, &mut session).await;
+        if !finish_step(
+            &state,
+            &mut session,
+            &mut wake,
+            &mut failures,
+            seen,
+            outcome,
+        )
+        .await
+        {
             return;
+        }
+    }
+}
+
+async fn finish_step(
+    state: &Arc<ServerState>,
+    session: &mut Session,
+    wake: &mut watch::Receiver<u64>,
+    failures: &mut u32,
+    seen: u64,
+    outcome: Result<Step, PushError>,
+) -> bool {
+    match outcome {
+        Ok(Step::Sent {
+            endpoint,
+            sent,
+            delivered,
+            scanned_to,
+        }) => {
+            if *failures > 0 {
+                report_recovered(state, &endpoint, sent, delivered, *failures);
+                *failures = 0;
+            }
+            state
+                .collapse
+                .set_pending(CollapseFeed::StateFeed, &endpoint, false, Some(scanned_to));
+            true
+        }
+        Ok(Step::Wait {
+            until,
+            endpoint,
+            delivered,
+            empty,
+        }) => {
+            if *failures > 0 && empty {
+                report_recovered(state, &endpoint, 0, delivered, *failures);
+                *failures = 0;
+            }
+            wait_for_news(state, wake, until).await
+        }
+        Ok(Step::WaitForLand) => {
+            *failures = 0;
+            wait_for_land(state, wake, seen).await
+        }
+        Err(PushError::Gone { endpoint }) => {
+            report_stopped(state, &endpoint);
+            state
+                .collapse
+                .record_stopped(CollapseFeed::StateFeed, &endpoint, STOPPED_MESSAGE);
+            session.stopped = Some(endpoint);
+            session.target = None;
+            *failures = 0;
+            wait_for_land(state, wake, seen).await
+        }
+        Err(error) => {
+            session.target = None;
+            *failures = failures.saturating_add(1);
+            let delay = retry_delay(*failures);
+            report_failure(state, &error, *failures, delay);
+            record_failure(state, &error, delay);
+            sleep_unless_shutdown(state, delay).await
         }
     }
 }
@@ -182,6 +238,7 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<Step, P
     }
     session.stopped = None;
     if !matches!(&session.target, Some((target, _)) if target.endpoint == endpoint) {
+        let _in_flight = state.collapse.begin(CollapseFeed::StateFeed, &endpoint);
         let (target, cursor) = reconcile(state, &endpoint).await?;
         session.pending = Pending::everything(cursor.scanned);
         session.target = Some((target, cursor));
@@ -191,13 +248,34 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<Step, P
     let check = session
         .machines_checked
         .map_or_else(Instant::now, |at| at + MACHINE_CHECK);
+    let delivered = session
+        .target
+        .as_ref()
+        .map_or(0, |(_, cursor)| cursor.delivered);
     if session.pending.is_empty() {
-        return Ok(Step::Wait { until: Some(check) });
+        state.collapse.set_pending(
+            CollapseFeed::StateFeed,
+            &endpoint,
+            false,
+            Some(session.pending.scanned_to),
+        );
+        return Ok(Step::Wait {
+            until: Some(check),
+            endpoint,
+            delivered,
+            empty: true,
+        });
     }
     let due = due(&session.pending, session.last_send);
     if Instant::now() < due {
+        state
+            .collapse
+            .set_pending(CollapseFeed::StateFeed, &endpoint, true, None);
         return Ok(Step::Wait {
             until: Some(due.min(check)),
+            endpoint,
+            delivered,
+            empty: false,
         });
     }
     send_pass(state, session, channel).await
@@ -214,9 +292,16 @@ async fn send_pass(
         .presence_sent
         .is_none_or(|at| at.elapsed() >= PRESENCE_REFRESH);
     let (target, cursor) = session.target.as_mut().expect("reconciled above");
+    let endpoint = target.endpoint.clone();
+    state
+        .collapse
+        .set_pending(CollapseFeed::StateFeed, &endpoint, true, None);
+    let _in_flight = state.collapse.begin(CollapseFeed::StateFeed, &endpoint);
     let delivered = pass::send(state, target, &session.pending, cursor, channel).await?;
+    let scanned_to = session.pending.scanned_to;
+    let cursor_delivered = cursor.delivered;
     session.pending = Pending {
-        scanned_to: session.pending.scanned_to,
+        scanned_to,
         ..Pending::default()
     };
     if delivered.count > 0 {
@@ -225,7 +310,12 @@ async fn send_pass(
     if delivered.presence {
         session.presence_sent = Some(Instant::now());
     }
-    Ok(Step::Sent)
+    Ok(Step::Sent {
+        endpoint,
+        sent: delivered.count,
+        delivered: cursor_delivered,
+        scanned_to,
+    })
 }
 
 /// Compares the machine list with what was last seen, at most every
@@ -323,6 +413,9 @@ async fn reconcile(
         relay: Arc::clone(&state.relay_wake),
     };
     let held = target.post(batch::probe()).await?;
+    state
+        .collapse
+        .record_success(CollapseFeed::StateFeed, endpoint);
     let (metadata, endpoint) = (state.config.metadata_path(), endpoint.to_owned());
     let tip = state.events.announced_seq();
     let cursor = blocking(move || {
@@ -409,6 +502,32 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| PushError::Store(error.to_string()))
 }
 
+fn record_failure(state: &ServerState, error: &PushError, retry_in: Duration) {
+    let (endpoint, status, message, no_credential) = match error {
+        PushError::Store(message) => (None, None, message.as_str(), false),
+        PushError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone", false),
+        PushError::Send {
+            endpoint,
+            status,
+            message,
+            no_credential,
+        } => (
+            Some(endpoint.as_str()),
+            *status,
+            message.as_str(),
+            *no_credential,
+        ),
+    };
+    state.collapse.record_failure(
+        CollapseFeed::StateFeed,
+        endpoint,
+        status,
+        message,
+        retry_in,
+        no_credential,
+    );
+}
+
 /// Publishes a `state_push` event for a failed pass (R9).
 fn report_failure(state: &ServerState, error: &PushError, attempt: u32, retry_in: Duration) {
     let retry_in_ms = u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX);
@@ -419,6 +538,7 @@ fn report_failure(state: &ServerState, error: &PushError, attempt: u32, retry_in
             endpoint,
             status,
             message,
+            ..
         } => (Some(endpoint.as_str()), *status, message.as_str()),
     };
     report(
@@ -443,8 +563,28 @@ fn report_stopped(state: &ServerState, endpoint: &str) {
             "status": "stopped",
             "endpoint": endpoint,
             "http_status": 410,
-            "error": "the endpoint's repository is archived or deleted; nothing more is sent \
-                      until collapse changes or the server restarts",
+            "error": STOPPED_MESSAGE,
+        }),
+    );
+}
+
+/// Publishes a `state_push` event when a pass succeeds after failures,
+/// matching `ledger_push`'s `sent`-after-failures event (R9, #434).
+fn report_recovered(
+    state: &ServerState,
+    endpoint: &str,
+    sent: usize,
+    delivered: u64,
+    failures: u32,
+) {
+    report(
+        state,
+        json!({
+            "status": "sent",
+            "endpoint": endpoint,
+            "sent": sent,
+            "delivered": delivered,
+            "after_failures": failures,
         }),
     );
 }

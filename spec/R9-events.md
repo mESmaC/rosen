@@ -62,8 +62,8 @@
   - The server keeps a fingerprint of each document it delivered and skips a dirty document the endpoint already holds.
   - The endpoint keeps the newer of two copies by `seq`, so a repeated batch changes nothing, and answers `{"highest_sequence":N}`.
     On start and after a failure the server first sends an empty batch to read that, resumes from it when it is less than was delivered, and then resends every live document.
-  - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `state_push` event; the first success after failures publishes one too.
-    HTTP 410 stops sending until `collapse` changes or the server restarts.
+  - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `state_push` event with `status: "failed"`; the first success after failures publishes one with `status: "sent"`, `sent`, `delivered` and `after_failures`, matching `ledger_push` (R13).
+    HTTP 410 publishes `status: "stopped"` and stops sending until `collapse` changes or the server restarts.
   - Receipt signatures, machine credentials and their hashes, join keys, network addresses, certificate fingerprints and the data directory are never sent.
     Messages and piece claims are sent only as channel lines with `collapse_channel = true`.
   - Without `collapse`, nothing is sent.

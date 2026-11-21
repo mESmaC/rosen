@@ -1,7 +1,9 @@
 //! `rosen server start|stop|status|relay` and `rosen events`: the commands that
 //! talk to the daemon directly rather than through a project operation.
 
-use rosen_client::protocol::{Event, RelayKind, RelaySetting, ServerStatus};
+use rosen_client::protocol::{
+    CollapseHealth, Event, FeedHealth, FeedState, RelayKind, RelaySetting, ServerStatus,
+};
 use rosen_client::{Client, Endpoint, Error};
 use rosen_core::AgentId;
 use serde_json::json;
@@ -80,63 +82,153 @@ pub async fn stop(json: bool, endpoint: &Endpoint) -> Result<Succeeded, Error> {
 
 fn print_status(json: bool, status: &ServerStatus) {
     if json {
-        let body = json!({
-            "schema": STATUS_SCHEMA,
-            "running": true,
-            "server": status.server,
-            "protocol_version": status.protocol_version,
-            "pid": status.pid,
-            "endpoint": status.endpoint,
-            "data_dir": status.data_dir,
-            "uptime_ms": status.uptime_ms,
-            "open_connections": status.open_connections,
-            "last_event": status.last_event,
-            "listen": status.listen,
-            "fingerprint": status.fingerprint,
-            "upstream": status.upstream,
-            "mirror_owner": status.mirror_owner,
-            "mirror_proactive_auth": status.mirror_proactive_auth,
-            "relay": status.relay,
-            "commit": status.commit,
-            "executable": status.executable,
-        });
-        println!("{body}");
+        print_status_json(status);
     } else {
-        println!("running: {} (pid {})", status.server, status.pid);
-        if let Some(commit) = &status.commit {
-            println!("commit: {commit}");
-        }
-        if let Some(executable) = &status.executable {
-            println!("executable: {executable}");
-        }
-        println!("endpoint: {}", status.endpoint);
-        println!("data dir: {}", status.data_dir);
-        println!("protocol: v{}", status.protocol_version);
-        println!("uptime: {:.1}s", status.uptime_ms as f64 / 1000.0);
-        println!("connections: {}", status.open_connections);
-        println!("last event: {}", status.last_event);
-        if let Some(listen) = &status.listen {
-            println!("network: {listen}");
-        }
-        if let Some(fingerprint) = &status.fingerprint {
-            println!("fingerprint: {fingerprint}");
-        }
-        if let Some(upstream) = &status.upstream {
-            println!("cache for: {upstream}");
-        }
-        if let Some(line) = mirror_owner_line(status.mirror_owner) {
-            println!("{line}");
-        }
-        if status.mirror_proactive_auth == Some(true) {
-            println!("mirror reads: proactive basic auth (http.proactiveAuth=basic)");
-        }
-        if let Some(relay) = &status.relay {
-            println!(
-                "collapse relay: {}",
-                status_relay_line(relay, status.mirror_owner)
-            );
-        }
+        print_status_text(status);
     }
+}
+
+fn print_status_json(status: &ServerStatus) {
+    let body = json!({
+        "schema": STATUS_SCHEMA,
+        "running": true,
+        "server": status.server,
+        "protocol_version": status.protocol_version,
+        "pid": status.pid,
+        "endpoint": status.endpoint,
+        "data_dir": status.data_dir,
+        "uptime_ms": status.uptime_ms,
+        "open_connections": status.open_connections,
+        "last_event": status.last_event,
+        "listen": status.listen,
+        "fingerprint": status.fingerprint,
+        "upstream": status.upstream,
+        "mirror_owner": status.mirror_owner,
+        "mirror_proactive_auth": status.mirror_proactive_auth,
+        "relay": status.relay,
+        "collapse": status.collapse,
+        "commit": status.commit,
+        "executable": status.executable,
+    });
+    println!("{body}");
+}
+
+fn print_status_text(status: &ServerStatus) {
+    println!("running: {} (pid {})", status.server, status.pid);
+    if let Some(commit) = &status.commit {
+        println!("commit: {commit}");
+    }
+    if let Some(executable) = &status.executable {
+        println!("executable: {executable}");
+    }
+    println!("endpoint: {}", status.endpoint);
+    println!("data dir: {}", status.data_dir);
+    println!("protocol: v{}", status.protocol_version);
+    println!("uptime: {:.1}s", status.uptime_ms as f64 / 1000.0);
+    println!("connections: {}", status.open_connections);
+    println!("last event: {}", status.last_event);
+    if let Some(listen) = &status.listen {
+        println!("network: {listen}");
+    }
+    if let Some(fingerprint) = &status.fingerprint {
+        println!("fingerprint: {fingerprint}");
+    }
+    if let Some(upstream) = &status.upstream {
+        println!("cache for: {upstream}");
+    }
+    if let Some(line) = mirror_owner_line(status.mirror_owner) {
+        println!("{line}");
+    }
+    if status.mirror_proactive_auth == Some(true) {
+        println!("mirror reads: proactive basic auth (http.proactiveAuth=basic)");
+    }
+    if let Some(relay) = &status.relay {
+        println!(
+            "collapse relay: {}",
+            status_relay_line(relay, status.mirror_owner)
+        );
+    }
+    if let Some(collapse) = &status.collapse {
+        print_collapse_health(collapse);
+    }
+}
+
+fn print_collapse_health(collapse: &CollapseHealth) {
+    println!(
+        "collapse state feed: {}",
+        feed_health_line("seq", &collapse.state_feed)
+    );
+    println!(
+        "collapse ledger push: {}",
+        feed_health_line("seq", &collapse.ledger_push)
+    );
+    println!(
+        "collapse action relay: {}",
+        feed_health_line("action", &collapse.relay)
+    );
+}
+
+fn feed_health_line(cursor_label: &str, health: &FeedHealth) -> String {
+    let label = match health.state {
+        FeedState::Sending => "sending",
+        FeedState::Current => "current",
+        FeedState::Failing => "failing",
+        FeedState::Stopped => "stopped",
+        FeedState::NotOwner => "not owner",
+        FeedState::NoCredential => "no credential",
+    };
+    let mut parts = Vec::new();
+    if let Some(code) = health.last_error.as_ref().and_then(|err| err.http_status) {
+        parts.push(format!("HTTP {code}"));
+    }
+    if let Some(ledgers) = health.ledger_cursors.filter(|_| health.cursor.is_some()) {
+        parts.push(format!(
+            "discovery {}, past_work {}",
+            ledgers.discovery, ledgers.past_work
+        ));
+    } else if let Some(cursor) = health.cursor {
+        parts.push(format!("{cursor_label} {cursor}"));
+    }
+    if let Some(gen) = health.doorbell_generation {
+        parts.push(format!("gen {gen}"));
+    }
+    if health.backlog > 0 {
+        parts.push(format!("backlog {}", health.backlog));
+    }
+    if let Some(at) = health.last_success_at {
+        parts.push(format!("last ok {}", utc_second(at)));
+    }
+    if let Some(at) = health.next_retry_at {
+        parts.push(format!("retry {}", utc_second(at)));
+    }
+    let head = if parts.is_empty() {
+        label.to_owned()
+    } else {
+        format!("{label} ({})", parts.join(", "))
+    };
+    match &health.last_error {
+        Some(error) => {
+            let message = error
+                .message
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{head}: {message}")
+        }
+        None => head,
+    }
+}
+
+fn utc_second(millis: i64) -> String {
+    let seconds = millis.div_euclid(1000);
+    let of_day = seconds.rem_euclid(86_400);
+    format!(
+        "{} {:02}:{:02}:{:02} UTC",
+        crate::history_cmd::utc_date(seconds),
+        of_day / 3600,
+        of_day % 3600 / 60,
+        of_day % 60
+    )
 }
 
 fn mirror_owner_line(mirror_owner: Option<bool>) -> Option<&'static str> {
@@ -337,6 +429,49 @@ mod tests {
         assert_eq!(
             status_relay_line(&setting, Some(true)),
             "runs config, approve"
+        );
+    }
+
+    /// Risk (#434): a revoked Collapse token must show HTTP 401 and the time
+    /// of the last success on one line, then return cleanly to current.
+    #[test]
+    fn feed_health_line_reports_401_last_ok_and_current() {
+        use rosen_client::protocol::FeedError;
+        let failing = FeedHealth {
+            state: FeedState::Failing,
+            last_success_at: Some(1_700_000_000_000),
+            cursor: Some(42),
+            ledger_cursors: None,
+            doorbell_generation: None,
+            backlog: 3,
+            last_error: Some(FeedError {
+                http_status: Some(401),
+                message: "HTTP 401: revoked\ntoken".into(),
+                at: 1_700_000_060_000,
+            }),
+            next_retry_at: Some(1_700_000_065_000),
+        };
+        let line = feed_health_line("seq", &failing);
+        assert!(!line.contains('\n'), "{line}");
+        assert!(
+            line.contains("failing (HTTP 401, seq 42, backlog 3, last ok 2023-11-14 22:13:20 UTC"),
+            "{line}"
+        );
+        assert!(line.contains("retry 2023-11-14 22:14:25 UTC"), "{line}");
+
+        let current = FeedHealth {
+            state: FeedState::Current,
+            last_success_at: Some(1_700_000_120_000),
+            cursor: Some(45),
+            ledger_cursors: None,
+            doorbell_generation: None,
+            backlog: 0,
+            last_error: None,
+            next_retry_at: None,
+        };
+        assert_eq!(
+            feed_health_line("seq", &current),
+            "current (seq 45, last ok 2023-11-14 22:15:20 UTC)"
         );
     }
 }
