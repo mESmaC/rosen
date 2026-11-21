@@ -7,6 +7,6 @@
   With `--full` or the global `--json` flag, the command inherits the caller's output streams directly.
   While waiting it reports its class, thread allocation, memory budget and priority alongside the runs ahead, plus current available memory, the reserve, the current reservations and whether memory is holding it back.
   After the first progress message it reports again only when the running commands or the number of waiting commands ahead change.
-  After 5 minutes of waiting, and every 5 minutes after, it also says what holds it: a slot, more important runs, or the cores or memory it needs against what is available, the turns holding them and the waiter it keeps room for.
+  After 5 minutes of waiting, and every 5 minutes after, it also says what holds it: a slot, more important runs, or the cores or memory it needs against what is available, the turns holding them and the waiter it keeps room for, reporting an idle stall (with any `reserve-gib` setting that would unblock it) when no turn is running.
   A checker takes a turn through `rosen-client` for the whole of one check.
   If the queue cannot grant admission because it cannot be opened or read, the command exits with an error.

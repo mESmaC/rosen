@@ -45,8 +45,9 @@ pub fn physical_memory() -> Option<u64> {
     None
 }
 
-/// Available memory in bytes, also limited by free system commit on Windows.
-/// `None` means this OS cannot report it; it never means zero free bytes.
+/// Available memory in bytes, including reclaimable file cache on Windows and
+/// capped by free system commit. `None` means this OS cannot report it; it
+/// never means zero free bytes.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 pub fn available_memory() -> Option<u64> {
@@ -62,7 +63,15 @@ pub fn available_memory() -> Option<u64> {
         return None;
     }
     let commit = status.CommitLimit.saturating_sub(status.CommitTotal);
-    let pages = commit.min(status.PhysicalAvailable);
+    // `PhysicalAvailable` is standby + free + zero pages; `SystemCache` is
+    // standby + the system file cache working set, which Windows trims under
+    // pressure (a large ReFS volume can hold tens of GiB there). Taking their
+    // max counts that reclaimable cache without double-counting standby pages.
+    let physical = status
+        .PhysicalAvailable
+        .max(status.SystemCache)
+        .min(status.PhysicalTotal);
+    let pages = commit.min(physical);
     u64::try_from(pages)
         .ok()?
         .checked_mul(status.PageSize as u64)

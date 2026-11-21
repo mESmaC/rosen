@@ -172,7 +172,7 @@ fn machine_cores() -> usize {
     std::thread::available_parallelism().map_or(1, |cores| cores.get())
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RunBudget {
     pub jobs: usize,
     pub memory: u64,
@@ -228,13 +228,80 @@ impl MemoryHeadroom {
         })
     }
 
+    /// Whether a single turn of `bytes` fits when no turn is running: uses the
+    /// 4 GiB floor instead of a larger reserve, so the reserve throttles
+    /// concurrency without deadlocking an idle machine.
+    pub fn fits_idle(self, bytes: u64) -> bool {
+        self.available
+            .is_some_and(|available| available >= MEMORY_FLOOR.saturating_add(bytes))
+    }
+
+    /// Highest whole-GiB `reserve-gib` setting (`>= 4`) that would fit
+    /// `budget_bytes` under the concurrency reserve, or `None` when it already
+    /// fits or available memory is missing or below `budget_bytes + 4 GiB`.
+    pub fn suggested_reserve_gib(self, budget_bytes: u64) -> Option<u64> {
+        if self.fits(budget_bytes) {
+            return None;
+        }
+        let max_gib = self.available?.checked_sub(budget_bytes)? / GIB;
+        (max_gib >= MEMORY_FLOOR / GIB).then_some(max_gib)
+    }
+
+    fn reserve_for(self, idle_head: bool) -> u64 {
+        if idle_head {
+            MEMORY_FLOOR
+        } else {
+            self.reserve.unwrap_or(MEMORY_FLOOR)
+        }
+    }
+
     /// Whether `bytes` would fit once live turns charged `running` end and
-    /// give back at most what they were charged.
+    /// give back at most what they were charged. With nothing running, that
+    /// head waiter only needs the floor, not the concurrency reserve.
     fn fits_once_drained(self, running: u64, bytes: u64) -> bool {
         let available = self
             .available
             .map(|available| available.saturating_add(running));
-        Self { available, ..self }.fits(bytes)
+        Self { available, ..self }.fits_idle(bytes)
+    }
+}
+
+/// Reported when the head waiter has waited at least [`STARVING`] while no
+/// turn is running (SPEC R3 "Memory reserve").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdleStall {
+    pub class: RunClass,
+    pub waited: Duration,
+    pub waiting_count: usize,
+    pub budget: RunBudget,
+    pub available: Option<u64>,
+    pub reserve: Option<u64>,
+    pub reason: Option<String>,
+    /// Exact `reserve-gib` setting (`>= 4`) that would admit the head waiter
+    /// under the concurrency reserve, when lowering the reserve would help.
+    pub suggested_reserve_gib: Option<u64>,
+}
+
+impl IdleStall {
+    pub fn summary(&self) -> String {
+        let detail = self.reason.clone().unwrap_or_else(|| {
+            let available = self
+                .available
+                .map_or_else(|| "no reading available".to_owned(), gib);
+            format!(
+                "needs {}, {available} available",
+                gib(MEMORY_FLOOR.saturating_add(self.budget.memory))
+            )
+        });
+        let fix = self.suggested_reserve_gib.map_or_else(String::new, |gib| {
+            format!("; unblock with `rosen run --slots reserve-gib={gib}`")
+        });
+        format!(
+            "run queue stalled with no turn running ({} waiting); head {} waiter waited {}s ({detail}){fix}",
+            self.waiting_count,
+            self.class.name(),
+            self.waited.as_secs(),
+        )
     }
 }
 
@@ -371,11 +438,59 @@ impl RunQueue {
         Ok(line)
     }
 
+    /// Reports an idle stall when no turn is running and the head waiter has
+    /// waited at least [`STARVING`].
+    pub fn idle_stall(&self) -> io::Result<Option<IdleStall>> {
+        self.idle_stall_on(machine_cores(), now_nanos(), self.memory_headroom())
+    }
+
+    fn idle_stall_on(
+        &self,
+        cores: usize,
+        now: u128,
+        memory: MemoryHeadroom,
+    ) -> io::Result<Option<IdleStall>> {
+        if !self.running()?.is_empty() {
+            return Ok(None);
+        }
+        let waiting = self.waiting()?;
+        let Some((ticket, name)) = waiting
+            .iter()
+            .filter_map(|(name, _)| Some((Ticket::parse(name)?, name)))
+            .min_by_key(|(ticket, _)| ticket.precedence(now))
+        else {
+            return Ok(None);
+        };
+        let waited = nanos_to_duration(now.saturating_sub(ticket.arrived));
+        let reason = std::fs::read_to_string(self.dir.join(reason_name(name)))
+            .ok()
+            .filter(|reason| !reason.is_empty());
+        if waited < STARVING && reason.is_none() {
+            return Ok(None);
+        }
+        let budget = admitted_budget(ticket.class, ticket.requested, cores);
+        Ok(Some(IdleStall {
+            class: ticket.class,
+            waited,
+            waiting_count: waiting.len(),
+            budget,
+            available: memory.available,
+            reserve: memory.reserve,
+            reason,
+            suggested_reserve_gib: memory.suggested_reserve_gib(budget.memory),
+        }))
+    }
+
     /// The live tickets' file names with their classes, in queue order. A
     /// ticket whose owner died is removed on the way.
     fn waiting(&self) -> io::Result<Vec<(String, RunClass)>> {
         let mut tickets = Vec::new();
-        for entry in std::fs::read_dir(&self.dir)? {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(tickets),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
             let name = entry?.file_name().to_string_lossy().into_owned();
             let Some(class) = ticket_class(&name) else {
                 self.remove_abandoned(&name);
@@ -751,6 +866,14 @@ impl Waiter {
             reserved.charge(wanted);
         }
         reserved.charge(budget);
+        // When no turn is running and nothing startable precedes this waiter,
+        // admit against the floor so a larger reserve never deadlocks idle.
+        let idle_head = running.is_empty() && ahead.is_none();
+        let fits_memory = if idle_head {
+            memory.fits_idle(reserved.memory)
+        } else {
+            memory.fits(reserved.memory)
+        };
         // Live turns can still grow to their caps. Charging the full caps
         // also covers a just-admitted command that has not started yet.
         let short = if reserved.jobs > cores {
@@ -758,10 +881,9 @@ impl Waiter {
                 "waiting for {} cores, {cores} on this machine",
                 reserved.jobs
             )
-        } else if !memory.fits(reserved.memory) {
+        } else if !fits_memory {
             let needed = memory
-                .reserve
-                .unwrap_or(MEMORY_FLOOR)
+                .reserve_for(idle_head)
                 .saturating_add(reserved.memory);
             let available = memory.available.map_or_else(
                 || "no reading available".to_owned(),
@@ -958,6 +1080,12 @@ fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos())
+}
+
+fn nanos_to_duration(nanos: u128) -> Duration {
+    let secs = u64::try_from(nanos / 1_000_000_000).unwrap_or(u64::MAX);
+    let subsec = (nanos % 1_000_000_000) as u32;
+    Duration::new(secs, subsec)
 }
 
 /// The budget a waiter is admitted and charged on: what its caller asked

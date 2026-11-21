@@ -139,7 +139,9 @@ fn turn(class: RunClass, requested: Option<RunBudget>, note: &str) -> io::Result
         // A long wait says what holds it, since the runs ahead may not change.
         if Instant::now() >= next_starving_report {
             next_starving_report = Instant::now() + STARVING;
-            if let Some(reason) = waiter.waiting_for() {
+            if let Ok(Some(stall)) = queue.idle_stall() {
+                eprintln!("rosen run: {}", stall.summary());
+            } else if let Some(reason) = waiter.waiting_for() {
                 eprintln!(
                     "rosen run: waited {}s; {}: {reason}",
                     started.elapsed().as_secs(),
@@ -322,6 +324,9 @@ pub fn slots(settings: &[String]) -> io::Result<()> {
         );
     }
     println!("{}", memory_resources(&queue, None));
+    if let Ok(Some(stall)) = queue.idle_stall() {
+        println!("stall: {}", stall.summary());
+    }
     // Waiters held past `STARVING` say what they wait for.
     for entry in queue.line().unwrap_or_default() {
         if let Some(reason) = entry.waiting_for {
@@ -358,7 +363,10 @@ fn memory_resources(queue: &RunQueue, waiting: Option<RunBudget>) -> String {
     };
     let reserved = queue.running_budget().ok().map(|budget| budget.memory);
     let state = match (waiting, reserved) {
-        (Some(budget), Some(reserved)) if !memory.fits(reserved.saturating_add(budget.memory)) => {
+        (Some(budget), Some(0)) if !memory.fits_idle(budget.memory) => "; waiting for memory",
+        (Some(budget), Some(reserved))
+            if reserved > 0 && !memory.fits(reserved.saturating_add(budget.memory)) =>
+        {
             "; waiting for memory"
         }
         _ => "",

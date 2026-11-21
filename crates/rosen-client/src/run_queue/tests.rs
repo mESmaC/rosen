@@ -2,15 +2,22 @@
 
 use std::time::Instant;
 
-use super::{MemoryHeadroom, RunBudget, RunClass, RunQueue, Turn, Waiter, GIB, MEMORY_FLOOR};
+use super::{
+    now_nanos, MemoryHeadroom, RunBudget, RunClass, RunQueue, Turn, Waiter, GIB, MEMORY_FLOOR,
+    STARVING,
+};
 
-fn admit(waiter: &Waiter, cores: usize, available: u64) -> Option<Turn> {
+fn admit_with_reserve(waiter: &Waiter, cores: usize, available: u64, reserve: u64) -> Option<Turn> {
     waiter
         .try_start_on(cores, || MemoryHeadroom {
             available: Some(available),
-            reserve: Some(MEMORY_FLOOR),
+            reserve: Some(reserve),
         })
         .unwrap()
+}
+
+fn admit(waiter: &Waiter, cores: usize, available: u64) -> Option<Turn> {
+    admit_with_reserve(waiter, cores, available, MEMORY_FLOOR)
 }
 
 fn start(waiter: &Waiter) -> Option<Turn> {
@@ -174,4 +181,78 @@ fn a_waiter_blocked_on_memory_keeps_its_room_from_later_turns() {
     drop(verify);
     let _small = admit(&small, 16, available).expect("the small turn fits beside verify");
     drop(verifying);
+}
+
+// Risk: a large RAM-based reserve stops the only queued run when available
+// memory is below `reserve + budget` but above `MEMORY_FLOOR + budget`,
+// deadlocking an idle machine (mESmaC/rosen#431).
+#[test]
+fn idle_head_waiter_uses_floor_while_concurrency_keeps_reserve() {
+    let dir = tempfile::tempdir().unwrap();
+    let queue = RunQueue::at(dir.path());
+    let reserve = 12 * GIB;
+    let available = 14 * GIB;
+
+    let build = queue.wait(RunClass::Build, "head build").unwrap();
+    let mut small = queue
+        .wait_with(RunClass::Prepare, RunBudget::new(1, 1), "aged prepare")
+        .unwrap();
+    small.since = Instant::now()
+        .checked_sub(RunClass::Prepare.patience())
+        .unwrap();
+    assert!(
+        admit_with_reserve(&small, 16, available, reserve).is_none(),
+        "an aged waiter behind the head still keeps room for the head waiter"
+    );
+    assert!(
+        admit_with_reserve(&build, 16, MEMORY_FLOOR + 6 * GIB - 1, reserve).is_none(),
+        "even when idle, the 4 GiB floor still holds"
+    );
+    let running = admit_with_reserve(&build, 16, available, reserve)
+        .expect("head waiter starts idle when available covers budget + floor");
+    drop(build);
+
+    let second = queue.wait(RunClass::Build, "second build").unwrap();
+    assert!(
+        admit_with_reserve(&second, 16, available, reserve).is_none(),
+        "a second concurrent turn still obeys the full reserve"
+    );
+    drop(running);
+    assert!(admit_with_reserve(&second, 16, available, reserve).is_some());
+}
+
+// Risk: an idle machine stuck past STARVING with no turn running must surface
+// as a stall with the exact reserve-gib setting that would unblock it
+// (mESmaC/rosen#431).
+#[test]
+fn idle_stall_reports_starving_head_waiter_and_suggested_reserve() {
+    let dir = tempfile::tempdir().unwrap();
+    let queue = RunQueue::at(dir.path());
+    let headroom = MemoryHeadroom {
+        available: Some(14 * GIB + GIB / 2),
+        reserve: Some(12 * GIB),
+    };
+    let head = queue.wait(RunClass::Build, "head").unwrap();
+    let now = now_nanos();
+    assert!(queue.idle_stall_on(16, now, headroom).unwrap().is_none());
+
+    let stalled = queue
+        .idle_stall_on(16, now + STARVING.as_nanos(), headroom)
+        .unwrap()
+        .expect("head waiter past STARVING with nothing running reports a stall");
+    assert_eq!(stalled.class, RunClass::Build);
+    assert_eq!(stalled.suggested_reserve_gib, Some(8));
+    assert!(stalled.summary().contains("reserve-gib=8"));
+
+    let too_low = MemoryHeadroom {
+        available: Some(9 * GIB),
+        reserve: Some(12 * GIB),
+    };
+    assert_eq!(too_low.suggested_reserve_gib(6 * GIB), None);
+
+    let _turn = admit_with_reserve(&head, 16, 14 * GIB, 12 * GIB).unwrap();
+    assert!(queue
+        .idle_stall_on(16, now + STARVING.as_nanos(), headroom)
+        .unwrap()
+        .is_none());
 }
