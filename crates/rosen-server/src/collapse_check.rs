@@ -115,6 +115,21 @@ async fn run_checks(config: &ServerConfig, snapshot: &ServerSnapshot) -> Vec<Col
         &git_dir,
     )
     .await;
+    let (state_check, state_moved_root) = check_state_endpoint(
+        snapshot.state_url.as_deref(),
+        state_cred.as_ref(),
+        snapshot.feed_id.as_deref(),
+        snapshot.local_event_seq,
+    )
+    .await;
+    let (ledger_check, ledger_moved_root) = check_ledger_endpoint(
+        snapshot.ledger_url.as_deref(),
+        ledger_cred.as_ref(),
+        snapshot.feed_id.as_deref(),
+        snapshot.local_ledger_seq,
+    )
+    .await;
+    let moved_root = state_moved_root.or(ledger_moved_root);
     vec![
         check_mirror_owner(&config.data_dir, snapshot.mirror_owner),
         check_collapse_config(snapshot),
@@ -124,25 +139,14 @@ async fn run_checks(config: &ServerConfig, snapshot: &ServerSnapshot) -> Vec<Col
         cred_state,
         cred_ledgers,
         check_mirror_ls_remote(config, snapshot, &git_dir).await,
-        check_state_endpoint(
-            snapshot.state_url.as_deref(),
-            state_cred.as_ref(),
-            snapshot.feed_id.as_deref(),
-            snapshot.local_event_seq,
-        )
-        .await,
-        check_ledger_endpoint(
-            snapshot.ledger_url.as_deref(),
-            ledger_cred.as_ref(),
-            snapshot.feed_id.as_deref(),
-            snapshot.local_ledger_seq,
-        )
-        .await,
+        state_check,
+        ledger_check,
         check_relay_allow(&snapshot.relay),
         check_relay_doorbell(
             snapshot.collapse.as_deref(),
             snapshot.state_url.as_deref(),
             state_cred.as_ref(),
+            moved_root.as_deref(),
         )
         .await,
     ]
@@ -703,27 +707,51 @@ async fn check_state_endpoint(
     credential: Option<&Credential>,
     feed_id: Option<&str>,
     local_event_seq: u64,
-) -> CollapseCheckItem {
+) -> (CollapseCheckItem, Option<String>) {
     let Some(url) = url else {
-        return skipped("state_endpoint", "no `collapse` root configured", None);
+        return (
+            skipped("state_endpoint", "no `collapse` root configured", None),
+            None,
+        );
     };
     let scratch = match tempfile::tempdir() {
         Ok(dir) => dir,
         Err(error) => {
-            return fail(
-                "state_endpoint",
-                format!("could not create temporary directory: {error}"),
-                "check server temporary directory permissions",
+            return (
+                fail(
+                    "state_endpoint",
+                    format!("could not create temporary directory: {error}"),
+                    "check server temporary directory permissions",
+                ),
+                None,
             );
         }
     };
     let probe = state_batch::probe(feed_id);
-    match send::post_json(scratch.path(), url, &probe, credential).await {
-        Ok(accepted) => match serde_json::from_str::<serde_json::Value>(&accepted.body)
-            .ok()
-            .and_then(|v| v.get("highest_sequence")?.as_u64())
-        {
-            Some(highest) if highest > local_event_seq => fail(
+    match send::post_json_following(scratch.path(), url, &probe, credential).await {
+        Ok(accepted) => classify_state_endpoint(url, accepted, local_event_seq),
+        Err(failure) => (
+            endpoint_failure("state_endpoint", url, url, credential, failure),
+            None,
+        ),
+    }
+}
+
+fn classify_state_endpoint(
+    url: &str,
+    accepted: send::Accepted,
+    local_event_seq: u64,
+) -> (CollapseCheckItem, Option<String>) {
+    let highest = serde_json::from_str::<serde_json::Value>(&accepted.body)
+        .ok()
+        .and_then(|v| v.get("highest_sequence")?.as_u64());
+    if let Some(highest) = highest.filter(|&h| h > local_event_seq) {
+        let root = accepted
+            .redirected
+            .as_ref()
+            .and_then(|(_, new_url)| send::collapse_root_from_url(new_url));
+        return (
+            fail(
                 "state_endpoint",
                 format!(
                     "diverged at {url}: Collapse holds event {highest}, ahead of this server's \
@@ -731,14 +759,41 @@ async fn check_state_endpoint(
                 ),
                 "run `rosen collapse link --reset` to clear Collapse's feed tables and resend from this server",
             ),
-            Some(highest) => pass(
+            root,
+        );
+    }
+    match (accepted.redirected, highest) {
+        (Some((code, new_url)), Some(highest)) => {
+            let root = send::collapse_root_from_url(&new_url);
+            let detail = format!(
+                "HTTP {code} from {url} -> {new_url} (reachable: HTTP {}, highest_sequence {highest})",
+                accepted.status
+            );
+            (moved("state_endpoint", detail, send::moved_hint(&new_url)), root)
+        }
+        (Some((code, new_url)), None) => (
+            fail(
+                "state_endpoint",
+                format!(
+                    "HTTP {code} from {url} -> {new_url}, but unexpected answer (HTTP {}): missing highest_sequence",
+                    accepted.status
+                ),
+                send::moved_hint(&new_url),
+            ),
+            send::collapse_root_from_url(&new_url),
+        ),
+        (None, Some(highest)) => (
+            pass(
                 "state_endpoint",
                 format!(
                     "reachable at {url} (HTTP {}, highest_sequence {highest})",
                     accepted.status
                 ),
             ),
-            None => fail(
+            None,
+        ),
+        (None, None) => (
+            fail(
                 "state_endpoint",
                 format!(
                     "unexpected answer from {url} (HTTP {}): missing highest_sequence",
@@ -746,8 +801,8 @@ async fn check_state_endpoint(
                 ),
                 "verify that `collapse` in rosen.toml points to a Collapse repository root",
             ),
-        },
-        Err(failure) => endpoint_failure("state_endpoint", url, url, credential, failure),
+            None,
+        ),
     }
 }
 
@@ -756,51 +811,80 @@ async fn check_ledger_endpoint(
     credential: Option<&Credential>,
     feed_id: Option<&str>,
     local_ledger_seq: Held,
-) -> CollapseCheckItem {
+) -> (CollapseCheckItem, Option<String>) {
     let Some(url) = url else {
-        return skipped(
-            "ledger_endpoint",
-            "no `ledger_endpoint` or `collapse` root configured",
+        return (
+            skipped(
+                "ledger_endpoint",
+                "no `ledger_endpoint` or `collapse` root configured",
+                None,
+            ),
             None,
         );
     };
     let scratch = match tempfile::tempdir() {
         Ok(dir) => dir,
         Err(error) => {
-            return fail(
-                "ledger_endpoint",
-                format!("could not create temporary directory: {error}"),
-                "check server temporary directory permissions",
+            return (
+                fail(
+                    "ledger_endpoint",
+                    format!("could not create temporary directory: {error}"),
+                    "check server temporary directory permissions",
+                ),
+                None,
             );
         }
     };
     let probe = ledger_entries::empty_body(feed_id);
-    match send::post(scratch.path(), url, &probe, credential).await {
-        Ok(held)
+    match send::post_following(scratch.path(), url, &probe, credential).await {
+        Ok((held, redirected))
             if held.discovery > local_ledger_seq.discovery
                 || held.past_work > local_ledger_seq.past_work =>
         {
-            fail(
-                "ledger_endpoint",
-                format!(
-                    "diverged at {url}: Collapse holds discovery {} and past_work {}, ahead of \
-                     this server's latest {} and {}",
-                    held.discovery,
-                    held.past_work,
-                    local_ledger_seq.discovery,
-                    local_ledger_seq.past_work
+            let root = redirected
+                .as_ref()
+                .and_then(|(_, new_url)| send::collapse_root_from_url(new_url));
+            (
+                fail(
+                    "ledger_endpoint",
+                    format!(
+                        "diverged at {url}: Collapse holds discovery {} and past_work {}, ahead of \
+                         this server's latest {} and {}",
+                        held.discovery,
+                        held.past_work,
+                        local_ledger_seq.discovery,
+                        local_ledger_seq.past_work
+                    ),
+                    "run `rosen collapse link --reset` to clear Collapse's feed tables and accept this server's feed ID",
                 ),
-                "run `rosen collapse link --reset` to clear Collapse's feed tables and accept this server's feed ID",
+                root,
             )
         }
-        Ok(held) => pass(
-            "ledger_endpoint",
-            format!(
-                "reachable at {url} (highest_sequence: discovery {}, past_work {})",
+        Ok((held, Some((code, new_url)))) => {
+            let root = send::collapse_root_from_url(&new_url);
+            let detail = format!(
+                "HTTP {code} from {url} -> {new_url} (reachable: highest_sequence: discovery {}, past_work {})",
                 held.discovery, held.past_work
+            );
+            (
+                moved("ledger_endpoint", detail, send::moved_hint(&new_url)),
+                root,
+            )
+        }
+        Ok((held, None)) => (
+            pass(
+                "ledger_endpoint",
+                format!(
+                    "reachable at {url} (highest_sequence: discovery {}, past_work {})",
+                    held.discovery, held.past_work
+                ),
             ),
+            None,
         ),
-        Err(failure) => endpoint_failure("ledger_endpoint", url, url, credential, failure),
+        Err(failure) => (
+            endpoint_failure("ledger_endpoint", url, url, credential, failure),
+            None,
+        ),
     }
 }
 
@@ -830,34 +914,87 @@ async fn check_relay_doorbell(
     collapse: Option<&str>,
     state_url: Option<&str>,
     credential: Option<&Credential>,
+    moved_root: Option<&str>,
 ) -> CollapseCheckItem {
     let Some(root) = collapse else {
         return skipped("relay_doorbell", "no `collapse` root configured", None);
     };
-    let url = format!("{}/rosen/doorbell", root.trim_end_matches('/'));
+    let trimmed = root.trim_end_matches('/');
+    let url = format!("{trimmed}/rosen/doorbell");
     let cred_url = state_url.unwrap_or(&url);
-    match send::get_json(&url, credential).await {
-        Ok(accepted) => match serde_json::from_str::<serde_json::Value>(&accepted.body)
-            .ok()
-            .and_then(|v| v.get("generation")?.as_i64())
+    match send::get_json_following(&url, credential).await {
+        Ok(accepted) => classify_doorbell(&url, accepted),
+        Err(SendFailure::Failed {
+            status: Some(404), ..
+        }) if moved_root
+            .is_some_and(|next| next != trimmed && send::same_origin(trimmed, next)) =>
         {
-            Some(generation) => pass(
-                "relay_doorbell",
-                format!(
-                    "reachable at {url} (HTTP {}, generation {generation})",
-                    accepted.status
-                ),
-            ),
-            None => fail(
-                "relay_doorbell",
-                format!(
-                    "unexpected doorbell answer from {url} (HTTP {}): missing generation",
-                    accepted.status
-                ),
-                "verify that `collapse` in rosen.toml points to a Collapse repository root",
-            ),
-        },
+            let new_url = format!("{}/rosen/doorbell", moved_root.unwrap());
+            match send::get_json_following(&new_url, credential).await {
+                Ok(accepted) => match doorbell_generation(&accepted.body) {
+                    Some(generation) => moved(
+                        "relay_doorbell",
+                        format!(
+                            "HTTP 404 at {url}; reachable at {new_url} (HTTP {}, generation {generation})",
+                            accepted.status
+                        ),
+                        send::moved_hint(&new_url),
+                    ),
+                    None => fail(
+                        "relay_doorbell",
+                        format!(
+                            "HTTP 404 at {url}; unexpected doorbell answer from {new_url} (HTTP {}): missing generation",
+                            accepted.status
+                        ),
+                        send::moved_hint(&new_url),
+                    ),
+                },
+                Err(failure) => endpoint_failure("relay_doorbell", &new_url, cred_url, credential, failure),
+            }
+        }
         Err(failure) => endpoint_failure("relay_doorbell", &url, cred_url, credential, failure),
+    }
+}
+
+fn doorbell_generation(body: &str) -> Option<i64> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("generation")?.as_i64())
+}
+
+fn classify_doorbell(url: &str, accepted: send::Accepted) -> CollapseCheckItem {
+    match (accepted.redirected, doorbell_generation(&accepted.body)) {
+        (Some((code, new_url)), Some(generation)) => moved(
+            "relay_doorbell",
+            format!(
+                "HTTP {code} from {url} -> {new_url} (reachable: HTTP {}, generation {generation})",
+                accepted.status
+            ),
+            send::moved_hint(&new_url),
+        ),
+        (Some((code, new_url)), None) => fail(
+            "relay_doorbell",
+            format!(
+                "HTTP {code} from {url} -> {new_url}, but unexpected doorbell answer (HTTP {}): missing generation",
+                accepted.status
+            ),
+            send::moved_hint(&new_url),
+        ),
+        (None, Some(generation)) => pass(
+            "relay_doorbell",
+            format!(
+                "reachable at {url} (HTTP {}, generation {generation})",
+                accepted.status
+            ),
+        ),
+        (None, None) => fail(
+            "relay_doorbell",
+            format!(
+                "unexpected doorbell answer from {url} (HTTP {}): missing generation",
+                accepted.status
+            ),
+            "verify that `collapse` in rosen.toml points to a Collapse repository root",
+        ),
     }
 }
 
@@ -878,6 +1015,11 @@ fn endpoint_failure(
             name,
             format!("diverged at {url} (HTTP 409): {message}"),
             "run `rosen collapse link --reset` to clear Collapse's feed tables and accept this server's feed ID",
+        ),
+        SendFailure::Moved { status, location } => fail(
+            name,
+            format!("HTTP {status} from {url}: moved to {location} (redirect not followed)"),
+            send::moved_hint(&location),
         ),
         SendFailure::Failed { status, message } => {
             let detail = match (credential, status) {
@@ -1006,6 +1148,15 @@ fn pass(name: &str, detail: impl Into<String>) -> CollapseCheckItem {
         status: CollapseCheckStatus::Pass,
         detail: detail.into(),
         hint: None,
+    }
+}
+
+fn moved(name: &str, detail: impl Into<String>, hint: impl Into<String>) -> CollapseCheckItem {
+    CollapseCheckItem {
+        name: name.to_owned(),
+        status: CollapseCheckStatus::Moved,
+        detail: detail.into(),
+        hint: Some(hint.into()),
     }
 }
 

@@ -71,6 +71,12 @@ pub enum RelayError {
     Gone {
         endpoint: String,
     },
+    /// An unfollowed redirect (HTTP 301 or cross-origin 307/308) (#446).
+    Moved {
+        endpoint: String,
+        status: u16,
+        location: String,
+    },
     Send {
         endpoint: String,
         status: Option<u16>,
@@ -121,6 +127,9 @@ struct Session {
     remote: Option<Remote>,
     /// The endpoint that answered 410.
     stopped: Option<String>,
+    /// Followed same-origin 307/308 Collapse root for the session:
+    /// `(configured_root, active_root)` (#446).
+    redirected: Option<(String, String)>,
     /// Whether actions a stopped server left running were settled.
     recovered: bool,
 }
@@ -197,23 +206,48 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<(), Rel
         session.remote = Some(connect(state, &root).await);
         session.recovered = false;
     }
+    let mut active_root = match &session.redirected {
+        Some((configured, target)) if configured == &root => target.clone(),
+        _ => {
+            session.redirected = None;
+            root.clone()
+        }
+    };
     let remote = session.remote.as_ref().expect("connected above");
-    post_unposted(state, remote).await?;
+    if active_root == remote.root {
+        if let Some(new_root) = state.collapse.moved_root_for(&remote.root) {
+            note_redirect(state, &remote.root, &mut active_root, Some((307, new_root)));
+        }
+    }
+    let outcome = run_step(state, remote, &mut active_root, &mut session.recovered).await;
+    if active_root != root {
+        session.redirected = Some((root, active_root));
+    }
+    outcome
+}
+
+async fn run_step(
+    state: &Arc<ServerState>,
+    remote: &Remote,
+    active_root: &mut String,
+    recovered: &mut bool,
+) -> Result<(), RelayError> {
+    post_unposted(state, remote, active_root).await?;
     let dir = state.config.data_dir.clone();
     let setting = blocking(move || RelayStore::open(&dir)?.setting())
         .await
         .map_err(RelayError::Store)?;
-    if !session.recovered {
-        settle_interrupted(state, remote, &setting).await?;
-        session.recovered = true;
+    if !*recovered {
+        settle_interrupted(state, remote, active_root, &setting).await?;
+        *recovered = true;
     }
     if !setting.active() {
         // A feed answer while off asks for nothing this server will run.
         state.relay_wake.take_fetch();
-        state.collapse.record_idle(Feed::Relay, &root, None);
+        state.collapse.record_idle(Feed::Relay, &remote.root, None);
         return Ok(());
     }
-    fetch_if_rung(state, remote, &setting).await
+    fetch_if_rung(state, remote, active_root, &setting).await
 }
 
 /// Fetches and runs the queue when the doorbell's generation changed since
@@ -221,10 +255,11 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<(), Rel
 async fn fetch_if_rung(
     state: &Arc<ServerState>,
     remote: &Remote,
+    active_root: &mut String,
     setting: &RelaySetting,
 ) -> Result<(), RelayError> {
     let forced = state.relay_wake.take_fetch();
-    let rung = remote.doorbell().await;
+    let rung = poll_doorbell(state, remote, active_root).await;
     let generation = match rung {
         Ok(generation) => {
             state.collapse.record_success(Feed::Relay, &remote.root);
@@ -240,7 +275,7 @@ async fn fetch_if_rung(
     })
     .await?;
     if forced || generation != cursor.generation {
-        fetch(state, remote, setting, cursor.after).await?;
+        fetch(state, remote, active_root, setting, cursor.after).await?;
     }
     if let Some(generation) = generation {
         let root = remote.root.clone();
@@ -253,22 +288,54 @@ async fn fetch_if_rung(
     Ok(())
 }
 
+/// Reads the doorbell, falling back to probing `/rosen/actions` for a
+/// same-origin 307/308 when Collapse's edge doorbell Worker returns 404 for a
+/// renamed repository (#446).
+async fn poll_doorbell(
+    state: &ServerState,
+    remote: &Remote,
+    active_root: &mut String,
+) -> Result<i64, RelayError> {
+    match remote.doorbell_at(active_root).await {
+        Ok((generation, moved)) => {
+            note_redirect(state, &remote.root, active_root, moved);
+            Ok(generation)
+        }
+        Err(
+            error @ RelayError::Send {
+                status: Some(404), ..
+            },
+        ) if *active_root == remote.root => {
+            if let Some((status, new_root)) = remote.probe_moved_root(active_root).await {
+                note_redirect(state, &remote.root, active_root, Some((status, new_root)));
+                let (generation, moved) = remote.doorbell_at(active_root).await?;
+                note_redirect(state, &remote.root, active_root, moved);
+                return Ok(generation);
+            }
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Takes up every queued action after `after`, page by page.
 async fn fetch(
     state: &Arc<ServerState>,
     remote: &Remote,
+    active_root: &mut String,
     setting: &RelaySetting,
     mut after: i64,
 ) -> Result<(), RelayError> {
     loop {
-        let actions = remote.actions(after).await?;
+        let (actions, moved) = remote.actions_at(active_root, after).await?;
+        note_redirect(state, &remote.root, active_root, moved);
         state.collapse.record_success(Feed::Relay, &remote.root);
         if actions.is_empty() {
             return Ok(());
         }
         let mut highest = after;
         for raw in actions {
-            highest = highest.max(take_up(state, remote, setting, raw).await?);
+            highest = highest.max(take_up(state, remote, active_root, setting, raw).await?);
         }
         if highest <= after {
             return Ok(());
@@ -290,6 +357,7 @@ async fn fetch(
 async fn take_up(
     state: &Arc<ServerState>,
     remote: &Remote,
+    active_root: &mut String,
     setting: &RelaySetting,
     raw: Value,
 ) -> Result<i64, RelayError> {
@@ -298,7 +366,7 @@ async fn take_up(
         let id = raw.get("id").and_then(Value::as_i64).unwrap_or(0);
         if id > 0 {
             let refused = action::refusal("", "invalid_action", "malformed action");
-            record(state, remote, id, &raw, refused).await?;
+            record(state, remote, active_root, id, &raw, refused).await?;
         }
         return Ok(id);
     };
@@ -327,7 +395,7 @@ async fn take_up(
             run_call(state, call).await
         }
     };
-    record(state, remote, id, &raw, done).await?;
+    record(state, remote, active_root, id, &raw, done).await?;
     Ok(id)
 }
 
@@ -353,6 +421,7 @@ async fn run_call(state: &Arc<ServerState>, call: Call) -> Done {
 async fn record(
     state: &Arc<ServerState>,
     remote: &Remote,
+    active_root: &mut String,
     id: i64,
     raw: &Value,
     done: Done,
@@ -381,17 +450,21 @@ async fn record(
             "code": done.result.get("code"),
         }),
     );
-    post(state, remote, id, outcome, &result).await
+    post(state, remote, active_root, id, outcome, &result).await
 }
 
 async fn post(
     state: &Arc<ServerState>,
     remote: &Remote,
+    active_root: &mut String,
     id: i64,
     outcome: &str,
     result: &str,
 ) -> Result<(), RelayError> {
-    remote.post_result(id, outcome, result).await?;
+    let (_, moved) = remote
+        .post_result_at(active_root, id, outcome, result)
+        .await?;
+    note_redirect(state, &remote.root, active_root, moved);
     state.collapse.record_success(Feed::Relay, &remote.root);
     let root = remote.root.clone();
     with_store(state, move |store| store.posted(&root, id)).await
@@ -399,7 +472,11 @@ async fn post(
 
 /// Re-posts every outcome Collapse has not accepted, as a stopped or
 /// failed server left it.
-async fn post_unposted(state: &Arc<ServerState>, remote: &Remote) -> Result<(), RelayError> {
+async fn post_unposted(
+    state: &Arc<ServerState>,
+    remote: &Remote,
+    active_root: &mut String,
+) -> Result<(), RelayError> {
     let root = remote.root.clone();
     let now = crate::post_land::submitter::now_millis();
     let unposted = with_store(state, move |store| {
@@ -408,7 +485,15 @@ async fn post_unposted(state: &Arc<ServerState>, remote: &Remote) -> Result<(), 
     })
     .await?;
     for outcome in unposted {
-        post(state, remote, outcome.id, &outcome.state, &outcome.result).await?;
+        post(
+            state,
+            remote,
+            active_root,
+            outcome.id,
+            &outcome.state,
+            &outcome.result,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -418,6 +503,7 @@ async fn post_unposted(state: &Arc<ServerState>, remote: &Remote) -> Result<(), 
 async fn settle_interrupted(
     state: &Arc<ServerState>,
     remote: &Remote,
+    active_root: &mut String,
     setting: &RelaySetting,
 ) -> Result<(), RelayError> {
     let root = remote.root.clone();
@@ -428,7 +514,7 @@ async fn settle_interrupted(
             Some(fetched) => settle(state, &fetched, setting, started_at).await,
             None => action::refusal("", "invalid_action", "malformed action"),
         };
-        record(state, remote, id, &raw, done).await?;
+        record(state, remote, active_root, id, &raw, done).await?;
     }
     Ok(())
 }
@@ -499,6 +585,34 @@ async fn connect(state: &Arc<ServerState>, root: &str) -> Remote {
     }
 }
 
+fn note_redirect(
+    state: &ServerState,
+    configured_root: &str,
+    active_root: &mut String,
+    moved: Option<(u16, String)>,
+) {
+    let Some((status, new_root)) = moved else {
+        return;
+    };
+    if *active_root == new_root {
+        return;
+    }
+    *active_root = new_root.clone();
+    state
+        .collapse
+        .record_moved(Feed::Relay, configured_root, &new_root);
+    report(
+        state,
+        json!({
+            "status": "moved",
+            "endpoint": configured_root,
+            "http_status": status,
+            "location": new_root,
+            "hint": send::moved_hint(&new_root),
+        }),
+    );
+}
+
 async fn with_store<T: Send + 'static>(
     state: &ServerState,
     work: impl FnOnce(&RelayStore) -> rusqlite::Result<T> + Send + 'static,
@@ -519,9 +633,27 @@ async fn blocking<T: Send + 'static>(
 }
 
 fn record_failure(state: &ServerState, root: Option<&str>, error: &RelayError, retry_in: Duration) {
+    if let RelayError::Moved {
+        endpoint,
+        status,
+        location,
+    } = error
+    {
+        let message = format!("HTTP {status}: moved to {location} (redirect not followed)");
+        state.collapse.record_moved_unfollowed(
+            Feed::Relay,
+            root.unwrap_or(endpoint.as_str()),
+            *status,
+            location,
+            &message,
+            retry_in,
+        );
+        return;
+    }
     let (endpoint, status, message, no_credential) = match error {
         RelayError::Store(message) => (root, None, message.as_str(), false),
         RelayError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone", false),
+        RelayError::Moved { .. } => unreachable!(),
         RelayError::Send {
             endpoint,
             status,
@@ -547,9 +679,31 @@ fn record_failure(state: &ServerState, root: Option<&str>, error: &RelayError, r
 /// Publishes a `relay` event for a failed step (R9, R14).
 fn report_failure(state: &ServerState, error: &RelayError, attempt: u32, retry_in: Duration) {
     let retry_in_ms = u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX);
+    if let RelayError::Moved {
+        endpoint,
+        status,
+        location,
+    } = error
+    {
+        report(
+            state,
+            json!({
+                "status": "moved",
+                "endpoint": endpoint,
+                "http_status": status,
+                "location": location,
+                "hint": send::moved_hint(location),
+                "attempt": attempt,
+                "retry_in_ms": retry_in_ms,
+                "error": format!("HTTP {status}: moved to {location} (redirect not followed)"),
+            }),
+        );
+        return;
+    }
     let (endpoint, status, message) = match error {
         RelayError::Store(message) => (None, None, message.as_str()),
         RelayError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone"),
+        RelayError::Moved { .. } => unreachable!(),
         RelayError::Send {
             endpoint,
             status,

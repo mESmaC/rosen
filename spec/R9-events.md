@@ -68,6 +68,7 @@
   - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `state_push` event with `status: "failed"`; the first success after failures publishes one with `status: "sent"`, `sent`, `delivered` and `after_failures`, matching `ledger_push` (R13).
     When the endpoint refuses a batch with HTTP 400, 413 or 422, the feed splits the batch by halves to isolate the refused item(s), skips each refused document until its content changes, publishes `state_push` `status: "refused"` naming the document, and keeps delivering the rest.
     Health records `last_success_at` only for delivered batches, not empty reconciliation probes.
+    HTTP 301, 307 and 308 with a redirect URL map to a moved condition; same-origin 307 and 308 redirects are followed for the session while health stays `moved` with a `rosen collapse link <new-owner>/<name> --land` hint until `rosen.toml` updates.
     HTTP 409 `source_changed` (or Collapse reporting `highest_sequence` ahead of this server's local event log) publishes `status: "diverged"`, reports `diverged` in `server status` and `collapse check`, and sends nothing until the operator runs `rosen collapse link --reset`.
     HTTP 410 publishes `status: "stopped"` and stops sending until `collapse` changes or the server restarts.
   - Receipt signatures, machine credentials and their hashes, join keys, network addresses, certificate fingerprints and the data directory are never sent.

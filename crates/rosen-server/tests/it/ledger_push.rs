@@ -28,6 +28,9 @@ struct Intake {
     failing: Option<u16>,
     /// When set, any batch whose body contains `needle` is refused with `status`.
     refuse: Option<(String, u16)>,
+    /// `(old_path, new_path, status)` redirect rule (#446).
+    redirect: Option<(String, String, u16)>,
+    paths: Vec<String>,
     /// When set, batches with a different `feed_id` receive HTTP 409 `source_changed`.
     expected_feed_id: Option<String>,
     /// Floor reported for `highest_sequence` even when `held` is empty.
@@ -46,20 +49,26 @@ impl Intake {
         keys.map(|(_, seq)| *seq).max().unwrap_or(0).max(floor)
     }
 
-    fn answer(&mut self, body: &[u8]) -> (u16, String) {
+    fn answer(&mut self, path: &str, body: &[u8]) -> (u16, Option<String>, String) {
+        self.paths.push(path.to_owned());
+        if let Some((old, new, code)) = &self.redirect {
+            if path == old {
+                return (*code, Some(new.clone()), String::new());
+            }
+        }
         if let Some(status) = self.failing {
-            return (status, json!({"error": "unavailable"}).to_string());
+            return (status, None, json!({"error": "unavailable"}).to_string());
         }
         if let Some((needle, status)) = &self.refuse {
             if String::from_utf8_lossy(body).contains(needle) {
                 self.refusals += 1;
-                return (*status, json!({"error": "invalid entry"}).to_string());
+                return (*status, None, json!({"error": "invalid entry"}).to_string());
             }
         }
         let batch: Value = serde_json::from_slice(body).unwrap();
         if let Some(expected) = &self.expected_feed_id {
             if batch["feed_id"].as_str() != Some(expected.as_str()) {
-                return (409, json!({"error": "source_changed"}).to_string());
+                return (409, None, json!({"error": "source_changed"}).to_string());
             }
         }
         let entries = batch["entries"].as_array().unwrap().clone();
@@ -75,7 +84,11 @@ impl Intake {
             "discovery": self.highest("discovery"),
             "past_work": self.highest("past_work"),
         });
-        (200, json!({ "highest_sequence": highest }).to_string())
+        (
+            200,
+            None,
+            json!({ "highest_sequence": highest }).to_string(),
+        )
     }
 }
 
@@ -101,9 +114,14 @@ async fn serve(listener: tokio::net::TcpListener, intake: Arc<Mutex<Intake>>) {
             let read = socket.read(&mut buffer).await.unwrap();
             request.extend_from_slice(&buffer[..read]);
         }
-        let (status, body) = intake.lock().unwrap().answer(&request[head_end..]);
+        let head = String::from_utf8_lossy(&request[..head_end]).into_owned();
+        let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
+        let (status, location, body) = intake.lock().unwrap().answer(&path, &request[head_end..]);
+        let loc_header = location
+            .map(|loc| format!("Location: {loc}\r\n"))
+            .unwrap_or_default();
         let response = format!(
-            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} X\r\n{loc_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();
@@ -303,6 +321,90 @@ fn ledger_push_splits_refused_batch_and_skips_invalid_entry() {
     );
     assert_eq!(sent_sequences(&intake), [1, 3, 4]);
     assert_eq!(intake.lock().unwrap().refusals, refusals_before);
+}
+
+/// Risk (#446, R13): after a Collapse rename, ledger push must follow a
+/// same-origin 307 for the session and keep delivering, while 301 maps to Moved.
+#[test]
+fn ledger_push_follows_same_origin_307_for_session_and_rejects_301() {
+    let data = tempfile::tempdir().unwrap();
+    rosen_server::mirror::owner::mark(data.path()).unwrap();
+    let state = ServerState::new(ServerConfig {
+        data_dir: data.path().to_path_buf(),
+        endpoint: Endpoint::new("rosen-ledger-redirect-test"),
+        warm_pool_dir: None,
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let url = format!("http://{}/o/r/ledgers", listener.local_addr().unwrap());
+    let intake = Arc::new(Mutex::new(Intake {
+        redirect: Some((
+            "/o/r/ledgers".into(),
+            "/new-org/new-repo/ledgers".into(),
+            307,
+        )),
+        ..Intake::default()
+    }));
+    runtime.spawn(serve(listener, Arc::clone(&intake)));
+    let join = ChannelRequest::Join {
+        member: "a".into(),
+        nick: "alice".into(),
+        machine: "m1".into(),
+    };
+    channel::run(&state.events, join).unwrap();
+    append(&state, Ledger::Discovery, "first after rename", None);
+
+    let mut session = Session::default();
+    let pushed = runtime
+        .block_on(push_to(&state.config, &url, &mut session))
+        .unwrap();
+    assert!(
+        matches!(pushed, Pushed::Current { sent: 1, .. }),
+        "{pushed:?}"
+    );
+    let old_hits_after_first = intake
+        .lock()
+        .unwrap()
+        .paths
+        .iter()
+        .filter(|p| *p == "/o/r/ledgers")
+        .count();
+    assert_eq!(old_hits_after_first, 1);
+
+    append(&state, Ledger::Discovery, "second goes direct", None);
+    let pushed = runtime
+        .block_on(push_to(&state.config, &url, &mut session))
+        .unwrap();
+    assert!(
+        matches!(pushed, Pushed::Current { sent: 1, .. }),
+        "{pushed:?}"
+    );
+    assert_eq!(sent_sequences(&intake), [1, 2]);
+    let old_hits_after_second = intake
+        .lock()
+        .unwrap()
+        .paths
+        .iter()
+        .filter(|p| *p == "/o/r/ledgers")
+        .count();
+    assert_eq!(old_hits_after_second, 1);
+
+    // HTTP 301 is mapped to PushError::Moved and not followed.
+    intake.lock().unwrap().redirect = Some((
+        "/o/r/ledgers".into(),
+        "/new-org/new-repo/ledgers".into(),
+        301,
+    ));
+    let mut fresh = Session::default();
+    let err = runtime
+        .block_on(push_to(&state.config, &url, &mut fresh))
+        .unwrap_err();
+    assert!(
+        matches!(err, PushError::Moved { status: 301, ref location, .. } if location.ends_with("/new-org/new-repo/ledgers")),
+        "{err:?}"
+    );
 }
 
 /// Risk (#445, R13): ledger push must detect both HTTP 409 `source_changed`

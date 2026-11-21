@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum CollapseCheckStatus {
     Pass,
+    Moved,
     Fail,
     Skipped,
 }
@@ -15,6 +16,7 @@ impl CollapseCheckStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pass => "pass",
+            Self::Moved => "moved",
             Self::Fail => "fail",
             Self::Skipped => "skipped",
         }
@@ -37,7 +39,8 @@ pub struct CollapseCheckItem {
 /// Read-only verification report for a server's Collapse link.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollapseCheckReport {
-    /// True when no check failed (every check passed or was skipped).
+    /// True when no check failed (every check passed, moved with a reachable
+    /// target, or was skipped).
     pub ok: bool,
     /// Effective mirror remote (with any URL credentials hidden), if configured.
     #[serde(default)]

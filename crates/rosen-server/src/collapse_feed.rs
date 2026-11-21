@@ -190,7 +190,7 @@ async fn post_reset(
     }
     let body = reset_body(new_feed_id);
     let scratch = state.config.data_dir.join("state-push");
-    send::post_json(&scratch, &url, &body, credential.as_ref())
+    send::post_json_following(&scratch, &url, &body, credential.as_ref())
         .await
         .map(|_| ())
         .map_err(|failure| map_reset_failure(&url, credential.as_ref(), failure))
@@ -241,6 +241,13 @@ fn map_reset_failure(
         SendFailure::SourceChanged { message } => ErrorBody::new(
             ErrorCode::Refused,
             format!("HTTP 409 from {url}: {message}"),
+        ),
+        SendFailure::Moved { status, location } => ErrorBody::new(
+            ErrorCode::Refused,
+            format!(
+                "HTTP {status} from {url}: moved to {location}; run `{}`",
+                send::moved_hint(&location)
+            ),
         ),
         SendFailure::Failed { status, message } => {
             let detail = match (credential, status) {

@@ -33,13 +33,19 @@ pub struct Tracker {
 #[derive(Debug, Clone, Default)]
 struct FeedSlot {
     /// The endpoint the tracked fields apply to. When a land changes the
-    /// configured endpoint, stale errors or stops for the old one are ignored.
+    /// configured endpoint, stale errors, stops or moves for the old one are ignored.
     endpoint: Option<String>,
     in_flight: bool,
     has_pending: bool,
     stopped: bool,
     diverged: bool,
     no_credential: bool,
+    /// Redirect target reported by HTTP 301, 307 or 308 (#446).
+    moved_to: Option<String>,
+    /// Operator hint for a moved endpoint (e.g. `rosen collapse link <owner>/<name> --land`).
+    moved_hint: Option<String>,
+    /// True when the latest `last_error` is an unfollowed redirect (301 or cross-origin).
+    moved_unfollowed: bool,
     /// Highest event sequence confirmed clean in memory by `state_push`,
     /// avoiding false backlog counts for ignored events between sends.
     clean_scanned: Option<u64>,
@@ -91,6 +97,7 @@ impl Tracker {
         slot.stopped = false;
         slot.diverged = false;
         slot.no_credential = false;
+        slot.moved_unfollowed = false;
         slot.last_success_at = Some(now_millis());
         slot.last_error = None;
         slot.next_retry_at = None;
@@ -105,11 +112,79 @@ impl Tracker {
         slot.stopped = false;
         slot.diverged = false;
         slot.no_credential = false;
+        slot.moved_unfollowed = false;
         slot.last_error = None;
         slot.next_retry_at = None;
         if let Some(seq) = clean_scanned {
             slot.clean_scanned = Some(slot.clean_scanned.map_or(seq, |prev| prev.max(seq)));
         }
+    }
+
+    /// Records a followed same-origin 307/308 redirect for `endpoint` (#446).
+    /// Preserved across subsequent successes until `rosen.toml` changes.
+    pub fn record_moved(&self, feed: Feed, endpoint: &str, location: &str) {
+        let mut slot = lock(&self.feeds[feed as usize]);
+        slot.select_endpoint(endpoint);
+        slot.moved_to = Some(location.to_owned());
+        slot.moved_hint = Some(crate::ledger_push::send::moved_hint(location));
+        slot.moved_unfollowed = false;
+    }
+
+    /// Records an unfollowed redirect (HTTP 301 or cross-origin 307/308) for `feed` (#446).
+    pub fn record_moved_unfollowed(
+        &self,
+        feed: Feed,
+        endpoint: &str,
+        status: u16,
+        location: &str,
+        message: &str,
+        retry_in: Duration,
+    ) {
+        let now = now_millis();
+        let delay = i64::try_from(retry_in.as_millis()).unwrap_or(i64::MAX);
+        let mut slot = lock(&self.feeds[feed as usize]);
+        slot.select_endpoint(endpoint);
+        slot.stopped = false;
+        slot.diverged = false;
+        slot.no_credential = false;
+        slot.moved_to = Some(location.to_owned());
+        slot.moved_hint = Some(crate::ledger_push::send::moved_hint(location));
+        slot.moved_unfollowed = true;
+        slot.last_error = Some(FeedError {
+            http_status: Some(status),
+            message: message.to_owned(),
+            at: now,
+        });
+        slot.next_retry_at = Some(now.saturating_add(delay));
+    }
+
+    /// Returns a same-origin moved Collapse root already observed by the state
+    /// feed or ledger push for `configured_root`, so the relay can recover when
+    /// Collapse's edge doorbell Worker answers 404 for the old path (#446).
+    pub fn moved_root_for(&self, configured_root: &str) -> Option<String> {
+        let root = configured_root.trim_end_matches('/');
+        let candidates = [
+            (Feed::StateFeed, format!("{root}/rosen/state")),
+            (Feed::LedgerPush, format!("{root}/ledgers")),
+        ];
+        for (feed, expected_endpoint) in candidates {
+            let slot = lock(&self.feeds[feed as usize]);
+            if slot.endpoint.as_deref() != Some(expected_endpoint.as_str()) {
+                continue;
+            }
+            let Some(location) = slot.moved_to.as_deref() else {
+                continue;
+            };
+            if !crate::ledger_push::send::same_origin(root, location) {
+                continue;
+            }
+            if let Some(new_root) = crate::ledger_push::send::collapse_root_from_url(location) {
+                if new_root != root {
+                    return Some(new_root);
+                }
+            }
+        }
+        None
     }
 
     /// Records whether `feed` has unsent work waiting (e.g., settle/debounce).
@@ -149,6 +224,7 @@ impl Tracker {
         slot.stopped = false;
         slot.diverged = false;
         slot.no_credential = no_credential;
+        slot.moved_unfollowed = false;
         slot.last_error = Some(FeedError {
             http_status: status,
             message: message.to_owned(),
@@ -165,6 +241,7 @@ impl Tracker {
         slot.stopped = true;
         slot.diverged = false;
         slot.no_credential = false;
+        slot.moved_unfollowed = false;
         slot.last_error = Some(FeedError {
             http_status: Some(410),
             message: message.to_owned(),
@@ -182,6 +259,7 @@ impl Tracker {
         slot.stopped = false;
         slot.diverged = true;
         slot.no_credential = false;
+        slot.moved_unfollowed = false;
         slot.last_error = Some(FeedError {
             http_status: status,
             message: message.to_owned(),
@@ -322,11 +400,14 @@ fn build_health(
             tracked.next_retry_at,
         )
     } else if tracked.last_error.is_some() {
-        (
-            FeedState::Failing,
-            tracked.last_error.clone(),
-            tracked.next_retry_at,
-        )
+        let state = if tracked.moved_unfollowed {
+            FeedState::Moved
+        } else {
+            FeedState::Failing
+        };
+        (state, tracked.last_error.clone(), tracked.next_retry_at)
+    } else if tracked.moved_to.is_some() {
+        (FeedState::Moved, None, None)
     } else if tracked.in_flight || tracked.has_pending || backlog > 0 {
         (FeedState::Sending, None, None)
     } else {
@@ -342,6 +423,8 @@ fn build_health(
         last_error,
         next_retry_at,
         refused: if is_owner { refused } else { Vec::new() },
+        moved_to: is_owner.then(|| tracked.moved_to.clone()).flatten(),
+        hint: is_owner.then(|| tracked.moved_hint.clone()).flatten(),
     }
 }
 

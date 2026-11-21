@@ -89,21 +89,62 @@ fn field(body: &str, key: &str) -> Option<Value> {
 
 impl Remote {
     /// The doorbell's generation, which grows each time an action is queued.
+    #[cfg(test)]
     pub async fn doorbell(&self) -> Result<i64, RelayError> {
-        let url = self.url("rosen/doorbell");
+        self.doorbell_at(&self.root).await.map(|(gen, _)| gen)
+    }
+
+    /// Reads the doorbell at `active_root`, returning any same-origin 307/308
+    /// redirect target root discovered (#446).
+    pub async fn doorbell_at(
+        &self,
+        active_root: &str,
+    ) -> Result<(i64, Option<(u16, String)>), RelayError> {
+        let url = Self::url_at(active_root, "rosen/doorbell");
         let accepted = self.get(&url).await?;
-        field(&accepted.body, "generation")
+        let moved = self.extract_redirect(active_root, accepted.redirected.as_ref());
+        let generation = field(&accepted.body, "generation")
             .and_then(|generation| generation.as_i64())
-            .ok_or_else(|| self.failure(&url, accepted.unreadable("unreadable doorbell")))
+            .ok_or_else(|| self.failure(&url, accepted.unreadable("unreadable doorbell")))?;
+        Ok((generation, moved))
+    }
+
+    /// Probes `<active_root>/rosen/actions?after=0` without following redirects
+    /// when the edge doorbell Worker returns 404 for a renamed repository (#446).
+    pub async fn probe_moved_root(&self, active_root: &str) -> Option<(u16, String)> {
+        let url = Self::url_at(active_root, "rosen/actions?after=0");
+        match send::get_json(&url, self.credential.as_ref()).await {
+            Err(SendFailure::Moved {
+                status: status @ (307 | 308),
+                location,
+            }) if send::same_origin(&self.root, &location) => {
+                let new_root = send::collapse_root_from_url(&location)?;
+                (new_root != active_root.trim_end_matches('/')).then_some((status, new_root))
+            }
+            _ => None,
+        }
     }
 
     /// Queued actions after `after`, oldest first, each still as JSON so
     /// one Collapse sends malformed is refused alone.
+    #[cfg(test)]
     pub async fn actions(&self, after: i64) -> Result<Vec<Value>, RelayError> {
-        let url = self.url(&format!("rosen/actions?after={after}"));
+        self.actions_at(&self.root, after)
+            .await
+            .map(|(actions, _)| actions)
+    }
+
+    /// Reads queued actions at `active_root`, returning any redirect target root.
+    pub async fn actions_at(
+        &self,
+        active_root: &str,
+        after: i64,
+    ) -> Result<(Vec<Value>, Option<(u16, String)>), RelayError> {
+        let url = Self::url_at(active_root, &format!("rosen/actions?after={after}"));
         let accepted = self.get(&url).await?;
+        let moved = self.extract_redirect(active_root, accepted.redirected.as_ref());
         match field(&accepted.body, "actions") {
-            Some(Value::Array(actions)) => Ok(actions),
+            Some(Value::Array(actions)) => Ok((actions, moved)),
             _ => Err(self.failure(&url, accepted.unreadable("unreadable action list"))),
         }
     }
@@ -112,58 +153,105 @@ impl Remote {
     /// answers a repeat with what it holds, so posting again is safe.
     /// True once Collapse holds a result; false when it never will, as for
     /// an action it no longer has.
+    #[cfg(test)]
     pub async fn post_result(
         &self,
         id: i64,
         state: &str,
         result: &str,
     ) -> Result<bool, RelayError> {
-        let url = self.url(&format!("rosen/actions/{id}/result"));
+        self.post_result_at(&self.root, id, state, result)
+            .await
+            .map(|(ok, _)| ok)
+    }
+
+    /// Posts an outcome at `active_root`, returning any redirect target root.
+    pub async fn post_result_at(
+        &self,
+        active_root: &str,
+        id: i64,
+        state: &str,
+        result: &str,
+    ) -> Result<(bool, Option<(u16, String)>), RelayError> {
+        let url = Self::url_at(active_root, &format!("rosen/actions/{id}/result"));
         let result: Value = serde_json::from_str(result).unwrap_or(Value::Null);
         let body = result_body(state, &result);
-        match send::post_json(&self.scratch, &url, &body, self.credential.as_ref()).await {
-            Ok(_) => Ok(true),
+        match send::post_json_following(&self.scratch, &url, &body, self.credential.as_ref()).await
+        {
+            Ok(accepted) => Ok((
+                true,
+                self.extract_redirect(active_root, accepted.redirected.as_ref()),
+            )),
             // Unknown, or never handed out (`not_sent`): no retry can land it.
             Err(SendFailure::Failed {
                 status: Some(404 | 409),
                 ..
-            }) => Ok(false),
+            }) => Ok((false, None)),
             // Oversized or permanently rejected body: post a minimal error so
             // one stuck outcome never blocks later actions (#443).
             Err(SendFailure::Failed {
                 status: Some(400 | 413),
                 ..
-            }) => self.post_too_large(&url, command_of(&result)).await,
+            }) => {
+                self.post_too_large(active_root, &url, command_of(&result))
+                    .await
+            }
             Err(failure) => Err(self.failure(&url, failure)),
         }
     }
 
-    async fn post_too_large(&self, url: &str, command: &str) -> Result<bool, RelayError> {
+    async fn post_too_large(
+        &self,
+        active_root: &str,
+        url: &str,
+        command: &str,
+    ) -> Result<(bool, Option<(u16, String)>), RelayError> {
         let body = result_body("refused", &result_too_large(command));
-        match send::post_json(&self.scratch, url, &body, self.credential.as_ref()).await {
-            Ok(_) => Ok(true),
+        match send::post_json_following(&self.scratch, url, &body, self.credential.as_ref()).await {
+            Ok(accepted) => Ok((
+                true,
+                self.extract_redirect(active_root, accepted.redirected.as_ref()),
+            )),
             Err(SendFailure::Failed {
                 status: Some(400 | 404 | 409 | 413),
                 ..
-            }) => Ok(false),
+            }) => Ok((false, None)),
             Err(failure) => Err(self.failure(url, failure)),
         }
     }
 
     async fn get(&self, url: &str) -> Result<Accepted, RelayError> {
-        send::get_json(url, self.credential.as_ref())
+        send::get_json_following(url, self.credential.as_ref())
             .await
             .map_err(|failure| self.failure(url, failure))
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}/{path}", self.root.trim_end_matches('/'))
+    fn extract_redirect(
+        &self,
+        active_root: &str,
+        redirected: Option<&(u16, String)>,
+    ) -> Option<(u16, String)> {
+        let (status, new_url) = redirected?;
+        if !send::same_origin(&self.root, new_url) {
+            return None;
+        }
+        let new_root = send::collapse_root_from_url(new_url)?;
+        (new_root != active_root.trim_end_matches('/')).then_some((*status, new_root))
+    }
+
+    fn url_at(root: &str, path: &str) -> String {
+        format!("{}/{path}", root.trim_end_matches('/'))
     }
 
     fn failure(&self, url: &str, failure: SendFailure) -> RelayError {
         match failure {
             SendFailure::Gone => RelayError::Gone {
                 endpoint: self.root.clone(),
+            },
+            SendFailure::Moved { status, location } => RelayError::Moved {
+                endpoint: self.root.clone(),
+                status,
+                location,
             },
             SendFailure::SourceChanged { message } => RelayError::Send {
                 endpoint: url.to_owned(),

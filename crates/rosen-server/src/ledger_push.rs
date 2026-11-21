@@ -76,6 +76,12 @@ pub enum PushError {
     Store(String),
     /// The endpoint's repository is archived or deleted (HTTP 410).
     Gone { endpoint: String },
+    /// An unfollowed redirect (HTTP 301 or cross-origin 307/308) (#446).
+    Moved {
+        endpoint: String,
+        status: u16,
+        location: String,
+    },
     /// Collapse holds feed state from another Rosen server (HTTP 409
     /// `source_changed`) or ahead of this server's local ledgers (#445).
     Diverged {
@@ -103,6 +109,9 @@ pub struct Session {
     reconciled: Option<Reconciled>,
     /// The endpoint that answered 410.
     stopped: Option<String>,
+    /// Followed same-origin 307/308 delivery URL for the session:
+    /// `(configured_endpoint, delivery_endpoint)` (#446).
+    redirected: Option<(String, String)>,
     /// The endpoint that reported `diverged` (409 `source_changed` or ahead of local ledgers).
     diverged: Option<String>,
 }
@@ -259,7 +268,7 @@ async fn push_to_with(
         return Ok(Pushed::NotOwner);
     }
     let _in_flight = tracker.map(|t| t.begin(Feed::LedgerPush, endpoint));
-    let (target, mut held) = prepare_target(config, endpoint, session).await?;
+    let (mut target, mut held) = prepare_target(config, endpoint, session, tracker, events).await?;
     let mut sent = 0;
     loop {
         let batch = target.next_batch().await?;
@@ -272,7 +281,15 @@ async fn push_to_with(
         }
         let extent = batch.extent;
         if !batch.entries.is_empty() {
-            sent += send_batch(&target, batch.entries, &mut held, tracker, events).await?;
+            sent += send_batch(
+                &mut target,
+                batch.entries,
+                &mut held,
+                session,
+                tracker,
+                events,
+            )
+            .await?;
         }
         // Advance scanned past any skipped rows covered by this batch.
         target.update(move |cursors| cursors.skip(&extent)).await?;
@@ -282,9 +299,10 @@ async fn push_to_with(
 /// Sends `entries` as one batch, splitting by halves on HTTP 400, 413 or 422
 /// to isolate and skip refused entries while delivering the rest (#444).
 async fn send_batch(
-    target: &Target,
+    target: &mut Target,
     entries: Vec<BatchEntry>,
     held: &mut Held,
+    session: &mut Session,
     tracker: Option<&Tracker>,
     events: Option<&EventLog>,
 ) -> Result<usize, PushError> {
@@ -293,7 +311,10 @@ async fn send_batch(
     while let Some(chunk) = stack.pop() {
         let body = entries::encode(Some(&target.feed_id), &chunk);
         match target.send(body).await {
-            Ok(answer) => {
+            Ok((answer, redirected)) => {
+                if let Some((status, new_url)) = redirected {
+                    note_redirect(session, tracker, events, &target.endpoint, status, &new_url);
+                }
                 *held = answer;
                 let sub = entries::extent_of(&chunk);
                 let kept = target
@@ -368,6 +389,8 @@ async fn prepare_target(
     config: &ServerConfig,
     endpoint: &str,
     session: &mut Session,
+    tracker: Option<&Tracker>,
+    events: Option<&EventLog>,
 ) -> Result<(Target, Held), PushError> {
     let fresh = !matches!(&session.reconciled, Some(known) if known.endpoint == endpoint);
     let (credential, feed_id) = match &session.reconciled {
@@ -379,12 +402,23 @@ async fn prepare_target(
             (credential, feed_id)
         }
     };
-    let target = Target::new(config, endpoint, feed_id, credential);
+    let delivery = match &session.redirected {
+        Some((configured, target)) if configured == endpoint => target.as_str(),
+        _ => {
+            session.redirected = None;
+            endpoint
+        }
+    };
+    let mut target = Target::new(config, endpoint, delivery, feed_id, credential);
     let mut held = Held::default();
     if fresh {
-        held = target
+        let (h, redirected) = target
             .send(entries::empty_body(Some(&target.feed_id)))
             .await?;
+        if let Some((status, new_url)) = redirected {
+            note_redirect(session, tracker, events, endpoint, status, &new_url);
+        }
+        held = h;
         // A probe delivers no entries, so it never advances last_success_at (#444).
         let local_latest = target.local_latest().await?;
         if held.discovery > local_latest.discovery || held.past_work > local_latest.past_work {
@@ -414,9 +448,35 @@ async fn prepare_target(
     Ok((target, held))
 }
 
+fn note_redirect(
+    session: &mut Session,
+    tracker: Option<&Tracker>,
+    events: Option<&EventLog>,
+    endpoint: &str,
+    status: u16,
+    new_url: &str,
+) {
+    let changed = session
+        .redirected
+        .as_ref()
+        .is_none_or(|(cfg, dst)| cfg != endpoint || dst != new_url);
+    session.redirected = Some((endpoint.to_owned(), new_url.to_owned()));
+    if let Some(t) = tracker {
+        t.record_moved(Feed::LedgerPush, endpoint, new_url);
+    }
+    if changed {
+        if let Some(events) = events {
+            report_moved(events, endpoint, status, new_url);
+        }
+    }
+}
+
 /// One endpoint and what reaching it needs.
 struct Target {
+    /// Configured endpoint from `rosen.toml` (cursor and health tracker key).
     endpoint: String,
+    /// Active delivery URL for the session (follows same-origin 307/308).
+    delivery_endpoint: String,
     feed_id: String,
     metadata: PathBuf,
     scratch: PathBuf,
@@ -427,11 +487,13 @@ impl Target {
     fn new(
         config: &ServerConfig,
         endpoint: &str,
+        delivery_endpoint: &str,
         feed_id: String,
         credential: Option<send::Credential>,
     ) -> Self {
         Self {
             endpoint: endpoint.to_owned(),
+            delivery_endpoint: delivery_endpoint.to_owned(),
             feed_id,
             metadata: config.metadata_path(),
             scratch: config.data_dir.join("ledger-push"),
@@ -439,21 +501,31 @@ impl Target {
         }
     }
 
-    async fn send(&self, body: Vec<u8>) -> Result<Held, PushError> {
+    async fn send(&mut self, body: Vec<u8>) -> Result<(Held, Option<(u16, String)>), PushError> {
         let credential = self.credential.as_ref();
-        send::post(&self.scratch, &self.endpoint, &body, credential)
-            .await
-            .map_err(|failure| match failure {
-                SendFailure::Gone => PushError::Gone {
-                    endpoint: self.endpoint.clone(),
-                },
-                SendFailure::SourceChanged { message } => PushError::Diverged {
-                    endpoint: self.endpoint.clone(),
-                    status: Some(409),
-                    message,
-                },
-                SendFailure::Failed { status, message } => self.failure(status, message),
-            })
+        match send::post_following(&self.scratch, &self.delivery_endpoint, &body, credential).await
+        {
+            Ok((held, redirected)) => {
+                if let Some((_, ref new_url)) = redirected {
+                    self.delivery_endpoint = new_url.clone();
+                }
+                Ok((held, redirected))
+            }
+            Err(SendFailure::Gone) => Err(PushError::Gone {
+                endpoint: self.endpoint.clone(),
+            }),
+            Err(SendFailure::Moved { status, location }) => Err(PushError::Moved {
+                endpoint: self.endpoint.clone(),
+                status,
+                location,
+            }),
+            Err(SendFailure::SourceChanged { message }) => Err(PushError::Diverged {
+                endpoint: self.endpoint.clone(),
+                status: Some(409),
+                message,
+            }),
+            Err(SendFailure::Failed { status, message }) => Err(self.failure(status, message)),
+        }
     }
 
     async fn local_latest(&self) -> Result<Held, PushError> {
@@ -635,9 +707,27 @@ pub(crate) fn retry_delay(failures: u32) -> Duration {
 }
 
 fn record_failure(state: &ServerState, error: &PushError, retry_in: Duration) {
+    if let PushError::Moved {
+        endpoint,
+        status,
+        location,
+    } = error
+    {
+        let message = format!("HTTP {status}: moved to {location} (redirect not followed)");
+        state.collapse.record_moved_unfollowed(
+            Feed::LedgerPush,
+            endpoint,
+            *status,
+            location,
+            &message,
+            retry_in,
+        );
+        return;
+    }
     let (endpoint, status, message, no_credential) = match error {
         PushError::Store(message) => (None, None, message.as_str(), false),
         PushError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone", false),
+        PushError::Moved { .. } => unreachable!(),
         PushError::Diverged {
             endpoint,
             status,
@@ -668,9 +758,29 @@ fn record_failure(state: &ServerState, error: &PushError, retry_in: Duration) {
 /// Publishes a `ledger_push` event for a failed pass (R13, R9).
 fn report_failure(state: &ServerState, error: &PushError, attempt: u32, retry_in: Duration) {
     let retry_in_ms = u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX);
+    if let PushError::Moved {
+        endpoint,
+        status,
+        location,
+    } = error
+    {
+        let detail = json!({
+            "status": "moved",
+            "endpoint": endpoint,
+            "http_status": status,
+            "location": location,
+            "hint": send::moved_hint(location),
+            "attempt": attempt,
+            "retry_in_ms": retry_in_ms,
+            "error": format!("HTTP {status}: moved to {location} (redirect not followed)"),
+        });
+        state.events.publish(EventKind::LedgerPush, None, detail);
+        return;
+    }
     let (endpoint, status, message) = match error {
         PushError::Store(message) => (None, None, message.as_str()),
         PushError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone"),
+        PushError::Moved { .. } => unreachable!(),
         PushError::Diverged {
             endpoint,
             status,
@@ -692,6 +802,19 @@ fn report_failure(state: &ServerState, error: &PushError, attempt: u32, retry_in
         "error": message,
     });
     state.events.publish(EventKind::LedgerPush, None, detail);
+}
+
+/// Publishes a `ledger_push` event when the endpoint follows a same-origin
+/// 307/308 redirect to `location` (#446).
+fn report_moved(events: &EventLog, endpoint: &str, http_status: u16, location: &str) {
+    let detail = json!({
+        "status": "moved",
+        "endpoint": endpoint,
+        "http_status": http_status,
+        "location": location,
+        "hint": send::moved_hint(location),
+    });
+    events.publish(EventKind::LedgerPush, None, detail);
 }
 
 /// Publishes a `ledger_push` event when the endpoint answers 410, once,

@@ -22,6 +22,9 @@ pub enum FeedState {
     Sending,
     /// Caught up with the endpoint.
     Current,
+    /// The endpoint redirected (HTTP 301, 307 or 308); same-origin 307/308
+    /// keeps delivering for the session until `rosen.toml` is updated (#446).
+    Moved,
     /// The last attempt failed and is backing off to retry.
     Failing,
     /// The endpoint answered HTTP 410 (archived or deleted) and sending stopped.
@@ -41,6 +44,7 @@ impl FeedState {
         match self {
             FeedState::Sending => "sending",
             FeedState::Current => "current",
+            FeedState::Moved => "moved",
             FeedState::Failing => "failing",
             FeedState::Stopped => "stopped",
             FeedState::NotOwner => "not_owner",
@@ -122,4 +126,11 @@ pub struct FeedHealth {
     /// that are skipped until their content changes (#444).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<RefusedItem>,
+    /// Redirect target reported by HTTP 301, 307 or 308 (#446).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_to: Option<String>,
+    /// Actionable hint when the endpoint moved, such as
+    /// `rosen collapse link <new-owner>/<name> --land` (#446).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }

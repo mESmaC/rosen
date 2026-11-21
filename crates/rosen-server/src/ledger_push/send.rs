@@ -24,6 +24,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const CREDENTIAL_TIMEOUT: Duration = Duration::from_secs(60);
 /// How much of an error response is kept for the event.
 const SHOWN_RESPONSE: usize = 300;
+/// Maximum same-origin 307/308 redirects followed for one request (#446).
+const MAX_REDIRECTS: usize = 5;
 
 /// A user name and token for HTTPS basic auth.
 #[derive(Clone)]
@@ -47,6 +49,8 @@ pub enum SendFailure {
     /// HTTP 410: the endpoint's repository is archived or deleted. Retrying
     /// cannot help, so the push stops until the endpoint changes.
     Gone,
+    /// HTTP 301, 307 or 308: the endpoint moved to `location` (#446).
+    Moved { status: u16, location: String },
     /// HTTP 409 `source_changed`: the endpoint holds feed state from another
     /// Rosen server (different `feed_id`). Sending stops until the operator
     /// runs `rosen collapse link --reset` (#445).
@@ -64,6 +68,113 @@ pub enum SendFailure {
 /// isolate refused items instead of retrying the same batch unchanged (#444).
 pub fn is_batch_refusal(status: Option<u16>) -> bool {
     matches!(status, Some(400 | 413 | 422))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Origin {
+    scheme: &'static str,
+    host: String,
+    port: u16,
+}
+
+fn parse_origin(url: &str) -> Option<Origin> {
+    if url.chars().any(char::is_control) {
+        return None;
+    }
+    let (scheme_raw, rest) = url.split_once("://")?;
+    let (scheme, default_port) = if scheme_raw.eq_ignore_ascii_case("https") {
+        ("https", 443)
+    } else if scheme_raw.eq_ignore_ascii_case("http") {
+        ("http", 80)
+    } else {
+        return None;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let (host, port) = if let Some(after_open) = authority.strip_prefix('[') {
+        let (addr, tail) = after_open.split_once(']')?;
+        if addr.is_empty() {
+            return None;
+        }
+        let port = match tail {
+            "" => default_port,
+            _ => tail.strip_prefix(':')?.parse::<u16>().ok()?,
+        };
+        (format!("[{}]", addr.to_ascii_lowercase()), port)
+    } else if let Some((host, port_str)) = authority.rsplit_once(':') {
+        if host.is_empty() || host.contains(':') {
+            return None;
+        }
+        let port = port_str.parse::<u16>().ok()?;
+        (host.to_ascii_lowercase(), port)
+    } else {
+        (authority.to_ascii_lowercase(), default_port)
+    };
+    Some(Origin { scheme, host, port })
+}
+
+/// Whether `from` and `to` share exact scheme, host and port, with no embedded
+/// credentials. Only same-origin 307/308 redirects may receive the push token.
+pub fn same_origin(from: &str, to: &str) -> bool {
+    match (parse_origin(from), parse_origin(to)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Extracts the Collapse repository root (`<origin>/<owner>/<name>`) from a
+/// Collapse root, state feed, ledger push or action relay URL (#446).
+pub fn collapse_root_from_url(url: &str) -> Option<String> {
+    if url.chars().any(char::is_control) {
+        return None;
+    }
+    let (scheme, rest) = url.split_once("://")?;
+    let (authority, path_and_query) = rest.split_once('/')?;
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let path = path_and_query
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path_and_query)
+        .trim_end_matches('/');
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    let (owner, name, tail) = (segments[0], segments[1], &segments[2..]);
+    let valid_tail = matches!(
+        tail,
+        [] | ["ledgers"]
+            | ["rosen", "state"]
+            | ["rosen", "doorbell"]
+            | ["rosen", "actions"]
+            | ["rosen", "actions", _, "result"]
+    );
+    if !valid_tail || name.ends_with(".git") {
+        return None;
+    }
+    Some(format!("{scheme}://{authority}/{owner}/{name}"))
+}
+
+/// Extracts `<owner>/<name>` from a Collapse URL, when it matches a Collapse
+/// repository root or feed/relay route (#446).
+pub fn collapse_repo_slug(url: &str) -> Option<String> {
+    let root = collapse_root_from_url(url)?;
+    let (_, rest) = root.split_once("://")?;
+    let (_, slug) = rest.split_once('/')?;
+    Some(slug.to_owned())
+}
+
+/// Operator hint for a redirected Collapse endpoint (#446).
+pub fn moved_hint(location: &str) -> String {
+    match collapse_repo_slug(location) {
+        Some(slug) => format!("rosen collapse link {slug} --land"),
+        None => format!("update `collapse` or `ledger_endpoint` in rosen.toml to {location}"),
+    }
 }
 
 /// The credential git's helpers hold for `endpoint`, or `None` when they
@@ -109,21 +220,28 @@ pub async fn credential(data_dir: &Path, endpoint: &str) -> Option<Credential> {
     Some(Credential { user, token })
 }
 
-/// POSTs `body` to `endpoint` and returns what the endpoint now holds.
-pub async fn post(
+/// POSTs `body` to `endpoint`, following same-origin 307/308 redirects, and
+/// returns what the endpoint holds along with the first redirect status and
+/// final URL when redirected (#446).
+pub async fn post_following(
     scratch: &Path,
     endpoint: &str,
     body: &[u8],
     credential: Option<&Credential>,
-) -> Result<Held, SendFailure> {
-    let accepted = post_json(scratch, endpoint, body, credential).await?;
-    held(&accepted)
+) -> Result<(Held, Option<(u16, String)>), SendFailure> {
+    let accepted = post_json_following(scratch, endpoint, body, credential).await?;
+    let held = held(&accepted)?;
+    Ok((held, accepted.redirected))
 }
 
 /// A 2xx answer from the endpoint.
+#[derive(Debug)]
 pub struct Accepted {
     pub status: u16,
     pub body: String,
+    /// First redirect HTTP status and final URL when a same-origin 307/308
+    /// redirect was followed (#446).
+    pub redirected: Option<(u16, String)>,
 }
 
 impl Accepted {
@@ -162,6 +280,43 @@ pub async fn post_json(
     status_answer(&output)
 }
 
+/// POSTs a JSON `body` to `endpoint`, following same-origin 307 and 308
+/// redirects (which preserve POST and the request body) up to [`MAX_REDIRECTS`]
+/// hops (#446). HTTP 301 and cross-origin redirects are returned as
+/// [`SendFailure::Moved`] without leaking credentials.
+pub async fn post_json_following(
+    scratch: &Path,
+    endpoint: &str,
+    body: &[u8],
+    credential: Option<&Credential>,
+) -> Result<Accepted, SendFailure> {
+    let mut current = endpoint.to_owned();
+    let mut first_status: Option<u16> = None;
+    for _ in 0..=MAX_REDIRECTS {
+        match post_json(scratch, &current, body, credential).await {
+            Ok(mut accepted) => {
+                if let Some(status) = first_status {
+                    accepted.redirected = Some((status, current));
+                }
+                return Ok(accepted);
+            }
+            Err(SendFailure::Moved { status, location })
+                if matches!(status, 307 | 308)
+                    && same_origin(&current, &location)
+                    && location != current =>
+            {
+                first_status.get_or_insert(status);
+                current = location;
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
+    Err(SendFailure::Failed {
+        status: first_status,
+        message: format!("too many redirects from {endpoint} (last: {current})"),
+    })
+}
+
 /// GETs `endpoint` with the same credential and curl settings as a POST.
 /// The action relay (R14) reads Collapse's doorbell and actions this way.
 pub async fn get_json(
@@ -171,6 +326,39 @@ pub async fn get_json(
     let config = curl_config(endpoint, credential)?;
     let output = run_curl(None, &config).await?;
     status_answer(&output)
+}
+
+/// GETs `endpoint`, following same-origin 307 and 308 redirects up to
+/// [`MAX_REDIRECTS`] hops (#446).
+pub async fn get_json_following(
+    endpoint: &str,
+    credential: Option<&Credential>,
+) -> Result<Accepted, SendFailure> {
+    let mut current = endpoint.to_owned();
+    let mut first_status: Option<u16> = None;
+    for _ in 0..=MAX_REDIRECTS {
+        match get_json(&current, credential).await {
+            Ok(mut accepted) => {
+                if let Some(status) = first_status {
+                    accepted.redirected = Some((status, current));
+                }
+                return Ok(accepted);
+            }
+            Err(SendFailure::Moved { status, location })
+                if matches!(status, 307 | 308)
+                    && same_origin(&current, &location)
+                    && location != current =>
+            {
+                first_status.get_or_insert(status);
+                current = location;
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
+    Err(SendFailure::Failed {
+        status: first_status,
+        message: format!("too many redirects from {endpoint} (last: {current})"),
+    })
 }
 
 /// The endpoint's answer, from curl's output.
@@ -184,13 +372,16 @@ fn status_answer(output: &std::process::Output) -> Result<Accepted, SendFailure>
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(fail(format!("curl: {}", stderr.trim())));
     }
-    // `--write-out` puts the status on its own line after the response.
-    let (response, status) = stdout.rsplit_once('\n').unwrap_or(("", &stdout));
+    // `--write-out` puts `\n%{http_code}\n%{redirect_url}` after the response.
+    let (before_redirect, redirect_url) = stdout.rsplit_once('\n').unwrap_or(("", &stdout));
+    let (response, status) = before_redirect
+        .rsplit_once('\n')
+        .unwrap_or(("", before_redirect));
     let status: u16 = status
         .trim()
         .parse()
         .map_err(|_| fail(format!("curl printed no HTTP status: {}", shown(&stdout))))?;
-    answer(status, response)
+    answer(status, response, redirect_url.trim())
 }
 
 /// curl's settings, read from its standard input. A token never appears
@@ -238,7 +429,12 @@ async fn run_curl(body: Option<&Path>, config: &str) -> Result<std::process::Out
             .arg(data);
     }
     command
-        .args(["--write-out", "\\n%{http_code}", "--config", "-"])
+        .args([
+            "--write-out",
+            "\\n%{http_code}\\n%{redirect_url}",
+            "--config",
+            "-",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -260,9 +456,18 @@ async fn run_curl(body: Option<&Path>, config: &str) -> Result<std::process::Out
 }
 
 /// Reads the endpoint's status: its answer when it accepted, or why not.
-fn answer(status: u16, response: &str) -> Result<Accepted, SendFailure> {
+fn answer(status: u16, response: &str, redirect_url: &str) -> Result<Accepted, SendFailure> {
     if status == 410 {
         return Err(SendFailure::Gone);
+    }
+    if matches!(status, 301 | 307 | 308)
+        && !redirect_url.is_empty()
+        && !redirect_url.chars().any(char::is_control)
+    {
+        return Err(SendFailure::Moved {
+            status,
+            location: redirect_url.to_owned(),
+        });
     }
     if status == 409 && is_source_changed(response) {
         return Err(SendFailure::SourceChanged {
@@ -284,6 +489,7 @@ fn answer(status: u16, response: &str) -> Result<Accepted, SendFailure> {
     Ok(Accepted {
         status,
         body: response.to_owned(),
+        redirected: None,
     })
 }
 
@@ -338,5 +544,66 @@ fn shown(text: &str) -> String {
     match text.char_indices().nth(SHOWN_RESPONSE) {
         Some((end, _)) => format!("{}...", &text[..end]),
         None => text.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Risk (#446): following a cross-origin redirect would leak the Collapse
+    /// push token to another host or over plain HTTP.
+    #[test]
+    fn same_origin_and_redirect_helpers_reject_cross_origin_and_extract_slug() {
+        assert!(same_origin(
+            "https://api.collapse.sh/old/repo/rosen/state",
+            "https://API.COLLAPSE.SH:443/new/repo/rosen/state"
+        ));
+        assert!(same_origin(
+            "http://127.0.0.1:8080/old/repo/ledgers",
+            "http://127.0.0.1:8080/new/repo/ledgers"
+        ));
+        assert!(!same_origin(
+            "https://api.collapse.sh/old/repo/rosen/state",
+            "http://api.collapse.sh/new/repo/rosen/state"
+        ));
+        assert!(!same_origin(
+            "https://api.collapse.sh/old/repo/rosen/state",
+            "https://evil.example/new/repo/rosen/state"
+        ));
+        assert!(!same_origin(
+            "https://api.collapse.sh/old/repo/rosen/state",
+            "https://tok@api.collapse.sh/new/repo/rosen/state"
+        ));
+        assert_eq!(
+            moved_hint("https://api.collapse.sh/new-org/new-repo/rosen/state"),
+            "rosen collapse link new-org/new-repo --land"
+        );
+        assert_eq!(
+            moved_hint("https://api.collapse.sh/new-org/new-repo/ledgers"),
+            "rosen collapse link new-org/new-repo --land"
+        );
+        assert_eq!(
+            collapse_root_from_url(
+                "https://api.collapse.sh/new-org/new-repo/rosen/actions?after=5"
+            ),
+            Some("https://api.collapse.sh/new-org/new-repo".to_owned())
+        );
+        for code in [301, 307, 308] {
+            assert_eq!(
+                answer(code, "", "https://api.collapse.sh/new/repo/rosen/state").unwrap_err(),
+                SendFailure::Moved {
+                    status: code,
+                    location: "https://api.collapse.sh/new/repo/rosen/state".to_owned(),
+                }
+            );
+        }
+        assert!(matches!(
+            answer(307, "", "").unwrap_err(),
+            SendFailure::Failed {
+                status: Some(307),
+                ..
+            }
+        ));
     }
 }

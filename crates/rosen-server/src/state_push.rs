@@ -78,6 +78,12 @@ pub enum PushError {
     Store(String),
     /// The endpoint's repository is archived or deleted (HTTP 410).
     Gone { endpoint: String },
+    /// An unfollowed redirect (HTTP 301 or cross-origin 307/308) (#446).
+    Moved {
+        endpoint: String,
+        status: u16,
+        location: String,
+    },
     /// Collapse holds feed state from another Rosen server (HTTP 409
     /// `source_changed`) or ahead of this server's local event log (#445).
     Diverged {
@@ -136,6 +142,9 @@ struct Session {
     configured: Option<(Option<Feed>, u64)>,
     /// The endpoint that answered 410.
     stopped: Option<String>,
+    /// Followed same-origin 307/308 delivery URL for the session:
+    /// `(configured_endpoint, delivery_endpoint)` (#446).
+    redirected: Option<(String, String)>,
     /// The endpoint that reported `diverged` (409 `source_changed` or ahead of local log).
     diverged: Option<String>,
     pending: Pending,
@@ -307,7 +316,7 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<Step, P
     session.diverged = None;
     if !matches!(&session.target, Some((target, _)) if target.endpoint == endpoint) {
         let _in_flight = state.collapse.begin(CollapseFeed::StateFeed, &endpoint);
-        let (target, cursor) = reconcile(state, &endpoint).await?;
+        let (target, cursor) = reconcile(state, &endpoint, session).await?;
         session.pending = Pending::everything(cursor.scanned);
         session.target = Some((target, cursor));
     }
@@ -367,8 +376,12 @@ async fn send_pass(
         .set_pending(CollapseFeed::StateFeed, &endpoint, true, None);
     let _in_flight = state.collapse.begin(CollapseFeed::StateFeed, &endpoint);
     let delivered = pass::send(state, target, &session.pending, cursor, channel).await?;
+    let delivery_endpoint = target.delivery_endpoint.clone();
     let scanned_to = session.pending.scanned_to;
     let cursor_delivered = cursor.delivered;
+    if delivery_endpoint != endpoint {
+        session.redirected = Some((endpoint.clone(), delivery_endpoint));
+    }
     session.pending = Pending {
         scanned_to,
         ..Pending::default()
@@ -485,19 +498,32 @@ async fn configured_feed(
 async fn reconcile(
     state: &Arc<ServerState>,
     endpoint: &str,
+    session: &mut Session,
 ) -> Result<(Target, Cursor), PushError> {
     let metadata = state.config.metadata_path();
     let feed_id = blocking(move || crate::collapse_feed::get_or_create(&metadata)).await?;
     let credential = send::credential(&state.config.data_dir, endpoint).await;
-    let target = Target {
+    let delivery_endpoint = match &session.redirected {
+        Some((configured, target)) if configured == endpoint => target.clone(),
+        _ => {
+            session.redirected = None;
+            endpoint.to_owned()
+        }
+    };
+    let mut target = Target {
         endpoint: endpoint.to_owned(),
+        delivery_endpoint,
         feed_id,
         scratch: state.config.data_dir.join("state-push"),
         credential,
         stores: Stores::new(&state.config),
         relay: Arc::clone(&state.relay_wake),
     };
-    let held = target.post(batch::probe(Some(&target.feed_id))).await?;
+    let probe = batch::probe(Some(&target.feed_id));
+    let held = target.post(state, probe).await?;
+    if target.delivery_endpoint != endpoint {
+        session.redirected = Some((endpoint.to_owned(), target.delivery_endpoint.clone()));
+    }
     // A probe delivers no items, so it never advances last_success_at (#444).
     let (metadata, endpoint_owned) = (state.config.metadata_path(), endpoint.to_owned());
     let announced = state.events.announced_seq();
@@ -608,9 +634,27 @@ async fn blocking<T: Send + 'static>(
 }
 
 fn record_failure(state: &ServerState, error: &PushError, retry_in: Duration) {
+    if let PushError::Moved {
+        endpoint,
+        status,
+        location,
+    } = error
+    {
+        let message = format!("HTTP {status}: moved to {location} (redirect not followed)");
+        state.collapse.record_moved_unfollowed(
+            CollapseFeed::StateFeed,
+            endpoint,
+            *status,
+            location,
+            &message,
+            retry_in,
+        );
+        return;
+    }
     let (endpoint, status, message, no_credential) = match error {
         PushError::Store(message) => (None, None, message.as_str(), false),
         PushError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone", false),
+        PushError::Moved { .. } => unreachable!(),
         PushError::Diverged {
             endpoint,
             status,
@@ -641,9 +685,31 @@ fn record_failure(state: &ServerState, error: &PushError, retry_in: Duration) {
 /// Publishes a `state_push` event for a failed pass (R9).
 fn report_failure(state: &ServerState, error: &PushError, attempt: u32, retry_in: Duration) {
     let retry_in_ms = u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX);
+    if let PushError::Moved {
+        endpoint,
+        status,
+        location,
+    } = error
+    {
+        report(
+            state,
+            json!({
+                "status": "moved",
+                "endpoint": endpoint,
+                "http_status": status,
+                "location": location,
+                "hint": send::moved_hint(location),
+                "attempt": attempt,
+                "retry_in_ms": retry_in_ms,
+                "error": format!("HTTP {status}: moved to {location} (redirect not followed)"),
+            }),
+        );
+        return;
+    }
     let (endpoint, status, message) = match error {
         PushError::Store(message) => (None, None, message.as_str()),
         PushError::Gone { endpoint } => (Some(endpoint.as_str()), Some(410), "gone"),
+        PushError::Moved { .. } => unreachable!(),
         PushError::Diverged {
             endpoint,
             status,
@@ -665,6 +731,21 @@ fn report_failure(state: &ServerState, error: &PushError, attempt: u32, retry_in
             "attempt": attempt,
             "retry_in_ms": retry_in_ms,
             "error": message,
+        }),
+    );
+}
+
+/// Publishes a `state_push` event when a same-origin 307/308 redirect is
+/// followed to `location` (#446).
+pub(crate) fn report_moved(state: &ServerState, endpoint: &str, http_status: u16, location: &str) {
+    report(
+        state,
+        json!({
+            "status": "moved",
+            "endpoint": endpoint,
+            "http_status": http_status,
+            "location": location,
+            "hint": send::moved_hint(location),
         }),
     );
 }

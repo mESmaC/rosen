@@ -61,6 +61,7 @@ Rosen is its store and its authority.
     On start and after a failure it first sends an empty batch to read what the endpoint holds, and resends from there when that is less than it delivered.
   - A failed send is retried with backoff from 1 s to 5 minutes and publishes a `ledger_push` event (R9); the first success after failures publishes one too.
     When the endpoint refuses a batch with HTTP 400, 413 or 422, the push splits the batch by halves to isolate the refused entry(s), skips them, publishes `ledger_push` `status: "refused"` naming the entry, and keeps delivering the rest; health counts `last_success_at` only for delivered batches.
+    HTTP 301, 307 and 308 report a `moved` health state with a `rosen collapse link <new-owner>/<name> --land` hint, and same-origin 307 and 308 redirects are followed for the session.
     HTTP 409 `source_changed` (or Collapse reporting `highest_sequence` ahead of this server's local ledgers) publishes `status: "diverged"`, reports `diverged` in `server status` and `collapse check`, and sends nothing until the operator runs `rosen collapse link --reset`.
     HTTP 410 (the endpoint's repository is archived) stops sending until the endpoint changes or the server restarts.
   - Without `ledger_endpoint` or `collapse`, nothing is sent.

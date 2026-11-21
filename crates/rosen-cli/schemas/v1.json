@@ -4077,7 +4077,7 @@
     },
     "FeedState": {
       "type": "string",
-      "enum": ["sending", "current", "failing", "stopped", "not_owner", "no_credential", "diverged"]
+      "enum": ["sending", "current", "moved", "failing", "stopped", "not_owner", "no_credential", "diverged"]
     },
     "FeedError": {
       "type": "object",
@@ -4158,6 +4158,18 @@
         "refused": {
           "type": "array",
           "items": { "$ref": "#/$defs/RefusedItem" }
+        },
+        "moved_to": {
+          "anyOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ]
+        },
+        "hint": {
+          "anyOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ]
         }
       },
       "required": ["state", "last_success_at", "cursor", "backlog", "last_error", "next_retry_at"],
@@ -5297,6 +5309,7 @@
         "status": {
           "enum": [
             "pass",
+            "moved",
             "fail",
             "skipped"
           ]

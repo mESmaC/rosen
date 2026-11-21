@@ -226,6 +226,7 @@ fn feed_health_line(cursor_label: &str, health: &FeedHealth) -> String {
     let label = match health.state {
         FeedState::Sending => "sending",
         FeedState::Current => "current",
+        FeedState::Moved => "moved",
         FeedState::Failing => "failing",
         FeedState::Stopped => "stopped",
         FeedState::NotOwner => "not owner",
@@ -256,6 +257,9 @@ fn feed_health_line(cursor_label: &str, health: &FeedHealth) -> String {
     if let Some(at) = health.next_retry_at {
         parts.push(format!("retry {}", utc_second(at)));
     }
+    if let Some(moved_to) = &health.moved_to {
+        parts.push(format!("to {moved_to}"));
+    }
     if let Some(summary) = refused_summary(&health.refused) {
         parts.push(summary);
     }
@@ -269,13 +273,17 @@ fn feed_health_line(cursor_label: &str, health: &FeedHealth) -> String {
         .as_ref()
         .map(|error| error.message.as_str())
         .or_else(|| health.refused.last().map(|item| item.message.as_str()));
-    match trailing {
+    let mut line = match trailing {
         Some(raw) => {
             let message = raw.split_whitespace().collect::<Vec<_>>().join(" ");
             format!("{head}: {message}")
         }
         None => head,
+    };
+    if let Some(hint) = &health.hint {
+        line.push_str(&format!(" — hint: {hint}"));
     }
+    line
 }
 
 fn refused_summary(refused: &[RefusedItem]) -> Option<String> {
@@ -555,6 +563,8 @@ mod tests {
             }),
             next_retry_at: Some(1_700_000_065_000),
             refused: Vec::new(),
+            moved_to: None,
+            hint: None,
         };
         let line = feed_health_line("seq", &failing);
         assert!(!line.contains('\n'), "{line}");
@@ -574,10 +584,23 @@ mod tests {
             last_error: None,
             next_retry_at: None,
             refused: Vec::new(),
+            moved_to: None,
+            hint: None,
         };
         assert_eq!(
             feed_health_line("seq", &current),
             "current (seq 45, last ok 2023-11-14 22:15:20 UTC)"
+        );
+
+        let moved = FeedHealth {
+            state: FeedState::Moved,
+            moved_to: Some("https://api.collapse.sh/new-org/new-repo/rosen/state".into()),
+            hint: Some("rosen collapse link new-org/new-repo --land".into()),
+            ..current.clone()
+        };
+        assert_eq!(
+            feed_health_line("seq", &moved),
+            "moved (seq 45, last ok 2023-11-14 22:15:20 UTC, to https://api.collapse.sh/new-org/new-repo/rosen/state) — hint: rosen collapse link new-org/new-repo --land"
         );
 
         let with_refused = FeedHealth {

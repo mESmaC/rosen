@@ -24,6 +24,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[derive(Default)]
 struct MockCollapse {
     state_status: Option<u16>,
+    /// `(old_prefix, new_prefix, status)`: redirects `/state` and `/ledgers`,
+    /// while old `/rosen/doorbell` returns 404 like Collapse's edge Worker.
+    renamed: Option<(String, String, u16)>,
     state_body: Option<String>,
     state_highest: u64,
     ledger_highest: (u64, u64),
@@ -31,15 +34,23 @@ struct MockCollapse {
 }
 
 impl MockCollapse {
-    fn answer(&mut self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
+    fn answer(&mut self, method: &str, path: &str, body: &[u8]) -> (u16, Option<String>, String) {
         self.requests.push((method.to_owned(), path.to_owned()));
+        if let Some((old, new, code)) = &self.renamed {
+            if let Some(rest) = path.strip_prefix(old.as_str()) {
+                if rest == "/rosen/doorbell" {
+                    return (404, None, json!({"error": "not found"}).to_string());
+                }
+                return (*code, Some(format!("{new}{rest}")), String::new());
+            }
+        }
         if path.ends_with("/rosen/state") {
             if let Some(status) = self.state_status {
                 let body = self
                     .state_body
                     .clone()
                     .unwrap_or_else(|| json!({"error": "unauthorized"}).to_string());
-                return (status, body);
+                return (status, None, body);
             }
             let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
             assert_eq!(parsed["through"], 0);
@@ -47,6 +58,7 @@ impl MockCollapse {
             assert!(parsed["changes"].as_array().unwrap().is_empty());
             return (
                 200,
+                None,
                 json!({"highest_sequence": self.state_highest}).to_string(),
             );
         }
@@ -56,6 +68,7 @@ impl MockCollapse {
             assert!(parsed["entries"].as_array().unwrap().is_empty());
             return (
                 200,
+                None,
                 json!({"highest_sequence": {
                     "discovery": self.ledger_highest.0,
                     "past_work": self.ledger_highest.1
@@ -64,9 +77,9 @@ impl MockCollapse {
             );
         }
         if path.ends_with("/rosen/doorbell") {
-            return (200, json!({"generation": 5}).to_string());
+            return (200, None, json!({"generation": 5}).to_string());
         }
-        (404, json!({"error": "not found"}).to_string())
+        (404, None, json!({"error": "not found"}).to_string())
     }
 }
 
@@ -103,12 +116,15 @@ async fn serve(listener: tokio::net::TcpListener, mock: Arc<Mutex<MockCollapse>>
         let mut parts = first_line.lines().next().unwrap_or("").split_whitespace();
         let method = parts.next().unwrap_or("");
         let path = parts.next().unwrap_or("");
-        let (status, body) = mock
-            .lock()
-            .unwrap()
-            .answer(method, path, &request[head_end..]);
+        let (status, location, body) =
+            mock.lock()
+                .unwrap()
+                .answer(method, path, &request[head_end..]);
+        let loc_header = location
+            .map(|loc| format!("Location: {loc}\r\n"))
+            .unwrap_or_default();
         let response = format!(
-            "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} OK\r\n{loc_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         let _ = socket.write_all(response.as_bytes()).await;
@@ -280,7 +296,34 @@ fn collapse_check_passes_when_linked_and_pinpoints_each_failure() {
     );
     mock.lock().unwrap().state_highest = 0;
 
-    // 4. Pointing `collapse` at a different repository fails `repo_match` with a hint.
+    // 4. Renamed repository (307 on state/ledgers, 404 on old doorbell) reports
+    // `moved` with the new path and `rosen collapse link <new> --land` hint (#446).
+    mock.lock().unwrap().renamed = Some(("/mESmaC/rosen".into(), "/new-org/new-repo".into(), 307));
+    let report = check(&runtime, &state);
+    assert!(report.ok, "{report:?}");
+    for name in ["state_endpoint", "ledger_endpoint", "relay_doorbell"] {
+        let item = find(&report, name);
+        assert_eq!(item.status, CollapseCheckStatus::Moved, "{item:?}");
+        assert!(item.detail.contains("new-org/new-repo"), "{item:?}");
+        assert_eq!(
+            item.hint.as_deref(),
+            Some("rosen collapse link new-org/new-repo --land"),
+            "{item:?}"
+        );
+    }
+    // HTTP 301 is not followed and fails with the link hint.
+    mock.lock().unwrap().renamed = Some(("/mESmaC/rosen".into(), "/new-org/new-repo".into(), 301));
+    let report = check(&runtime, &state);
+    assert!(!report.ok, "{report:?}");
+    let item = find(&report, "state_endpoint");
+    assert_eq!(item.status, CollapseCheckStatus::Fail, "{item:?}");
+    assert_eq!(
+        item.hint.as_deref(),
+        Some("rosen collapse link new-org/new-repo --land")
+    );
+    mock.lock().unwrap().renamed = None;
+
+    // 5. Pointing `collapse` at a different repository fails `repo_match` with a hint.
     let mismatch_dir = tempfile::tempdir().unwrap();
     owner::mark(mismatch_dir.path()).unwrap();
     let mismatch_state = ServerState::new(ServerConfig {

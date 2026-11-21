@@ -24,12 +24,27 @@ struct Queue {
     results: BTreeMap<i64, Value>,
     status_413: BTreeSet<i64>,
     rejected: BTreeMap<i64, Vec<u16>>,
+    /// `(old_prefix, new_prefix)`: old doorbell returns 404 (like Collapse's
+    /// edge Worker), while old actions/results return 307 to `new_prefix` (#446).
+    renamed: Option<(String, String)>,
 }
 
 impl Queue {
-    fn answer(&mut self, path: &str, body: &[u8]) -> (u16, String) {
+    fn answer(&mut self, path: &str, body: &[u8]) -> (u16, Option<String>, String) {
+        if let Some((old, new)) = &self.renamed {
+            if let Some(rest) = path.strip_prefix(old.as_str()) {
+                if rest == "/rosen/doorbell" {
+                    return (404, None, r#"{"error":"not found"}"#.into());
+                }
+                return (307, Some(format!("{new}{rest}")), String::new());
+            }
+        }
         if path.ends_with("/rosen/doorbell") {
-            return (200, json!({ "generation": self.actions.len() }).to_string());
+            return (
+                200,
+                None,
+                json!({ "generation": self.actions.len() }).to_string(),
+            );
         }
         if let Some(after) = path.split("after=").nth(1) {
             let after: i64 = after.parse().unwrap();
@@ -44,7 +59,7 @@ impl Queue {
                 })
                 .cloned()
                 .collect();
-            return (200, json!({ "actions": due }).to_string());
+            return (200, None, json!({ "actions": due }).to_string());
         }
         let id = path.split('/').rev().nth(1).unwrap().parse().unwrap();
         if body.len() > 16 << 10 {
@@ -54,11 +69,11 @@ impl Queue {
                 400
             };
             self.rejected.entry(id).or_default().push(status);
-            return (status, r#"{"error":"body too large"}"#.into());
+            return (status, None, r#"{"error":"body too large"}"#.into());
         }
         self.results
             .insert(id, serde_json::from_slice(body).unwrap());
-        (200, "{}".into())
+        (200, None, "{}".into())
     }
 }
 
@@ -85,15 +100,20 @@ async fn serve(listener: tokio::net::TcpListener, queue: Arc<Mutex<Queue>>) {
         }
         let head = String::from_utf8_lossy(&request[..head_end]).into_owned();
         let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
-        let (status, body) = queue.lock().unwrap().answer(&path, &request[head_end..]);
+        let (status, location, body) = queue.lock().unwrap().answer(&path, &request[head_end..]);
         let reason = match status {
             200 => "OK",
+            307 => "Temporary Redirect",
             400 => "Bad Request",
+            404 => "Not Found",
             413 => "Payload Too Large",
             _ => "Error",
         };
+        let loc_header = location
+            .map(|loc| format!("Location: {loc}\r\n"))
+            .unwrap_or_default();
         let response = format!(
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} {reason}\r\n{loc_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();
@@ -388,4 +408,48 @@ async fn oversized_outcomes_and_400_413_never_block_later_actions() {
     }
     relay.abort();
     assert_oversized_results(&queue.lock().unwrap(), &state);
+}
+
+/// Risk (#446, R14): Collapse's edge doorbell Worker returns 404 after a rename
+/// while origin `/rosen/*` routes return 307; the relay must recover, keep
+/// running actions, and report `moved` with the new path in `server status`.
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_recovers_after_rename_404_doorbell_and_reports_moved() {
+    let data = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!("http://{}/o/r", listener.local_addr().unwrap());
+    let base_text = format!("review = \"before-land\"\ncollapse = \"{root}\"\n");
+    let (state, base, blob) = setup(data.path(), &base_text);
+    let lowered = format!("review = \"after-land\"\ncollapse = \"{root}\"\n");
+    let queue = Arc::new(Mutex::new(Queue {
+        actions: vec![action(1, base, json!(blob), &lowered)],
+        renamed: Some(("/o/r".into(), "/new-org/new-repo".into())),
+        ..Queue::default()
+    }));
+    tokio::spawn(serve(listener, Arc::clone(&queue)));
+    rosen_server::relay::set(&state, vec![RelayKind::Config]).await;
+    let relay = tokio::spawn(rosen_server::relay::run(Arc::clone(&state)));
+    let start = Instant::now();
+    while queue.lock().unwrap().results.is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(30), "no relay result");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let Response::Status(status) = call(&state, Request::Status).await else {
+        panic!()
+    };
+    relay.abort();
+    let rel = &status.collapse.unwrap().relay;
+    assert_eq!(rel.state, FeedState::Moved, "{rel:?}");
+    assert!(
+        rel.moved_to
+            .as_deref()
+            .unwrap()
+            .ends_with("/new-org/new-repo"),
+        "{rel:?}"
+    );
+    assert_eq!(
+        rel.hint.as_deref(),
+        Some("rosen collapse link new-org/new-repo --land")
+    );
+    assert_eq!(queue.lock().unwrap().results[&1]["state"], "done");
 }

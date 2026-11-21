@@ -22,7 +22,10 @@ use crate::ServerState;
 
 /// One endpoint and what reaching it needs.
 pub struct Target {
+    /// Configured endpoint from `rosen.toml` (cursor and health tracker key).
     pub endpoint: String,
+    /// Active delivery URL for the session (follows same-origin 307/308).
+    pub delivery_endpoint: String,
     pub feed_id: String,
     pub scratch: PathBuf,
     pub credential: Option<Credential>,
@@ -34,11 +37,21 @@ pub struct Target {
 impl Target {
     /// Posts `body` and returns the highest event sequence the endpoint
     /// holds.
-    pub async fn post(&self, body: Vec<u8>) -> Result<u64, PushError> {
+    pub async fn post(&mut self, state: &ServerState, body: Vec<u8>) -> Result<u64, PushError> {
         let credential = self.credential.as_ref();
-        let accepted = send::post_json(&self.scratch, &self.endpoint, &body, credential)
-            .await
-            .map_err(|failure| self.failure(failure))?;
+        let accepted =
+            send::post_json_following(&self.scratch, &self.delivery_endpoint, &body, credential)
+                .await
+                .map_err(|failure| self.failure(failure))?;
+        if let Some((status, new_url)) = accepted.redirected.as_ref() {
+            if self.delivery_endpoint != *new_url {
+                self.delivery_endpoint = new_url.clone();
+                state
+                    .collapse
+                    .record_moved(Feed::StateFeed, &self.endpoint, new_url);
+                super::report_moved(state, &self.endpoint, *status, new_url);
+            }
+        }
         // `{"highest_sequence":N,"actions_pending":B}`
         let answer: serde_json::Value = serde_json::from_str(&accepted.body)
             .map_err(|_| self.failure(accepted.unreadable("unreadable answer")))?;
@@ -55,6 +68,11 @@ impl Target {
         let endpoint = self.endpoint.clone();
         match failure {
             SendFailure::Gone => PushError::Gone { endpoint },
+            SendFailure::Moved { status, location } => PushError::Moved {
+                endpoint,
+                status,
+                location,
+            },
             SendFailure::SourceChanged { message } => PushError::Diverged {
                 endpoint,
                 status: Some(409),
@@ -134,7 +152,7 @@ impl UnitProgress {
 /// whether channel lines go too.
 pub async fn send(
     state: &Arc<ServerState>,
-    target: &Target,
+    target: &mut Target,
     pending: &Pending,
     cursor: &mut Cursor,
     channel: bool,
@@ -170,7 +188,7 @@ pub async fn send(
 /// still deliver (#444).
 async fn send_batches(
     state: &Arc<ServerState>,
-    target: &Target,
+    target: &mut Target,
     batches: Vec<Batch>,
     progress: &mut [UnitProgress],
     cursor: &mut Cursor,
@@ -188,7 +206,7 @@ async fn send_batches(
         let through = if is_final { seq } else { cursor.delivered };
         let body =
             prebuilt.unwrap_or_else(|| batch::encode(Some(&target.feed_id), through, &items));
-        match target.post(body).await {
+        match target.post(state, body).await {
             Ok(held) => {
                 if held < through {
                     return Err(lost(target, cursor, through, held).await);

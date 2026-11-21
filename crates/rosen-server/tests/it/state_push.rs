@@ -38,6 +38,8 @@ struct Intake {
     failing: Option<u16>,
     /// When set, any batch whose body contains `needle` is refused with `status`.
     refuse: Option<(String, u16)>,
+    /// `(old_path, new_path, status)` redirect rule (#446).
+    redirect: Option<(String, String, u16)>,
     /// When set, batches with a different `feed_id` receive HTTP 409 `source_changed`.
     expected_feed_id: Option<String>,
     resets: usize,
@@ -46,9 +48,15 @@ struct Intake {
 }
 
 impl Intake {
-    fn answer(&mut self, path: &str, body: &[u8]) -> (u16, String) {
+    fn answer(&mut self, path: &str, body: &[u8]) -> (u16, Option<String>, String) {
+        if let Some((old, new, code)) = &self.redirect {
+            if path == old {
+                self.paths.push(path.to_owned());
+                return (*code, Some(new.clone()), String::new());
+            }
+        }
         if let Some(status) = self.failing {
-            return (status, "{}".into());
+            return (status, None, "{}".into());
         }
         if path.ends_with("/rosen/state/reset") {
             let parsed: Value = serde_json::from_slice(body).unwrap();
@@ -56,18 +64,18 @@ impl Intake {
             self.through = 0;
             self.expected_feed_id = parsed["feed_id"].as_str().map(str::to_owned);
             self.resets += 1;
-            return (200, json!({"ok": true}).to_string());
+            return (200, None, json!({"ok": true}).to_string());
         }
         if let Some((needle, status)) = &self.refuse {
             if String::from_utf8_lossy(body).contains(needle) {
                 self.refusals += 1;
-                return (*status, json!({"error": "invalid item"}).to_string());
+                return (*status, None, json!({"error": "invalid item"}).to_string());
             }
         }
         let parsed: Value = serde_json::from_slice(body).unwrap();
         if let Some(expected) = &self.expected_feed_id {
             if parsed["feed_id"].as_str() != Some(expected.as_str()) {
-                return (409, json!({"error": "source_changed"}).to_string());
+                return (409, None, json!({"error": "source_changed"}).to_string());
             }
         }
         let is_probe = parsed["through"].as_u64() == Some(0)
@@ -82,7 +90,11 @@ impl Intake {
         self.paths.push(path.to_owned());
         self.bodies.push(body.to_vec());
         self.store(body);
-        (200, json!({ "highest_sequence": self.through }).to_string())
+        (
+            200,
+            None,
+            json!({ "highest_sequence": self.through }).to_string(),
+        )
     }
 
     /// Keeps an item unless a newer copy is held, as Collapse does.
@@ -161,9 +173,12 @@ async fn serve(listener: tokio::net::TcpListener, intake: Arc<Mutex<Intake>>) {
         }
         let head = String::from_utf8_lossy(&request[..head_end]).into_owned();
         let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
-        let (status, body) = intake.lock().unwrap().answer(&path, &request[head_end..]);
+        let (status, location, body) = intake.lock().unwrap().answer(&path, &request[head_end..]);
+        let loc_header = location
+            .map(|loc| format!("Location: {loc}\r\n"))
+            .unwrap_or_default();
         let response = format!(
-            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} X\r\n{loc_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         socket.write_all(response.as_bytes()).await.unwrap();
@@ -833,5 +848,70 @@ async fn fresh_data_dir_reports_diverged_until_reset_then_delivers() {
         .state_feed
         .last_error
         .is_none());
+    feed.abort();
+}
+
+/// Risk (#446, R9, R10): after a Collapse rename, the state feed must follow a
+/// same-origin 307 for the session so updates keep delivering while `server status`
+/// reports `moved` with the new path and `rosen collapse link <new> --land` hint.
+#[tokio::test(flavor = "multi_thread")]
+async fn state_feed_follows_same_origin_307_and_reports_moved_status() {
+    let data = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let root = format!("http://{}/o/r", listener.local_addr().unwrap());
+    let intake = Arc::new(Mutex::new(Intake {
+        redirect: Some((
+            "/o/r/rosen/state".into(),
+            "/new-org/new-repo/rosen/state".into(),
+            307,
+        )),
+        ..Intake::default()
+    }));
+    tokio::spawn(serve(listener, Arc::clone(&intake)));
+    let state = setup(data.path(), &root, "");
+    let first = change_editing(&state, "a.txt").await;
+    let feed = tokio::spawn(rosen_server::state_push::run(Arc::clone(&state)));
+    let wait = Duration::from_secs(30);
+
+    until(&intake, wait, |i| i.change(&first).is_some()).await;
+    let status = until_status(&state, wait, |s| {
+        s.collapse.as_ref().is_some_and(|c| {
+            c.state_feed.state == FeedState::Moved && c.state_feed.last_success_at.is_some()
+        })
+    })
+    .await;
+    let sf = &status.collapse.as_ref().unwrap().state_feed;
+    assert!(
+        sf.moved_to
+            .as_deref()
+            .unwrap()
+            .ends_with("/new-org/new-repo/rosen/state"),
+        "{sf:?}"
+    );
+    assert_eq!(
+        sf.hint.as_deref(),
+        Some("rosen collapse link new-org/new-repo --land")
+    );
+    assert!(sf.last_error.is_none());
+    let old_hits = intake
+        .lock()
+        .unwrap()
+        .paths
+        .iter()
+        .filter(|p| *p == "/o/r/rosen/state")
+        .count();
+    assert_eq!(old_hits, 1);
+
+    // Subsequent change delivers directly to the redirected path without re-hitting the 307.
+    let second = change_editing(&state, "b.txt").await;
+    until(&intake, wait, |i| i.change(&second).is_some()).await;
+    let old_hits_after = intake
+        .lock()
+        .unwrap()
+        .paths
+        .iter()
+        .filter(|p| *p == "/o/r/rosen/state")
+        .count();
+    assert_eq!(old_hits_after, 1);
     feed.abort();
 }
