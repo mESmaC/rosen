@@ -19,16 +19,18 @@ use super::marker::STATE_DIR;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::Match;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
+use std::path::{Path, PathBuf};
 
 pub struct IgnoreRules {
     root: PathBuf,
     /// The project's ignore list, rooted at the workspace root.
     project: Option<Gitignore>,
-    /// Stored `.gitignore` contents by workspace-relative directory, used as a
+    /// Stored `.gitignore` bytes by workspace-relative directory, used as a
     /// fallback when resuming deletion of a staged directory whose `.gitignore`
     /// was already removed on disk (#430).
-    stored: HashMap<String, String>,
+    stored: HashMap<String, Vec<u8>>,
     /// Parsed `.gitignore` per workspace-relative directory, or `None` where
     /// the directory has none. Filled lazily as paths are checked.
     per_dir: HashMap<String, Option<Gitignore>>,
@@ -40,7 +42,11 @@ impl IgnoreRules {
         Self::with_stored(root, project, HashMap::new())
     }
 
-    pub fn with_stored(root: PathBuf, project: &[String], stored: HashMap<String, String>) -> Self {
+    pub fn with_stored(
+        root: PathBuf,
+        project: &[String],
+        stored: HashMap<String, Vec<u8>>,
+    ) -> Self {
         Self {
             project: project_rules(&root, project),
             root,
@@ -108,21 +114,38 @@ impl IgnoreRules {
         };
         let file = dir_path.join(".gitignore");
         if file.is_file() {
-            let mut builder = GitignoreBuilder::new(&dir_path);
-            // A malformed line is skipped, as git skips it; the rest still apply.
-            let _ = builder.add(&file);
-            return builder.build().ok();
+            match File::open(&file) {
+                Ok(opened) => return parse_gitignore(&dir_path, &file, BufReader::new(opened)),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return None,
+            }
         }
         let stored = self.stored.get(dir)?;
-        let mut builder = GitignoreBuilder::new(&dir_path);
-        for line in stored.lines() {
-            let _ = builder.add_line(None, line);
-        }
-        builder.build().ok()
+        parse_gitignore(&dir_path, &file, stored.as_slice())
     }
 }
 
-fn project_rules(root: &std::path::Path, lines: &[String]) -> Option<Gitignore> {
+/// Parses `.gitignore` bytes the same way `GitignoreBuilder::add` reads a live
+/// file, so live files and stored fallbacks apply identical rules (#456).
+fn parse_gitignore(dir_path: &Path, file: &Path, reader: impl BufRead) -> Option<Gitignore> {
+    const UTF8_BOM: &str = "\u{feff}";
+    let mut builder = GitignoreBuilder::new(dir_path);
+    for (i, line) in reader.lines().enumerate() {
+        let Ok(line) = line else {
+            break;
+        };
+        let line = if i == 0 {
+            line.trim_start_matches(UTF8_BOM)
+        } else {
+            &line
+        };
+        // A malformed line is skipped, as git skips it; the rest still apply.
+        let _ = builder.add_line(Some(file.to_path_buf()), line);
+    }
+    builder.build().ok()
+}
+
+fn project_rules(root: &Path, lines: &[String]) -> Option<Gitignore> {
     if lines.is_empty() {
         return None;
     }
@@ -144,4 +167,24 @@ pub fn always_ignored(rel: &str) -> bool {
 /// Whether a change to this path can change the ignore rules.
 pub fn is_ignore_file(rel: &str) -> bool {
     rel == ".gitignore" || rel.ends_with("/.gitignore")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_and_stored_parse_utf8_bom_identically() {
+        // R2/R4 (#456): stored fallback must match live BOM and UTF-8 parsing.
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"\xef\xbb\xbfcache/\n# non-utf8 \xff\nlater/\n".to_vec();
+        let path = dir.path().join(".gitignore");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut live = IgnoreRules::new(dir.path().to_path_buf(), &[]);
+        assert!(live.is_ignored("cache/a", false) && !live.is_ignored("later/a", false));
+        std::fs::remove_file(&path).unwrap();
+        let stored_map = HashMap::from([(String::new(), bytes)]);
+        let mut stored = IgnoreRules::with_stored(dir.path().to_path_buf(), &[], stored_map);
+        assert!(stored.is_ignored("cache/a", false) && !stored.is_ignored("later/a", false));
+    }
 }

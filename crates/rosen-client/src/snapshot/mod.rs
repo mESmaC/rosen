@@ -109,9 +109,9 @@ pub struct Snapshotter {
     marker: WorkspaceMarker,
     index: Index,
     ignore: ignore::IgnoreRules,
-    /// Stored `.gitignore` contents loaded only during staged cleanup so a
+    /// Stored `.gitignore` bytes loaded only during staged cleanup so a
     /// partial deletion that already removed `.gitignore` still ignores caches.
-    stored_ignores: HashMap<String, String>,
+    stored_ignores: HashMap<String, Vec<u8>>,
     sparse: Sparse,
     /// Trees the server is known to hold, so they are never sent again.
     known_trees: HashSet<ObjectId>,

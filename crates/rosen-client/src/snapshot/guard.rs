@@ -107,7 +107,7 @@ fn relevant_files(
     root: &Path,
     index: &Index,
     project_ignore: &[String],
-    stored_ignores: &HashMap<String, String>,
+    stored_ignores: &HashMap<String, Vec<u8>>,
 ) -> Result<BTreeSet<String>, SnapshotError> {
     // Ignored output never blocks deletion (SPEC R2, R4).
     let mut ignore =
@@ -218,9 +218,7 @@ impl Snapshotter {
             }
             let dir = path.strip_suffix("/.gitignore").unwrap_or("");
             if let Ok(blob) = store.read_blob(&entry.blob) {
-                if let Ok(text) = String::from_utf8(blob.data) {
-                    self.stored_ignores.insert(dir.to_owned(), text);
-                }
+                self.stored_ignores.insert(dir.to_owned(), blob.data);
             }
         }
     }
