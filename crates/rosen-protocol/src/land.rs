@@ -161,11 +161,12 @@ pub enum MergeGate {
         merged_tree: Option<ObjectId>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         commands: BTreeMap<String, String>,
-        /// True when every reported path has a registered command and no higher
-        /// stack layer remains unmerged in `after-land` mode, so `land` will
+        /// True in `after-land` mode when earlier gates pass and every reported
+        /// path at the stopped layer has a registered command, so `land` will
         /// run those commands automatically instead of refusing with
-        /// `regeneration_required` (#454). Because the read-only check has not
-        /// executed them, `landable` stays false and `refusal` stays absent.
+        /// `regeneration_required` (#454, #468). Because the read-only check
+        /// has not executed them, `landable` stays false and `refusal` stays
+        /// absent.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pending_at_land: bool,
     },

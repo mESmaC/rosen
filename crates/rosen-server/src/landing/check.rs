@@ -36,11 +36,12 @@ pub struct GateCheck {
 }
 
 impl GateCheck {
-    /// True when the merge gate has a complete registered regeneration plan on
-    /// the top layer in `after-land` mode and the read-only check has not run
-    /// those commands yet (#454).
+    /// True when earlier gates passed, the merge gate stopped at an uncached
+    /// complete registered regeneration plan in `after-land` mode, and the
+    /// read-only check has not run those commands yet (#454, #468).
     pub fn pending_regeneration(&self) -> bool {
-        self.review == ReviewMode::AfterLand
+        self.refusal.is_none()
+            && self.review == ReviewMode::AfterLand
             && matches!(
                 self.merge,
                 MergeCheck::Regenerate {
@@ -65,9 +66,9 @@ pub enum MergeCheck {
         paths: Vec<String>,
         merged_tree: TreeId,
         commands: BTreeMap<String, String>,
-        /// True when every reported path has a registered command and no higher
-        /// stack layer remains unmerged, so an after-land request will run the
-        /// commands automatically instead of refusing with `regeneration_required`.
+        /// True when every reported path at this layer has a registered
+        /// command, so an after-land request will run the commands
+        /// automatically instead of refusing with `regeneration_required`.
         auto_at_land: bool,
     },
     Oversize {
@@ -226,7 +227,7 @@ impl Landing {
         }
         let mut trees = Vec::new();
         let mut onto = *base;
-        for (index, facts) in stack.iter().enumerate() {
+        for facts in stack {
             match self
                 .deps
                 .merger
@@ -254,7 +255,7 @@ impl Landing {
                         paths,
                         merged_tree: tree,
                         commands: info.commands,
-                        auto_at_land: info.all_registered && index + 1 == stack.len(),
+                        auto_at_land: info.all_registered,
                     });
                 }
             }

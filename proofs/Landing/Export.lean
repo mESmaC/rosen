@@ -62,6 +62,33 @@ def regenerationRow (name : String) (commands : List (Option Nat))
 
 def stackPassingInput : Input :=
   ⟨.active, true, false, false, .afterLand, false, .normal, .missing, true, false, true⟩
+def stackAbandonedInput : Input :=
+  { stackPassingInput with state := .abandoned }
+def stackLayerRefusal (isTop : Bool) (i : Input) : Option Refusal :=
+  let own : Option Refusal := match i.state with
+    | .landed => some .alreadyLanded
+    | .abandoned => some .abandoned
+    | .active =>
+      if i.hasConflicts then some .conflicts
+      else if i.review == ReviewMode.beforeLand && !i.approved then some .unapproved
+      else none
+  own.map fun r => if isTop then r else .parentUnlanded
+def stackEarlierRefusal : List (StackLayer Input) → Option Refusal
+  | [] => none
+  | [top] => stackLayerRefusal true (top.input 0)
+  | layer :: rest =>
+    match stackLayerRefusal false (layer.input 0) with
+    | some r => some r
+    | none => stackEarlierRefusal rest
+def uncachedLayer : LayerRegeneration → LayerRegeneration
+  | .clean tree => .clean tree
+  | .required commands _ => .required commands none
+def uncachedStack (layers : List (StackLayer α)) : List (StackLayer α) :=
+  layers.map fun l => { l with merge := fun onto => uncachedLayer (l.merge onto) }
+def checkStackCode (result : Except Refusal RegenerationCheck) : String :=
+  match result with
+  | .ok check => check.code
+  | .error r => (Verdict.refuse r).code
 def stackTreeCode : Nat → String
   | 4 => "parent_provisional"
   | 52 => "parent_regenerated"
@@ -77,6 +104,9 @@ def stackRefusalCode : RegenerationRefusal → String
   | .failed => "regeneration_failed"
   | .pending => "pending"
 def regenerationStackRow (name : String) (layers : List (StackLayer Input)) : String :=
+  let earlier := stackEarlierRefusal layers
+  let initial := checkStackCode (checkStackGate earlier 1 (uncachedStack layers))
+  let afterPreview := checkStackCode (checkStackGate earlier 1 layers)
   let preview := match previewStack 1 layers with
     | some tree => stackTreeCode tree
     | none => "-"
@@ -87,15 +117,20 @@ def regenerationStackRow (name : String) (layers : List (StackLayer Input)) : St
       ("land", stackTreeCode (stackCommitTree parentCommit),
         stackTreeCode (stackCommitTree ledger.base))
     | none =>
-      let reason := match resolveStack 1 layers with
-        | .error err => stackRefusalCode err
-        | .ok _ => "refused"
+      let reason := match earlier with
+        | some r => (Verdict.refuse r).code
+        | none => match resolveStack 1 layers with
+          | .error err => stackRefusalCode err
+          | .ok _ => "refused"
       (reason, "-", "-")
-  s!"regeneration_stack\t{name}\t{verdict}\t{preview}\t{parentTree}\t{childTree}\n"
+  s!"regeneration_stack\t{name}\t{verdict}\t{preview}\t{parentTree}\t{childTree}\t{initial}\t{afterPreview}\n"
+def stackLayersWith (parentInput : Input) (parent : LayerRegeneration)
+    (childOnRegen : LayerRegeneration) : List (StackLayer Input) :=
+  [ ⟨10, fun _ => parentInput, fun onto => if onto = 1 then parent else .clean 4⟩,
+    ⟨20, fun _ => stackPassingInput, fun onto => if onto = 52 then childOnRegen else .clean 14⟩ ]
 def stackLayers (parent : LayerRegeneration) (childOnRegen : LayerRegeneration) :
     List (StackLayer Input) :=
-  [ ⟨10, fun _ => stackPassingInput, fun onto => if onto = 1 then parent else .clean 4⟩,
-    ⟨20, fun _ => stackPassingInput, fun onto => if onto = 52 then childOnRegen else .clean 14⟩ ]
+  stackLayersWith stackPassingInput parent childOnRegen
 
 def fixtureTable : String :=
   "state\tparent_landed\thas_conflicts\tapproved\treview\trecheck\ttier\treceipt\tbase_moved\t" ++
@@ -119,7 +154,11 @@ def fixtureTable : String :=
     regenerationStackRow "parent_failed_child_clean"
       (stackLayers (.required [some 7] (some none)) (.clean 62)) ++
     regenerationStackRow "parent_regenerated_child_failed"
-      (stackLayers (.required [some 7] (some (some 52))) (.required [some 8] (some none)))
+      (stackLayers (.required [some 7] (some (some 52))) (.required [some 8] (some none))) ++
+    regenerationStackRow "parent_regenerated_child_missing"
+      (stackLayers (.required [some 7] (some (some 52))) (.required [some 8, none] none)) ++
+    regenerationStackRow "parent_abandoned_child_clean"
+      (stackLayersWith stackAbandonedInput (.required [some 7] (some (some 52))) (.clean 62))
 end Landing
 
 def main : IO Unit := IO.print Landing.fixtureTable

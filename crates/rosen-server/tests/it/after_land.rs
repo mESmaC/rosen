@@ -982,10 +982,11 @@ async fn regeneration_gate_matches_landing_model() {
     assert_eq!(rows, 3);
 }
 
-// Risk (R8 #428, #467): a regenerated lower layer must carry its completed
-// tree into its landed commit, the stacked child's merge preview, and the
-// child's landed commit instead of a provisional tree, and any layer failure
-// must refuse the whole stack without recording a checked preview.
+// Risk (R8 #428, #467, #468): a regenerated lower layer must carry its
+// completed tree into its landed commit, the stacked child's merge preview, and
+// the child's landed commit instead of a provisional tree; read-only land check
+// must report pending for complete uncached lower-layer plans once earlier
+// gates pass while preserving genuine refusals without side effects.
 #[tokio::test(flavor = "multi_thread")]
 async fn regeneration_stack_matches_landing_model() {
     let table = include_str!("../../../../proofs/fixtures/landing.tsv");
@@ -994,12 +995,16 @@ async fn regeneration_stack_matches_landing_model() {
         .lines()
         .filter_map(|line| line.strip_prefix("regeneration_stack\t"))
     {
-        let [scenario, verdict, preview, parent_tree, child_tree]: [&str; 5] =
-            row.split('\t').collect::<Vec<_>>().try_into().unwrap();
-        assert_regeneration_stack(scenario, verdict, preview, parent_tree, child_tree).await;
+        let [scenario, verdict, preview, parent_tree, child_tree, initial, after_preview]: [&str;
+            7] = row.split('\t').collect::<Vec<_>>().try_into().unwrap();
+        assert_regeneration_stack(
+            [scenario, verdict, preview, parent_tree, child_tree],
+            [initial, after_preview],
+        )
+        .await;
         rows += 1;
     }
-    assert_eq!(rows, 5);
+    assert_eq!(rows, 7);
 }
 
 async fn setup_regeneration_stack(
@@ -1013,8 +1018,14 @@ async fn setup_regeneration_stack(
     write_file(&state, &parent, "artifact.lock", b"stale parent").await;
     let child = new_change_on(&state, &parent).await;
     write_file(&state, &child, "child.txt", b"+CHILD").await;
-    if scenario.contains("child_regenerated") || scenario.contains("child_failed") {
+    if scenario.contains("child_regenerated")
+        || scenario.contains("child_failed")
+        || scenario.contains("child_missing")
+    {
         write_file(&state, &child, "second.lock", b"stale child").await;
+    }
+    if scenario == "parent_abandoned_child_clean" {
+        call(&state, Request::ChangeAbandon { change: parent }).await;
     }
     let base_change = new_change(&state).await;
     write_file(&state, &base_change, "base.txt", b"BASE+").await;
@@ -1025,14 +1036,12 @@ async fn setup_regeneration_stack(
 }
 
 async fn assert_regeneration_stack(
-    scenario: &str,
-    verdict: &str,
-    expected_preview: &str,
-    expected_parent: &str,
-    expected_child: &str,
+    [scenario, verdict, expected_preview, expected_parent, expected_child]: [&str; 5],
+    [initial, after_preview]: [&str; 2],
 ) {
     let temp = tempfile::tempdir().unwrap();
     let (state, child, base) = setup_regeneration_stack(temp.path(), scenario).await;
+    assert_read_only_regeneration_check(&state, &child, initial, scenario).await;
     let Response::MergeResult(preview) = call(
         &state,
         Request::MergeResult {
@@ -1062,6 +1071,7 @@ async fn assert_regeneration_stack(
         assert_eq!(checked, Some(preview_tree), "{scenario}");
         assert_stack_tree(&store, preview_tree, expected_preview, scenario);
     }
+    assert_read_only_regeneration_check(&state, &child, after_preview, scenario).await;
     let Response::Land(answer) = call(&state, Request::Land { change: child }).await else {
         panic!("expected a land answer")
     };
@@ -1074,6 +1084,23 @@ async fn assert_regeneration_stack(
         [scenario, verdict, expected_parent, expected_child],
     );
     state.landing.settle();
+}
+
+async fn assert_read_only_regeneration_check(
+    state: &Arc<ServerState>,
+    change: &str,
+    expected: &str,
+    scenario: &str,
+) {
+    let before_state = state.changes.show(change).unwrap().change.state;
+    let before_events = state.events.last_seq();
+    assert_regeneration_check(state, change, expected).await;
+    assert_eq!(
+        state.changes.show(change).unwrap().change.state,
+        before_state,
+        "{scenario}"
+    );
+    assert_eq!(state.events.last_seq(), before_events, "{scenario}");
 }
 
 fn assert_stack_land_outcome(
@@ -1124,7 +1151,9 @@ fn regeneration_stack_config(scenario: &str) -> String {
         "parent_failed_child_clean" => {
             config.push_str(&format!("\"artifact.lock\" = {fail:?}\n"));
         }
-        "parent_regenerated_child_clean" => {
+        "parent_regenerated_child_clean"
+        | "parent_regenerated_child_missing"
+        | "parent_abandoned_child_clean" => {
             config.push_str(&format!("\"artifact.lock\" = {parent_ok:?}\n"));
         }
         "parent_regenerated_child_regenerated" => {
@@ -1276,10 +1305,8 @@ async fn assert_regeneration_check(state: &Arc<ServerState>, change: &str, expec
             },
             Some(refusal),
             false,
-        ) => {
-            assert_eq!(refusal.reason, "regeneration_required");
-            "regeneration_required"
-        }
+        ) => refusal.reason.as_str(),
+        (MergeGate::Clean, Some(refusal), false) => refusal.reason.as_str(),
         _ => panic!("unexpected regeneration verdict: {check:?}"),
     };
     assert_eq!(verdict, expected);

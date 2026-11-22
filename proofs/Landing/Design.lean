@@ -125,21 +125,16 @@ private theorem land_correct (l : Ledger) (i : Input) (expected change commit : 
       landStep l i expected change commit = some ⟨commit, (change, commit) :: l.landed⟩) := by
   constructor
   · intro l' h
-    unfold landStep at h
-    split at h
-    · rename_i hv
-      unfold cas at h
-      split at h
+    unfold landStep at h; split at h
+    · rename_i hv; unfold cas at h; split at h
       · contradiction
       · split at h
-        · rename_i hl hb
-          cases h
+        · rename_i hl hb; cases h
           exact ⟨(decideLand_eq_land i).mp hv, hb.symm, by simpa using hl, rfl⟩
         · contradiction
     · contradiction
   · intro ha hb hl
-    have hv := (decideLand_eq_land i).mpr ha
-    simp [landStep, hv, cas, hl, hb]
+    simp [landStep, (decideLand_eq_land i).mpr ha, cas, hl, hb]
 /-- R12 Platforms: a confirmed failure on an advisory target cannot request an inverse. -/
 def failureReverts (review : ReviewMode) (build advisory : Bool) : Bool :=
   !advisory && (review == .beforeLand || build)
@@ -152,9 +147,9 @@ def reportFailure (s : Verification) (review : ReviewMode) (build advisory : Boo
   (failureReverts review build advisory, {s with failures := (culprit, build, out) :: s.failures})
 /-- **correct** (spec/R8-optimistic-landing/README.md R8, clean-merge-and-conflict-markers.md,
 before-land-mode.md, land-check.md, and spec/R12-post-land-verification.md R12): receipts and
-approvals gate before-land projects. Every confirmed failure is recorded. Advisory failures
-request no inverse. Successful stack publication and preview propagate each layer's completed
-tree into its candidate and the next layer, and an uncached top plan reads as pending. -/
+approvals gate before-land projects; failures are recorded without advisory reverts; stack land
+propagates regenerated trees; read-only checks report uncached complete plans at any layer as
+pending once earlier gates pass while preserving genuine refusals. -/
 theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     ((∀ l', landStep l i expected change commit = some l' →
       Authorized i ∧ expected = l.base ∧ l.hasLanded change = false ∧
@@ -190,22 +185,27 @@ theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     (∀ commands finished, checkTopRegeneration (.required commands finished) =
       if commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true) then
         if finished.join.isSome then .landable else .pendingAtLand
-      else .manual) := by
+      else .manual) ∧
+    (∀ (earlier : Option Refusal) onto (layers : List (StackLayer Input)),
+      (∀ r, earlier = some r → checkStackGate earlier onto layers = .error r) ∧
+      (earlier = none →
+        (checkStackGate earlier onto layers = .ok .landable ↔ ∃ resolved, ResolvedStack onto layers resolved) ∧
+        (checkStackGate earlier onto layers = .ok .manual ↔ resolveStack onto layers = .error .missing) ∧
+        (checkStackGate earlier onto layers = .ok .pendingAtLand ↔
+          resolveStack onto layers = .error .pending ∨ resolveStack onto layers = .error .failed))) := by
   have hreg : ∀ expected baseTree writeCommit layers result,
       regeneratedStackCas l expected baseTree writeCommit layers = some result ↔
       ∃ resolved, ResolvedStack baseTree layers resolved ∧ expected = l.base ∧
         stackReady l (candidatesOf writeCommit expected resolved) ∧
-        result = stackResult l (candidatesOf writeCommit expected resolved) := by
-    intro expected baseTree writeCommit layers result
+        result = stackResult l (candidatesOf writeCommit expected resolved) := fun _ _ _ _ _ => by
     simp only [regeneratedStackCas, withResolvedStack_some, stack_correct]
   refine ⟨land_correct l i expected change commit, ?_, stack_correct l, finish_correct,
-    previewStack_iff, hreg, ?_, fun _ => rfl, check_top_required⟩
+    previewStack_iff, hreg, ?_, fun _ => rfl, check_top_required, checkStackGate_spec⟩
   · intro s review build advisory culprit out
     refine ⟨rfl, rfl, ?_⟩
     cases review <;> cases build <;> cases advisory <;> simp [reportFailure, failureReverts]
   · intro expected baseTree writeCommit commitTree layers result hct h
-    rcases (hreg expected baseTree writeCommit layers result).mp h with
-      ⟨resolved, hres, _, hready, rfl⟩
+    rcases (hreg expected baseTree writeCommit layers result).mp h with ⟨resolved, hres, _, hready, rfl⟩
     rcases candidatesOf_published_trees writeCommit commitTree hct expected l.base l.landed
       resolved hready.1 with ⟨topTree, hlast, hbase, htrees⟩
     exact ⟨resolved, topTree, hres, (previewStack_iff baseTree layers topTree).mpr ⟨resolved, hres, hlast⟩,

@@ -57,6 +57,24 @@ inductive ResolvedStack : Nat → List (StackLayer α) → List (StackLayer α �
       ResolvedStack tree rest tail →
       ResolvedStack onto (layer :: rest) ((layer, tree) :: tail)
 
+/-- Read-only R8 land check for a bottom-first stack in after-land mode, with
+preceding layer gates satisfied. Stops at the first uncached layer needing
+regeneration: complete plans report `pendingAtLand` at any layer (not only the
+top), while incomplete plans report `manual` (R8, #454, #468). -/
+def checkStackRegeneration (onto : Nat) (layers : List (StackLayer α)) : RegenerationCheck :=
+  match resolveStack onto layers with
+  | .ok _ => .landable
+  | .error .missing => .manual
+  | .error .pending | .error .failed => .pendingAtLand
+
+/-- Read-only R8 land check for a stack with earlier layer gates checked first:
+an earlier gate refusal is preserved and never masked as pending regeneration. -/
+def checkStackGate {ρ : Type} (earlierRefusal : Option ρ) (onto : Nat)
+    (layers : List (StackLayer α)) : Except ρ RegenerationCheck :=
+  match earlierRefusal with
+  | some refusal => .error refusal
+  | none => .ok (checkStackRegeneration onto layers)
+
 /-- Checked merge preview for a stack: returns the top layer's completed tree
 only when the stack is nonempty and every layer finishes regeneration. -/
 def previewStack (baseTree : Nat) (layers : List (StackLayer α)) : Option Nat :=
@@ -241,5 +259,47 @@ theorem candidatesOf_published_trees (writeCommit : Nat → Nat → Nat → Nat)
         simp [candidatesOf_length]
       rw [List.take_left' hlen, ← List.map_reverse, List.reverse_reverse, List.map_map]
       exact candidatesOf_trees writeCommit commitTree hct parent resolved
+
+theorem checkStackRegeneration_singleton (onto : Nat) (layer : StackLayer α) :
+    checkStackRegeneration onto [layer] = checkTopRegeneration (layer.merge onto) := by
+  unfold checkStackRegeneration checkTopRegeneration resolveStack
+  cases finishRegeneration (layer.merge onto) with
+  | ok _ => rfl
+  | error err => cases err <;> rfl
+
+theorem checkStackRegeneration_spec (onto : Nat) (layers : List (StackLayer α)) :
+    (checkStackRegeneration onto layers = .landable ↔
+      ∃ resolved, ResolvedStack onto layers resolved) ∧
+    (checkStackRegeneration onto layers = .manual ↔
+      resolveStack onto layers = .error .missing) ∧
+    (checkStackRegeneration onto layers = .pendingAtLand ↔
+      resolveStack onto layers = .error .pending ∨
+      resolveStack onto layers = .error .failed) := by
+  unfold checkStackRegeneration
+  cases hr : resolveStack onto layers with
+  | ok resolved =>
+    refine ⟨⟨fun _ => ⟨resolved, (resolveStack_iff onto layers resolved).mp hr⟩, fun _ => rfl⟩,
+      by simp, by simp⟩
+  | error err =>
+    cases err <;>
+      refine ⟨⟨by simp, fun ⟨resolved, hres⟩ => by
+        have h := (resolveStack_iff onto layers resolved).mpr hres
+        rw [hr] at h; cases h⟩, by simp, by simp⟩
+
+theorem checkStackGate_spec {ρ : Type} (earlier : Option ρ) (onto : Nat)
+    (layers : List (StackLayer α)) :
+    (∀ r, earlier = some r → checkStackGate earlier onto layers = .error r) ∧
+    (earlier = none →
+      (checkStackGate earlier onto layers = .ok .landable ↔
+        ∃ resolved, ResolvedStack onto layers resolved) ∧
+      (checkStackGate earlier onto layers = .ok .manual ↔
+        resolveStack onto layers = .error .missing) ∧
+      (checkStackGate earlier onto layers = .ok .pendingAtLand ↔
+        resolveStack onto layers = .error .pending ∨
+        resolveStack onto layers = .error .failed)) := by
+  constructor
+  · intro r hr; subst hr; rfl
+  · intro hnone; subst hnone
+    simpa [checkStackGate] using checkStackRegeneration_spec onto layers
 
 end Landing
