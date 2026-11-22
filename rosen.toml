@@ -68,6 +68,7 @@ sensitive = [
     "crates/rosen-protocol/src/transport_windows.rs",
     "crates/rosen-merge/",
 ]
+collapse = "https://api.collapse.sh/mESmaC/rosen"
 
 # Build units are left to discovery: each package of the Cargo workspace is a
 # unit, read from the manifests at the base, so a new crate or dependency
@@ -119,4 +120,4 @@ commands = [
 # The base is pushed here after each land (R1). The server's git credential
 # helper holds the credentials.
 [mirror]
-remote = "https://github.com/mESmaC/rosen.git"
+remote = "https://api.collapse.sh/mESmaC/rosen.git"
