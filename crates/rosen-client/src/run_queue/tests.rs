@@ -222,10 +222,11 @@ fn idle_head_waiter_uses_floor_while_concurrency_keeps_reserve() {
 }
 
 // Risk: an idle machine stuck past STARVING with no turn running must surface
-// as a stall with the exact reserve-gib setting that would unblock it
-// (mESmaC/rosen#431).
+// the effective idle admission condition and omit `reserve-gib` advice that
+// cannot unblock an idle head admitted against the 4 GiB floor
+// (mESmaC/rosen#431, mESmaC/rosen#453).
 #[test]
-fn idle_stall_reports_starving_head_waiter_and_suggested_reserve() {
+fn idle_stall_reports_effective_condition_without_misleading_reserve_hint() {
     let dir = tempfile::tempdir().unwrap();
     let queue = RunQueue::at(dir.path());
     let headroom = MemoryHeadroom {
@@ -241,13 +242,43 @@ fn idle_stall_reports_starving_head_waiter_and_suggested_reserve() {
         .unwrap()
         .expect("head waiter past STARVING with nothing running reports a stall");
     assert_eq!(stalled.class, RunClass::Build);
-    assert_eq!(stalled.suggested_reserve_gib, Some(8));
-    assert!(stalled.summary().contains("reserve-gib=8"));
+    assert_eq!(stalled.suggested_reserve_gib, None);
+    let summary = stalled.summary();
+    assert!(!summary.contains("unblock with"), "{summary}");
+    assert!(
+        summary.contains("covers 10.0 GiB idle threshold"),
+        "{summary}"
+    );
 
     let too_low = MemoryHeadroom {
         available: Some(9 * GIB),
         reserve: Some(12 * GIB),
     };
+    let low_stall = queue
+        .idle_stall_on(16, now + STARVING.as_nanos(), too_low)
+        .unwrap()
+        .expect("below-floor idle stall still reports");
+    assert_eq!(low_stall.suggested_reserve_gib, None);
+    let low_summary = low_stall.summary();
+    assert!(!low_summary.contains("unblock with"), "{low_summary}");
+    assert!(
+        low_summary.contains("needs 10.0 GiB with 4.0 GiB idle floor, 9.0 GiB available"),
+        "{low_summary}"
+    );
+    let unreadable = queue
+        .idle_stall_on(
+            16,
+            now + STARVING.as_nanos(),
+            MemoryHeadroom {
+                available: None,
+                reserve: Some(12 * GIB),
+            },
+        )
+        .unwrap()
+        .expect("missing memory reading still reports an idle stall");
+    assert_eq!(unreadable.suggested_reserve_gib, None);
+    assert!(unreadable.summary().contains("no reading available"));
+    assert_eq!(headroom.suggested_reserve_gib(6 * GIB), Some(8));
     assert_eq!(too_low.suggested_reserve_gib(6 * GIB), None);
 
     let _turn = admit_with_reserve(&head, 16, 14 * GIB, 12 * GIB).unwrap();

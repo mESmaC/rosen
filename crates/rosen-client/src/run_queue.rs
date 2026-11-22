@@ -277,22 +277,18 @@ pub struct IdleStall {
     pub available: Option<u64>,
     pub reserve: Option<u64>,
     pub reason: Option<String>,
-    /// Exact `reserve-gib` setting (`>= 4`) that would admit the head waiter
-    /// under the concurrency reserve, when lowering the reserve would help.
+    /// Any `reserve-gib` setting (`>= 4`) that would unblock the idle head
+    /// waiter. Always `None` because idle head admission uses the fixed 4 GiB
+    /// floor rather than the concurrency reserve.
     pub suggested_reserve_gib: Option<u64>,
 }
 
 impl IdleStall {
     pub fn summary(&self) -> String {
-        let detail = self.reason.clone().unwrap_or_else(|| {
-            let available = self
-                .available
-                .map_or_else(|| "no reading available".to_owned(), gib);
-            format!(
-                "needs {}, {available} available",
-                gib(MEMORY_FLOOR.saturating_add(self.budget.memory))
-            )
-        });
+        let detail = self
+            .reason
+            .clone()
+            .unwrap_or_else(|| self.idle_memory_detail());
         let fix = self.suggested_reserve_gib.map_or_else(String::new, |gib| {
             format!("; unblock with `rosen run --slots reserve-gib={gib}`")
         });
@@ -302,6 +298,28 @@ impl IdleStall {
             self.class.name(),
             self.waited.as_secs(),
         )
+    }
+
+    fn idle_memory_detail(&self) -> String {
+        let needed = MEMORY_FLOOR.saturating_add(self.budget.memory);
+        match self.available {
+            None => format!(
+                "needs {} with {} idle floor, no reading available",
+                gib(needed),
+                gib(MEMORY_FLOOR),
+            ),
+            Some(available) if available < needed => format!(
+                "needs {} with {} idle floor, {} available",
+                gib(needed),
+                gib(MEMORY_FLOOR),
+                gib(available),
+            ),
+            Some(available) => format!(
+                "no wait reason recorded; {} available covers {} idle threshold",
+                gib(available),
+                gib(needed),
+            ),
+        }
     }
 }
 
@@ -469,6 +487,9 @@ impl RunQueue {
             return Ok(None);
         }
         let budget = admitted_budget(ticket.class, ticket.requested, cores);
+        // Idle head admission uses MEMORY_FLOOR (4 GiB) rather than the
+        // concurrency reserve, and `reserve-gib` cannot go below MEMORY_FLOOR,
+        // so no reserve change can unblock an idle head waiter.
         Ok(Some(IdleStall {
             class: ticket.class,
             waited,
@@ -477,7 +498,7 @@ impl RunQueue {
             available: memory.available,
             reserve: memory.reserve,
             reason,
-            suggested_reserve_gib: memory.suggested_reserve_gib(budget.memory),
+            suggested_reserve_gib: None,
         }))
     }
 
