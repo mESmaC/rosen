@@ -266,7 +266,12 @@ async fn macos_only_failure_bisects_and_records_platform_culprit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn connected_checker_tracks_lifecycle_in_status_and_state_feed() {
     let temp = tempfile::tempdir().unwrap();
-    let endpoint = Endpoint::new(format!("rosen-platforms-test-{}", std::process::id()));
+    // A pipe name on Windows; elsewhere a socket in a folder bind makes owner-only.
+    let endpoint = if cfg!(windows) {
+        Endpoint::new(format!("rosen-platforms-test-{}", std::process::id()))
+    } else {
+        Endpoint::new(temp.path().join("sock").join("s.sock").to_string_lossy())
+    };
     let state = ServerState::new(ServerConfig {
         data_dir: temp.path().into(),
         endpoint: endpoint.clone(),

@@ -113,7 +113,7 @@ fn start_server(data: &Path, store: &dyn ObjectStore) -> Endpoint {
     let endpoint = if cfg!(windows) {
         Endpoint::new(name)
     } else {
-        Endpoint::new(data.join("s.sock").to_string_lossy())
+        Endpoint::new(data.join("sock").join("s.sock").to_string_lossy())
     };
     let listener = Listener::bind(&endpoint).unwrap();
     let state = ServerState::new(ServerConfig {

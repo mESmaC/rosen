@@ -134,7 +134,7 @@ fn start_server(data: &Path, name: &str) -> Endpoint {
     let endpoint = if cfg!(windows) {
         Endpoint::new(format!("rosen-session-test-{name}-{}", std::process::id()))
     } else {
-        Endpoint::new(data.join("s.sock").to_string_lossy())
+        Endpoint::new(data.join("sock").join("s.sock").to_string_lossy())
     };
     let listener = Listener::bind(&endpoint).unwrap();
     let state = ServerState::new(ServerConfig {

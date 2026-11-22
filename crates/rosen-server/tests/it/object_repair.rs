@@ -29,7 +29,7 @@ fn config(dir: &Path) -> ServerConfig {
             dir.file_name().unwrap().to_string_lossy(),
         ))
     } else {
-        Endpoint::new(dir.join("s.sock").to_string_lossy())
+        Endpoint::new(dir.join("sock").join("s.sock").to_string_lossy())
     };
     ServerConfig {
         data_dir: dir.into(),

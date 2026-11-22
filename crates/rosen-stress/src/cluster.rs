@@ -48,7 +48,14 @@ impl Layout {
         if cfg!(windows) {
             Endpoint::new(name)
         } else {
-            Endpoint::new(self.root.join(format!("{name}.sock")).to_string_lossy())
+            // A folder `Listener::bind` creates owner-only itself: the root may be
+            // group-writable under a umask such as Ubuntu's 0002, which bind refuses.
+            Endpoint::new(
+                self.root
+                    .join("sockets")
+                    .join(format!("{name}.sock"))
+                    .to_string_lossy(),
+            )
         }
     }
 

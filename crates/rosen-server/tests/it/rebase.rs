@@ -225,7 +225,12 @@ async fn start(
     ObjectId,
     ObjectId,
 ) {
-    let endpoint = Endpoint::new(format!("rebase-{test}-{}", std::process::id()));
+    // A pipe name on Windows; elsewhere a socket in a folder bind makes owner-only.
+    let endpoint = if cfg!(windows) {
+        Endpoint::new(format!("rebase-{test}-{}", std::process::id()))
+    } else {
+        Endpoint::new(data.join("sock").join("s.sock").to_string_lossy())
+    };
     let state = ServerState::new(ServerConfig {
         data_dir: data.to_path_buf(),
         endpoint: endpoint.clone(),

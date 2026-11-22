@@ -67,7 +67,10 @@ fn endpoint_for(dir: &Path, label: &str) -> String {
     #[cfg(not(windows))]
     {
         let _ = label;
-        dir.join("s.sock").to_string_lossy().into_owned()
+        dir.join("sock")
+            .join("s.sock")
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -568,7 +571,16 @@ fn broken_server_fails_fast_within_timeout() {
 
 #[cfg(unix)]
 fn verify_wedged_socket_times_out(endpoint: &str, gitconfig: &Path) {
+    use std::os::unix::fs::DirBuilderExt;
     use std::os::unix::net::UnixListener;
+    // No server started, so the socket's owner-only folder is not there yet.
+    if let Some(folder) = Path::new(endpoint).parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)
+            .expect("create socket folder");
+    }
     let listener = UnixListener::bind(endpoint).expect("bind silent unix socket");
     let (done_tx, done_rx) = mpsc::channel();
     let accept_thread = std::thread::spawn(move || {

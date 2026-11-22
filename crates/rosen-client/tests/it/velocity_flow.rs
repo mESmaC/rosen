@@ -176,7 +176,7 @@ fn start_server(data: &Path) -> Endpoint {
     let endpoint = if cfg!(windows) {
         Endpoint::new(format!("rosen-velocity-flow-{}", std::process::id()))
     } else {
-        Endpoint::new(data.join("s.sock").to_string_lossy())
+        Endpoint::new(data.join("sock").join("s.sock").to_string_lossy())
     };
     let state = ServerState::new(ServerConfig {
         data_dir: data.to_path_buf(),

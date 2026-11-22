@@ -3,8 +3,8 @@
 #   cargo clippy --workspace --all-targets -- -D warnings
 #   cargo test --workspace
 # Windows 11 is the shipped platform (D11), so it runs all three.
-# Linux is best-effort and only has to compile. macOS also runs the checks
-# to cover Unix workspace deletion and process liveness (#375).
+# macOS also runs all three to cover Unix workspace deletion and process
+# liveness (#375), and Linux runs all three with tests under umask 0002 (#451).
 name: CI
 
 on:
@@ -206,15 +206,16 @@ jobs:
         run: cargo test --workspace --locked
 
   linux:
-    name: Linux (build)
+    name: Linux (build, clippy, test)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+          components: clippy
 
       - name: Install the pinned toolchain
         run: rustup toolchain install --no-self-update && rustc -V
@@ -222,4 +223,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: cargo build
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
+
+      - name: cargo clippy (zero warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Desktop Linux defaults to umask 0002, which makes new folders group-writable; the
+      # runner's is 0022. Testing under 0002 keeps the Unix socket's private-folder check
+      # from failing only on developers' machines.
+      - name: cargo test (umask 0002)
+        run: umask 0002 && cargo test --workspace --locked
