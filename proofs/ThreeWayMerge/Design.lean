@@ -152,6 +152,30 @@ theorem resolve_honest (c : Chunk α) : Honest c (resolve c) := by
 
 /-! ### Theorems -/
 
+/-- Successful read-back from the scratch tree emits one edit for each
+reported path. An inner `none` represents a generated deletion. -/
+def generatedEdits (paths : List String) (scratch : String → Option α) :
+    List (String × Option α) :=
+  paths.map fun path => (path, scratch path)
+
+def applyGenerated (paths : List String) (merged scratch : String → Option α)
+    (path : String) : Option α :=
+  ((generatedEdits paths scratch).lookup path).getD (merged path)
+
+omit [DecidableEq α] in
+private theorem applyGenerated_spec (paths : List String) (merged scratch : String → Option α)
+    (path : String) :
+    applyGenerated paths merged scratch path =
+      if path ∈ paths then scratch path else merged path := by
+  induction paths with
+  | nil => simp [applyGenerated, generatedEdits]
+  | cons target rest ih =>
+    by_cases h : path = target
+    · subst target
+      simp [applyGenerated, generatedEdits]
+    · have different : (path == target) = false := by simpa [beq_iff_eq] using h
+      simpa [applyGenerated, generatedEdits, List.lookup_cons, different, h] using ih
+
 -- spec/R5-automatic-merge-and-conflicts.md R5
 /-- **Correctness (spec/R5-automatic-merge-and-conflicts.md R5, "Automatic merge and conflicts").** For any two
 edit scripts from one base: the chunks partition base, ours and theirs exactly
@@ -163,9 +187,12 @@ theorem correct (os ts : List (Op α)) (h : baseOf os = baseOf ts) :
     cs.flatMap Chunk.oursText = sideOf os ∧
     cs.flatMap Chunk.theirsText = sideOf ts ∧
     (merge os ts).length = cs.length ∧
-    ∀ i (hc : i < cs.length) (hr : i < (merge os ts).length),
-      Honest cs[i] (merge os ts)[i] := by
-  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+    (∀ i (hc : i < cs.length) (hr : i < (merge os ts).length),
+      Honest cs[i] (merge os ts)[i]) ∧
+    (∀ (paths : List String) (merged scratch : String → Option α) path,
+      applyGenerated paths merged scratch path =
+        if path ∈ paths then scratch path else merged path) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, applyGenerated_spec⟩
   · simpa using chunk_base os ts ⟨[], [], []⟩ h
   · simpa using chunk_ours os ts ⟨[], [], []⟩
   · simpa using chunk_theirs os ts ⟨[], [], []⟩
@@ -180,8 +207,13 @@ which reads at most one op from each script (the Rust partition advances its
 three line cursors the same way). Cutting the chunks costs at most the total
 length of the two edit scripts. -/
 theorem cost_bound (os ts : List (Op α)) (p : Pending α) :
-    (chunk os ts p).2 ≤ os.length + ts.length := by
-  fun_induction chunk os ts p <;> simp_all [tick] <;> omega
+    (chunk os ts p).2 ≤ os.length + ts.length ∧
+    -- Regeneration read-back costs one read per emitted path edit.
+    (∀ paths (scratch : String → Option α),
+      (generatedEdits paths scratch).length ≤ paths.length) := by
+  constructor
+  · fun_induction chunk os ts p <;> simp_all [tick] <;> omega
+  · simp [generatedEdits]
 
 /-- The number of conflict regions in a merge result. -/
 def conflictCount (regions : List (Region α)) : Nat := regions.countP (·.isConflict)
@@ -227,7 +259,15 @@ that never picks silently, i.e. whose clean regions are all `Honest`. No such
 resolver reports fewer conflicts than `resolve`. -/
 theorem optimal (cs : List (Chunk α)) (other : Chunk α → Region α)
     (sound : ∀ c r, other c = .clean r → Honest c (.clean r)) :
-    conflictCount (cs.map resolve) ≤ conflictCount (cs.map other) :=
-  conflictCount_map_mono cs resolve other (resolve_conflict_forced other sound)
+    conflictCount (cs.map resolve) ≤ conflictCount (cs.map other) ∧
+    -- Alternative read schedules must visit the requested paths in plan order.
+    (∀ (paths schedule : List String) (scratch : String → Option α),
+      paths.Sublist schedule → (generatedEdits paths scratch).length ≤ schedule.length) := by
+  refine ⟨conflictCount_map_mono cs resolve other (resolve_conflict_forced other sound), ?_⟩
+  intro paths schedule scratch covers
+  simpa [generatedEdits] using covers.length_le
 
+#print axioms correct
+#print axioms cost_bound
+#print axioms optimal
 end ThreeWayMerge

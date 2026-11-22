@@ -49,6 +49,9 @@ fn merge_matches_lean_model_fixtures() {
     let table = include_str!("../../../../proofs/fixtures/three-way-merge.tsv");
     let mut rows = 0;
     for row in table.lines().filter(|row| !row.is_empty()) {
+        if row.starts_with("generated\t") {
+            continue; // The server checks generated edits after the file merge.
+        }
         let [base, ours, theirs, expected]: [&str; 4] = row
             .split('\t')
             .collect::<Vec<_>>()

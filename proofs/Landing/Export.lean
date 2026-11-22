@@ -1,3 +1,69 @@
 import Landing.Design
 
+namespace Landing
+
+/-! ## Fixture table -/
+/-- With no snapshot or inverse racing the exclusive turn, it needs one
+attempt after the optimistic budget is exhausted (R8 retry; #393). -/
+def contentionAttempts (cap losses : Nat) : Nat :=
+  attempts cap (List.replicate losses true) + (if cap ≤ losses then 1 else 0)
+def bit (b : Bool) : String := if b then "1" else "0"
+def ChangeState.code : ChangeState → String
+  | .active => "active" | .landed => "landed" | .abandoned => "abandoned"
+def Tier.code : Tier → String
+  | .prose => "prose" | .normal => "normal" | .sensitive => "sensitive"
+def ReviewMode.code : ReviewMode → String
+  | .beforeLand => "before-land" | .afterLand => "after-land"
+def ReceiptCheck.code : ReceiptCheck → String
+  | .missing => "missing" | .invalid => "invalid" | .valid => "valid" | .sameTree => "same_tree"
+def Verdict.code : Verdict → String
+  | .land => "land"
+  | .refuse .alreadyLanded => "already_landed"
+  | .refuse .abandoned => "abandoned"
+  | .refuse .parentUnlanded => "parent_unlanded"
+  | .refuse .conflicts => "conflicts"
+  | .refuse .unapproved => "unapproved"
+  | .refuse .noReceipt => "no_receipt"
+  | .refuse .receiptStale => "receipt_stale"
+  | .refuse .mergeConflict => "merge_conflict"
+  | .refuse .needsRecheck => "needs_recheck"
+/-- Every input, except that `landedSinceAllIndependent` is pinned to true when the
+base has not moved: nothing landed since B, so the flag is vacuously true. -/
+def allInputs : List Input :=
+  [ChangeState.active, .landed, .abandoned].flatMap fun s =>
+  [false, true].flatMap fun p =>
+  [false, true].flatMap fun c =>
+  [false, true].flatMap fun a =>
+  [ReviewMode.beforeLand, .afterLand].flatMap fun v =>
+  [false, true].flatMap fun x =>
+  [Tier.prose, .normal, .sensitive].flatMap fun t =>
+  [ReceiptCheck.missing, .invalid, .valid, .sameTree].flatMap fun r =>
+  [(false, true), (true, false), (true, true)].flatMap fun (b, q) =>
+  [false, true].map fun m => ⟨s, p, c, a, v, x, t, r, b, q, m⟩
+def fixtureRow (i : Input) : String :=
+  "\t".intercalate [i.state.code, bit i.parentLanded, bit i.hasConflicts,
+    bit i.approved, i.review.code, (if i.mergeMode then "merge" else "reach"), i.tier.code, i.receipt.code, bit i.baseMoved,
+    bit i.landedSinceAllIndependent, bit i.mergeClean, (decideLand i).code]
+def regenerationRow (name : String) (layer : LayerRegeneration) : String :=
+  let (verdict, checked) := match finishRegeneration layer with
+    | .ok _ => ("land", true)
+    | .error .missing => ("regeneration_required", false)
+    | .error .failed => ("regeneration_failed", false)
+    | .error .pending => ("pending", false)
+  s!"regeneration\t{name}\t{verdict}\t{bit checked}\n"
+
+def fixtureTable : String :=
+  "state\tparent_landed\thas_conflicts\tapproved\treview\trecheck\ttier\treceipt\tbase_moved\t" ++
+    "landed_since_all_independent\tmerge_clean\tverdict\n" ++
+    String.join (allInputs.map (fixtureRow · ++ "\n")) ++
+    String.join ([ReviewMode.beforeLand, .afterLand].flatMap fun review =>
+      [false, true].map fun build =>
+        "failure\t" ++ review.code ++ "\t" ++ bit build ++ "\t" ++ bit (failureReverts review build) ++ "\n") ++
+    String.join ([0, 1, 12].map fun cap =>
+      s!"contention\t{cap}\t{cap}\t{contentionAttempts cap cap}\n") ++
+    regenerationRow "partial" (.required [some 0, none] none) ++
+    regenerationRow "failure" (.required [some 0, some 0] (some none)) ++
+    regenerationRow "success" (.required [some 0, some 0] (some (some 1)))
+end Landing
+
 def main : IO Unit := IO.print Landing.fixtureTable

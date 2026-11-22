@@ -67,8 +67,17 @@ def fixtureCases : List (String × String × String) := [
   ("abcabc", "abcXabc", "abcabc")
 ]
 
+def generatedRows : List String :=
+  let targets := ["artifact.lock"]
+  let merged := [("artifact.lock", "stale base"), ("base.txt", "BASE+")]
+  let scratch := [("artifact.lock", "BASE+OWNER"), ("base.txt", "stray"), ("stray.tmp", "stray")]
+  ["artifact.lock", "base.txt", "stray.tmp"].map fun path =>
+    let expected := applyGenerated targets (merged.lookup ·) (scratch.lookup ·) path
+    s!"generated\t{path}\t{expected.getD "-"}"
+
 end ThreeWayMerge
 
 def main : IO Unit :=
   IO.print (String.intercalate "\n"
-    (ThreeWayMerge.fixtureCases.map fun (b, o, t) => ThreeWayMerge.fixtureRow b o t) ++ "\n")
+    ((ThreeWayMerge.fixtureCases.map fun (b, o, t) => ThreeWayMerge.fixtureRow b o t) ++
+      ThreeWayMerge.generatedRows) ++ "\n")

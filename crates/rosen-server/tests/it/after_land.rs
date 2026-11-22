@@ -821,9 +821,10 @@ async fn generated_merge_refuses_until_owner_rebases_and_regenerates() {
 #[tokio::test(flavor = "multi_thread")]
 async fn registered_generated_command_regenerates_at_land() {
     #[cfg(windows)]
-    let cmd = "copy /b base.txt+owner.txt artifact.lock >NUL & echo stray > stray.tmp";
+    let cmd = "copy /b base.txt+owner.txt artifact.lock >NUL && echo stray > base.txt && echo stray > stray.tmp";
     #[cfg(not(windows))]
-    let cmd = "cat base.txt owner.txt > artifact.lock && echo stray > stray.tmp";
+    let cmd =
+        "cat base.txt owner.txt > artifact.lock && echo stray > base.txt && echo stray > stray.tmp";
     let config =
         format!("review = \"after-land\"\n[generated.commands]\n\"artifact.lock\" = {cmd:?}\n");
     let temp = tempfile::tempdir().unwrap();
@@ -872,17 +873,34 @@ async fn registered_generated_command_regenerates_at_land() {
         panic!("{answer:?}")
     };
     state.landing.settle();
+    assert_generated_edits(&state, commit);
+}
+
+fn assert_generated_edits(state: &ServerState, commit: ObjectId) {
     let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
     let tree = store
         .read_tree(&store.read_commit(&commit).unwrap().tree)
         .unwrap();
-    let artifact = tree
-        .entries()
-        .iter()
-        .find(|e| e.name == b"artifact.lock")
-        .unwrap();
-    assert_eq!(store.read_blob(&artifact.id).unwrap().data, b"BASE+OWNER");
-    assert!(tree.entries().iter().all(|e| e.name != b"stray.tmp"));
+    let table = include_str!("../../../../proofs/fixtures/three-way-merge.tsv");
+    let mut rows = 0;
+    for row in table
+        .lines()
+        .filter_map(|line| line.strip_prefix("generated\t"))
+    {
+        let (path, expected) = row.split_once('\t').unwrap();
+        let edit = tree
+            .entries()
+            .iter()
+            .find(|entry| entry.name == path.as_bytes());
+        let actual = edit.map(|entry| store.read_blob(&entry.id).unwrap().data);
+        assert_eq!(
+            actual.as_deref(),
+            (expected != "-").then_some(expected.as_bytes()),
+            "{path}"
+        );
+        rows += 1;
+    }
+    assert_eq!(rows, 3);
 }
 
 // Risk (R5/R8, #428): a failing generator command must refuse the land with
@@ -919,6 +937,107 @@ async fn failed_generated_command_refuses_with_log() {
     assert!(log.as_deref().unwrap_or("").contains("regen-boom"));
     let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
     assert_eq!(ledger.base("main").unwrap(), Some(base));
+}
+
+// Risk (R8 #428): a failed or incomplete generator plan can otherwise bind
+// a receipt to the provisional tree or publish that tree.
+#[tokio::test(flavor = "multi_thread")]
+async fn regeneration_gate_matches_landing_model() {
+    let table = include_str!("../../../../proofs/fixtures/landing.tsv");
+    let mut rows = 0;
+    for row in table
+        .lines()
+        .filter_map(|line| line.strip_prefix("regeneration\t"))
+    {
+        let [plan, verdict, checked]: [&str; 3] =
+            row.split('\t').collect::<Vec<_>>().try_into().unwrap();
+        assert_regeneration_gate(plan, verdict, checked == "1").await;
+        rows += 1;
+    }
+    assert_eq!(rows, 3);
+}
+
+async fn assert_regeneration_gate(plan: &str, verdict: &str, checked: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let config = regeneration_config(plan);
+    let state = setup_with_config(temp.path(), config.as_bytes());
+    let owner = new_change(&state).await;
+    let base_change = new_change(&state).await;
+    for path in ["artifact.lock", "second.lock"] {
+        write_file(&state, &owner, path, b"owner").await;
+        write_file(&state, &base_change, path, b"base").await;
+    }
+    let base = land_change(&state, base_change).await;
+    let Response::MergeResult(preview) = call(
+        &state,
+        Request::MergeResult {
+            change: owner.clone(),
+        },
+    )
+    .await
+    else {
+        panic!("expected a merge result")
+    };
+    let receipt = rosen_core::Receipt {
+        change: preview.change,
+        head: preview.head,
+        base: preview.base,
+        check_set: "pre-land".into(),
+        submitter: AgentId::new("checker").unwrap(),
+    };
+    let ledger = Ledger::open(&state.config.metadata_path()).unwrap();
+    let preview_tree = preview.tree.expect("merged input tree");
+    assert_eq!(
+        ledger.checked_merge_result(&receipt).unwrap(),
+        checked.then_some(preview_tree)
+    );
+    let Response::Land(answer) = call(&state, Request::Land { change: owner }).await else {
+        panic!("expected a land answer")
+    };
+    match answer.outcome {
+        LandStatus::Landed { commit, .. } => {
+            assert_eq!(verdict, "land");
+            let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+            assert_eq!(store.read_commit(&commit).unwrap().tree, preview_tree);
+        }
+        LandStatus::Refused {
+            reason,
+            merged_tree,
+            ..
+        } => {
+            assert_eq!(reason, verdict);
+            assert_eq!(merged_tree, Some(preview_tree));
+            assert_eq!(ledger.base("main").unwrap(), Some(base));
+        }
+        LandStatus::AlreadyLanded { commit } => panic!("unexpected prior land at {commit}"),
+    }
+    state.landing.settle();
+}
+
+fn regeneration_config(plan: &str) -> String {
+    let command = match plan {
+        "partial" | "failure" => "echo generator failed && exit 1",
+        "success" => "echo regenerated > artifact.lock && echo regenerated > second.lock",
+        _ => panic!("unknown plan {plan}"),
+    };
+    let mut config = format!(
+        "review = \"after-land\"\n[generated]\npaths = [\"artifact.lock\", \"second.lock\"]\n[generated.commands]\n\"artifact.lock\" = {command:?}\n"
+    );
+    if plan != "partial" {
+        config.push_str(&format!("\"second.lock\" = {command:?}\n"));
+    }
+    config
+}
+
+async fn land_change(state: &Arc<ServerState>, change: String) -> ObjectId {
+    let Response::Land(answer) = call(state, Request::Land { change }).await else {
+        panic!("expected a land answer")
+    };
+    let LandStatus::Landed { commit, .. } = answer.outcome else {
+        panic!("{answer:?}")
+    };
+    state.landing.settle();
+    commit
 }
 
 fn setup_with_config(path: &std::path::Path, config: &[u8]) -> Arc<ServerState> {

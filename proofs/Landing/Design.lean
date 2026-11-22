@@ -103,15 +103,52 @@ def stackResult (l : Ledger) (layers : List (Input × Nat × Nat)) : Ledger :=
   ⟨((layers.getLast?).map (·.2.2)).getD l.base, layers.reverse.map (·.2) ++ l.landed⟩
 def stackCas (l : Ledger) (expected : Nat) (layers : List (Input × Nat × Nat)) : Option Ledger :=
   if l.base = expected ∧ stackReady l layers then some (stackResult l layers) else none
+/-- R8 clean merge gate. Trees are immutable IDs. -/
+inductive LayerRegeneration where
+  | clean (tree : Nat)
+  | required (commands : List (Option Nat)) (finished : Option (Option Nat))
+inductive RegenerationRefusal where
+  | missing | pending | failed
+
+def finishRegeneration : LayerRegeneration → Except RegenerationRefusal Nat
+  | .clean tree => .ok tree
+  | .required commands finished =>
+    if commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true) then match finished with
+      | none => .error .pending
+      | some none => .error .failed
+      | some (some tree) => .ok tree
+    else .error .missing
+def regenerationReady (r : LayerRegeneration) : Bool :=
+  match finishRegeneration r with
+  | .ok _ => true
+  | .error _ => false
+def regeneratedStackCas (l : Ledger) (expected : Nat) (layers : List (Input × Nat × Nat))
+    (regeneration : List LayerRegeneration) : Option Ledger :=
+  if layers.length = regeneration.length ∧ regeneration.all regenerationReady = true then
+    stackCas l expected layers
+  else none
 private theorem stack_correct (l : Ledger) (expected : Nat) (layers : List (Input × Nat × Nat))
     (result : Ledger) : stackCas l expected layers = some result ↔
       expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers := by
   unfold stackCas; split <;> simp_all [eq_comm]
+
+private theorem finish_correct (commands : List (Option Nat)) (finished : Option (Option Nat))
+    (tree : Nat) :
+    finishRegeneration (.required commands finished) = .ok tree ↔
+      commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true) ∧ finished = some (some tree) := by
+  rw [← and_assoc]
+  by_cases ready : commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true)
+  · rw [and_iff_right ready]
+    cases finished with
+    | none => simp only [finishRegeneration, ite_eq_left ready] <;> simp
+    | some result => cases result <;> simp only [finishRegeneration, ite_eq_left ready] <;> simp
+  · cases finished with
+    | none => simp [finishRegeneration, ready]
+    | some result => cases result <;> simp [finishRegeneration, ready]
 private theorem decideLand_eq_land (i : Input) : decideLand i = .land ↔ Authorized i := by
   obtain ⟨s, p, c, a, v, x, t, r, b, q, m⟩ := i
   cases s <;> cases p <;> cases c <;> cases a <;> cases v <;> cases x <;> cases t <;> cases r <;>
     cases b <;> cases q <;> cases m <;> decide
-/-- Original CAS and stack guarantee, with the R7/R8 mode-dependent gates. -/
 private theorem land_correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     (∀ l', landStep l i expected change commit = some l' →
       Authorized i ∧ expected = l.base ∧ l.hasLanded change = false ∧
@@ -145,10 +182,11 @@ structure Verification where
 def reportFailure (s : Verification) (review : ReviewMode) (build : Bool)
     (culprit : Nat) (out : String) : Bool × Verification :=
   (failureReverts review build, {s with failures := (culprit, build, out) :: s.failures})
-/-- **correct** (spec/R8-optimistic-landing/README.md R8 and R12, owner decision #365): the original CAS,
-stack and preservation requirements remain; receipts/approvals gate only
-before-land projects. Every confirmed failure is recorded, and only builds
-request a revert after land. The statement changes because the spec changed. -/
+/-- **correct** (spec/R8-optimistic-landing/README.md R8, clean-merge-and-conflict-markers.md,
+and spec/R12-post-land-verification.md R12): receipts and approvals gate
+before-land projects, failures are recorded, and only builds request a revert
+after land. A required layer supplies a final tree only after successful
+regeneration. An unresolved layer prevents the entire stack's CAS. -/
 theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     ((∀ l', landStep l i expected change commit = some l' →
       Authorized i ∧ expected = l.base ∧ l.hasLanded change = false ∧
@@ -160,11 +198,26 @@ theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
       (reportFailure s review build culprit out).2.failures = (culprit, build, out) :: s.failures ∧
       ((reportFailure s review build culprit out).1 = true ↔ review = .beforeLand ∨ build = true)) ∧
     (∀ expected layers result, stackCas l expected layers = some result ↔
+      expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers) ∧
+    (∀ commands finished tree, finishRegeneration (.required commands finished) = .ok tree ↔
+      commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true) ∧ finished = some (some tree)) ∧
+    (∀ expected layers regeneration result,
+      regeneratedStackCas l expected layers regeneration = some result ↔
+      layers.length = regeneration.length ∧ (∀ r ∈ regeneration, regenerationReady r = true) ∧
       expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers) := by
-  refine ⟨land_correct l i expected change commit, ?_, stack_correct l⟩
-  intro s review build culprit out
-  refine ⟨rfl, rfl, ?_⟩
-  cases review <;> cases build <;> simp [reportFailure, failureReverts]
+  refine ⟨land_correct l i expected change commit, ?_, stack_correct l, finish_correct, ?_⟩
+  · intro s review build culprit out
+    refine ⟨rfl, rfl, ?_⟩
+    cases review <;> cases build <;> simp [reportFailure, failureReverts]
+  · intro expected layers regeneration result
+    simp only [regeneratedStackCas, List.all_eq_true]
+    split
+    · rename_i ready
+      rw [stack_correct]
+      exact ⟨fun h => ⟨ready.1, ready.2, h⟩, fun h => h.2.2⟩
+    · rename_i blocked
+      simp only [reduceCtorEq, false_iff]
+      exact fun h => blocked ⟨h.1, h.2.1⟩
 /-- Cost model: an attempt merges and writes each layer, and performs one
 compare-and-swap; `attempts` counts optimistic attempts. `races[j]` is true
 when a competing land moved the base during attempt `j`, so its swap lost.
@@ -177,7 +230,6 @@ def attempts : Nat → List Bool → Nat
 /-- **cost_bound**: under the cost model of `attempts`, the optimistic phase
 never costs more than `cap` attempts, nor more than one attempt per competing
 land that beat it plus one. -/
--- spec/R8-optimistic-landing/README.md R8
 theorem cost_bound (cap : Nat) (races : List Bool) :
     attempts cap races ≤ cap ∧ attempts cap races ≤ races.count true + 1 := by
   induction cap generalizing races with
@@ -226,7 +278,6 @@ private theorem countP_le_of_imp (p q : Input → Bool) (hpq : ∀ i, p i = true
       simp [hp]; split <;> omega
 /-- **optimal**: our re-check policy is sound, and no sound policy asks for
 fewer new receipts on any history of land requests. -/
--- spec/R8-optimistic-landing/README.md R8
 theorem optimal :
     SoundPolicy oursRecheck ∧
     ∀ policy, SoundPolicy policy → ∀ requests : List Input,
@@ -242,57 +293,6 @@ theorem optimal :
     intro i hi
     obtain ⟨hg, hm, hv, hx, ht, hb, hq, hr⟩ := oursRecheck_unsafe i hi
     exact hp i hg hm hv hx ht hb hq hr
-/-! ## Fixture table -/
-/-- With no snapshot or inverse racing the exclusive turn, it needs one
-attempt after the optimistic budget is exhausted (R8 retry; #393). -/
-def contentionAttempts (cap losses : Nat) : Nat :=
-  attempts cap (List.replicate losses true) + (if cap ≤ losses then 1 else 0)
-def bit (b : Bool) : String := if b then "1" else "0"
-def ChangeState.code : ChangeState → String
-  | .active => "active" | .landed => "landed" | .abandoned => "abandoned"
-def Tier.code : Tier → String
-  | .prose => "prose" | .normal => "normal" | .sensitive => "sensitive"
-def ReviewMode.code : ReviewMode → String
-  | .beforeLand => "before-land" | .afterLand => "after-land"
-def ReceiptCheck.code : ReceiptCheck → String
-  | .missing => "missing" | .invalid => "invalid" | .valid => "valid" | .sameTree => "same_tree"
-def Verdict.code : Verdict → String
-  | .land => "land"
-  | .refuse .alreadyLanded => "already_landed"
-  | .refuse .abandoned => "abandoned"
-  | .refuse .parentUnlanded => "parent_unlanded"
-  | .refuse .conflicts => "conflicts"
-  | .refuse .unapproved => "unapproved"
-  | .refuse .noReceipt => "no_receipt"
-  | .refuse .receiptStale => "receipt_stale"
-  | .refuse .mergeConflict => "merge_conflict"
-  | .refuse .needsRecheck => "needs_recheck"
-/-- Every input, except that `landedSinceAllIndependent` is pinned to true when the
-base has not moved: nothing landed since B, so the flag is vacuously true. -/
-def allInputs : List Input :=
-  [ChangeState.active, .landed, .abandoned].flatMap fun s =>
-  [false, true].flatMap fun p =>
-  [false, true].flatMap fun c =>
-  [false, true].flatMap fun a =>
-  [ReviewMode.beforeLand, .afterLand].flatMap fun v =>
-  [false, true].flatMap fun x =>
-  [Tier.prose, .normal, .sensitive].flatMap fun t =>
-  [ReceiptCheck.missing, .invalid, .valid, .sameTree].flatMap fun r =>
-  [(false, true), (true, false), (true, true)].flatMap fun (b, q) =>
-  [false, true].map fun m => ⟨s, p, c, a, v, x, t, r, b, q, m⟩
-def fixtureRow (i : Input) : String :=
-  "\t".intercalate [i.state.code, bit i.parentLanded, bit i.hasConflicts,
-    bit i.approved, i.review.code, (if i.mergeMode then "merge" else "reach"), i.tier.code, i.receipt.code, bit i.baseMoved,
-    bit i.landedSinceAllIndependent, bit i.mergeClean, (decideLand i).code]
-def fixtureTable : String :=
-  "state\tparent_landed\thas_conflicts\tapproved\treview\trecheck\ttier\treceipt\tbase_moved\t" ++
-    "landed_since_all_independent\tmerge_clean\tverdict\n" ++
-    String.join (allInputs.map (fixtureRow · ++ "\n")) ++
-    String.join ([ReviewMode.beforeLand, .afterLand].flatMap fun review =>
-      [false, true].map fun build =>
-        "failure\t" ++ review.code ++ "\t" ++ bit build ++ "\t" ++ bit (failureReverts review build) ++ "\n") ++
-    String.join ([0, 1, 12].map fun cap =>
-      s!"contention\t{cap}\t{cap}\t{contentionAttempts cap cap}\n")
 #print axioms correct
 #print axioms cost_bound
 #print axioms optimal

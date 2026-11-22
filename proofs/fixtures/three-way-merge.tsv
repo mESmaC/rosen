@@ -23,3 +23,6 @@ abcd	ad	abcd	ad
 abcd	ad	abYd	a<|bc|bY>d
 abcdef	abcdefXY	Wabcdef	WabcdefXY
 abcabc	abcXabc	abcabc	abcXabc
+generated	artifact.lock	BASE+OWNER
+generated	base.txt	BASE+
+generated	stray.tmp	-
