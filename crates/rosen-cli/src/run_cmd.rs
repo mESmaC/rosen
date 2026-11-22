@@ -111,14 +111,14 @@ fn record_timing(
         return;
     };
     let endpoint = endpoint.clone();
-    let _ = runtime.block_on(tokio::time::timeout(
-        Duration::from_millis(500),
-        async move {
+    runtime.block_on(async move {
+        let _ = tokio::time::timeout(Duration::from_millis(500), async move {
             if let Ok(client) = Client::connect(&endpoint).await {
                 let _ = client.record_run_timing(record).await;
             }
-        },
-    ));
+        })
+        .await;
+    });
 }
 
 fn resolve_run_change(given: Option<&str>) -> Option<String> {
