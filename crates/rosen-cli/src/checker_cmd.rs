@@ -233,7 +233,7 @@ async fn drive_bisection(
     mut state: BisectState,
 ) -> Result<(), Error> {
     while let Some(job) = state.job.clone() {
-        let commands = bisect_commands(client, &job).await?;
+        let commands = bisect_commands(client, &cfg.platform, &job).await?;
         let priority = match job.kind {
             CheckKind::Build => CheckPriority::Landing,
             CheckKind::Test => CheckPriority::Verify,
@@ -291,17 +291,29 @@ async fn drive_bisection(
     Ok(())
 }
 
-async fn bisect_commands(client: &Client, job: &BisectJob) -> Result<Vec<String>, Error> {
+async fn bisect_commands(
+    client: &Client,
+    checker_platform: &Platform,
+    job: &BisectJob,
+) -> Result<Vec<String>, Error> {
     let record = client.project_config(Some(job.commit)).await?;
-    let set = match job.kind {
-        CheckKind::Build => &record.config.checks.pre_land,
-        CheckKind::Test => &record.config.checks.post_land,
+    Ok(bisect_commands_for(
+        &record.config,
+        job.kind,
+        checker_platform,
+    ))
+}
+
+fn bisect_commands_for(
+    config: &rosen_core::ProjectConfig,
+    kind: CheckKind,
+    checker_platform: &Platform,
+) -> Vec<String> {
+    let set = match kind {
+        CheckKind::Build => &config.checks.pre_land,
+        CheckKind::Test => &config.checks.post_land,
     };
-    let target = job
-        .platform
-        .as_deref()
-        .and_then(|raw| Platform::parse(raw).ok());
-    Ok(set.commands_for(target.as_ref()))
+    set.commands_for(Some(checker_platform))
 }
 
 #[derive(Default)]
@@ -515,5 +527,28 @@ struct TempDirGuard(PathBuf);
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Risk (R12, #460): bisection on a generic target must expand commands
+    /// against the checker platform so arch-specific checks are not omitted.
+    #[test]
+    fn bisect_commands_use_checker_platform_for_generic_target() {
+        let cfg = rosen_core::ProjectConfig::parse(
+            "[checks.post_land]\nplatforms = [\"macos\"]\n\
+             [checks.post_land.platform_commands]\nmacos-arm64 = [\"echo arm check\"]\n",
+        )
+        .unwrap();
+        let arm = Platform::parse("macos-arm64").unwrap();
+        let x64 = Platform::parse("macos-x86_64").unwrap();
+        assert_eq!(
+            bisect_commands_for(&cfg, CheckKind::Test, &arm),
+            vec!["echo arm check"]
+        );
+        assert!(bisect_commands_for(&cfg, CheckKind::Test, &x64).is_empty());
     }
 }

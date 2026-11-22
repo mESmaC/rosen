@@ -67,8 +67,9 @@ fn run(
         validate(state, &ledger, &name, &job)?;
         if checker_platform.is_none() {
             checker_platform = job
-                .platform
+                .checker_platform
                 .as_deref()
+                .or(job.platform.as_deref())
                 .and_then(|raw| Platform::parse(raw).ok());
         }
         record_pass(state, &mut conn, &name, &job, &submitted)?;
@@ -178,7 +179,7 @@ fn offer_next(
         checker_platform,
     )?;
     let job = next_pending_work(base_config.as_deref(), conn, name, kind, checker_platform)?
-        .map(|(commit, target)| job_at(state, commit, kind, target.as_ref()))
+        .map(|(commit, target)| job_at(state, commit, kind, target.as_ref(), checker_platform))
         .transpose()?;
     Ok(PostLandWork {
         job,
@@ -266,10 +267,11 @@ fn job_at(
     commit: rosen_core::ObjectId,
     kind: CheckKind,
     target: Option<&Platform>,
+    checker_platform: Option<&Platform>,
 ) -> Result<PostLandJob, ErrorBody> {
     let config = state.project_config.at_commit(&commit).map_err(internal)?;
     let mut check_set = check_set_for(&config.config, kind).clone();
-    check_set.commands = check_set.commands_for(target);
+    check_set.commands = check_set.commands_for(checker_platform.or(target));
     Ok(PostLandJob {
         commit,
         kind,
@@ -282,6 +284,7 @@ fn job_at(
         },
         check_set,
         platform: target.map(|p| p.as_str().to_owned()),
+        checker_platform: checker_platform.map(|p| p.as_str().to_owned()),
         submitter: None,
     })
 }
@@ -309,7 +312,14 @@ pub fn validate(
         .map_err(internal)?;
     let configured = check_set_for(&config.config, job.kind);
     let target = validate_platform(configured, job.platform.as_deref())?;
-    let expected = job_at(state, job.commit, job.kind, target.as_ref())?;
+    let checker = validate_checker_platform(target.as_ref(), job.checker_platform.as_deref())?;
+    let expected = job_at(
+        state,
+        job.commit,
+        job.kind,
+        target.as_ref(),
+        checker.as_ref(),
+    )?;
     if expected.check_set != job.check_set {
         return Err(ErrorBody::new(
             ErrorCode::InvalidArgument,
@@ -317,6 +327,29 @@ pub fn validate(
         ));
     }
     Ok(())
+}
+
+fn validate_checker_platform(
+    target: Option<&Platform>,
+    checker_platform: Option<&str>,
+) -> Result<Option<Platform>, ErrorBody> {
+    let Some(raw) = checker_platform else {
+        return Ok(None);
+    };
+    let parsed =
+        Platform::parse(raw).map_err(|err| ErrorBody::new(ErrorCode::InvalidArgument, err))?;
+    if let Some(target) = target {
+        if !parsed.matches(target) {
+            return Err(ErrorBody::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "checker platform {raw:?} does not match target platform {:?}",
+                    target.as_str()
+                ),
+            ));
+        }
+    }
+    Ok(Some(parsed))
 }
 
 fn validate_platform(

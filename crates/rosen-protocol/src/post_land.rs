@@ -48,10 +48,16 @@ pub struct PostLandJob {
     pub priority: CheckPriority,
     /// Configuration in force at this landed commit, including commands.
     pub check_set: CheckSet,
-    /// Required target platform this job checks (from `check_set.platforms`).
-    /// Absent when the check set runs on any platform.
+    /// Required or advisory target platform this job checks (from
+    /// `check_set.platforms` or `check_set.platform_commands`). Absent when
+    /// the check set runs on any platform.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// Reported checker platform used to expand `check_set.commands` (for
+    /// example `macos-arm64` running a generic `macos` target). Absent when
+    /// no checker platform was reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checker_platform: Option<String>,
     /// The checker's nick, set when it reports this job's result. The server
     /// records it with the machine from the connection, never from the
     /// request (R14), so it may not hold `@`. An offered job carries none.

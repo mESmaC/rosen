@@ -317,14 +317,16 @@ impl CheckSet {
     /// Whether `target` is either a required platform or an advisory
     /// `platform_commands` target for this check set (R12, #457).
     pub fn accepts_platform(&self, target: &Platform) -> bool {
-        self.platforms.contains(target) || self.platform_commands.contains_key(target)
+        self.platforms.contains(target)
+            || self.advisory_platforms().any(|advisory| advisory == target)
     }
 
-    /// Advisory targets declared in `platform_commands` that do not gate green.
+    /// Advisory targets declared in `platform_commands` that are not already
+    /// covered by a required entry in `platforms` and do not gate green.
     pub fn advisory_platforms(&self) -> impl Iterator<Item = &Platform> {
         self.platform_commands
             .keys()
-            .filter(|target| !self.platforms.contains(target))
+            .filter(|target| !self.platforms.iter().any(|req| target.matches(req)))
     }
 
     fn push_matches<'a>(

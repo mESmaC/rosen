@@ -602,3 +602,63 @@ async fn overlapping_macos_targets_advance_both_checkpoints_without_starvation()
         Some(c2)
     );
 }
+
+/// Risk (R12, #460): a generic required target (`macos`) must expand
+/// `platform_commands` against the reported checker (`macos-arm64`) while
+/// preserving the generic target's checkpoint and bisection scope.
+#[tokio::test(flavor = "multi_thread")]
+async fn generic_macos_job_expands_arm64_commands_and_preserves_checkpoint() {
+    let toml = "review = \"after-land\"\n[checks.post_land]\nplatforms = [\"macos\"]\n\
+                [checks.post_land.platform_commands]\nmacos-arm64 = [\"echo arm check\"]\n";
+    let (_temp, state, _) = setup(toml);
+    let c1 = land(&state, "a.rs", b"1").await;
+
+    let arm = next_for(&state, "macos-arm64").await.job.unwrap();
+    assert_eq!(arm.platform.as_deref(), Some("macos"));
+    assert_eq!(arm.checker_platform.as_deref(), Some("macos-arm64"));
+    assert_eq!(arm.check_set.commands, vec!["echo arm check"]);
+    assert!(next_for(&state, "macos-x86_64")
+        .await
+        .job
+        .unwrap()
+        .check_set
+        .commands
+        .is_empty());
+
+    let mut skipped = arm.clone();
+    skipped.check_set.commands.clear();
+    assert!(matches!(
+        dispatch(&state, Request::PostLandPassed(skipped)).await,
+        Outcome::Error(_)
+    ));
+    let mut bad = arm.clone();
+    bad.checker_platform = Some("windows-x86_64".into());
+    assert!(matches!(
+        dispatch(&state, Request::PostLandPassed(bad)).await,
+        Outcome::Error(_)
+    ));
+
+    let Response::PostLand(after) = call(&state, Request::PostLandPassed(arm)).await else {
+        panic!()
+    };
+    assert_eq!((after.last_green, after.job), (Some(c1), None));
+    let st = post_land_status(&state).await;
+    assert_eq!(st.platforms.len(), 1);
+    assert_eq!(st.platforms[0].platform, "macos");
+    assert_eq!(
+        st.platforms[0].last_green.as_ref().map(|c| c.commit),
+        Some(c1)
+    );
+
+    let c2 = land(&state, "b.rs", b"2").await;
+    let arm_c2 = next_for(&state, "macos-arm64").await.job.unwrap();
+    assert_eq!((arm_c2.commit, arm_c2.check_set.commands.len()), (c2, 1));
+    let req = Request::PostLandFailed {
+        job: arm_c2,
+        output: "arm fail".into(),
+    };
+    let Response::Bisection(bisect) = call(&state, req).await else {
+        panic!()
+    };
+    assert_eq!(bisect.platform.as_deref(), Some("macos"));
+}

@@ -68,9 +68,9 @@
   Its detail holds the session, kind, step, commit, result, submitter and time, and `progress`: `opened`, `step`, `culprit` or `flaky`.
 - **Platforms.**
   `[checks.pre_land]` and `[checks.post_land]` may name `platforms = ["windows", "macos", "linux"]` (or `<os>-<arch>` targets) and optional `[checks.<set>.platform_commands]` appended for matching platforms; omitting `platforms` defaults to any platform.
-  Checkers report their OS and architecture via `post_land_next_for`, and the server offers each platform's jobs only to matching checkers.
+  Checkers report their OS and architecture via `post_land_next_for`, and the server offers each platform's jobs only to matching checkers, expanding `platform_commands` against the reported checker platform while preserving the offered target's checkpoint for both batch jobs and bisection.
   Each required platform keeps its own monotone checkpoint, bisection sessions and culprit records; the aggregate base built or green checkpoint advances only to the minimum passing commit across every required platform.
-  A platform named only in `platform_commands` (not in `platforms`) is advisory: matching checkers run its commands, its checkpoints are shown once reported, and its failures are bisected and recorded without gating aggregate green or auto-reverting.
+  A platform named only in `platform_commands` that is not covered by any required entry in `platforms` is advisory: matching checkers run its commands, its checkpoints are shown once reported, and its failures are bisected and recorded without gating aggregate green or auto-reverting.
   `rosen checker run [--platform <platform>]` runs a long-lived headless checker on an enrolled machine without Velocity, running each job's commands through `rosen run` (with the `verify` class for full tests) and posting batch and bisection results.
   `post_land_status`, `rosen server status`, `rosen review status` and the Collapse state feed (`platforms`) show each required platform's checkpoint and report when no matching checker is connected (for example `macOS: no checker`).
   When a required platform has had no checker online for an hour while checkpoints wait on it, `rosen status`, `rosen server status`, `rosen review status` and the `platforms` state feed report `post-land waiting on <platform>: no checker online since <time>`.
