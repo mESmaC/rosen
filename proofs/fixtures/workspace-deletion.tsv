@@ -23,3 +23,6 @@ dirty	journal	mismatch	ignored	delete
 1	1	1	1	0
 #413 regression: report rows give the scratch count and exact refusal text
 report	12	unstored files (12): e.g. scratch/edit-00, scratch/edit-01, scratch/edit-02, scratch/edit-03, scratch/edit-04
+#430 regression: staged retry with a removed tracked file and stored ignore rules
+staged	0	1
+staged	1	0

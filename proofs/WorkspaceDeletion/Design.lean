@@ -36,6 +36,18 @@ def observations (e : Evidence Edit) : List Edit := e.dirty ++ e.journal ++ e.di
 def pending [DecidableEq Edit] (e : Evidence Edit) (server : List Edit) : List Edit :=
   (observations e).filter fun edit => !e.ignored edit && decide (edit ∉ server)
 
+/-- Disk evidence on a staged retry. A missing tracked file may already have
+been disposed of. For an ignore file removed during a partial deletion, use
+its stored rules at the same precedence as the live rules. `live` and `stored`
+model the resolved matches after choosing the source of each ignore file.
+Journal and watcher evidence are handled separately by the guard. -/
+def stagedDisk (disk : List Edit) (present tracked : Edit → Bool)
+    (live : Edit → Option Bool) (stored : Edit → Bool) : Evidence Edit :=
+  { dirty := []
+    journal := []
+    disk := disk.filter present
+    ignored := fun edit => !(tracked edit || !((live edit).getD (stored edit))) }
+
 /-- A refusal reports the full count and samples the ordered path list. -/
 def refusalSummary (paths : List Edit) : Nat × List Edit :=
   (paths.length, paths.take 5)
@@ -54,7 +66,9 @@ local. Only observed objects may enter that prefix; unobserved objects and
 later additions/replacements are retained. Thus complete workspace evidence
 is required for full cleanup, but not for safety of partial cleanup.
 The refusal reports the full count and the first five pending versions, or
-all of them if there are fewer. Every example is relevant and unstored. -/
+all of them if there are fewer. Every example is relevant and unstored.
+A staged retry requires durability for the tracked or unignored versions
+still on disk, with live ignore rules taking precedence over stored rules. -/
 theorem correct [DecidableEq Edit] (e : Evidence Edit)
     (server originals removed later : List Edit)
     (verified : ∀ edit ∈ removed, edit ∈ observations e) :
@@ -65,8 +79,12 @@ theorem correct [DecidableEq Edit] (e : Evidence Edit)
       e.ignored edit = false ∧ edit ∉ server) ∧
     ((refusalSummary (pending e server)).1 = (pending e server).length ∧
       (refusalSummary (pending e server)).2.length = min 5 (pending e server).length ∧
-      List.IsPrefix (refusalSummary (pending e server)).2 (pending e server)) := by
-  refine ⟨?_, ?_, ?_, ?_⟩
+      List.IsPrefix (refusalSummary (pending e server)).2 (pending e server)) ∧
+    (∀ present tracked live stored edit,
+      edit ∈ pending (stagedDisk e.disk present tracked live stored) server ↔
+      edit ∈ e.disk ∧ present edit = true ∧
+        (tracked edit = true ∨ (live edit).getD (stored edit) = false) ∧ edit ∉ server) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
   · intro edit held hi
     rcases List.mem_append.mp held with original | added
     · by_cases accepted : pending e server = []
@@ -86,6 +104,9 @@ theorem correct [DecidableEq Edit] (e : Evidence Edit)
   · intro edit hp
     simpa [pending, List.mem_filter, Bool.and_eq_true] using hp
   · exact ⟨rfl, List.length_take, List.take_prefix _ _⟩
+  · intro present tracked live stored edit
+    simp [pending, observations, stagedDisk, List.mem_filter, Bool.and_eq_true,
+      Bool.or_eq_true, and_left_comm, and_comm]
 /-- One unit per dirty/journal record checked; one unit plus its bytes per
 hash-scanned file, for one evidence-validation pass. This primitive model
 excludes set/list lookup, traversal, OS metadata/handle operations, actual
@@ -170,6 +191,7 @@ theorem optimal :
 
 #print axioms observations
 #print axioms pending
+#print axioms stagedDisk
 #print axioms refusalSummary
 #print axioms remaining
 #print axioms correct

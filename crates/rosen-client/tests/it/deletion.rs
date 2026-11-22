@@ -276,10 +276,35 @@ async fn readonly_git_packs_delete_cleanly(client: &Client, root: &Path) {
 
 #[cfg(any(windows, unix))]
 async fn orphaned_staged_folders_finish_in_one_pass(client: &Client, data: &Path, root: &Path) {
-    // R4 / #430: leftover `.rosen-delete-*` folders (even unregistered or
-    // missing `.gitignore` from an earlier interrupted pass) finish in one
-    // cleanup pass, while foreign-project folders stay untouched.
-    let workspace = root.join("orphaned-staged");
+    let foreign = root.join(format!(
+        ".rosen-delete-{}-{}",
+        rosen_core::ChangeId::from_bytes([9; 16]),
+        "b".repeat(40)
+    ));
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("keep.txt"), b"other project").unwrap();
+    for fixture in DELETION_FIXTURES
+        .lines()
+        .filter_map(|line| line.strip_prefix("staged\t"))
+    {
+        let (scratch, delete) = fixture.split_once('\t').unwrap();
+        check_staged_fixture(client, data, root, scratch == "1", delete == "1").await;
+    }
+    assert!(foreign.join("keep.txt").exists(), "foreign dir was removed");
+    std::fs::remove_dir_all(&foreign).unwrap();
+}
+
+#[cfg(any(windows, unix))]
+async fn check_staged_fixture(
+    client: &Client,
+    data: &Path,
+    root: &Path,
+    scratch: bool,
+    delete: bool,
+) {
+    // R4 / #430: partial cleanup may remove stored files and ignore rules.
+    // A retry still has to keep any unstored, non-ignored file it finds.
+    let workspace = root.join(format!("orphaned-staged-{scratch}"));
     let change = new_workspace(client, &workspace).await;
     let cache = workspace.join("proofs/.lake/config/0");
     std::fs::create_dir_all(&cache).unwrap();
@@ -307,27 +332,32 @@ async fn orphaned_staged_folders_finish_in_one_pass(client: &Client, data: &Path
         }
     }
     std::fs::remove_file(workspace.join(".gitignore")).unwrap();
+    std::fs::remove_file(workspace.join("main.rs")).unwrap();
+    if scratch {
+        std::fs::write(workspace.join("scratch.txt"), b"unstored").unwrap();
+    }
     let staged = root.join(format!(
         ".rosen-delete-{}-{}",
         change.change.id,
         "a".repeat(40)
     ));
     std::fs::rename(&workspace, &staged).unwrap();
-    let foreign = root.join(format!(
-        ".rosen-delete-{}-{}",
-        rosen_core::ChangeId::from_bytes([9; 16]),
-        "b".repeat(40)
-    ));
-    std::fs::create_dir_all(&foreign).unwrap();
-    std::fs::write(foreign.join("keep.txt"), b"other project").unwrap();
     let reports = client.cleanup_workspaces().await.unwrap();
-    let finished = reports
+    let report = reports
         .iter()
-        .find(|report| report.path.file_name() == staged.file_name());
-    assert!(finished.is_some_and(|r| r.error.is_none()), "{reports:?}");
-    assert!(!staged.exists(), "orphaned staged dir survived cleanup");
-    assert!(foreign.join("keep.txt").exists(), "foreign dir was removed");
-    std::fs::remove_dir_all(&foreign).unwrap();
+        .find(|report| report.path.file_name() == staged.file_name())
+        .unwrap_or_else(|| panic!("staged folder missing from cleanup reports: {reports:?}"));
+    assert_eq!(report.error.is_none(), delete, "{report:?}");
+    assert_eq!(staged.exists(), !delete);
+    if !delete {
+        assert_eq!(
+            std::fs::read(staged.join("scratch.txt")).unwrap(),
+            b"unstored"
+        );
+        std::fs::remove_file(staged.join("scratch.txt")).unwrap();
+        client.cleanup_workspaces().await.unwrap();
+        assert!(!staged.exists());
+    }
 }
 
 /// Issue #90: a crash after verified removal deleted some tracked files of
@@ -413,6 +443,7 @@ fn check_design_fixtures() {
             || line.starts_with('#')
             || line.starts_with("dirty")
             || line.starts_with("report\t")
+            || line.starts_with("staged\t")
         {
             continue;
         }

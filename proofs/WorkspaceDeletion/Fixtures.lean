@@ -27,6 +27,14 @@ def reportRow (scratchCount : Nat) : String :=
   let diagnostic := s!"unstored files ({count}): {qualifier}{", ".intercalate sample}"
   "\t".intercalate ["report", toString scratchCount, diagnostic]
 
+/-- A removed tracked file, ignored build output, and optional unstored work
+remain candidates when cleanup resumes after removing the live ignore file. -/
+def stagedRow (scratch : Bool) : String :=
+  let disk := stagedDisk ["main.rs", "proofs/.lake/output.bin", "scratch.txt"]
+    (fun path => path != "main.rs" && (path != "scratch.txt" || scratch))
+    (· == "main.rs") (fun _ => none) (· == "proofs/.lake/output.bin")
+  "\t".intercalate ["staged", bit scratch, bit (pending disk []).isEmpty]
+
 def table : String :=
   "dirty\tjournal\tmismatch\tignored\tdelete\n" ++
     "#375 regression: a durable Unix workspace (0 0 0 0) must be removable\n" ++
@@ -38,12 +46,15 @@ def table : String :=
     String.join ([false, true].flatMap fun d => [false, true].flatMap fun j =>
       [false, true].flatMap fun m => [false, true].map fun i => row d j m i ++ "\n") ++
     "#413 regression: report rows give the scratch count and exact refusal text\n" ++
-    reportRow 12 ++ "\n"
+    reportRow 12 ++ "\n" ++
+    "#430 regression: staged retry with a removed tracked file and stored ignore rules\n" ++
+    stagedRow false ++ "\n" ++ stagedRow true ++ "\n"
 
 #print axioms bit
 #print axioms evidence
 #print axioms row
 #print axioms reportRow
+#print axioms stagedRow
 #print axioms table
 
 end WorkspaceDeletion.Fixtures
