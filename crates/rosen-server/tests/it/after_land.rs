@@ -964,8 +964,8 @@ async fn failed_generated_command_refuses_with_log() {
     assert_eq!(ledger.base("main").unwrap(), Some(base));
 }
 
-// Risk (R8 #428): a failed or incomplete generator plan can otherwise bind
-// a receipt to the provisional tree or publish that tree.
+// Risk (R8 #428, #454): an unfinished generator plan can appear landable,
+// bind a receipt to the provisional tree, or publish that tree.
 #[tokio::test(flavor = "multi_thread")]
 async fn regeneration_gate_matches_landing_model() {
     let table = include_str!("../../../../proofs/fixtures/landing.tsv");
@@ -974,15 +974,16 @@ async fn regeneration_gate_matches_landing_model() {
         .lines()
         .filter_map(|line| line.strip_prefix("regeneration\t"))
     {
-        let [plan, verdict, checked]: [&str; 3] =
+        let [plan, verdict, checked, initial, after_preview]: [&str; 5] =
             row.split('\t').collect::<Vec<_>>().try_into().unwrap();
-        assert_regeneration_gate(plan, verdict, checked == "1").await;
+        assert_regeneration_gate(plan, verdict, checked == "1", [initial, after_preview]).await;
         rows += 1;
     }
     assert_eq!(rows, 3);
 }
 
-async fn assert_regeneration_gate(plan: &str, verdict: &str, checked: bool) {
+async fn assert_regeneration_gate(plan: &str, verdict: &str, checked: bool, checks: [&str; 2]) {
+    let [initial, after_preview] = checks;
     let temp = tempfile::tempdir().unwrap();
     let config = regeneration_config(plan);
     let state = setup_with_config(temp.path(), config.as_bytes());
@@ -993,6 +994,7 @@ async fn assert_regeneration_gate(plan: &str, verdict: &str, checked: bool) {
         write_file(&state, &base_change, path, b"base").await;
     }
     let base = land_change(&state, base_change).await;
+    assert_regeneration_check(&state, &owner, initial).await;
     let Response::MergeResult(preview) = call(
         &state,
         Request::MergeResult {
@@ -1016,6 +1018,7 @@ async fn assert_regeneration_gate(plan: &str, verdict: &str, checked: bool) {
         ledger.checked_merge_result(&receipt).unwrap(),
         checked.then_some(preview_tree)
     );
+    assert_regeneration_check(&state, &owner, after_preview).await;
     let Response::Land(answer) = call(&state, Request::Land { change: owner }).await else {
         panic!("expected a land answer")
     };
@@ -1037,6 +1040,43 @@ async fn assert_regeneration_gate(plan: &str, verdict: &str, checked: bool) {
         LandStatus::AlreadyLanded { commit } => panic!("unexpected prior land at {commit}"),
     }
     state.landing.settle();
+}
+
+async fn assert_regeneration_check(state: &Arc<ServerState>, change: &str, expected: &str) {
+    let Response::LandCheck(check) = call(
+        state,
+        Request::LandCheck {
+            change: change.into(),
+        },
+    )
+    .await
+    else {
+        panic!("expected a land check")
+    };
+    let verdict = match (&check.merge, &check.refusal, check.landable) {
+        (MergeGate::Clean, None, true) => "landable",
+        (
+            MergeGate::RegenerationRequired {
+                pending_at_land: true,
+                ..
+            },
+            None,
+            false,
+        ) => "pending_at_land",
+        (
+            MergeGate::RegenerationRequired {
+                pending_at_land: false,
+                ..
+            },
+            Some(refusal),
+            false,
+        ) => {
+            assert_eq!(refusal.reason, "regeneration_required");
+            "regeneration_required"
+        }
+        _ => panic!("unexpected regeneration verdict: {check:?}"),
+    };
+    assert_eq!(verdict, expected);
 }
 
 fn regeneration_config(plan: &str) -> String {

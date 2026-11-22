@@ -44,13 +44,21 @@ def fixtureRow (i : Input) : String :=
   "\t".intercalate [i.state.code, bit i.parentLanded, bit i.hasConflicts,
     bit i.approved, i.review.code, (if i.mergeMode then "merge" else "reach"), i.tier.code, i.receipt.code, bit i.baseMoved,
     bit i.landedSinceAllIndependent, bit i.mergeClean, (decideLand i).code]
-def regenerationRow (name : String) (layer : LayerRegeneration) : String :=
+def RegenerationCheck.code : RegenerationCheck → String
+  | .landable => "landable"
+  | .pendingAtLand => "pending_at_land"
+  | .manual => "regeneration_required"
+def regenerationRow (name : String) (commands : List (Option Nat))
+    (finished : Option (Option Nat)) : String :=
+  let layer := LayerRegeneration.required commands finished
   let (verdict, checked) := match finishRegeneration layer with
     | .ok _ => ("land", true)
     | .error .missing => ("regeneration_required", false)
     | .error .failed => ("regeneration_failed", false)
     | .error .pending => ("pending", false)
-  s!"regeneration\t{name}\t{verdict}\t{bit checked}\n"
+  let initial := checkTopRegeneration (.required commands none)
+  let afterPreview := checkTopRegeneration layer
+  s!"regeneration\t{name}\t{verdict}\t{bit checked}\t{initial.code}\t{afterPreview.code}\n"
 
 def fixtureTable : String :=
   "state\tparent_landed\thas_conflicts\tapproved\treview\trecheck\ttier\treceipt\tbase_moved\t" ++
@@ -61,9 +69,9 @@ def fixtureTable : String :=
         "failure\t" ++ review.code ++ "\t" ++ bit build ++ "\t" ++ bit (failureReverts review build) ++ "\n") ++
     String.join ([0, 1, 12].map fun cap =>
       s!"contention\t{cap}\t{cap}\t{contentionAttempts cap cap}\n") ++
-    regenerationRow "partial" (.required [some 0, none] none) ++
-    regenerationRow "failure" (.required [some 0, some 0] (some none)) ++
-    regenerationRow "success" (.required [some 0, some 0] (some (some 1)))
+    regenerationRow "partial" [some 0, none] none ++
+    regenerationRow "failure" [some 0, some 0] (some none) ++
+    regenerationRow "success" [some 0, some 0] (some (some 1))
 end Landing
 
 def main : IO Unit := IO.print Landing.fixtureTable

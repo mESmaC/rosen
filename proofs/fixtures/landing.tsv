@@ -6918,6 +6918,6 @@ failure	after-land	1	1
 contention	0	0	1
 contention	1	1	2
 contention	12	12	13
-regeneration	partial	regeneration_required	0
-regeneration	failure	regeneration_failed	0
-regeneration	success	land	1
+regeneration	partial	regeneration_required	0	regeneration_required	regeneration_required
+regeneration	failure	regeneration_failed	0	pending_at_land	pending_at_land
+regeneration	success	land	1	pending_at_land	landable

@@ -6,7 +6,7 @@ defaultTargets = ["Bisection", "Landing", "ThreeWayMerge", "Claims", "WorkspaceD
 
 [[lean_lib]]
 name = "Landing"
-globs = ["Landing.Design", "Landing.Export"]
+globs = ["Landing.Design", "Landing.Export", "Landing.Regeneration"]
 
 # Prints the landing fixture table: `lake exe landing-fixtures > fixtures/landing.tsv`
 [[lean_exe]]

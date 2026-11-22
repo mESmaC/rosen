@@ -1,3 +1,5 @@
+import Landing.Regeneration
+
 /-! Optimistic landing, stack atomicity and failure disposition (spec/R8-optimistic-landing/README.md R8 and spec/R12-post-land-verification.md R12; #365/#366/#368). -/
 namespace Landing
 /-- `active` covers both `open` and `ready`: the decision treats them alike. -/
@@ -103,21 +105,6 @@ def stackResult (l : Ledger) (layers : List (Input × Nat × Nat)) : Ledger :=
   ⟨((layers.getLast?).map (·.2.2)).getD l.base, layers.reverse.map (·.2) ++ l.landed⟩
 def stackCas (l : Ledger) (expected : Nat) (layers : List (Input × Nat × Nat)) : Option Ledger :=
   if l.base = expected ∧ stackReady l layers then some (stackResult l layers) else none
-/-- R8 clean merge gate. Trees are immutable IDs. -/
-inductive LayerRegeneration where
-  | clean (tree : Nat)
-  | required (commands : List (Option Nat)) (finished : Option (Option Nat))
-inductive RegenerationRefusal where
-  | missing | pending | failed
-
-def finishRegeneration : LayerRegeneration → Except RegenerationRefusal Nat
-  | .clean tree => .ok tree
-  | .required commands finished =>
-    if commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true) then match finished with
-      | none => .error .pending
-      | some none => .error .failed
-      | some (some tree) => .ok tree
-    else .error .missing
 def regenerationReady (r : LayerRegeneration) : Bool :=
   match finishRegeneration r with
   | .ok _ => true
@@ -182,11 +169,12 @@ structure Verification where
 def reportFailure (s : Verification) (review : ReviewMode) (build : Bool)
     (culprit : Nat) (out : String) : Bool × Verification :=
   (failureReverts review build, {s with failures := (culprit, build, out) :: s.failures})
-/-- **correct** (spec/R8-optimistic-landing/README.md R8, clean-merge-and-conflict-markers.md,
+/-- **correct** (spec/R8-optimistic-landing/README.md R8, clean-merge-and-conflict-markers.md, land-check.md,
 and spec/R12-post-land-verification.md R12): receipts and approvals gate
 before-land projects, failures are recorded, and only builds request a revert
 after land. A required layer supplies a final tree only after successful
-regeneration. An unresolved layer prevents the entire stack's CAS. -/
+regeneration. An unresolved layer prevents the entire stack's CAS. A read-only
+after-land check of the top layer reports a complete uncached plan as pending. -/
 theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     ((∀ l', landStep l i expected change commit = some l' →
       Authorized i ∧ expected = l.base ∧ l.hasLanded change = false ∧
@@ -204,8 +192,14 @@ theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     (∀ expected layers regeneration result,
       regeneratedStackCas l expected layers regeneration = some result ↔
       layers.length = regeneration.length ∧ (∀ r ∈ regeneration, regenerationReady r = true) ∧
-      expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers) := by
-  refine ⟨land_correct l i expected change commit, ?_, stack_correct l, finish_correct, ?_⟩
+      expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers) ∧
+    (∀ tree, checkTopRegeneration (.clean tree) = .landable) ∧
+    (∀ commands finished, checkTopRegeneration (.required commands finished) =
+      if commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true) then
+        if finished.join.isSome then .landable else .pendingAtLand
+      else .manual) := by
+  refine ⟨land_correct l i expected change commit, ?_, stack_correct l, finish_correct, ?_,
+    fun _ => rfl, check_top_required⟩
   · intro s review build culprit out
     refine ⟨rfl, rfl, ?_⟩
     cases review <;> cases build <;> simp [reportFailure, failureReverts]
