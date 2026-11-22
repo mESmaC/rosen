@@ -46,6 +46,9 @@ pub struct BisectState {
     pub culprit: Option<BisectCulprit>,
     /// Contradictory confirmation; checker must investigate/retry the batch.
     pub flaky: bool,
+    /// Failing test names in this session that differ from every known culprit's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing_tests: Vec<String>,
 }
 
 /// Where one bisection step stands. A step is `offered` once its job is the
@@ -91,5 +94,8 @@ pub struct BisectSession {
     /// Who reported the failing batch that opened the session, and when.
     pub opened_by: Option<String>,
     pub opened_at: Option<i64>,
+    /// Failing test names in this session that differ from every known culprit's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing_tests: Vec<String>,
     pub steps: Vec<BisectStep>,
 }

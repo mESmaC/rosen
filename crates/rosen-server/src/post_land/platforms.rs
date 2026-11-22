@@ -86,6 +86,9 @@ pub fn newest(
                          AND json_extract(b.commits,'$[' || b.high || '][0]')=f.commit_id
                      JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
                      WHERE b.ref_name=?1 AND b.platform=?2 AND f.kind='test' AND f.requires_revert=0), 0)
+                 AND seq > COALESCE((SELECT MAX(h.seq) FROM bisections b
+                     JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
+                     WHERE b.ref_name=?1 AND b.platform=?2 AND b.kind='test' AND b.phase='known'), 0)
                  ORDER BY seq DESC LIMIT 1",
                 params![name, platform],
                 |r| r.get(0),

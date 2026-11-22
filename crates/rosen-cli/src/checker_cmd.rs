@@ -269,23 +269,24 @@ async fn drive_bisection(
         record_post_land_timings(client, commit, kind, platform, Some(session), &timings).await;
     }
     if let Some(culprit) = &state.culprit {
-        log_status(
-            cfg,
-            "culprit",
-            json!({
-                "session": state.id,
-                "kind": state.kind,
-                "platform": state.platform,
-                "commit": culprit.commit,
-                "change": culprit.change,
-            }),
-        );
+        let mut detail = json!({
+            "session": state.id,
+            "kind": state.kind,
+            "platform": state.platform,
+            "commit": culprit.commit,
+            "change": culprit.change,
+        });
+        if !state.failing_tests.is_empty() {
+            detail["failing_tests"] = json!(state.failing_tests);
+        }
+        log_status(cfg, "culprit", detail);
     } else if state.flaky {
-        log_status(
-            cfg,
-            "flaky",
-            json!({ "session": state.id, "kind": state.kind, "platform": state.platform }),
-        );
+        let mut detail =
+            json!({ "session": state.id, "kind": state.kind, "platform": state.platform });
+        if !state.failing_tests.is_empty() {
+            detail["failing_tests"] = json!(state.failing_tests);
+        }
+        log_status(cfg, "flaky", detail);
     }
     Ok(())
 }

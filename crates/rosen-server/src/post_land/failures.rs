@@ -99,6 +99,7 @@ pub fn apply(
     kind: CheckKind,
     platform: Option<&str>,
     culprit: &BisectCulprit,
+    failing_tests: &[String],
 ) -> Result<()> {
     // Post-land policy takes effect at the landed commit, like its check commands.
     let policy = state
@@ -111,7 +112,15 @@ pub fn apply(
     let mut conn = crate::metadata::open(&state.config.metadata_path()).map_err(internal)?;
     ensure_schema(&conn).map_err(internal)?;
     crate::bisect::ensure_schema(&conn).map_err(internal)?;
-    record(&mut conn, session, kind, platform, culprit, must_revert)?;
+    record(
+        &mut conn,
+        session,
+        kind,
+        platform,
+        culprit,
+        must_revert,
+        failing_tests,
+    )?;
     state.events.deliver_staged();
     if must_revert {
         if let Err(error) = revert_recorded(state, &conn, culprit.commit, &culprit.output) {
@@ -133,6 +142,7 @@ fn record(
     platform: Option<&str>,
     culprit: &BisectCulprit,
     must_revert: bool,
+    failing_tests: &[String],
 ) -> Result<()> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -167,6 +177,7 @@ fn record(
             must_revert,
             submitter.as_deref(),
             at,
+            failing_tests,
         );
         crate::events::stage(
             &tx,
@@ -187,9 +198,19 @@ pub(crate) fn event_detail(
     submitter: Option<&str>,
     at: Option<i64>,
 ) -> serde_json::Value {
-    event_detail_for(session, culprit, kind, None, requires_revert, submitter, at)
+    event_detail_for(
+        session,
+        culprit,
+        kind,
+        None,
+        requires_revert,
+        submitter,
+        at,
+        &[],
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn event_detail_for(
     session: i64,
     culprit: &BisectCulprit,
@@ -198,6 +219,7 @@ pub(crate) fn event_detail_for(
     requires_revert: bool,
     submitter: Option<&str>,
     at: Option<i64>,
+    failing_tests: &[String],
 ) -> serde_json::Value {
     let mut detail = serde_json::json!({
         "session": session,
@@ -210,6 +232,9 @@ pub(crate) fn event_detail_for(
     });
     if let Some(platform) = platform {
         detail["platform"] = serde_json::json!(platform);
+    }
+    if !failing_tests.is_empty() {
+        detail["failing_tests"] = serde_json::json!(failing_tests);
     }
     detail
 }
@@ -264,7 +289,7 @@ fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>>
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
-                r.get(5)?,
+                r.get::<_, String>(5)?,
                 r.get::<_, Option<String>>(6)?,
                 r.get::<_, bool>(7)?,
                 (r.get(8)?, r.get(9)?),
@@ -275,6 +300,7 @@ fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>>
         let (session, change, commit, kind, platform, output, revert, requires_revert, by) =
             row.map_err(internal)?;
         let (submitter, submitted_at) = by;
+        let failing_tests = crate::bisect::failing_tests_for(conn, session, &output);
         Ok(PostLandFailure {
             session,
             change,
@@ -286,6 +312,7 @@ fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>>
             },
             platform: (!platform.is_empty()).then_some(platform),
             output,
+            failing_tests,
             requires_revert,
             revert: revert.map(|id| id.parse().map_err(internal)).transpose()?,
             submitter,

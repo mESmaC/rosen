@@ -3184,6 +3184,12 @@
         "output": {
           "type": "string"
         },
+        "failing_tests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "revert": {
           "anyOf": [
             {
@@ -3432,6 +3438,12 @@
               "type": "null"
             }
           ]
+        },
+        "failing_tests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "steps": {
           "type": "array",

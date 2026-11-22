@@ -1,3 +1,4 @@
+use super::known::KnownFailures;
 use super::model::Session;
 use rosen_protocol::{ErrorBody, ErrorCode};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -53,7 +54,7 @@ pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {
         phase: row.3,
         step: row.4,
         output: row.5,
-        known_output: row.7,
+        known: KnownFailures::from_stored(row.7),
         kind: if row.6 == "build" {
             rosen_protocol::CheckKind::Build
         } else {

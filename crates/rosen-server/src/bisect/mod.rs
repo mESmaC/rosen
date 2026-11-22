@@ -87,16 +87,18 @@ pub fn begin_for_in(
     {
         return storage::load(conn, id)?.state();
     }
-    let (boundary, known_output) = known::context(conn, name, green, failed, kind, platform)?;
+    let (boundary, known_ctx) = known::context(conn, name, green, failed, kind, platform)?;
     let commits = interval(conn, name, boundary, failed)?;
     let high = commits.len() - 1;
-    let phase = if known_output.as_deref() == Some(output) {
+    let known = known_ctx.bind(&commits);
+    let phase = if known.matches_at(high, output) {
         "known"
     } else if high == 1 {
         "confirm"
     } else {
         "search"
     };
+    let known_stored = known.to_stored()?;
     conn.execute(
         "INSERT INTO bisections
         (ref_name,failed,commits,low,high,phase,step,output,kind,known_output,platform)
@@ -109,7 +111,7 @@ pub fn begin_for_in(
             phase,
             output,
             kind.as_str(),
-            known_output,
+            known_stored,
             platform_key
         ],
     )
@@ -275,6 +277,26 @@ pub async fn handle(
     }
 }
 
+/// Failing test names parsed from `output`, excluding tests already explained by
+/// earlier known culprits recorded on `session`.
+pub(crate) fn failing_tests_for(conn: &Connection, session: i64, output: &str) -> Vec<String> {
+    let row: Option<(Option<String>, usize)> = conn
+        .query_row(
+            "SELECT known_output, high FROM bisections WHERE id=?1",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    match row {
+        Some((known_raw, high)) => {
+            known::KnownFailures::from_stored(known_raw).unfamiliar_tests(high, output)
+        }
+        None => known::parse_failing_tests(output).into_iter().collect(),
+    }
+}
+
 fn apply_confirmed(state: &crate::ServerState, answer: &BisectState) -> Result<()> {
     if let Some(culprit) = &answer.culprit {
         crate::post_land::failures::apply(
@@ -283,6 +305,7 @@ fn apply_confirmed(state: &crate::ServerState, answer: &BisectState) -> Result<(
             answer.kind,
             answer.platform.as_deref(),
             culprit,
+            &answer.failing_tests,
         )?;
     }
     Ok(())

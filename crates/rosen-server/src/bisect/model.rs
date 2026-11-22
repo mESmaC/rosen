@@ -1,3 +1,4 @@
+use super::known::KnownFailures;
 use rosen_core::ObjectId;
 use rosen_protocol::{BisectCulprit, BisectJob, BisectState, ErrorBody, ErrorCode};
 
@@ -11,7 +12,7 @@ pub(super) struct Session {
     pub phase: String,
     pub step: u64,
     pub output: String,
-    pub known_output: Option<String>,
+    pub known: KnownFailures,
 }
 
 /// Balanced split of the remaining possible first failures.
@@ -27,6 +28,10 @@ impl Session {
             "parent" => Some(self.high - 1),
             _ => None,
         }
+    }
+
+    pub fn failing_tests(&self) -> Vec<String> {
+        self.known.unfamiliar_tests(self.high, &self.output)
     }
 
     pub fn state(&self) -> Result<BisectState, ErrorBody> {
@@ -55,13 +60,15 @@ impl Session {
             }),
             culprit,
             flaky: self.phase == "flaky",
+            failing_tests: self.failing_tests(),
         })
     }
 
     pub fn advance(&mut self, passed: bool, output: &str) {
         // A matching known failure is a pass only for this search. It never
-        // advances a built/green checkpoint or suppresses an unfamiliar output.
-        let passed = passed || self.known_output.as_deref() == Some(output);
+        // advances a built/green checkpoint or suppresses an unfamiliar failure.
+        let index = self.job_index().unwrap_or(self.high);
+        let passed = passed || self.known.matches_at(index, output);
         match self.phase.as_str() {
             "search" => {
                 let middle = midpoint(self.low, self.high);

@@ -47,6 +47,7 @@ pub(super) fn opened(
         params![session.id, by.map(|s| &s.by), by.map(|s| s.at)],
     )
     .map_err(super::internal)?;
+    let failing_tests = session.failing_tests();
     let detail = opened_detail_for(
         session.id,
         session.kind,
@@ -55,6 +56,7 @@ pub(super) fn opened(
         by,
         session.commits[0].0,
         session.commits.len() - 1,
+        &failing_tests,
     );
     stage(conn, detail)
 }
@@ -69,9 +71,10 @@ pub(crate) fn opened_detail(
     lower: ObjectId,
     interval: usize,
 ) -> serde_json::Value {
-    opened_detail_for(session, kind, None, failed, by, lower, interval)
+    opened_detail_for(session, kind, None, failed, by, lower, interval, &[])
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn opened_detail_for(
     session: i64,
     kind: CheckKind,
@@ -80,6 +83,7 @@ pub(crate) fn opened_detail_for(
     by: Option<&Submitted>,
     lower: ObjectId,
     interval: usize,
+    failing_tests: &[String],
 ) -> serde_json::Value {
     let (who, at) = submitter::detail(by);
     let mut detail = serde_json::json!({
@@ -91,6 +95,9 @@ pub(crate) fn opened_detail_for(
     });
     if let Some(platform) = platform {
         detail["platform"] = serde_json::json!(platform);
+    }
+    if !failing_tests.is_empty() {
+        detail["failing_tests"] = serde_json::json!(failing_tests);
     }
     detail
 }
@@ -150,6 +157,9 @@ pub(crate) fn accepted_detail(
     });
     if let Some(platform) = &job.platform {
         detail["platform"] = serde_json::json!(platform);
+    }
+    if !after.failing_tests.is_empty() {
+        detail["failing_tests"] = serde_json::json!(&after.failing_tests);
     }
     detail
 }
@@ -299,6 +309,7 @@ pub fn sessions(conn: &Connection, name: &str) -> Result<Vec<BisectSession>, Err
             flaky: session.phase == "flaky",
             opened_by,
             opened_at,
+            failing_tests: session.failing_tests(),
             steps: steps(conn, &session)?,
         });
     }

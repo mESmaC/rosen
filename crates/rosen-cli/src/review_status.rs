@@ -83,6 +83,9 @@ fn print_session(session: &BisectSession) {
         "  opened{}",
         by(&session.opened_by, session.opened_at).trim_end()
     );
+    if !session.failing_tests.is_empty() {
+        println!("  failing tests: {}", session.failing_tests.join(", "));
+    }
     for step in &session.steps {
         print_step(step);
     }

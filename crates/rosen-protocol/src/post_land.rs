@@ -70,6 +70,9 @@ pub struct PostLandFailure {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
     pub output: String,
+    /// Failing test names parsed from this failure that differ from earlier known culprits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing_tests: Vec<String>,
     pub requires_revert: bool,
     pub revert: Option<ObjectId>,
     /// `nick@machine` of the result that confirmed the culprit, and when, in

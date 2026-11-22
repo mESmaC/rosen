@@ -29,13 +29,13 @@
   A recorded test-failure batch is not offered endlessly as untested and is never marked green merely because it was recorded.
   - Records and events are deduplicated by `(culprit commit, check kind)`, including confirmation by different bisection sessions.
     Completed batches remain covered when their culprit already has a record.
-    Later test searches use the newer of the test green and the latest recorded, non-reverting test culprit before the failing batch as their lower bound.
-    This does not mark the bound green; the new culprit still needs a fresh passing parent confirmation.
-  - Later build searches start after the newer of the build checkpoint, recorded build culprits and batches containing only a known failure.
-    While a build culprit awaits its inverse, the session captures the latest outstanding culprit's output durably.
-    An exact output match counts as no new failure during that search and its fresh parent confirmation; unfamiliar failures still require two failures and that parent confirmation.
-    A batch containing only the known failure is covered without marking it built or green.
-    Output comparison can distinguish new breaks only when they produce different output.
+    Later build, lint and test searches start after the newer of the kind's checkpoint, recorded culprits and batches containing only a known failure.
+    While earlier culprits in the range lack a passing checkpoint (or await an inverse), the session captures their failure outputs durably.
+    When an output names failing tests (`---- <name> stdout ----` headers or `failures:` lists), a step failing only on a subset of earlier culprits' failing tests counts as no new failure during that search and its fresh parent confirmation, so a lower-bound confirmed culprit never ends the session `flaky` just by failing for its known reason; outputs without parsed test names fall back to exact output matching.
+    Unfamiliar failures still require two failures and that parent confirmation.
+    A batch containing only known failures is covered without marking it built or green.
+    When the failing tip or culprit names failing tests that differ from every earlier known culprit's, the session, `post_land_status`, `post_land_failures` and post-land `bisect` / `post_land_failure` events report those `failing_tests`.
+    Output comparison can distinguish new breaks only when they produce different failing test names or different output.
 - **Auto-revert.**
   In after-land mode only a **build** failure requests a revert; a **test** failure stays landed with its failure record for Velocity to file as an issue.
   Before-land projects keep reverting confirmed full-test failures.

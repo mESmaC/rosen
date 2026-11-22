@@ -376,13 +376,236 @@ async fn later_test_search_starts_after_recorded_culprit() {
     let (second_id, _, second) = land(&state, "second.rs").await;
     let session = fail(&state, CheckKind::Test).await;
     assert_eq!(session.job.as_ref().unwrap().commit, repair);
-    confirm(&state, session, second).await;
+    confirm_with_output(&state, session, second, "second failure").await;
     assert_eq!(failures(&state, &first_id).await.len(), 1);
     assert_eq!(failures(&state, &second_id).await.len(), 1);
     let Response::PostLand(work) = call(&state, Request::PostLandNext).await else {
         panic!()
     };
     assert!(work.job.is_none() && work.last_green.is_none());
+}
+
+async fn confirm_with_output(
+    state: &Arc<ServerState>,
+    mut answer: BisectState,
+    culprit: ObjectId,
+    failure_output: &str,
+) -> BisectState {
+    while let Some(job) = answer.job {
+        assert_eq!(job.kind, answer.kind);
+        let result = BisectResult {
+            passed: job.commit != culprit,
+            job,
+            output: failure_output.into(),
+            submitter: None,
+        };
+        let Response::Bisection(next) = call(state, Request::BisectSubmit(result)).await else {
+            panic!()
+        };
+        answer = next;
+    }
+    assert_eq!(answer.culprit.as_ref().unwrap().commit, culprit);
+    answer
+}
+
+fn test_failure_output(tests: &[&str], duration: &str) -> String {
+    let mut out = String::from("failures:\n\n");
+    for name in tests {
+        out.push_str(&format!(
+            "---- {name} stdout ----\nthread '{name}' panicked\n\n"
+        ));
+    }
+    out.push_str("failures:\n");
+    for name in tests {
+        out.push_str(&format!("    {name}\n"));
+    }
+    out.push_str(&format!("\ntest result: FAILED. finished in {duration}\n"));
+    out
+}
+
+async fn fail_test_with(state: &Arc<ServerState>, output: &str) -> BisectState {
+    let Response::PostLand(work) = call(state, Request::PostLandNext).await else {
+        panic!()
+    };
+    let Response::Bisection(answer) = call(
+        state,
+        Request::PostLandFailed {
+            job: work.job.unwrap(),
+            output: output.into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    answer
+}
+
+async fn drive_test_bisect(
+    state: &Arc<ServerState>,
+    mut session: BisectState,
+    mut outcome: impl FnMut(ObjectId, u32) -> (bool, String),
+) -> BisectState {
+    let mut step = 0u32;
+    while let Some(job) = session.job {
+        step += 1;
+        let (passed, output) = outcome(job.commit, step);
+        let Response::Bisection(next) = call(
+            state,
+            Request::BisectSubmit(BisectResult {
+                job,
+                passed,
+                output,
+                submitter: None,
+            }),
+        )
+        .await
+        else {
+            panic!()
+        };
+        session = next;
+    }
+    session
+}
+
+// R12 risk (#452): ignoring earlier confirmed test culprits causes commits before
+// a fix-forward to fail bisection steps and end flaky, blocking green advancement.
+#[tokio::test(flavor = "multi_thread")]
+async fn second_test_failure_after_fix_forward_bisects_past_known_culprit() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = setup(temp.path());
+    let (_, _, green0) = land(&state, "green0.rs").await;
+    let Response::PostLand(work) = call(&state, Request::PostLandNext).await else {
+        panic!()
+    };
+    call(&state, Request::PostLandPassed(work.job.unwrap())).await;
+
+    // Culprit A breaks test X; C1 fails only on X -> covered as known.
+    let (_, _, culprit_a) = land(&state, "parking.rs").await;
+    let sess_a = fail_test_with(&state, &test_failure_output(&["parking::test_x"], "0.1s")).await;
+    let sess_a = drive_test_bisect(&state, sess_a, |c, n| {
+        if c == green0 {
+            (true, String::new())
+        } else {
+            (
+                false,
+                test_failure_output(&["parking::test_x"], &format!("0.{n}s")),
+            )
+        }
+    })
+    .await;
+    assert_eq!(sess_a.culprit.unwrap().commit, culprit_a);
+
+    let (_, _, c1) = land(&state, "c1.rs").await;
+    let known = fail_test_with(&state, &test_failure_output(&["parking::test_x"], "0.2s")).await;
+    assert!(known.job.is_none() && known.culprit.is_none() && !known.flaky);
+
+    // C2 predates fix F (fails X); F fixes X; B breaks Y; tip fails only on Y.
+    let (_, _, c2) = land(&state, "c2.rs").await;
+    let (_, _, fix_f) = land_bytes(&state, "parking.rs", b"fixed\n").await;
+    let (b_id, _, culprit_b) = land(&state, "other.rs").await;
+    let _ = land(&state, "tip.rs").await;
+
+    let sess_b = fail_test_with(&state, &test_failure_output(&["other::test_y"], "0.3s")).await;
+    assert_eq!(sess_b.failing_tests, vec!["other::test_y"]);
+    assert_eq!(
+        status(&state).await.sessions[0].failing_tests,
+        vec!["other::test_y"]
+    );
+    let sess_b = drive_test_bisect(&state, sess_b, |c, n| {
+        if c == c1 || c == c2 {
+            (
+                false,
+                test_failure_output(&["parking::test_x"], &format!("0.{n}s")),
+            )
+        } else if c == fix_f {
+            (true, String::new())
+        } else {
+            (
+                false,
+                test_failure_output(&["other::test_y"], &format!("0.{n}s")),
+            )
+        }
+    })
+    .await;
+    assert!(!sess_b.flaky && sess_b.culprit.unwrap().commit == culprit_b);
+    assert_eq!(
+        failures(&state, &b_id).await[0].failing_tests,
+        vec!["other::test_y"]
+    );
+    assert_unfamiliar_test_events(&state, sess_b.id, "other::test_y");
+    let (_, _, fix_y) = land_bytes(&state, "other.rs", b"fixed y\n").await;
+    let Response::PostLand(work) = call(&state, Request::PostLandNext).await else {
+        panic!()
+    };
+    assert_eq!(work.job.as_ref().unwrap().commit, fix_y);
+    call(&state, Request::PostLandPassed(work.job.unwrap())).await;
+    assert_eq!(
+        status(&state).await.last_green.as_ref().map(|c| c.commit),
+        Some(fix_y)
+    );
+    assert_lower_bound_culprit_not_flaky(&state, fix_y).await;
+}
+
+async fn assert_lower_bound_culprit_not_flaky(state: &Arc<ServerState>, green: ObjectId) {
+    // Culprit D breaks test_y; E lands directly after D breaking test_z too, so
+    // parent confirmation runs on lower bound D itself and must not end flaky.
+    let (_, _, culprit_d) = land(state, "d.rs").await;
+    let sess_d = fail_test_with(state, &test_failure_output(&["d::test_y"], "0.1s")).await;
+    let sess_d = drive_test_bisect(state, sess_d, |c, n| {
+        if c == green {
+            (true, String::new())
+        } else {
+            (
+                false,
+                test_failure_output(&["d::test_y"], &format!("0.{n}s")),
+            )
+        }
+    })
+    .await;
+    assert_eq!(sess_d.culprit.unwrap().commit, culprit_d);
+
+    let (_, _, culprit_e) = land(state, "e.rs").await;
+    let sess_e = fail_test_with(
+        state,
+        &test_failure_output(&["d::test_y", "e::test_z"], "0.2s"),
+    )
+    .await;
+    assert_eq!(sess_e.failing_tests, vec!["e::test_z"]);
+    let sess_e = drive_test_bisect(state, sess_e, |c, n| {
+        let tests: &[&str] = if c == culprit_d {
+            &["d::test_y"]
+        } else {
+            &["d::test_y", "e::test_z"]
+        };
+        (false, test_failure_output(tests, &format!("0.{n}s")))
+    })
+    .await;
+    assert!(!sess_e.flaky && sess_e.culprit.unwrap().commit == culprit_e);
+}
+
+fn assert_unfamiliar_test_events(state: &Arc<ServerState>, session: i64, test_name: &str) {
+    let events = state.events.page(0, None, 200).unwrap().events;
+    let opened = events
+        .iter()
+        .find(|e| {
+            e.kind == EventKind::Bisect
+                && e.detail["session"] == session
+                && e.detail["progress"] == "opened"
+        })
+        .unwrap();
+    assert_eq!(
+        opened.detail["failing_tests"],
+        serde_json::json!([test_name])
+    );
+    let failed = events
+        .iter()
+        .find(|e| e.kind == EventKind::PostLandFailure && e.detail["session"] == session)
+        .unwrap();
+    assert_eq!(
+        failed.detail["failing_tests"],
+        serde_json::json!([test_name])
+    );
 }
 
 // R12 must use configuration once landed, including a change that changes review mode.

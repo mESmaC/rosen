@@ -722,6 +722,7 @@ fn bisect_events(
         job: None,
         culprit: Some(culprit),
         flaky: false,
+        failing_tests: Vec::new(),
     };
     vec![
         (

@@ -66,8 +66,11 @@ fn search_boundary(
     name: &str,
     job: &PostLandJob,
 ) -> Result<ObjectId, ErrorBody> {
-    let green = match post_land::last_green_for(conn, name, job.kind, job.platform.as_deref())? {
-        Some(green) => green,
+    // Pass the verified green/built checkpoint (or initial commit) so `known::context`
+    // sees every earlier confirmed culprit in `[green, failed)` and computes the
+    // search lower bound uniformly for both build/lint and test checks.
+    match post_land::last_green_for(conn, name, job.kind, job.platform.as_deref())? {
+        Some(green) => Ok(green),
         None => {
             // No initial commit is assumed tested: confirmation will run the
             // culprit's parent, and refuses to identify a culprit if it fails.
@@ -79,18 +82,7 @@ fn search_boundary(
                     |r| r.get(0),
                 )
                 .map_err(super::internal)?;
-            ObjectId::from_hex(&initial).map_err(super::internal)?
+            ObjectId::from_hex(&initial).map_err(super::internal)
         }
-    };
-    match job.kind {
-        rosen_protocol::CheckKind::Test => post_land::failures::test_boundary(
-            conn,
-            name,
-            green,
-            job.commit,
-            job.platform.as_deref(),
-        )
-        .map_err(super::internal),
-        rosen_protocol::CheckKind::Build => Ok(green),
     }
 }
