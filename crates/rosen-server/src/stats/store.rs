@@ -1,9 +1,9 @@
 //! Durable SQLite storage for run-queue, post-land checkpoint and land phase
 //! timings (counts and durations only, #449).
 
-use rosen_core::ObjectId;
+use rosen_core::{ChangeId, ObjectId};
 use rosen_protocol::{CheckKind, LandPhaseTimings, RecordPostLandTiming, RecordRunTiming};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS run_timings (
@@ -67,6 +67,15 @@ CREATE TABLE IF NOT EXISTS land_timings (
 );
 CREATE INDEX IF NOT EXISTS land_timings_by_change ON land_timings (change_id, recorded_at);
 CREATE INDEX IF NOT EXISTS land_timings_by_time ON land_timings (recorded_at);
+
+CREATE TABLE IF NOT EXISTS land_timing_layers (
+    timing_id INTEGER NOT NULL REFERENCES land_timings(id),
+    change_id TEXT    NOT NULL,
+    commit_id TEXT    NOT NULL,
+    PRIMARY KEY (timing_id, change_id)
+);
+CREATE INDEX IF NOT EXISTS land_timing_layers_by_change
+    ON land_timing_layers (change_id, timing_id);
 ";
 
 /// Creates the timing tables if they are missing. Safe to call on every open.
@@ -113,6 +122,53 @@ pub fn record_land(
     recorded_at: i64,
 ) -> rusqlite::Result<()> {
     ensure_schema(conn)?;
+    insert_land_row(conn, change_id, commit_id, outcome, phases, recorded_at)?;
+    Ok(())
+}
+
+/// Persists phase totals for one land request and links any ancestor layers
+/// landed atomically in the same request to that single timing row (#462).
+/// Window latency queries read `land_timings` directly, so an atomic stack
+/// contributes one latency sample while every landed layer reports its phase
+/// totals in `rosen stats`.
+pub fn record_land_layers(
+    conn: &mut Connection,
+    change_id: &str,
+    commit_id: Option<&ObjectId>,
+    ancestors: &[(ChangeId, ObjectId)],
+    outcome: &str,
+    phases: &LandPhaseTimings,
+    recorded_at: i64,
+) -> rusqlite::Result<()> {
+    ensure_schema(conn)?;
+    if ancestors.is_empty() {
+        insert_land_row(conn, change_id, commit_id, outcome, phases, recorded_at)?;
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let timing_id = insert_land_row(&tx, change_id, commit_id, outcome, phases, recorded_at)?;
+    for (layer_change, layer_commit) in ancestors {
+        let layer_id = layer_change.to_string();
+        if layer_id == change_id {
+            continue;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO land_timing_layers (timing_id, change_id, commit_id)
+             VALUES (?1, ?2, ?3)",
+            params![timing_id, layer_id, layer_commit.to_hex()],
+        )?;
+    }
+    tx.commit()
+}
+
+fn insert_land_row(
+    conn: &Connection,
+    change_id: &str,
+    commit_id: Option<&ObjectId>,
+    outcome: &str,
+    phases: &LandPhaseTimings,
+    recorded_at: i64,
+) -> rusqlite::Result<i64> {
     conn.execute(
         "INSERT INTO land_timings (
             change_id, commit_id, outcome, attempts,
@@ -150,7 +206,7 @@ pub fn record_land(
             recorded_at,
         ],
     )?;
-    Ok(())
+    Ok(conn.last_insert_rowid())
 }
 
 /// Records a passing post-land checkpoint advancement inside the caller's transaction.

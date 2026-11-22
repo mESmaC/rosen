@@ -176,6 +176,17 @@ fn active_change_ids(conn: &Connection, since_ms: Option<i64>) -> rusqlite::Resu
             params![SERVER_OWNER, since],
             &mut ids,
         )?;
+        if table_exists(conn, "land_timing_layers")? {
+            collect_ids(
+                conn,
+                "SELECT DISTINCT tl.change_id FROM land_timing_layers tl
+                 JOIN land_timings l ON l.id = tl.timing_id
+                 JOIN changes c ON c.id = tl.change_id
+                 WHERE c.owner != ?1 AND l.recorded_at >= ?2",
+                params![SERVER_OWNER, since],
+                &mut ids,
+            )?;
+        }
     }
     if table_exists(conn, "run_timings")? {
         collect_ids(
@@ -340,42 +351,43 @@ fn load_change_land_phases(
     if !table_exists(conn, "land_timings")? {
         return Ok((None, None));
     }
-    let row = conn
-        .query_row(
-            "SELECT outcome, attempts,
+    let sql = if table_exists(conn, "land_timing_layers")? {
+        "SELECT outcome, attempts,
+                registry_ms, engine_ms, attempts_ms, facts_ms, tiers_ms,
+                merge_ms, sizes_ms, receipt_ms, write_ms, cas_ms,
+                write_and_cas_ms, restack_ms, decision_and_restack_ms,
+                answer_ms, total_ms, recorded_at
+         FROM (
+             SELECT outcome, attempts,
                     registry_ms, engine_ms, attempts_ms, facts_ms, tiers_ms,
                     merge_ms, sizes_ms, receipt_ms, write_ms, cas_ms,
                     write_and_cas_ms, restack_ms, decision_and_restack_ms,
-                    answer_ms, total_ms, recorded_at
+                    answer_ms, total_ms, recorded_at, id
              FROM land_timings WHERE change_id = ?1
-             ORDER BY CASE WHEN outcome = 'landed' THEN 0 ELSE 1 END, recorded_at DESC, id DESC
-             LIMIT 1",
-            [change_id],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    LandPhaseTimings {
-                        attempts: u32::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
-                        registry_ms: to_u64(r.get(2)?),
-                        engine_ms: to_u64(r.get(3)?),
-                        attempts_ms: to_u64(r.get(4)?),
-                        facts_ms: to_u64(r.get(5)?),
-                        tiers_ms: to_u64(r.get(6)?),
-                        merge_ms: to_u64(r.get(7)?),
-                        sizes_ms: to_u64(r.get(8)?),
-                        receipt_ms: to_u64(r.get(9)?),
-                        write_ms: to_u64(r.get(10)?),
-                        cas_ms: to_u64(r.get(11)?),
-                        write_and_cas_ms: to_u64(r.get(12)?),
-                        restack_ms: to_u64(r.get(13)?),
-                        decision_and_restack_ms: to_u64(r.get(14)?),
-                        answer_ms: to_u64(r.get(15)?),
-                        total_ms: to_u64(r.get(16)?),
-                    },
-                    r.get::<_, i64>(17)?,
-                ))
-            },
-        )
+             UNION ALL
+             SELECT l.outcome, l.attempts,
+                    l.registry_ms, l.engine_ms, l.attempts_ms, l.facts_ms, l.tiers_ms,
+                    l.merge_ms, l.sizes_ms, l.receipt_ms, l.write_ms, l.cas_ms,
+                    l.write_and_cas_ms, l.restack_ms, l.decision_and_restack_ms,
+                    l.answer_ms, l.total_ms, l.recorded_at, l.id
+             FROM land_timing_layers tl
+             JOIN land_timings l ON l.id = tl.timing_id
+             WHERE tl.change_id = ?1
+         )
+         ORDER BY CASE WHEN outcome = 'landed' THEN 0 ELSE 1 END, recorded_at DESC, id DESC
+         LIMIT 1"
+    } else {
+        "SELECT outcome, attempts,
+                registry_ms, engine_ms, attempts_ms, facts_ms, tiers_ms,
+                merge_ms, sizes_ms, receipt_ms, write_ms, cas_ms,
+                write_and_cas_ms, restack_ms, decision_and_restack_ms,
+                answer_ms, total_ms, recorded_at
+         FROM land_timings WHERE change_id = ?1
+         ORDER BY CASE WHEN outcome = 'landed' THEN 0 ELSE 1 END, recorded_at DESC, id DESC
+         LIMIT 1"
+    };
+    let row = conn
+        .query_row(sql, [change_id], decode_land_phase_row)
         .optional()?;
     Ok(match row {
         Some((outcome, phases, at)) => {
@@ -384,6 +396,33 @@ fn load_change_land_phases(
         }
         None => (None, None),
     })
+}
+
+fn decode_land_phase_row(
+    r: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(String, LandPhaseTimings, i64)> {
+    Ok((
+        r.get::<_, String>(0)?,
+        LandPhaseTimings {
+            attempts: u32::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+            registry_ms: to_u64(r.get(2)?),
+            engine_ms: to_u64(r.get(3)?),
+            attempts_ms: to_u64(r.get(4)?),
+            facts_ms: to_u64(r.get(5)?),
+            tiers_ms: to_u64(r.get(6)?),
+            merge_ms: to_u64(r.get(7)?),
+            sizes_ms: to_u64(r.get(8)?),
+            receipt_ms: to_u64(r.get(9)?),
+            write_ms: to_u64(r.get(10)?),
+            cas_ms: to_u64(r.get(11)?),
+            write_and_cas_ms: to_u64(r.get(12)?),
+            restack_ms: to_u64(r.get(13)?),
+            decision_and_restack_ms: to_u64(r.get(14)?),
+            answer_ms: to_u64(r.get(15)?),
+            total_ms: to_u64(r.get(16)?),
+        },
+        r.get::<_, i64>(17)?,
+    ))
 }
 
 fn load_land_latencies(conn: &Connection, since_ms: Option<i64>) -> rusqlite::Result<Vec<u64>> {

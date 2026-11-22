@@ -62,11 +62,15 @@ async fn call(state: &Arc<ServerState>, request: Request) -> Response {
 }
 
 async fn new_change(state: &Arc<ServerState>, owner: &str) -> ChangeId {
+    new_change_on(state, owner, None).await
+}
+
+async fn new_change_on(state: &Arc<ServerState>, owner: &str, on: Option<ChangeId>) -> ChangeId {
     let Response::Change(record) = call(
         state,
         Request::ChangeNew(NewChange {
             owner: AgentId::new(owner).unwrap(),
-            on: None,
+            on: on.map(|id| id.to_string()),
         }),
     )
     .await
@@ -282,4 +286,77 @@ async fn stats_and_timings_survive_server_restart() {
             .unwrap();
     assert_eq!(window.lands, 2);
     assert_eq!(window.post_land_checks, 1);
+}
+
+/// Risk (#462, R8): an atomic stack land must record land phase totals for
+/// every landed layer while contributing only one latency sample per request.
+#[tokio::test(flavor = "multi_thread")]
+async fn atomic_stack_land_records_phases_for_all_layers_with_one_latency_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _base) = init_server(dir.path());
+    let now = rosen_server::stats::now_millis();
+
+    let lower = new_change(&state, "alice").await;
+    write_and_name(&state, lower, "lower.txt", b"lower\n", "Lower").await;
+    let upper = new_change_on(&state, "alice", Some(lower)).await;
+    write_and_name(&state, upper, "upper.txt", b"upper\n", "Upper").await;
+    let _tip = land(&state, upper).await;
+
+    let Response::Stats(report) = call(
+        &state,
+        Request::Stats(StatsQuery {
+            since_ms: Some(now - 3_600_000),
+            change: None,
+        }),
+    )
+    .await
+    else {
+        panic!("expected Stats")
+    };
+    let lower_stats = report
+        .changes
+        .iter()
+        .find(|c| c.change == lower.to_string())
+        .expect("lower change stats");
+    let upper_stats = report
+        .changes
+        .iter()
+        .find(|c| c.change == upper.to_string())
+        .expect("upper change stats");
+    assert_eq!(lower_stats.state, rosen_core::ChangeState::Landed);
+    assert_eq!(upper_stats.state, rosen_core::ChangeState::Landed);
+    assert!(lower_stats.timeline.landed_at_ms.is_some());
+    assert!(upper_stats.timeline.landed_at_ms.is_some());
+    assert!(lower_stats.land_phases.is_some());
+    assert_eq!(lower_stats.land_phases, upper_stats.land_phases);
+    assert_eq!(report.window.lands, 2);
+    assert_eq!(
+        report.window.land_latency_p50_ms,
+        upper_stats.land_phases.as_ref().map(|p| p.total_ms),
+    );
+
+    // One atomic request stores a single latency sample, not one per layer.
+    let conn = rosen_server::metadata::open(&state.config.metadata_path()).unwrap();
+    let sample_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM land_timings WHERE outcome = 'landed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sample_count, 1);
+
+    let Response::Stats(only_lower) = call(
+        &state,
+        Request::Stats(StatsQuery {
+            since_ms: None,
+            change: Some(lower.to_string()),
+        }),
+    )
+    .await
+    else {
+        panic!("expected Stats for lower")
+    };
+    assert_eq!(only_lower.changes.len(), 1);
+    assert_eq!(only_lower.changes[0].land_phases, upper_stats.land_phases);
 }

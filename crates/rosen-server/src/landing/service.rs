@@ -221,20 +221,27 @@ impl LandingService {
         let collector = super::timing::Collector::start();
         let result = self.land_measured(state, change);
         let attempts = match &result {
-            Ok(LandAnswer {
-                outcome: LandStatus::Landed { attempts, .. },
-                ..
-            }) => Some(*attempts),
+            Ok((
+                LandAnswer {
+                    outcome: LandStatus::Landed { attempts, .. },
+                    ..
+                },
+                _,
+            )) => Some(*attempts),
             _ => None,
         };
         let phases = collector.finish(attempts);
-        if let Ok(answer) = &result {
-            persist_land_timing(state, answer, &phases);
+        if let Ok((answer, ancestors)) = &result {
+            persist_land_timing(state, answer, ancestors, &phases);
         }
-        result
+        result.map(|(answer, _)| answer)
     }
 
-    fn land_measured(&self, state: &ServerState, change: &str) -> Result<LandAnswer, ErrorBody> {
+    fn land_measured(
+        &self,
+        state: &ServerState,
+        change: &str,
+    ) -> Result<(LandAnswer, Vec<(ChangeId, CommitId)>), ErrorBody> {
         let mut timing = super::timing::Timing::new(change, "request");
         let record = state.changes.show(change).map_err(change_body)?;
         let id = record.change.id;
@@ -248,7 +255,7 @@ impl LandingService {
         timing.phase("registry");
         let engine = self.engine(state)?;
         timing.phase("engine");
-        let status = self.decide(&engine, &id)?;
+        let (status, ancestors) = self.decide(&engine, &id)?;
         timing.phase("decision_and_restack");
         let base_ref = engine.config().base_ref.clone();
         let base = engine
@@ -261,12 +268,13 @@ impl LandingService {
             Err(refusal) => refusal_status(state, &engine, &record.change, &base, refusal)?,
         };
         timing.phase("answer");
-        Ok(LandAnswer {
+        let answer = LandAnswer {
             change: id,
             base_ref,
             base,
             outcome,
-        })
+        };
+        Ok((answer, ancestors))
     }
 
     /// Reports every gate a land of `change` would apply on the current
@@ -329,7 +337,11 @@ impl LandingService {
     /// transaction that also marks the post-land work pending, so the
     /// requester is answered before the overlap rebases run (R8 accept:
     /// 200 ms) and a crash leaves them to recovery.
-    fn decide(&self, engine: &Arc<Landing>, id: &ChangeId) -> Result<Decided, ErrorBody> {
+    fn decide(
+        &self,
+        engine: &Arc<Landing>,
+        id: &ChangeId,
+    ) -> Result<(Decided, Vec<(ChangeId, CommitId)>), ErrorBody> {
         let mut timing = super::timing::Timing::new(id, "decision");
         let decision = match engine.decide(id) {
             Err(LandError::RegenerationRequired {
@@ -338,12 +350,10 @@ impl LandingService {
                 merged_tree,
                 commands,
             }) => {
-                return Ok(Ok(regeneration_status(
-                    change,
-                    paths,
-                    merged_tree,
-                    commands,
-                )))
+                return Ok((
+                    Ok(regeneration_status(change, paths, merged_tree, commands)),
+                    Vec::new(),
+                ));
             }
             Err(LandError::RegenerationFailed {
                 change,
@@ -352,33 +362,37 @@ impl LandingService {
                 commands,
                 log,
             }) => {
-                return Ok(Ok(regeneration_failed_status(
-                    change,
-                    paths,
-                    merged_tree,
-                    commands,
-                    log,
-                )))
+                return Ok((
+                    Ok(regeneration_failed_status(
+                        change,
+                        paths,
+                        merged_tree,
+                        commands,
+                        log,
+                    )),
+                    Vec::new(),
+                ));
             }
             Err(LandError::OversizeFiles { limit, files }) => {
-                return Ok(Ok(super::size_limit::status(limit, files)))
+                return Ok((Ok(super::size_limit::status(limit, files)), Vec::new()));
             }
             other => other.map_err(land_body)?,
         };
         timing.phase("attempts");
-        let (status, land) = match decision {
+        let (status, ancestors, land) = match decision {
             Decision::Committed(land) => {
                 // A failure is retried by the post-land run handed off below.
                 if let Err(why) = engine.restack_stacked(&land) {
                     let change = land.record.change;
                     eprintln!("rosen-server: stack rebase after {change} landed failed: {why}");
                 }
+                let ancestors = land_ancestors(&land);
                 let status = LandStatus::Landed {
                     commit: land.record.commit,
                     attempts: land.attempts,
                     line_endings: self.landed_line_endings(&land),
                 };
-                (Ok(status), Some(land))
+                (Ok(status), ancestors, Some(land))
             }
             // `decide` reports a land it committed as `Committed`.
             Decision::Decided(LandOutcome::Landed {
@@ -390,22 +404,22 @@ impl LandingService {
                     attempts,
                     line_endings,
                 };
-                (Ok(status), None)
+                (Ok(status), Vec::new(), None)
             }
             Decision::Decided(LandOutcome::AlreadyLanded { commit }) => {
                 if let Err(why) = engine.restack_landed(&commit) {
                     eprintln!("rosen-server: stack rebase after {id} landed failed: {why}");
                     self.retry.notify_one();
                 }
-                (Ok(LandStatus::AlreadyLanded { commit }), None)
+                (Ok(LandStatus::AlreadyLanded { commit }), Vec::new(), None)
             }
-            Decision::Decided(LandOutcome::Refused(refusal)) => (Err(refusal), None),
+            Decision::Decided(LandOutcome::Refused(refusal)) => (Err(refusal), Vec::new(), None),
         };
         timing.phase("restack");
         if status.is_ok() {
             self.after_answer(Arc::clone(engine), land);
         }
-        Ok(status)
+        Ok((status, ancestors))
     }
 
     /// Runs, off the request's thread, the work a land request leaves after
@@ -556,11 +570,20 @@ impl LandingService {
     }
 }
 
-/// Persists the phase totals for one land request. Telemetry failures are
-/// logged and never undo a committed land (#449).
+fn land_ancestors(land: &CommittedLand) -> Vec<(ChangeId, CommitId)> {
+    land.ancestors
+        .iter()
+        .map(|record| (record.change, record.commit))
+        .collect()
+}
+
+/// Persists the phase totals for one land request, linking any ancestor layers
+/// landed atomically with it. Telemetry failures are logged and never undo a
+/// committed land (#449, #462).
 fn persist_land_timing(
     state: &ServerState,
     answer: &LandAnswer,
+    ancestors: &[(ChangeId, CommitId)],
     phases: &rosen_protocol::LandPhaseTimings,
 ) {
     let (outcome, commit) = match &answer.outcome {
@@ -569,11 +592,12 @@ fn persist_land_timing(
         LandStatus::Refused { .. } => ("refused", None),
     };
     let at = crate::stats::now_millis();
-    let recorded = crate::metadata::open(&state.config.metadata_path()).and_then(|conn| {
-        crate::stats::store::record_land(
-            &conn,
+    let recorded = crate::metadata::open(&state.config.metadata_path()).and_then(|mut conn| {
+        crate::stats::store::record_land_layers(
+            &mut conn,
             &answer.change.to_string(),
             commit,
+            ancestors,
             outcome,
             phases,
             at,
