@@ -21,8 +21,8 @@ use crate::ledger_push::MAX_BODY;
 
 /// The format Collapse reads; it refuses one it does not know.
 const FORMAT: u64 = 1;
-/// Room left for the envelope around the items (including `"feed_id"`).
-const ENVELOPE: usize = 320;
+/// Room left for the envelope around the items (including `"feed_id"` and `"metrics"`).
+const ENVELOPE: usize = 360;
 const SECTIONS: [Section; 9] = [
     Section::Changes,
     Section::Conflicts,
@@ -70,7 +70,7 @@ pub fn split_slice(feed_id: Option<&str>, units: &[Unit], seq: u64, delivered: u
     for (unit_index, unit) in units.iter().enumerate() {
         let logged = unit.delivery == Delivery::Log;
         for (section, item) in &unit.items {
-            let item = if logged || *section == Section::Relay {
+            let item = if logged || matches!(*section, Section::Relay | Section::Stats) {
                 item.clone()
             } else {
                 stamped(item.clone(), seq)
@@ -149,8 +149,17 @@ pub fn encode(feed_id: Option<&str>, through: u64, items: &[BatchItem]) -> Vec<u
     if let Some(platforms) = items.iter().find(|item| item.section == Section::Platforms) {
         envelope.insert(Section::Platforms.key().into(), platforms.value.clone());
     }
-    if let Some(stats) = items.iter().find(|item| item.section == Section::Stats) {
-        envelope.insert(Section::Stats.key().into(), stats.value.clone());
+    let metrics: Vec<&Value> = items
+        .iter()
+        .filter(|item| item.section == Section::Stats)
+        .map(|item| &item.value)
+        .collect();
+    if !metrics.is_empty() {
+        let doc = json!({
+            "version": crate::stats::metrics::VERSION,
+            "hours": metrics,
+        });
+        envelope.insert(Section::Stats.key().into(), doc);
     }
     serde_json::to_vec(&Value::Object(envelope)).unwrap_or_default()
 }

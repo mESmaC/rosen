@@ -463,7 +463,7 @@ async fn extras(
             units.push(machines_doc::presence(&metadata, now_millis(), refresh)?);
         }
         if stats {
-            units.push(stats_doc::build(&metadata, now_millis())?);
+            units.extend(stats_doc::build(&metadata, now_millis())?);
         }
         if lines {
             units.extend(log_lines::read(&metadata, after, through, channel)?);

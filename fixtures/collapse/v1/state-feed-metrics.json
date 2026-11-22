@@ -1,0 +1,55 @@
+{
+  "changes": [],
+  "channel": [],
+  "config": [],
+  "conflicts": [],
+  "coverage": [],
+  "events": [],
+  "feed_id": "0123456789abcdef0123456789abcdef",
+  "format": 1,
+  "machines": [],
+  "metrics": {
+    "hours": [
+      {
+        "hour": 1699826400,
+        "machine": "",
+        "post_land_checks": 1,
+        "post_land_failures": 0
+      },
+      {
+        "hour": 1699826400,
+        "lands": 1,
+        "machine": "agent-1",
+        "post_land_failures": 0,
+        "reverts": 0
+      },
+      {
+        "hour": 1699999200,
+        "machine": "",
+        "post_land_checks": 2,
+        "post_land_failures": 0
+      },
+      {
+        "check_queue_wait_count": 2,
+        "check_queue_wait_ms_sum": 400,
+        "check_queue_wait_p50_ms": 100,
+        "hour": 1699999200,
+        "lands": 1,
+        "machine": "agent-1",
+        "post_land_failures": 0,
+        "reverts": 0
+      },
+      {
+        "hour": 1699999200,
+        "lands": 1,
+        "machine": "agent-2",
+        "post_land_failures": 1,
+        "reverts": 1
+      }
+    ],
+    "version": 1
+  },
+  "presence": [],
+  "threads": [],
+  "through": 70
+}

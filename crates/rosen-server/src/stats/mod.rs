@@ -1,5 +1,6 @@
 //! Timing persistence and stats queries (SPEC R8, R9, R10, R12, #449).
 
+pub mod metrics;
 pub mod query;
 pub mod store;
 

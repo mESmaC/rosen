@@ -43,7 +43,7 @@ use crate::rpc::dispatch;
 use crate::state_push::{
     batch, change_doc,
     facts::Stores,
-    log_lines, machines_doc, pass, review_docs,
+    log_lines, machines_doc, pass, review_docs, stats_doc,
     unit::{Section, Unit},
 };
 use crate::{bisect, channel, metadata, mirror, reviews, ServerConfig, ServerState};
@@ -1391,6 +1391,128 @@ fn capture_relay_dynamic(kind: &str, done: &action::Done, stab: &mut Stabilizer)
     }
 }
 
+fn seed_metrics_runs_and_checkpoints(conn: &rusqlite::Connection, earlier_ms: i64) {
+    for (label, wait_ms) in [("cargo test", 100i64), ("cargo clippy", 300i64)] {
+        let queued = FIXED_MS - 10_000;
+        crate::stats::store::record_run(
+            conn,
+            &RecordRunTiming {
+                label: label.into(),
+                class: "verify".into(),
+                change: None,
+                queued_at_ms: queued,
+                started_at_ms: queued + wait_ms,
+                finished_at_ms: queued + wait_ms + 500,
+                exit_status: Some(0),
+                reused: false,
+            },
+            None,
+            "agent-1",
+        )
+        .unwrap();
+    }
+    let commit_1: ObjectId = COMMIT_1.parse().unwrap();
+    let commit_2: ObjectId = COMMIT_2.parse().unwrap();
+    let commit_3: ObjectId = COMMIT_3.parse().unwrap();
+    crate::stats::store::record_checkpoint_passed(
+        conn,
+        "main",
+        CheckKind::Test,
+        None,
+        &commit_1,
+        1,
+        crate::stats::store::CheckpointTiming::at(earlier_ms + 5_000),
+    )
+    .unwrap();
+    crate::stats::store::record_checkpoint_passed(
+        conn,
+        "main",
+        CheckKind::Test,
+        None,
+        &commit_2,
+        1,
+        crate::stats::store::CheckpointTiming::at(FIXED_MS - 5_000),
+    )
+    .unwrap();
+    crate::stats::store::record_checkpoint_bisect_opened(
+        conn,
+        "main",
+        CheckKind::Test,
+        None,
+        &commit_3,
+        1,
+        1,
+        "culprit",
+        crate::stats::store::CheckpointTiming::at(FIXED_MS - 2_000),
+    )
+    .unwrap();
+}
+
+async fn generate_state_feed_metrics() -> Value {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = format!("review = \"after-land\"\ncollapse = \"{COLLAPSE_ROOT}\"\n");
+    let (state, _) = init_server(dir.path(), &cfg, &[]);
+    let earlier_ms = FIXED_MS - 48 * 3_600_000;
+
+    let id_a = new_change(&state, "alice").await;
+    let id_b = new_change(&state, "alice").await;
+    let id_c = new_change(&state, "bob").await;
+    let seq_a = state.events.publish(
+        EventKind::Landed,
+        Some(id_a.to_string()),
+        json!({ "commit": COMMIT_1 }),
+    );
+    let seq_b = state.events.publish(
+        EventKind::Landed,
+        Some(id_b.to_string()),
+        json!({ "commit": COMMIT_2 }),
+    );
+    let seq_c = state.events.publish(
+        EventKind::Landed,
+        Some(id_c.to_string()),
+        json!({ "commit": COMMIT_3 }),
+    );
+    let seq_fail = state.events.publish(
+        EventKind::PostLandFailure,
+        Some(id_c.to_string()),
+        json!({ "culprit": COMMIT_3 }),
+    );
+    let seq_rev = state.events.publish(
+        EventKind::Reverted,
+        Some(id_c.to_string()),
+        json!({ "culprit": COMMIT_3, "commit": COMMIT_3, "output": "test failed\n" }),
+    );
+
+    let conn = metadata::open(&state.config.metadata_path()).unwrap();
+    for (id, machine) in [(id_a, "agent-1"), (id_b, "agent-1"), (id_c, "agent-2")] {
+        conn.execute(
+            "UPDATE changes SET owner_machine = ?1 WHERE id = ?2",
+            rusqlite::params![machine, id.to_string()],
+        )
+        .unwrap();
+    }
+    for (seq, at) in [
+        (seq_a, earlier_ms),
+        (seq_b, FIXED_MS - 20_000),
+        (seq_c, FIXED_MS - 15_000),
+        (seq_fail, FIXED_MS - 2_000),
+        (seq_rev, FIXED_MS - 1_000),
+    ] {
+        conn.execute(
+            "UPDATE events SET created_at = ?1 WHERE seq = ?2",
+            rusqlite::params![at, seq as i64],
+        )
+        .unwrap();
+    }
+    seed_metrics_runs_and_checkpoints(&conn, earlier_ms);
+    drop(conn);
+
+    let unit = stats_doc::build(&state.config.metadata_path(), FIXED_MS)
+        .unwrap()
+        .expect("metrics unit");
+    single_batch(vec![unit], 70, 60, &Stabilizer::default())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn collapse_wire_fixtures_match_real_senders() {
     let (doorbell, actions, result) = generate_relay_fixtures().await;
@@ -1406,6 +1528,10 @@ async fn collapse_wire_fixtures_match_real_senders() {
         ("state-feed-machines.json", generate_state_feed_machines()),
         ("state-feed-presence.json", generate_state_feed_presence()),
         ("state-feed-channel.json", generate_state_feed_channel()),
+        (
+            "state-feed-metrics.json",
+            generate_state_feed_metrics().await,
+        ),
         (
             "state-feed-reset.json",
             serde_json::from_slice(&crate::collapse_feed::reset_body(FEED_ID)).unwrap(),

@@ -23,7 +23,7 @@ pub enum Section {
     Relay,
     /// Per-platform post-land checkpoints and live checker coverage (R12, #440): one object.
     Platforms,
-    /// Window timing aggregates (R9, #449): one object.
+    /// Hourly fleet timing metrics (Collapse C12 wire key `"metrics"`, R9, #449, #465).
     Stats,
 }
 
@@ -41,7 +41,7 @@ impl Section {
             Section::Channel => "channel",
             Section::Relay => "relay",
             Section::Platforms => "platforms",
-            Section::Stats => "stats",
+            Section::Stats => "metrics",
         }
     }
 }
