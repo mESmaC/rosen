@@ -85,9 +85,10 @@ commands = [
 
 # The full tests, on landed commits in batches (R12). Confirmed failures
 # are recorded for follow-up; only build/lint failures revert in after-land mode.
-# Lean proof checks run on macOS and Linux alongside the Rust test suite (#440).
+# Require only platforms with an enrolled checker; keep macOS and Linux in
+# `platform_commands` as advisory until their checkers are enrolled (#440, #457).
 [checks.post_land]
-platforms = ["windows", "macos"]
+platforms = ["windows"]
 commands = [
     "cargo test --workspace --locked",
 ]

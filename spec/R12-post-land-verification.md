@@ -70,8 +70,10 @@
   `[checks.pre_land]` and `[checks.post_land]` may name `platforms = ["windows", "macos", "linux"]` (or `<os>-<arch>` targets) and optional `[checks.<set>.platform_commands]` appended for matching platforms; omitting `platforms` defaults to any platform.
   Checkers report their OS and architecture via `post_land_next_for`, and the server offers each platform's jobs only to matching checkers.
   Each required platform keeps its own monotone checkpoint, bisection sessions and culprit records; the aggregate base built or green checkpoint advances only to the minimum passing commit across every required platform.
+  A platform named only in `platform_commands` (not in `platforms`) is advisory: matching checkers run its commands, its checkpoints are shown once reported, and its failures are bisected and recorded without gating aggregate green or auto-reverting.
   `rosen checker run [--platform <platform>]` runs a long-lived headless checker on an enrolled machine without Velocity, running each job's commands through `rosen run` (with the `verify` class for full tests) and posting batch and bisection results.
   `post_land_status`, `rosen server status`, `rosen review status` and the Collapse state feed (`platforms`) show each required platform's checkpoint and report when no matching checker is connected (for example `macOS: no checker`).
+  When a required platform has had no checker online for an hour while checkpoints wait on it, `rosen status`, `rosen server status`, `rosen review status` and the `platforms` state feed report `post-land waiting on <platform>: no checker online since <time>`.
 - **Deploy steps.**
   `rosen.toml` may declare `[deploy.<name>]` steps, each with a single-line `command`, optional `paths` globs, `secrets` (names only, never values) and `platforms`.
   When a full-test green checkpoint advances across a landed range touching a step's `paths` (or any range when `paths` is empty), the server queues the matching steps from the configuration at that green commit in declaration order, atomically with the checkpoint.

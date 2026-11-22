@@ -128,7 +128,7 @@ pub struct ConnectedChecker {
     pub platform: String,
 }
 
-/// Per-platform post-land checkpoints and live checker coverage (R12, #440).
+/// Per-platform post-land checkpoints and live checker coverage (R12, #440, #457).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformStatus {
     /// Configured platform target (e.g. `"windows"`, `"macos"`, `"linux"`).
@@ -143,6 +143,49 @@ pub struct PlatformStatus {
     pub required_test: bool,
     #[serde(default)]
     pub checkers: Vec<ConnectedChecker>,
+    /// Unix milliseconds since no matching checker has been online while
+    /// checkpoints wait on this required platform (set once waiting >= 1 h).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_no_checker_since: Option<i64>,
+}
+
+impl PlatformStatus {
+    /// True when this platform gates either build or full-test checkpoints.
+    pub fn is_required(&self) -> bool {
+        self.required_build || self.required_test
+    }
+
+    /// Loud warning when this required platform has had no checker online for
+    /// an hour while checkpoints wait on it (R12, #457).
+    pub fn waiting_no_checker_message(&self) -> Option<String> {
+        let since = self.waiting_no_checker_since?;
+        let label = rosen_core::Platform::display_label(&self.platform);
+        Some(format!(
+            "post-land waiting on {label}: no checker online since {}",
+            format_utc_minute(since)
+        ))
+    }
+}
+
+/// `YYYY-MM-DD HH:MM UTC` from Unix milliseconds (Howard Hinnant's civil-from-days).
+fn format_utc_minute(millis: i64) -> String {
+    let seconds = millis.div_euclid(1000);
+    let days = seconds.div_euclid(86_400);
+    let of_day = seconds.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        of_day / 3600,
+        of_day % 3600 / 60
+    )
 }
 
 /// The read-only answer to [`crate::Request::PostLandStatus`].

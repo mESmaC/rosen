@@ -3592,6 +3592,16 @@
           "items": {
             "$ref": "#/$defs/ConnectedChecker"
           }
+        },
+        "waiting_no_checker_since": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -4001,6 +4011,13 @@
             }
           ],
           "description": "Structured details when the change holds open stored conflicts."
+        },
+        "post_land_waiting": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Required post-land platforms with no checker online for at least an hour while checkpoints wait on them."
         }
       },
       "required": [

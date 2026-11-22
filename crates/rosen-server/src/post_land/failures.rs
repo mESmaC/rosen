@@ -102,13 +102,12 @@ pub fn apply(
     failing_tests: &[String],
 ) -> Result<()> {
     // Post-land policy takes effect at the landed commit, like its check commands.
-    let policy = state
+    let resolved = state
         .project_config
         .at_commit(&culprit.commit)
-        .map_err(internal)?
-        .config
-        .review;
-    let must_revert = failure_reverts(policy, kind);
+        .map_err(internal)?;
+    let is_advisory = is_advisory_platform(&resolved.config, kind, platform);
+    let must_revert = !is_advisory && failure_reverts(resolved.config.review, kind);
     let mut conn = crate::metadata::open(&state.config.metadata_path()).map_err(internal)?;
     ensure_schema(&conn).map_err(internal)?;
     crate::bisect::ensure_schema(&conn).map_err(internal)?;
@@ -325,6 +324,24 @@ fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>>
 /// R12 disposition, also checked against the landing model fixture.
 pub fn failure_reverts(review: ReviewMode, kind: CheckKind) -> bool {
     review == ReviewMode::BeforeLand || kind == CheckKind::Build
+}
+
+/// Advisory platforms declared only in `platform_commands` record failures
+/// without reverting the base (R12, #457).
+fn is_advisory_platform(
+    config: &rosen_core::ProjectConfig,
+    kind: CheckKind,
+    platform: Option<&str>,
+) -> bool {
+    let Some(raw) = platform else {
+        return false;
+    };
+    let set = match kind {
+        CheckKind::Test => &config.checks.post_land,
+        CheckKind::Build => &config.checks.pre_land,
+    };
+    !set.platforms.is_empty()
+        && rosen_core::Platform::parse(raw).is_ok_and(|parsed| !set.platforms.contains(&parsed))
 }
 
 fn revert_recorded(

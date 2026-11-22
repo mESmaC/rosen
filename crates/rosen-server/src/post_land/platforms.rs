@@ -247,6 +247,121 @@ fn aggregate_green(
     commit.map(|hex| Ok((seq, parse(hex)?))).transpose()
 }
 
+/// Tables present in the read-only snapshot, so waiting queries never write.
+#[derive(Clone, Copy)]
+pub(crate) struct ReadTables {
+    pub base_history: bool,
+    pub platform_green: bool,
+    pub bisections: bool,
+    pub bisections_platform: bool,
+    pub failures: bool,
+    pub failures_platform: bool,
+    pub events: bool,
+}
+
+/// Timestamp (Unix ms) of the oldest landed commit waiting on `(platform, kind)`,
+/// or `None` when no checkpoint waits on it. Safe on read-only connections.
+pub(crate) fn oldest_waiting_at(
+    conn: &Connection,
+    name: &str,
+    platform: &str,
+    kind: CheckKind,
+    tables: ReadTables,
+    fallback_at: i64,
+) -> rusqlite::Result<Option<i64>> {
+    if !tables.base_history {
+        return Ok(None);
+    }
+    let floor = covered_seq(conn, name, platform, kind, tables)?;
+    let filter = match kind {
+        CheckKind::Test => "change_id IS NOT NULL",
+        CheckKind::Build => "tier NOT IN ('initial','mirror')",
+    };
+    let oldest: Option<String> = conn
+        .query_row(
+            &format!(
+                "SELECT commit_id FROM base_history
+                 WHERE ref_name=?1 AND {filter} AND seq > ?2
+                 ORDER BY seq ASC LIMIT 1"
+            ),
+            params![name, floor],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if oldest.is_none() {
+        return Ok(None);
+    }
+    if !tables.events {
+        return Ok(Some(fallback_at));
+    }
+    let at: Option<i64> = conn.query_row(
+        &format!(
+            "SELECT MIN(created_at) FROM events
+             WHERE kind IN ('landed','reverted')
+               AND json_extract(detail, '$.commit') IN (
+                   SELECT commit_id FROM base_history
+                   WHERE ref_name=?1 AND {filter} AND seq > ?2
+               )"
+        ),
+        params![name, floor],
+        |r| r.get(0),
+    )?;
+    Ok(Some(at.unwrap_or(fallback_at)))
+}
+
+fn covered_seq(
+    conn: &Connection,
+    name: &str,
+    platform: &str,
+    kind: CheckKind,
+    tables: ReadTables,
+) -> rusqlite::Result<i64> {
+    let mut floor: i64 = if tables.platform_green {
+        conn.query_row(
+            "SELECT COALESCE((SELECT seq FROM post_land_platform_green
+                 WHERE ref_name=?1 AND platform=?2 AND kind=?3), 0)",
+            params![name, platform, kind.as_str()],
+            |r| r.get(0),
+        )?
+    } else {
+        0
+    };
+    if !tables.bisections || !tables.bisections_platform {
+        return Ok(floor);
+    }
+    let known: i64 = match kind {
+        CheckKind::Test => conn.query_row(
+            "SELECT COALESCE((SELECT MAX(h.seq) FROM bisections b
+                 JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
+                 WHERE b.ref_name=?1 AND b.platform=?2 AND b.kind='test' AND b.phase='known'), 0)",
+            params![name, platform],
+            |r| r.get(0),
+        )?,
+        CheckKind::Build => conn.query_row(
+            "SELECT COALESCE((SELECT MAX(h.seq) FROM bisections b
+                 JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
+                 WHERE b.ref_name=?1 AND b.platform=?2 AND b.kind='build'
+                     AND b.phase IN ('done','known')), 0)",
+            params![name, platform],
+            |r| r.get(0),
+        )?,
+    };
+    floor = floor.max(known);
+    if kind == CheckKind::Test && tables.failures && tables.failures_platform {
+        let non_reverting: i64 = conn.query_row(
+            "SELECT COALESCE((SELECT MAX(h.seq) FROM post_land_failures f
+                 JOIN bisections b ON b.kind=f.kind AND b.platform=f.platform AND b.phase='done'
+                     AND json_extract(b.commits,'$[' || b.high || '][0]')=f.commit_id
+                 JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
+                 WHERE b.ref_name=?1 AND b.platform=?2 AND f.kind='test' AND f.requires_revert=0), 0)",
+            params![name, platform],
+            |r| r.get(0),
+        )?;
+        floor = floor.max(non_reverting);
+    }
+    Ok(floor)
+}
+
 fn parse(id: String) -> rusqlite::Result<ObjectId> {
     id.parse()
         .map_err(|_| rusqlite::Error::InvalidParameterName("invalid green commit".into()))

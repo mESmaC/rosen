@@ -292,13 +292,35 @@ impl CheckSet {
         all
     }
 
-    /// The required platform entry in `self.platforms` that `checker` satisfies,
-    /// preferring an architecture-specific match over an OS-only one.
+    /// The configured platform entry in `self.platforms` or `self.platform_commands`
+    /// that `checker` satisfies, preferring required entries over advisory ones and
+    /// architecture-specific matches over OS-only ones.
     pub fn matching_target(&self, checker: &Platform) -> Option<&Platform> {
-        self.platforms
-            .iter()
+        Self::pick_match(self.platforms.iter(), checker)
+            .or_else(|| Self::pick_match(self.platform_commands.keys(), checker))
+    }
+
+    /// Whether `target` is either a required platform or an advisory
+    /// `platform_commands` target for this check set (R12, #457).
+    pub fn accepts_platform(&self, target: &Platform) -> bool {
+        self.platforms.contains(target) || self.platform_commands.contains_key(target)
+    }
+
+    /// Advisory targets declared in `platform_commands` that do not gate green.
+    pub fn advisory_platforms(&self) -> impl Iterator<Item = &Platform> {
+        self.platform_commands
+            .keys()
+            .filter(|target| !self.platforms.contains(target))
+    }
+
+    fn pick_match<'a>(
+        targets: impl Iterator<Item = &'a Platform> + Clone,
+        checker: &Platform,
+    ) -> Option<&'a Platform> {
+        targets
+            .clone()
             .find(|target| target.arch().is_some() && checker.matches(target))
-            .or_else(|| self.platforms.iter().find(|target| checker.matches(target)))
+            .or_else(|| targets.into_iter().find(|target| checker.matches(target)))
     }
 
     fn validate(&self, key: &str) -> Result<(), ConfigError> {

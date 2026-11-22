@@ -162,10 +162,18 @@ fn print_status_text(status: &ServerStatus) {
 }
 
 /// Formats one platform's checkpoint and checker coverage line, including
-/// `"<Platform>: no checker"` when no matching checker is connected (R12, #440).
+/// `"<Platform>: no checker"` when no matching checker is connected (R12, #440)
+/// and `"post-land waiting on <Platform>: no checker online since <time>"` once
+/// a required platform has waited an hour without a checker (#457).
 pub(crate) fn platform_status_line(status: &PlatformStatus) -> String {
+    if let Some(waiting) = status.waiting_no_checker_message() {
+        return waiting;
+    }
     let label = Platform::display_label(&status.platform);
     let checkpoint = platform_checkpoint_summary(status);
+    if !status.is_required() {
+        return advisory_platform_line(&label, checkpoint, &status.checkers);
+    }
     if status.checkers.is_empty() {
         return match checkpoint {
             Some(cp) => format!("{label}: no checker ({cp})"),
@@ -173,21 +181,36 @@ pub(crate) fn platform_status_line(status: &PlatformStatus) -> String {
         };
     }
     let state = checkpoint.unwrap_or_else(|| "pending".to_owned());
-    let checkers: Vec<String> = status
-        .checkers
+    let (count, noun, list) = format_checkers(&status.checkers);
+    format!("{label}: {state} ({count} {noun}: {list})")
+}
+
+fn advisory_platform_line(
+    label: &str,
+    checkpoint: Option<String>,
+    checkers: &[rosen_client::protocol::ConnectedChecker],
+) -> String {
+    let state = checkpoint.unwrap_or_else(|| "pending".to_owned());
+    if checkers.is_empty() {
+        return format!("{label} (advisory): {state}");
+    }
+    let (count, noun, list) = format_checkers(checkers);
+    format!("{label} (advisory): {state} ({count} {noun}: {list})")
+}
+
+fn format_checkers(
+    checkers: &[rosen_client::protocol::ConnectedChecker],
+) -> (usize, &'static str, String) {
+    let list: Vec<String> = checkers
         .iter()
         .map(|c| format!("{} [{}]", c.machine, c.platform))
         .collect();
-    let noun = if checkers.len() == 1 {
+    let noun = if list.len() == 1 {
         "checker"
     } else {
         "checkers"
     };
-    format!(
-        "{label}: {state} ({} {noun}: {})",
-        checkers.len(),
-        checkers.join(", ")
-    )
+    (list.len(), noun, list.join(", "))
 }
 
 fn platform_checkpoint_summary(status: &PlatformStatus) -> Option<String> {
@@ -620,8 +643,9 @@ mod tests {
         );
     }
 
-    /// Risk (#440): status must call out coverage gaps explicitly as
-    /// `"macOS: no checker"` when no checker for a required platform is connected.
+    /// Risk (#440, #457): status must call out coverage gaps explicitly as
+    /// `"macOS: no checker"`, report waiting-no-checker alerts once a required
+    /// platform has waited an hour, and label advisory platforms cleanly.
     #[test]
     fn platform_status_line_reports_no_checker_and_connected_checkpoints() {
         use rosen_client::protocol::{Checkpoint, ConnectedChecker};
@@ -632,8 +656,18 @@ mod tests {
             required_build: false,
             required_test: true,
             checkers: Vec::new(),
+            waiting_no_checker_since: None,
         };
         assert_eq!(platform_status_line(&missing), "macOS: no checker");
+
+        let waiting = PlatformStatus {
+            waiting_no_checker_since: Some(1_700_000_000_000),
+            ..missing
+        };
+        assert_eq!(
+            platform_status_line(&waiting),
+            "post-land waiting on macOS: no checker online since 2023-11-14 22:13 UTC"
+        );
 
         let commit = "1111111111111111111111111111111111111111".parse().unwrap();
         let connected = PlatformStatus {
@@ -650,10 +684,29 @@ mod tests {
                 machine: "server".into(),
                 platform: "windows-x86_64".into(),
             }],
+            waiting_no_checker_since: None,
         };
         assert_eq!(
             platform_status_line(&connected),
             "Windows: green 111111111111 (1 checker: server [windows-x86_64])"
+        );
+
+        let advisory = PlatformStatus {
+            platform: "linux".into(),
+            last_built: None,
+            last_green: Some(Checkpoint {
+                commit,
+                submitter: Some("checker@linux-box".into()),
+                at: Some(1_700_000_000_000),
+            }),
+            required_build: false,
+            required_test: false,
+            checkers: Vec::new(),
+            waiting_no_checker_since: None,
+        };
+        assert_eq!(
+            platform_status_line(&advisory),
+            "Linux (advisory): green 111111111111"
         );
     }
 }

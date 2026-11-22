@@ -156,6 +156,9 @@ struct Session {
     machines_checked: Option<Instant>,
     /// Last seen `ServerState::checkers` version (connects, disconnects, platform passes).
     checkers_seen: Option<u64>,
+    /// Last seen set of `(platform, waiting_no_checker_since)` alerts, checked on the
+    /// machine-check tick so crossing the 1-hour wait threshold pushes `platforms` (#457).
+    platforms_waiting_seen: Option<Vec<(String, i64)>>,
     /// Last seen `ServerState::stats` version (run, check or land timings recorded).
     stats_seen: Option<u64>,
     /// When the presence document last went.
@@ -171,6 +174,13 @@ impl Session {
         self.last_send = None;
         self.presence_sent = None;
     }
+}
+
+/// Builds the JSON payload of the `platforms` Collapse state-feed document.
+pub async fn platforms_feed_item(
+    state: &Arc<ServerState>,
+) -> Result<Option<serde_json::Value>, String> {
+    platforms_doc::build_item(state).await
 }
 
 /// Sends dirty documents until shutdown is requested.
@@ -426,7 +436,26 @@ async fn observe_machines(
     if seen.is_some_and(|seen| seen != unit.fingerprint) {
         session.pending.machines_changed();
     }
+    observe_platform_waiting(state, session).await;
     Ok(())
+}
+
+/// Notices when a required platform crosses (or clears) the 1-hour no-checker
+/// waiting threshold so the Collapse `platforms` document updates without waiting
+/// for an unrelated event (#457).
+async fn observe_platform_waiting(state: &Arc<ServerState>, session: &mut Session) {
+    let platforms = crate::post_land::status::platforms_snapshot(state).await;
+    let waiting: Vec<(String, i64)> = platforms
+        .into_iter()
+        .filter_map(|p| p.waiting_no_checker_since.map(|since| (p.platform, since)))
+        .collect();
+    if session
+        .platforms_waiting_seen
+        .replace(waiting.clone())
+        .is_some_and(|seen| seen != waiting)
+    {
+        session.pending.platforms_changed();
+    }
 }
 
 /// Notices checker connects, disconnects and per-platform checkpoint passes.

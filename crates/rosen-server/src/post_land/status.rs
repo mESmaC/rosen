@@ -96,6 +96,10 @@ fn read(state: &ServerState, conn: &Connection) -> Result<PostLandStatus> {
     })
 }
 
+/// Duration a required platform may go without an online checker while
+/// checkpoints wait on it before status reports it as waiting (R12, #457).
+pub const NO_CHECKER_WAIT_MS: i64 = 60 * 60 * 1000;
+
 fn read_platforms(
     state: &ServerState,
     conn: &Connection,
@@ -106,37 +110,163 @@ fn read_platforms(
     let Ok(resolved) = state.project_config.at_commit(base) else {
         return Ok(Vec::new());
     };
-    let pre = &resolved.config.checks.pre_land.platforms;
-    let post = &resolved.config.checks.post_land.platforms;
+    let tables = read_tables(conn, has_table)?;
+    let now_ms = super::submitter::now_millis();
+    let pre = &resolved.config.checks.pre_land;
+    let post = &resolved.config.checks.post_land;
     let mut ordered: Vec<Platform> = Vec::new();
-    for platform in pre.iter().chain(post.iter()) {
+    for platform in pre.platforms.iter().chain(post.platforms.iter()) {
+        if !ordered.contains(platform) {
+            ordered.push(platform.clone());
+        }
+    }
+    for platform in pre.advisory_platforms().chain(post.advisory_platforms()) {
         if !ordered.contains(platform) {
             ordered.push(platform.clone());
         }
     }
     let mut list = Vec::with_capacity(ordered.len());
     for target in ordered {
-        let key = target.as_str();
-        let last_built = if has_table {
-            super::platforms::checkpoint(conn, name, key, CheckKind::Build).map_err(internal)?
-        } else {
-            None
-        };
-        let last_green = if has_table {
-            super::platforms::checkpoint(conn, name, key, CheckKind::Test).map_err(internal)?
-        } else {
-            None
-        };
-        list.push(PlatformStatus {
-            platform: key.to_owned(),
-            last_built,
-            last_green,
-            required_build: pre.contains(&target),
-            required_test: post.contains(&target),
-            checkers: state.checkers.matching(&target),
-        });
+        let required_build = pre.platforms.contains(&target);
+        let required_test = post.platforms.contains(&target);
+        let entry = build_platform_status(
+            state,
+            conn,
+            name,
+            &target,
+            required_build,
+            required_test,
+            tables,
+            now_ms,
+        )?;
+        if entry.is_required()
+            || entry.last_built.is_some()
+            || entry.last_green.is_some()
+            || !entry.checkers.is_empty()
+        {
+            list.push(entry);
+        }
     }
     Ok(list)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_platform_status(
+    state: &ServerState,
+    conn: &Connection,
+    name: &str,
+    target: &Platform,
+    required_build: bool,
+    required_test: bool,
+    tables: super::platforms::ReadTables,
+    now_ms: i64,
+) -> Result<PlatformStatus> {
+    let key = target.as_str();
+    let last_built = if tables.platform_green {
+        super::platforms::checkpoint(conn, name, key, CheckKind::Build).map_err(internal)?
+    } else {
+        None
+    };
+    let last_green = if tables.platform_green {
+        super::platforms::checkpoint(conn, name, key, CheckKind::Test).map_err(internal)?
+    } else {
+        None
+    };
+    let checkers = state.checkers.matching(target);
+    let waiting_no_checker_since = if (required_build || required_test) && checkers.is_empty() {
+        waiting_no_checker(
+            state,
+            conn,
+            name,
+            target,
+            required_build,
+            required_test,
+            last_built.as_ref(),
+            last_green.as_ref(),
+            tables,
+            now_ms,
+        )?
+    } else {
+        None
+    };
+    Ok(PlatformStatus {
+        platform: key.to_owned(),
+        last_built,
+        last_green,
+        required_build,
+        required_test,
+        checkers,
+        waiting_no_checker_since,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn waiting_no_checker(
+    state: &ServerState,
+    conn: &Connection,
+    name: &str,
+    target: &Platform,
+    required_build: bool,
+    required_test: bool,
+    last_built: Option<&rosen_protocol::Checkpoint>,
+    last_green: Option<&rosen_protocol::Checkpoint>,
+    tables: super::platforms::ReadTables,
+    now_ms: i64,
+) -> Result<Option<i64>> {
+    let fallback = state.checkers.started_at_ms();
+    let mut oldest_waiting: Option<i64> = None;
+    for (required, kind) in [
+        (required_build, CheckKind::Build),
+        (required_test, CheckKind::Test),
+    ] {
+        if !required {
+            continue;
+        }
+        if let Some(at) =
+            super::platforms::oldest_waiting_at(conn, name, target.as_str(), kind, tables, fallback)
+                .map_err(internal)?
+        {
+            oldest_waiting = Some(oldest_waiting.map_or(at, |cur| cur.min(at)));
+        }
+    }
+    let Some(waiting_at) = oldest_waiting else {
+        return Ok(None);
+    };
+    let last_online = [
+        state.checkers.last_offline_for(target),
+        last_built.and_then(|cp| cp.at),
+        last_green.and_then(|cp| cp.at),
+    ]
+    .into_iter()
+    .flatten()
+    .max();
+    let wait_elapsed = now_ms.saturating_sub(waiting_at);
+    let offline_elapsed = last_online.map_or(wait_elapsed, |at| now_ms.saturating_sub(at));
+    if wait_elapsed >= NO_CHECKER_WAIT_MS && offline_elapsed >= NO_CHECKER_WAIT_MS {
+        Ok(Some(last_online.unwrap_or(waiting_at)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn read_tables(
+    conn: &Connection,
+    has_platform_green: bool,
+) -> Result<super::platforms::ReadTables> {
+    let bisections = table_exists(conn, "bisections")?;
+    let failures = table_exists(conn, "post_land_failures")?;
+    Ok(super::platforms::ReadTables {
+        base_history: table_exists(conn, "base_history")?,
+        platform_green: has_platform_green,
+        bisections,
+        bisections_platform: bisections
+            && super::submitter::has_column(conn, "bisections", "platform").map_err(internal)?,
+        failures,
+        failures_platform: failures
+            && super::submitter::has_column(conn, "post_land_failures", "platform")
+                .map_err(internal)?,
+        events: table_exists(conn, "events")?,
+    })
 }
 
 /// The project's base ref and tip, as `Ledger::project_base` reads them,

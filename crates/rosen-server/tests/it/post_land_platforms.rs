@@ -345,3 +345,198 @@ async fn connected_checker_tracks_lifecycle_in_status_and_state_feed() {
     state.request_shutdown();
     let _ = serving.await;
 }
+
+const ADVISORY_PLATFORM_TOML: &str = r#"
+review = "after-land"
+
+[checks.post_land]
+platforms = ["windows"]
+commands = ["cargo test --workspace --locked"]
+
+[checks.post_land.platform_commands]
+macos = [
+    "cd proofs && lake build --wfail",
+]
+linux = [
+    "cd proofs && lake build --wfail",
+]
+"#;
+
+/// Risk (R12, #457): Windows alone must advance post-land green when macOS and
+/// Linux are advisory (`platform_commands` only); advisory checkers still get
+/// their jobs, appear once they report, and record failures without blocking green.
+#[tokio::test(flavor = "multi_thread")]
+async fn advisory_platforms_report_results_and_failures_without_gating_green() {
+    let (_temp, state, _) = setup(ADVISORY_PLATFORM_TOML);
+    let c1 = land(&state, "a.rs", b"1").await;
+
+    // Advisory platforms are hidden from status until they connect or report.
+    let before = post_land_status(&state).await;
+    assert_eq!(before.platforms.len(), 1);
+    assert_eq!(before.platforms[0].platform, "windows");
+    assert!(before.platforms[0].required_test);
+
+    // Passing on Windows alone advances aggregate post-land green.
+    let win_job = next_for(&state, "windows-x86_64").await.job.unwrap();
+    assert_eq!(win_job.commit, c1);
+    assert_eq!(win_job.platform.as_deref(), Some("windows"));
+    call(&state, Request::PostLandPassed(win_job)).await;
+    let after_win = post_land_status(&state).await;
+    assert_eq!(after_win.last_green.as_ref().map(|c| c.commit), Some(c1));
+
+    // Advisory macOS checker receives its platform_commands and records its checkpoint.
+    let mac_job = next_for(&state, "macos-arm64").await.job.unwrap();
+    assert_eq!(mac_job.commit, c1);
+    assert_eq!(mac_job.platform.as_deref(), Some("macos"));
+    assert_eq!(mac_job.check_set.commands.len(), 2);
+    call(&state, Request::PostLandPassed(mac_job)).await;
+
+    let after_mac = post_land_status(&state).await;
+    let mac = after_mac
+        .platforms
+        .iter()
+        .find(|p| p.platform == "macos")
+        .expect("advisory macOS shown once reported");
+    assert!(!mac.required_test);
+    assert!(!mac.required_build);
+    assert_eq!(mac.last_green.as_ref().map(|c| c.commit), Some(c1));
+    assert_eq!(mac.waiting_no_checker_since, None);
+
+    // Advisory Linux failure is bisected and recorded without blocking Windows green.
+    let c2 = land(&state, "b.rs", b"2").await;
+    let win2 = next_for(&state, "windows-x86_64").await.job.unwrap();
+    call(&state, Request::PostLandPassed(win2)).await;
+    assert_eq!(
+        post_land_status(&state)
+            .await
+            .last_green
+            .as_ref()
+            .map(|c| c.commit),
+        Some(c2)
+    );
+    let linux_job = next_for(&state, "linux-x86_64").await.job.unwrap();
+    assert_eq!(linux_job.platform.as_deref(), Some("linux"));
+    let Response::Bisection(mut bisect) = call(
+        &state,
+        Request::PostLandFailed {
+            job: linux_job,
+            output: "linux proof failed".into(),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    while let Some(job) = bisect.job.clone() {
+        let passed = job.commit != c2;
+        let Response::Bisection(next) = call(
+            &state,
+            Request::BisectSubmit(BisectResult {
+                job,
+                passed,
+                output: if passed {
+                    String::new()
+                } else {
+                    "linux proof failed".into()
+                },
+                submitter: None,
+            }),
+        )
+        .await
+        else {
+            panic!()
+        };
+        bisect = next;
+    }
+    assert_eq!(bisect.culprit.as_ref().map(|c| c.commit), Some(c2));
+    let Response::PostLandFailures(failures) =
+        call(&state, Request::PostLandFailures { change: None }).await
+    else {
+        panic!()
+    };
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].platform.as_deref(), Some("linux"));
+    assert!(!failures[0].requires_revert);
+}
+
+/// Risk (R12, #457): a required platform with no checker online for an hour while
+/// checkpoints wait on it must be reported loudly in status and the state feed.
+#[tokio::test(flavor = "multi_thread")]
+async fn required_platform_without_checker_for_an_hour_is_reported_waiting() {
+    let (_temp, state, _) = setup(MULTI_PLATFORM_TOML);
+    let c1 = land(&state, "a.rs", b"1").await;
+
+    // Pass on Windows so only macOS is still waiting on c1.
+    let win_job = next_for(&state, "windows-x86_64").await.job.unwrap();
+    assert_eq!(win_job.commit, c1);
+    call(&state, Request::PostLandPassed(win_job)).await;
+
+    // Immediately after landing (< 1 hour), macOS is not yet reported as waiting.
+    let fresh = post_land_status(&state).await;
+    let mac_fresh = fresh
+        .platforms
+        .iter()
+        .find(|p| p.platform == "macos")
+        .unwrap();
+    assert_eq!(mac_fresh.waiting_no_checker_since, None);
+
+    // Backdate the landed event by 2 hours so checkpoints have waited > 1 hour.
+    let two_hours_ago = rosen_server::post_land::submitter::now_millis() - 2 * 60 * 60 * 1000;
+    {
+        let conn = rosen_server::metadata::open(&state.config.metadata_path()).unwrap();
+        conn.execute("UPDATE events SET created_at = ?1", [two_hours_ago])
+            .unwrap();
+    }
+
+    // PostLandStatus reports macOS as waiting with the exact loud message; Windows is covered.
+    let waited = post_land_status(&state).await;
+    let win = waited
+        .platforms
+        .iter()
+        .find(|p| p.platform == "windows")
+        .unwrap();
+    assert_eq!(win.waiting_no_checker_since, None);
+
+    let mac = waited
+        .platforms
+        .iter()
+        .find(|p| p.platform == "macos")
+        .unwrap();
+    assert_eq!(mac.waiting_no_checker_since, Some(two_hours_ago));
+    let message = mac
+        .waiting_no_checker_message()
+        .expect("waiting message present");
+    assert!(
+        message.starts_with("post-land waiting on macOS: no checker online since "),
+        "{message}"
+    );
+
+    // Collapse platforms state feed carries the same waiting report.
+    let feed = rosen_server::state_push::platforms_feed_item(&state)
+        .await
+        .unwrap()
+        .expect("platforms item");
+    assert_eq!(feed["waiting"][0].as_str(), Some(message.as_str()));
+    let mac_feed = feed["platforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["platform"] == "macos")
+        .unwrap();
+    assert_eq!(mac_feed["waiting_no_checker_since"], two_hours_ago);
+    assert_eq!(mac_feed["waiting_message"].as_str(), Some(message.as_str()));
+
+    // Connecting a macOS checker clears the waiting alert immediately.
+    let guard = state.checkers.register(
+        "mac-mini".into(),
+        rosen_core::Platform::parse("macos-arm64").unwrap(),
+    );
+    let online = post_land_status(&state).await;
+    let mac_online = online
+        .platforms
+        .iter()
+        .find(|p| p.platform == "macos")
+        .unwrap();
+    assert_eq!(mac_online.waiting_no_checker_since, None);
+    drop(guard);
+}

@@ -296,7 +296,7 @@ fn validate_platform(
     };
     let parsed =
         Platform::parse(raw).map_err(|err| ErrorBody::new(ErrorCode::InvalidArgument, err))?;
-    if !configured.platforms.contains(&parsed) {
+    if !configured.accepts_platform(&parsed) {
         return Err(ErrorBody::new(
             ErrorCode::InvalidArgument,
             format!("platform {raw:?} is not configured for this check set"),

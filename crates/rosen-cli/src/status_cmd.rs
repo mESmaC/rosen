@@ -61,6 +61,7 @@ pub async fn run(json: bool, endpoint: &Endpoint, args: &StatusArgs) -> Result<S
         Some(root) => Some(scan_workspace(&client, &root, &record).await?),
         None => None,
     };
+    let post_land_waiting = post_land_waiting(&client).await;
     let managed = crate::managed::is_managed();
     let current_agent = std::env::var("ROSEN_AGENT")
         .ok()
@@ -73,18 +74,14 @@ pub async fn run(json: bool, endpoint: &Endpoint, args: &StatusArgs) -> Result<S
         current_agent.as_deref(),
     );
     if json {
-        let body = json!({
-            "schema": STATUS_SCHEMA,
-            "change": record,
-            "claims": claims,
-            "workspace": local,
-            "land_check": gates,
-            "next_action": next.next_action,
-            "actor": next.actor,
-            "affected_head": next.affected_head,
-            "conflict": next.conflict,
-        });
-        println!("{body}");
+        print_json(
+            &record,
+            &claims,
+            gates.as_ref(),
+            local.as_ref(),
+            &next,
+            &post_land_waiting,
+        );
     } else {
         print_text(
             &record,
@@ -92,10 +89,51 @@ pub async fn run(json: bool, endpoint: &Endpoint, args: &StatusArgs) -> Result<S
             gates.as_ref(),
             local.as_ref(),
             &next,
+            &post_land_waiting,
             managed,
         );
     }
     Ok(true)
+}
+
+async fn post_land_waiting(client: &Client) -> Vec<String> {
+    client
+        .post_land_status()
+        .await
+        .ok()
+        .map(|status| {
+            status
+                .platforms
+                .iter()
+                .filter_map(|platform| platform.waiting_no_checker_message())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn print_json(
+    record: &ChangeRecord,
+    claims: &[PathClaim],
+    gates: Option<&LandCheck>,
+    local: Option<&WorkspaceState>,
+    next: &crate::status_next::NextStep,
+    post_land_waiting: &[String],
+) {
+    let mut body = json!({
+        "schema": STATUS_SCHEMA,
+        "change": record,
+        "claims": claims,
+        "workspace": local,
+        "land_check": gates,
+        "next_action": next.next_action,
+        "actor": next.actor,
+        "affected_head": next.affected_head,
+        "conflict": next.conflict,
+    });
+    if !post_land_waiting.is_empty() {
+        body["post_land_waiting"] = json!(post_land_waiting);
+    }
+    println!("{body}");
 }
 
 /// The workspace to scan: `--workspace`, else the one holding the current
@@ -165,6 +203,7 @@ fn print_text(
     gates: Option<&LandCheck>,
     local: Option<&WorkspaceState>,
     next: &crate::status_next::NextStep,
+    post_land_waiting: &[String],
     managed: bool,
 ) {
     let change = &record.change;
@@ -184,6 +223,9 @@ fn print_text(
     print_next(record, next, managed);
     if let Some(gates) = gates {
         print_gates(gates);
+    }
+    for line in post_land_waiting {
+        println!("{line}");
     }
     println!("claims:    {}", claims.len());
     for claim in claims {
