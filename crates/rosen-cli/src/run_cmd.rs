@@ -1,6 +1,7 @@
 //! `rosen run`: one command, run in its turn in the machine's run queue
 //! (SPEC R3 "Run queue").
 
+mod label;
 mod log;
 
 use std::fs::File;
@@ -92,7 +93,7 @@ fn record_timing(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| command_label(&args.command));
+        .unwrap_or_else(|| label::command_label(&args.command));
     let change = resolve_run_change(args.change.as_deref());
     let record = RecordRunTiming {
         label,
@@ -136,38 +137,6 @@ fn resolve_run_change(given: Option<&str>) -> Option<String> {
         .and_then(|dir| rosen_client::snapshot::WorkspaceMarker::find_root(&dir))
         .and_then(|root| rosen_client::snapshot::WorkspaceMarker::read(&root).ok())
         .map(|marker| marker.change.to_string())
-}
-
-/// Derives a compact, secret-free command label (e.g. `cargo test`, `lake build`).
-fn command_label(command: &[String]) -> String {
-    let tokens: Vec<String> = unwrap_shell(command);
-    let Some(first) = tokens.first() else {
-        return "run".to_owned();
-    };
-    let program = Path::new(first)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(first);
-    match tokens.get(1) {
-        Some(sub) if !sub.starts_with('-') && !sub.contains('/') && !sub.contains('\\') => {
-            format!("{program} {sub}")
-        }
-        _ => program.to_owned(),
-    }
-}
-
-fn unwrap_shell(command: &[String]) -> Vec<String> {
-    let is_shell = matches!(
-        command.first().map(String::as_str),
-        Some("cmd" | "cmd.exe" | "sh" | "bash" | "pwsh")
-    );
-    if is_shell
-        && command.len() == 3
-        && matches!(command[1].as_str(), "/C" | "/c" | "-c" | "-Command")
-    {
-        return command[2].split_whitespace().map(str::to_owned).collect();
-    }
-    command.to_vec()
 }
 
 fn now_millis() -> i64 {
