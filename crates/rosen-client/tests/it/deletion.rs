@@ -13,6 +13,8 @@ use rosen_store::{LooseObjectStore, ObjectStore};
 use std::path::Path;
 use std::time::Duration;
 
+const DELETION_FIXTURES: &str = include_str!("../../../../proofs/fixtures/workspace-deletion.tsv");
+
 #[tokio::test(flavor = "multi_thread")]
 async fn deletion_stores_edits_or_keeps_and_names_them() {
     check_design_fixtures();
@@ -51,9 +53,15 @@ async fn ignored_build_output_does_not_block_cleanup(client: &Client, root: &Pat
     let snapshot = client.snapshot_workspace(&path, None).await.unwrap();
     assert_eq!(snapshot.tree, change.change.head, "build output was stored");
 
+    let fixture = DELETION_FIXTURES
+        .lines()
+        .find_map(|line| line.strip_prefix("report\t"))
+        .expect("missing R4 refusal fixture");
+    let (scratch_count, expected_report) = fixture.split_once('\t').unwrap();
+    let scratch_count: usize = scratch_count.parse().unwrap();
     let scratch = path.join("scratch");
     std::fs::create_dir(&scratch).unwrap();
-    for i in 0..12 {
+    for i in 0..scratch_count {
         std::fs::write(scratch.join(format!("edit-{i:02}")), b"unstored").unwrap();
     }
     close_without_snapshot(client, &change).await;
@@ -62,13 +70,8 @@ async fn ignored_build_output_does_not_block_cleanup(client: &Client, root: &Pat
         .await
         .unwrap_err()
         .to_string();
-    assert!(
-        refusal.contains("unstored files (12): e.g. scratch/edit-00"),
-        "{refusal}"
-    );
-    assert!(refusal.contains("scratch/edit-04"), "{refusal}");
-    assert!(!refusal.contains("scratch/edit-05"), "{refusal}");
-    for i in 0..12 {
+    assert!(refusal.ends_with(expected_report), "{refusal}");
+    for i in 0..scratch_count {
         let edit = scratch.join(format!("edit-{i:02}"));
         assert_eq!(std::fs::read(&edit).unwrap(), b"unstored");
         std::fs::remove_file(edit).unwrap();
@@ -405,8 +408,12 @@ async fn close_without_snapshot(client: &Client, change: &ChangeRecord) {
 }
 
 fn check_design_fixtures() {
-    for line in include_str!("../../../../proofs/fixtures/workspace-deletion.tsv").lines() {
-        if line.is_empty() || line.starts_with('#') || line.starts_with("dirty") {
+    for line in DELETION_FIXTURES.lines() {
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with("dirty")
+            || line.starts_with("report\t")
+        {
             continue;
         }
         let columns: Vec<_> = line.split('\t').collect();

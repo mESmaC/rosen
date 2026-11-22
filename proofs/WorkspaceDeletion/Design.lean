@@ -32,9 +32,13 @@ structure Evidence (Edit : Type) where
 /-- Versions whose durability must be checked, including a final hash scan. -/
 def observations (e : Evidence Edit) : List Edit := e.dirty ++ e.journal ++ e.disk
 
-/-- Refusals name each observed relevant version absent from the server. -/
+/-- The observed relevant versions absent from the server. -/
 def pending [DecidableEq Edit] (e : Evidence Edit) (server : List Edit) : List Edit :=
   (observations e).filter fun edit => !e.ignored edit && decide (edit ∉ server)
+
+/-- A refusal reports the full count and samples the ordered path list. -/
+def refusalSummary (paths : List Edit) : Nat × List Edit :=
+  (paths.length, paths.take 5)
 
 /-- Only verified originals can be removed. Every completed removal prefix
 keeps unselected originals and concurrent later versions; refusals keep both. -/
@@ -49,7 +53,8 @@ every relevant original or later concurrent version stays server-stored or
 local. Only observed objects may enter that prefix; unobserved objects and
 later additions/replacements are retained. Thus complete workspace evidence
 is required for full cleanup, but not for safety of partial cleanup.
-Every named refusal identifies a relevant version absent from the server. -/
+The refusal reports the full count and the first five pending versions, or
+all of them if there are fewer. Every example is relevant and unstored. -/
 theorem correct [DecidableEq Edit] (e : Evidence Edit)
     (server originals removed later : List Edit)
     (verified : ∀ edit ∈ removed, edit ∈ observations e) :
@@ -57,8 +62,11 @@ theorem correct [DecidableEq Edit] (e : Evidence Edit)
       edit ∈ server ∨ edit ∈ remaining e server originals removed later) ∧
     (∀ edit ∈ later, edit ∈ remaining e server originals removed later) ∧
     (∀ edit ∈ pending e server, edit ∈ observations e ∧
-      e.ignored edit = false ∧ edit ∉ server) := by
-  refine ⟨?_, ?_, ?_⟩
+      e.ignored edit = false ∧ edit ∉ server) ∧
+    ((refusalSummary (pending e server)).1 = (pending e server).length ∧
+      (refusalSummary (pending e server)).2.length = min 5 (pending e server).length ∧
+      List.IsPrefix (refusalSummary (pending e server)).2 (pending e server)) := by
+  refine ⟨?_, ?_, ?_, ?_⟩
   · intro edit held hi
     rcases List.mem_append.mp held with original | added
     · by_cases accepted : pending e server = []
@@ -77,6 +85,7 @@ theorem correct [DecidableEq Edit] (e : Evidence Edit)
     by_cases accepted : pending e server = [] <;> simp [remaining, accepted, added]
   · intro edit hp
     simpa [pending, List.mem_filter, Bool.and_eq_true] using hp
+  · exact ⟨rfl, List.length_take, List.take_prefix _ _⟩
 /-- One unit per dirty/journal record checked; one unit plus its bytes per
 hash-scanned file, for one evidence-validation pass. This primitive model
 excludes set/list lookup, traversal, OS metadata/handle operations, actual
@@ -161,6 +170,7 @@ theorem optimal :
 
 #print axioms observations
 #print axioms pending
+#print axioms refusalSummary
 #print axioms remaining
 #print axioms correct
 #print axioms scanCost

@@ -16,6 +16,17 @@ def row (dirty journal mismatch ignored : Bool) : String :=
   let mayDelete := (pending (evidence dirty journal mismatch ignored) []).isEmpty
   "\t".intercalate [bit dirty, bit journal, bit mismatch, bit ignored, bit mayDelete]
 
+/-- Mix the two forms of ignored build output with genuinely unstored paths. -/
+def reportRow (scratchCount : Nat) : String :=
+  let caches := ["proofs/.lake/output.bin", "configured-cache/output.bin"]
+  let scratch := (List.range scratchCount).map fun i =>
+    if i < 10 then s!"scratch/edit-0{i}" else s!"scratch/edit-{i}"
+  let observed : Evidence String := ⟨[], [], caches ++ scratch, caches.contains⟩
+  let (count, sample) := refusalSummary (pending observed [])
+  let qualifier := if count > sample.length then "e.g. " else ""
+  let diagnostic := s!"unstored files ({count}): {qualifier}{", ".intercalate sample}"
+  "\t".intercalate ["report", toString scratchCount, diagnostic]
+
 def table : String :=
   "dirty\tjournal\tmismatch\tignored\tdelete\n" ++
     "#375 regression: a durable Unix workspace (0 0 0 0) must be removable\n" ++
@@ -25,11 +36,14 @@ def table : String :=
     row false false true true ++ "\n" ++
     row false false true false ++ "\n" ++
     String.join ([false, true].flatMap fun d => [false, true].flatMap fun j =>
-      [false, true].flatMap fun m => [false, true].map fun i => row d j m i ++ "\n")
+      [false, true].flatMap fun m => [false, true].map fun i => row d j m i ++ "\n") ++
+    "#413 regression: report rows give the scratch count and exact refusal text\n" ++
+    reportRow 12 ++ "\n"
 
 #print axioms bit
 #print axioms evidence
 #print axioms row
+#print axioms reportRow
 #print axioms table
 
 end WorkspaceDeletion.Fixtures
