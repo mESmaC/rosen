@@ -9,6 +9,7 @@
 - A `rebased` event reports an installed rebase, including a stack restack or an owner-requested rebase.
   A clean overlap probe emits none.
   Claim-only overlaps receive the `landed` notice.
+- Each event sent to clients carries `seq`, `kind`, `change`, `detail` and `at_ms`, the Unix milliseconds when the server stored it in the event log (defaulting to `0` for older servers).
 - The event types are `snapshot`, `landed`, `rebased`, `conflict`, `updated`, `review`, `claim`, `released`, `green`, `built`, `deploy_due`, `deploy_result`, `reverted`, `revert_refused`, `post_land_failure`, `bisect`, `mirror`, `channel` (R13), `ledger_push` (R13), `state_push` and `relay` (R14).
 - Each event is delivered only to subscribers it concerns: the change's owner, its reviewers, changes stacked on it, and the holders of overlapping changes or claims.
 - An event's audience is fixed when it is published.
@@ -45,6 +46,7 @@
   - A batch also carries `"relay":{"allow":[...]}`, the action kinds the server runs for Collapse (R14), on start and whenever the setting or the `collapse` machine's status changed.
     An answer holding `"actions_pending":true` makes the relay fetch actions at once.
   - When a check set names required platforms (R12), a batch also carries `"platforms":{...}` with the base checkpoints, each required platform's built and green checkpoints, `checker_connected` and the connected checkers, resent whenever a checkpoint changes or a checker connects or disconnects.
+  - A batch also carries `"stats":{...}` with the server's rolling 24-hour window timing aggregates (lands, land latency p50/p95, snapshot-to-land and named-to-land p50/p95, queue wait and run p50/p95 per check label, post-land failure and revert rates, and conflict rate), fingerprinted without its clock fields so idle projects wake no endpoint.
   - A change document holds its ID, `owner@machine`, state, parent, head, title (the newest named snapshot's message), creation and update times, the land check (R8) with its verdicts, tier and reach, conflict and thread IDs, approvals including void ones, the latest receipt without its signature and `base_current`, edit regions per path with lines added and removed against the parent (R6, R11), its path claims as `notice`, `exclusive`, `share` or `wait`, the changes overlapping it with their paths, and its newest 20 named snapshots with the total snapshot count.
     A part that cannot be read is named in `unavailable`.
   - A conflict item holds its path, start line, open or resolved state, and base, ours and theirs each cut to 64 KiB with a `truncated` flag, with the base merged in and the time the `conflict` event that stored it was published.

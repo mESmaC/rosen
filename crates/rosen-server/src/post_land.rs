@@ -126,6 +126,7 @@ fn record_pass(
             "commit is not a land",
         ));
     }
+    state.stats.bump();
     Ok(())
 }
 

@@ -52,6 +52,7 @@ pub mod run_queue;
 pub mod server_workspace;
 mod session;
 pub mod snapshot;
+pub mod stats;
 pub mod workspace;
 
 pub use connection::Client;

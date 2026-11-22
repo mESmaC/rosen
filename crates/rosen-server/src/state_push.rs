@@ -33,6 +33,7 @@ pub(crate) mod machines_doc;
 pub(crate) mod pass;
 pub(crate) mod platforms_doc;
 pub(crate) mod review_docs;
+pub(crate) mod stats_doc;
 mod store;
 pub(crate) mod unit;
 
@@ -155,6 +156,8 @@ struct Session {
     machines_checked: Option<Instant>,
     /// Last seen `ServerState::checkers` version (connects, disconnects, platform passes).
     checkers_seen: Option<u64>,
+    /// Last seen `ServerState::stats` version (run, check or land timings recorded).
+    stats_seen: Option<u64>,
     /// When the presence document last went.
     presence_sent: Option<Instant>,
 }
@@ -323,6 +326,7 @@ async fn step(state: &Arc<ServerState>, session: &mut Session) -> Result<Step, P
     scan(state, &mut session.pending, channel).await?;
     observe_machines(state, session).await?;
     observe_checkers(state, session);
+    observe_stats(state, session);
     let check = session
         .machines_checked
         .map_or_else(Instant::now, |at| at + MACHINE_CHECK);
@@ -434,6 +438,18 @@ fn observe_checkers(state: &ServerState, session: &mut Session) {
         .is_some_and(|seen| seen != version)
     {
         session.pending.platforms_changed();
+    }
+}
+
+/// Notices newly persisted run, post-land checkpoint or land timings (#449).
+fn observe_stats(state: &ServerState, session: &mut Session) {
+    let version = state.stats.version();
+    if session
+        .stats_seen
+        .replace(version)
+        .is_some_and(|seen| seen != version)
+    {
+        session.pending.stats_changed();
     }
 }
 

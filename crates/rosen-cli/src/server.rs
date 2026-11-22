@@ -480,6 +480,7 @@ fn print_events_batch(json: bool, events: &[Event], last_event: u64) {
                     "kind": event.kind,
                     "change": event.change,
                     "detail": event.detail,
+                    "at_ms": event.at_ms,
                 })
             })
             .collect();
@@ -508,6 +509,7 @@ fn print_event(json: bool, event: &Event) {
             "kind": event.kind,
             "change": event.change,
             "detail": event.detail,
+            "at_ms": event.at_ms,
         });
         println!("{body}");
     } else {

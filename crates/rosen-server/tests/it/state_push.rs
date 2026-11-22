@@ -83,7 +83,8 @@ impl Intake {
                 .iter()
                 .all(|s| parsed[*s].as_array().is_some_and(Vec::is_empty))
             && parsed.get("relay").is_none()
-            && parsed.get("platforms").is_none();
+            && parsed.get("platforms").is_none()
+            && parsed.get("stats").is_none();
         if is_probe {
             self.probes += 1;
         }

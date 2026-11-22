@@ -44,6 +44,7 @@ pub mod rpc;
 pub mod snapshots;
 pub mod stacks;
 pub mod state_push;
+pub mod stats;
 pub mod uploads;
 pub mod workspaces;
 
@@ -113,6 +114,8 @@ pub struct ServerState {
     collapse_reset: watch::Sender<u64>,
     /// Live connected checkers by reported platform (R12, #440).
     pub checkers: Arc<post_land::checkers::CheckerRegistry>,
+    /// Bumped whenever run, checkpoint or land timings are persisted (#449).
+    pub stats: stats::Tracker,
     /// Shared requests and mirror/recovery work; an operator rewrite takes
     /// exclusive access so no operation can retain an obsolete base view.
     pub maintenance: tokio::sync::RwLock<()>,
@@ -156,6 +159,7 @@ impl ServerState {
             collapse: collapse_health::Tracker::default(),
             collapse_reset: watch::Sender::new(0),
             checkers: Arc::default(),
+            stats: stats::Tracker::default(),
             maintenance: tokio::sync::RwLock::new(()),
             open_connections: AtomicU64::new(0),
             requests_in_flight: AtomicU64::new(0),

@@ -149,5 +149,8 @@ pub fn encode(feed_id: Option<&str>, through: u64, items: &[BatchItem]) -> Vec<u
     if let Some(platforms) = items.iter().find(|item| item.section == Section::Platforms) {
         envelope.insert(Section::Platforms.key().into(), platforms.value.clone());
     }
+    if let Some(stats) = items.iter().find(|item| item.section == Section::Stats) {
+        envelope.insert(Section::Stats.key().into(), stats.value.clone());
+    }
     serde_json::to_vec(&Value::Object(envelope)).unwrap_or_default()
 }

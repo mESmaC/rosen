@@ -147,7 +147,7 @@ pub fn page(
 ) -> rusqlite::Result<Page> {
     let from = i64::try_from(cursor).unwrap_or(i64::MAX);
     let max_rows = i64::try_from(limit).unwrap_or(i64::MAX);
-    let columns = "SELECT seq, kind, change_id, detail FROM events";
+    let columns = "SELECT seq, kind, change_id, detail, created_at FROM events";
     let rows = match subscriber {
         None => {
             let sql = format!("{columns} WHERE seq > ?1 ORDER BY seq LIMIT ?2");
@@ -208,6 +208,7 @@ fn read_event(row: &Row) -> rusqlite::Result<(u64, Option<Event>)> {
     let kind: String = row.get(1)?;
     let change: Option<String> = row.get(2)?;
     let detail: String = row.get(3)?;
+    let at_ms: i64 = row.get(4)?;
     let Ok(kind) = serde_json::from_value::<EventKind>(serde_json::Value::String(kind)) else {
         return Ok((seq, None));
     };
@@ -217,6 +218,7 @@ fn read_event(row: &Row) -> rusqlite::Result<(u64, Option<Event>)> {
         kind,
         change,
         detail,
+        at_ms,
     };
     Ok((seq, Some(event)))
 }

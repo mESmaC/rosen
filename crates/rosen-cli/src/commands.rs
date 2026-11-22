@@ -386,6 +386,21 @@ pub enum Command {
     /// tests after a land, then the warm pool's prepares. Nothing waits for
     /// ever: after a few minutes a run stops yielding to more important ones.
     Run(RunArgs),
+    /// Show per-change timelines, post-land checkpoints and window timing
+    /// aggregates (lands, land latency p50/p95, queue wait p50/p95 per check
+    /// label, post-land failure and revert rates, and conflict rate).
+    Stats(StatsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StatsArgs {
+    /// Include activity at or after this time: a relative duration (`30m`,
+    /// `1h`, `7d`), Unix milliseconds, or UTC ISO-8601 (`YYYY-MM-DD[THH:MM:SSZ]`).
+    #[arg(long, value_name = "TIME")]
+    pub since: Option<String>,
+    /// Limit per-change stats to this change ID or unique prefix.
+    #[arg(long, value_name = "CHANGE")]
+    pub change: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -415,6 +430,13 @@ pub struct RunArgs {
     /// command's memory is capped at it. Held to the class's cap.
     #[arg(long, value_name = "M", value_parser = clap::value_parser!(u64).range(1..), conflicts_with = "slots")]
     pub memory_gib: Option<u64>,
+    /// Label recorded for this run in `rosen stats` (defaults to the command name).
+    #[arg(long, value_name = "LABEL", conflicts_with = "slots")]
+    pub label: Option<String>,
+    /// Change ID or prefix to attribute this run's wait and run time to
+    /// (defaults to $ROSEN_CHANGE or the current workspace).
+    #[arg(long, value_name = "CHANGE", conflicts_with = "slots")]
+    pub change: Option<String>,
     /// The command and its arguments, after `--`.
     #[arg(
         last = true,
@@ -1081,6 +1103,7 @@ impl Command {
             Command::Machine(sub) => sub.path(),
             Command::Mcp(_) => "mcp",
             Command::Run(_) => "run",
+            Command::Stats(_) => "stats",
         }
     }
 }

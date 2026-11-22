@@ -7,18 +7,20 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rosen_client::protocol::RecordRunTiming;
 use rosen_client::run_queue::{
     self, RunBudget, RunClass, RunQueue, Turn, Waiter, HELD_ENV, POLL, STARVING, THREAD_VARIABLES,
 };
+use rosen_client::{Client, Endpoint};
 
 use crate::commands::RunArgs;
 use log::RunLog;
 
 /// Waits for the turn, runs the command, and gives its exit status.
 /// Beneath a run that already holds a turn, the command runs at once, in it.
-pub fn run(json: bool, args: &RunArgs) -> io::Result<ExitStatus> {
+pub fn run(json: bool, endpoint: &Endpoint, args: &RunArgs) -> io::Result<ExitStatus> {
     let class = RunClass::parse(&args.class).ok_or_else(|| {
         io::Error::other(format!(
             "unknown class `{}`: use landing, build, verify or prepare",
@@ -34,6 +36,7 @@ pub fn run(json: bool, args: &RunArgs) -> io::Result<ExitStatus> {
         let log = (output != "1").then(|| Path::new(&output));
         return spawn(program, arguments, class, None, log)?.wait();
     }
+    let queued_at_ms = now_millis();
     let (turn, holding) = match run_queue::held() {
         Some(held) => (None, held),
         None => {
@@ -47,17 +50,132 @@ pub fn run(json: bool, args: &RunArgs) -> io::Result<ExitStatus> {
     let budget = turn.as_ref().map(Turn::budget);
     let log = (!args.full && !json).then(RunLog::create).transpose()?;
     let output = log.as_ref().map(RunLog::path);
+    let started_at_ms = now_millis();
     let started = Instant::now();
     #[cfg(windows)]
     let result = run_tree(json, &args.command, holding, budget, output);
     #[cfg(not(windows))]
     let result =
         spawn(program, arguments, holding, budget, output).and_then(|mut child| child.wait());
+    let finished_at_ms = now_millis();
     drop(turn);
+    record_timing(
+        endpoint,
+        args,
+        holding,
+        queued_at_ms,
+        started_at_ms,
+        finished_at_ms,
+        result.as_ref().ok().and_then(ExitStatus::code),
+    );
     if let Some(log) = log {
         log.report(&args.command, &result, started.elapsed());
     }
     result
+}
+
+/// Best-effort persistence of this run's wait and execution times on a running
+/// Rosen server. Never starts a server, never prints errors and never fails
+/// `rosen run` (#449).
+fn record_timing(
+    endpoint: &Endpoint,
+    args: &RunArgs,
+    class: RunClass,
+    queued_at_ms: i64,
+    started_at_ms: i64,
+    finished_at_ms: i64,
+    exit_status: Option<i32>,
+) {
+    let label = args
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| command_label(&args.command));
+    let change = resolve_run_change(args.change.as_deref());
+    let record = RecordRunTiming {
+        label,
+        class: class.name().to_owned(),
+        change,
+        queued_at_ms,
+        started_at_ms,
+        finished_at_ms,
+        exit_status,
+        reused: false,
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    let endpoint = endpoint.clone();
+    let _ = runtime.block_on(tokio::time::timeout(
+        Duration::from_millis(500),
+        async move {
+            if let Ok(client) = Client::connect(&endpoint).await {
+                let _ = client.record_run_timing(record).await;
+            }
+        },
+    ));
+}
+
+fn resolve_run_change(given: Option<&str>) -> Option<String> {
+    if let Some(change) = given.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(change.to_owned());
+    }
+    if let Ok(env) = std::env::var("ROSEN_CHANGE") {
+        let trimmed = env.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
+        }
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|dir| rosen_client::snapshot::WorkspaceMarker::find_root(&dir))
+        .and_then(|root| rosen_client::snapshot::WorkspaceMarker::read(&root).ok())
+        .map(|marker| marker.change.to_string())
+}
+
+/// Derives a compact, secret-free command label (e.g. `cargo test`, `lake build`).
+fn command_label(command: &[String]) -> String {
+    let tokens: Vec<String> = unwrap_shell(command);
+    let Some(first) = tokens.first() else {
+        return "run".to_owned();
+    };
+    let program = Path::new(first)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(first);
+    match tokens.get(1) {
+        Some(sub) if !sub.starts_with('-') && !sub.contains('/') && !sub.contains('\\') => {
+            format!("{program} {sub}")
+        }
+        _ => program.to_owned(),
+    }
+}
+
+fn unwrap_shell(command: &[String]) -> Vec<String> {
+    let is_shell = matches!(
+        command.first().map(String::as_str),
+        Some("cmd" | "cmd.exe" | "sh" | "bash" | "pwsh")
+    );
+    if is_shell
+        && command.len() == 3
+        && matches!(command[1].as_str(), "/C" | "/c" | "-c" | "-Command")
+    {
+        return command[2].split_whitespace().map(str::to_owned).collect();
+    }
+    command.to_vec()
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 // The job owns a small launcher so Rust can keep doing executable lookup

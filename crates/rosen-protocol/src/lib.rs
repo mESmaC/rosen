@@ -35,6 +35,7 @@ pub mod receipt;
 pub mod relay;
 pub mod review;
 pub mod snapshot;
+pub mod stats;
 pub mod transport;
 pub mod workspace;
 pub use workspace::{WorkspaceBlobWrite, WorkspaceBytes, WorkspaceWrite};
@@ -83,5 +84,9 @@ pub use review::{
 pub use snapshot::{
     BlobChunk, BlobChunkStored, ObjectUpload, ObjectsStored, SnapshotOutcome, SnapshotRequest,
     UploadKind, UploadObject,
+};
+pub use stats::{
+    ChangeStats, ChangeTimeline, CheckLabelStats, LandPhaseTimings, PostLandCheckpointStats,
+    RecordPostLandTiming, RecordRunTiming, StatsQuery, StatsReport, WindowStats,
 };
 pub use transport::{connect, BoxStream, Endpoint, Listener};

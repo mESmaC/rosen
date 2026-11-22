@@ -116,6 +116,23 @@ pub fn begin_for_in(
     .map_err(internal)?;
     let session = storage::load(conn, conn.last_insert_rowid())?;
     progress::opened(conn, &session, failed, opened_by)?;
+    let outcome = if phase == "known" {
+        "known"
+    } else {
+        "bisecting"
+    };
+    crate::stats::store::record_checkpoint_bisect_opened(
+        conn,
+        name,
+        kind,
+        platform,
+        &failed,
+        high as u64,
+        session.id,
+        outcome,
+        opened_by.map_or_else(crate::stats::now_millis, |s| s.at),
+    )
+    .map_err(internal)?;
     session.state()
 }
 
@@ -197,6 +214,28 @@ pub fn submit_as(
     storage::save(&tx, &session)?;
     let state = session.state()?;
     progress::accepted(&tx, &result.job, result.passed, by, &state, planned)?;
+    let steps: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM bisection_steps WHERE session = ?1",
+            [session.id],
+            |r| r.get(0),
+        )
+        .map_err(internal)?;
+    let outcome = if state.culprit.is_some() {
+        "culprit"
+    } else if state.flaky {
+        "flaky"
+    } else {
+        "bisecting"
+    };
+    crate::stats::store::record_checkpoint_bisect_step(
+        &tx,
+        session.id,
+        u64::try_from(steps).unwrap_or(0),
+        outcome,
+        by.map_or_else(crate::stats::now_millis, |s| s.at),
+    )
+    .map_err(internal)?;
     tx.commit().map_err(internal)?;
     Ok(state)
 }
@@ -215,7 +254,11 @@ pub async fn handle(
     let work = tokio::task::spawn_blocking(move || {
         let mut conn = crate::metadata::open(&path).map_err(internal)?;
         let answer = match result {
-            Some((result, by)) => submit_as(&mut conn, &result, Some(&by))?,
+            Some((result, by)) => {
+                let answer = submit_as(&mut conn, &result, Some(&by))?;
+                state.stats.bump();
+                answer
+            }
             None => next(&conn, id)?,
         };
         // The step's event committed with it; a stop before this delivers

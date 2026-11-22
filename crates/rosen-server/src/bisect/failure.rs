@@ -15,6 +15,9 @@ pub async fn handle(
     let state = Arc::clone(state);
     let work = move || {
         let answer = start(&state, &job, &output, Some(&by));
+        if answer.is_ok() {
+            state.stats.bump();
+        }
         state.events.deliver_staged();
         answer
     };

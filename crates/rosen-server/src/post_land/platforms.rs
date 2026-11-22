@@ -134,17 +134,40 @@ pub fn passed_with(
         .map_err(sql_err)?;
     let end = history_seq(&tx, name, commit, kind).map_err(sql_err)?;
     let Some(end) = end else { return Ok(false) };
-    tx.execute(
-        "INSERT INTO post_land_platform_green
-         (ref_name, platform, kind, seq, commit_id, submitter, submitted_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(ref_name, platform, kind) DO UPDATE SET
-             seq=excluded.seq, commit_id=excluded.commit_id,
-             submitter=excluded.submitter, submitted_at=excluded.submitted_at
-         WHERE excluded.seq > post_land_platform_green.seq",
-        params![name, platform, kind.as_str(), end, commit.to_hex(), by, at],
-    )
-    .map_err(sql_err)?;
+    let prev_seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE((SELECT seq FROM post_land_platform_green
+         WHERE ref_name=?1 AND platform=?2 AND kind=?3), 0)",
+            params![name, platform, kind.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    let updated = tx
+        .execute(
+            "INSERT INTO post_land_platform_green
+             (ref_name, platform, kind, seq, commit_id, submitter, submitted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(ref_name, platform, kind) DO UPDATE SET
+                 seq=excluded.seq, commit_id=excluded.commit_id,
+                 submitter=excluded.submitter, submitted_at=excluded.submitted_at
+             WHERE excluded.seq > post_land_platform_green.seq",
+            params![name, platform, kind.as_str(), end, commit.to_hex(), by, at],
+        )
+        .map_err(sql_err)?;
+    if updated > 0 {
+        let batch_size = crate::stats::store::batch_size_between(&tx, name, kind, prev_seq, end)
+            .map_err(sql_err)?;
+        crate::stats::store::record_checkpoint_passed(
+            &tx,
+            name,
+            kind,
+            Some(platform),
+            commit,
+            batch_size,
+            at.unwrap_or_else(crate::stats::now_millis),
+        )
+        .map_err(sql_err)?;
+    }
     if let Some((overall_seq, overall_commit)) =
         aggregate_green(&tx, name, kind, required).map_err(sql_err)?
     {

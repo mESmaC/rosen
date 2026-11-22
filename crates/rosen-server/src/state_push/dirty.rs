@@ -36,6 +36,8 @@ pub struct Pending {
     pub relay: bool,
     /// Per-platform post-land checkpoints and live checker coverage (R12, #440).
     pub platforms: bool,
+    /// Window timing aggregates (R9, #449).
+    pub stats: bool,
     /// The presence document goes with this pass even unchanged, if any
     /// member is joined and anything else goes.
     pub refresh_presence: bool,
@@ -64,6 +66,7 @@ impl Pending {
             presence: true,
             relay: true,
             platforms: true,
+            stats: true,
             everything: true,
             scanned_to: cursor,
             urgent_since: Some(Instant::now()),
@@ -80,6 +83,7 @@ impl Pending {
             && !self.presence
             && !self.relay
             && !self.platforms
+            && !self.stats
             && !self.everything
     }
 
@@ -95,6 +99,12 @@ impl Pending {
     pub fn platforms_changed(&mut self) {
         self.platforms = true;
         self.urgent_since.get_or_insert_with(Instant::now);
+    }
+
+    /// Marks window timing aggregates dirty after new run/check/land timings.
+    pub fn stats_changed(&mut self) {
+        self.stats = true;
+        self.quiet_since.get_or_insert_with(Instant::now);
     }
 
     /// Reads events after `scanned_to` and marks what they make dirty;
@@ -153,6 +163,19 @@ impl Pending {
                 | EventKind::Reverted
         ) {
             self.platforms = true;
+            marked = true;
+        }
+        if matches!(
+            event.kind,
+            EventKind::Landed
+                | EventKind::Conflict
+                | EventKind::Rebased
+                | EventKind::Built
+                | EventKind::Green
+                | EventKind::PostLandFailure
+                | EventKind::Reverted
+        ) {
+            self.stats = true;
             marked = true;
         }
         if event.kind == EventKind::Landed {

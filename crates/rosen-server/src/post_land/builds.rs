@@ -89,6 +89,11 @@ pub(super) fn advance_in(
     submitted: Option<&Submitted>,
 ) -> rusqlite::Result<()> {
     let (by, at) = (submitted.map(|s| &s.by), submitted.map(|s| s.at));
+    let prev_seq: i64 = tx.query_row(
+        "SELECT COALESCE((SELECT seq FROM post_land_build_green WHERE ref_name=?1),0)",
+        [name],
+        |r| r.get(0),
+    )?;
     let count = tx.execute(
         "INSERT INTO post_land_build_green(ref_name,seq,commit_id,submitter,submitted_at)
          VALUES (?1,?2,?3,?4,?5)
@@ -98,6 +103,22 @@ pub(super) fn advance_in(
         params![name, seq, commit.to_string(), by, at],
     )?;
     if count > 0 {
+        let batch_size = crate::stats::store::batch_size_between(
+            tx,
+            name,
+            rosen_protocol::CheckKind::Build,
+            prev_seq,
+            seq,
+        )?;
+        crate::stats::store::record_checkpoint_passed(
+            tx,
+            name,
+            rosen_protocol::CheckKind::Build,
+            None,
+            commit,
+            batch_size,
+            at.unwrap_or_else(crate::stats::now_millis),
+        )?;
         crate::events::stage(
             tx,
             &crate::events::Staged {

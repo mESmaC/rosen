@@ -168,6 +168,22 @@ pub(super) fn advance_in(
              submitter=excluded.submitter,submitted_at=excluded.submitted_at",
             params![name, end, commit.to_string(), by, at],
         )?;
+        let batch_size = crate::stats::store::batch_size_between(
+            tx,
+            name,
+            rosen_protocol::CheckKind::Test,
+            start,
+            end,
+        )?;
+        crate::stats::store::record_checkpoint_passed(
+            tx,
+            name,
+            rosen_protocol::CheckKind::Test,
+            None,
+            commit,
+            batch_size,
+            at.unwrap_or_else(crate::stats::now_millis),
+        )?;
         return Ok(Some((start, end)));
     }
     Ok(None)

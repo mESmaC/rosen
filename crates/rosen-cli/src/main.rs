@@ -27,6 +27,7 @@ mod review_cmd;
 mod review_status;
 mod run_cmd;
 mod server;
+mod stats_cmd;
 mod status_cmd;
 mod status_next;
 mod workspace_cmd;
@@ -62,7 +63,7 @@ fn main() -> ExitCode {
         ));
     };
     if let Command::Run(args) = command {
-        return run_in_turn(cli.json, args);
+        return run_in_turn(cli.json, cli.endpoint.as_deref(), args);
     }
     let operation = command.path();
     match run(&cli, command) {
@@ -77,7 +78,7 @@ fn main() -> ExitCode {
 
 /// `rosen run`: exits with the command's own status, so a script sees the
 /// build's failure and not just "failed".
-fn run_in_turn(json: bool, args: &commands::RunArgs) -> ExitCode {
+fn run_in_turn(json: bool, endpoint: Option<&str>, args: &commands::RunArgs) -> ExitCode {
     if let Some(settings) = &args.slots {
         return match run_cmd::slots(settings) {
             Ok(()) => ExitCode::SUCCESS,
@@ -87,7 +88,8 @@ fn run_in_turn(json: bool, args: &commands::RunArgs) -> ExitCode {
             }
         };
     }
-    match run_cmd::run(json, args) {
+    let endpoint = endpoint.map_or_else(Endpoint::resolve, Endpoint::new);
+    match run_cmd::run(json, &endpoint, args) {
         Ok(status) if status.success() => ExitCode::SUCCESS,
         Ok(status) => match status.code().map(u8::try_from) {
             Some(Ok(code)) => ExitCode::from(code),
@@ -183,6 +185,7 @@ fn run(cli: &Cli, command: &Command) -> rosen_client::Result<server::Succeeded> 
             block_on(resolve_cmd::run(json, &endpoint, change.as_deref(), paths))
         }
         Command::Overlaps(args) => block_on(overlaps_cmd::run(json, &endpoint, args)),
+        Command::Stats(args) => block_on(stats_cmd::run(json, &endpoint, args)),
         Command::Status(args) => block_on(status_cmd::run(json, &endpoint, args)),
         Command::Import {
             repo,

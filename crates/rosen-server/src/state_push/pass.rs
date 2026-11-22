@@ -15,7 +15,7 @@ use super::facts::Stores;
 use super::store::{Cursor, Refusal, Sent, StateStore};
 use super::unit::{Delivery, Section, Unit};
 use super::{change_doc, PushError};
-use super::{log_lines, machines_doc, platforms_doc, review_docs};
+use super::{log_lines, machines_doc, platforms_doc, review_docs, stats_doc};
 use crate::collapse_health::Feed;
 use crate::ledger_push::send::{self, Credential, SendFailure};
 use crate::ServerState;
@@ -446,6 +446,7 @@ async fn extras(
     let presence = pending.presence || pending.refresh_presence || everything;
     let refresh = pending.refresh_presence;
     let relay = (pending.relay || everything).then(|| state.config.data_dir.clone());
+    let stats = pending.stats || everything;
     super::blocking(move || {
         let mut units = Vec::new();
         if let Some(data_dir) = relay {
@@ -460,6 +461,9 @@ async fn extras(
         }
         if presence {
             units.push(machines_doc::presence(&metadata, now_millis(), refresh)?);
+        }
+        if stats {
+            units.push(stats_doc::build(&metadata, now_millis())?);
         }
         if lines {
             units.extend(log_lines::read(&metadata, after, through, channel)?);

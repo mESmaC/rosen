@@ -370,6 +370,12 @@ pub enum Request {
     /// An AIRC channel operation (R13). Answered only by the server, never
     /// from a machine's local copy.
     Channel(ChannelRequest),
+    /// Queries per-change timelines and window aggregates (R9, R10, #449).
+    Stats(crate::StatsQuery),
+    /// Persists one run-queue timing sample (counts and durations only, #449).
+    RecordRunTiming(crate::RecordRunTiming),
+    /// Persists check durations for a post-land checkpoint or bisection (#449).
+    RecordPostLandTiming(crate::RecordPostLandTiming),
 }
 
 /// Successful results, one per [`Request`] variant.
@@ -453,6 +459,9 @@ pub enum Response {
     /// Boxed: a configuration is far larger than every other answer.
     Config(Box<ConfigRecord>),
     Channel(ChannelAnswer),
+    /// Boxed: `StatsReport` holds window aggregates and lists (clippy::large_enum_variant).
+    Stats(Box<crate::StatsReport>),
+    RunTimingRecorded,
 }
 
 /// The answer to [`Request::AckEvents`]: the cursor now stored, which is
@@ -652,6 +661,9 @@ pub struct Event {
     pub change: Option<String>,
     /// Event-specific details; each event type documents its own shape.
     pub detail: serde_json::Value,
+    /// Unix milliseconds when the server stored this event in its log (R9).
+    #[serde(default)]
+    pub at_ms: i64,
 }
 
 /// A connected client's frame that was not a valid [`ClientFrame`]. Kept separate

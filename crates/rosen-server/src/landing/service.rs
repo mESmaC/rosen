@@ -218,6 +218,23 @@ impl LandingService {
     /// Lands `change`, a change ID or unique prefix. An open change is marked
     /// ready first: asking to land is what `ready` means (SPEC §2).
     pub fn land(&self, state: &ServerState, change: &str) -> Result<LandAnswer, ErrorBody> {
+        let collector = super::timing::Collector::start();
+        let result = self.land_measured(state, change);
+        let attempts = match &result {
+            Ok(LandAnswer {
+                outcome: LandStatus::Landed { attempts, .. },
+                ..
+            }) => Some(*attempts),
+            _ => None,
+        };
+        let phases = collector.finish(attempts);
+        if let Ok(answer) = &result {
+            persist_land_timing(state, answer, &phases);
+        }
+        result
+    }
+
+    fn land_measured(&self, state: &ServerState, change: &str) -> Result<LandAnswer, ErrorBody> {
         let mut timing = super::timing::Timing::new(change, "request");
         let record = state.changes.show(change).map_err(change_body)?;
         let id = record.change.id;
@@ -536,6 +553,35 @@ impl LandingService {
         let engine = Arc::new(engine);
         *slot = Some(Arc::clone(&engine));
         Ok(engine)
+    }
+}
+
+/// Persists the phase totals for one land request. Telemetry failures are
+/// logged and never undo a committed land (#449).
+fn persist_land_timing(
+    state: &ServerState,
+    answer: &LandAnswer,
+    phases: &rosen_protocol::LandPhaseTimings,
+) {
+    let (outcome, commit) = match &answer.outcome {
+        LandStatus::Landed { commit, .. } => ("landed", Some(commit)),
+        LandStatus::AlreadyLanded { commit } => ("already_landed", Some(commit)),
+        LandStatus::Refused { .. } => ("refused", None),
+    };
+    let at = crate::stats::now_millis();
+    let recorded = crate::metadata::open(&state.config.metadata_path()).and_then(|conn| {
+        crate::stats::store::record_land(
+            &conn,
+            &answer.change.to_string(),
+            commit,
+            outcome,
+            phases,
+            at,
+        )
+    });
+    match recorded {
+        Ok(()) => state.stats.bump(),
+        Err(err) => eprintln!("rosen-server: could not record land timing: {err}"),
     }
 }
 

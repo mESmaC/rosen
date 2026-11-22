@@ -190,19 +190,61 @@ pub(crate) fn regenerate_tree(
         });
     }
     let pairs = plan.pairs();
+    let queued_at = crate::stats::now_millis();
     if let Some(cached) = state.regenerations.get(merged_tree, &pairs) {
+        record_regen_timing(state, queued_at, queued_at, queued_at, Some(0), true);
         return Ok(RegenOutcome::Regenerated(cached));
     }
     let note = format!("regenerate {} on {merged_tree}", paths.join(", "));
     let Some((turn, budget)) = acquire_turn(state, &note, current)? else {
         return Ok(RegenOutcome::Cancelled);
     };
+    let started_at = crate::stats::now_millis();
     let result = run_in_scratch(state, merged_tree, paths, &plan, budget);
+    let finished_at = crate::stats::now_millis();
     drop(turn);
+    let exit = match &result {
+        Ok(RegenOutcome::Regenerated(_)) => Some(0),
+        Ok(RegenOutcome::Failed { .. }) => Some(1),
+        _ => None,
+    };
+    record_regen_timing(state, queued_at, started_at, finished_at, exit, false);
     if let Ok(RegenOutcome::Regenerated(tree)) = &result {
         state.regenerations.remember(merged_tree, pairs, *tree);
     }
     result
+}
+
+fn record_regen_timing(
+    state: &ServerState,
+    queued_at_ms: i64,
+    started_at_ms: i64,
+    finished_at_ms: i64,
+    exit_status: Option<i32>,
+    reused: bool,
+) {
+    let record = rosen_protocol::RecordRunTiming {
+        label: "regenerate".to_owned(),
+        class: "landing".to_owned(),
+        change: None,
+        queued_at_ms,
+        started_at_ms,
+        finished_at_ms,
+        exit_status,
+        reused,
+    };
+    if let Ok(conn) = crate::metadata::open(&state.config.metadata_path()) {
+        if crate::stats::store::record_run(
+            &conn,
+            &record,
+            None,
+            crate::machines::signing::SERVER_MACHINE,
+        )
+        .is_ok()
+        {
+            state.stats.bump();
+        }
+    }
 }
 
 fn acquire_turn(

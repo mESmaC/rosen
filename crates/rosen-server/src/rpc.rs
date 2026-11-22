@@ -106,6 +106,15 @@ pub async fn dispatch_from(
             crate::post_land::handle_for(state, None, rosen_protocol::CheckKind::Build, platform)
                 .await
         }
+        Request::RecordRunTiming(record) if !state.is_shutting_down() => {
+            match origin_machine(state, origin).await {
+                Ok(machine) => crate::stats::handle_record_run(state, record, machine).await,
+                Err(refused) => Outcome::Error(refused),
+            }
+        }
+        Request::RecordPostLandTiming(record) if !state.is_shutting_down() => {
+            crate::stats::handle_record_post_land(state, record).await
+        }
         request => dispatch_unpaused(state, request).await,
     }
 }
@@ -373,6 +382,7 @@ async fn dispatch_objects(state: &Arc<ServerState>, request: Request) -> Outcome
         Request::WorkspaceWriteBlob(req) => crate::workspaces::write_blob(state, req).await,
         Request::ConfigShow(query) => crate::project_config::show(state, query).await,
         Request::Channel(call) => crate::channel::handle(state, call).await,
+        Request::Stats(query) => crate::stats::handle_query(state, query).await,
         _ => unreachable!("request was handled by an earlier dispatch group"),
     }
 }
