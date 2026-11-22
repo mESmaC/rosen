@@ -88,11 +88,12 @@ pub struct LandCheck {
     pub receipt: ReceiptGate,
     /// The unlanded ancestors an atomic land would include, bottom first.
     pub stack: Vec<StackLayer>,
-    /// True when a land on this base would commit, barring a lost
-    /// compare-and-swap.
+    /// True when a land on this base would commit without running uncached
+    /// generation commands, barring a lost compare-and-swap.
     pub landable: bool,
     /// The refusal a land on this base would answer with, in the land's own
-    /// order. Absent exactly when `landable` is true.
+    /// order. Absent when `landable` is true, or when only registered
+    /// regeneration commands remain to run at land (`merge.pending_at_land`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<LandRefusal>,
     /// The commit the change already landed as, when it has.
@@ -160,6 +161,13 @@ pub enum MergeGate {
         merged_tree: Option<ObjectId>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         commands: BTreeMap<String, String>,
+        /// True when every reported path has a registered command and no higher
+        /// stack layer remains unmerged in `after-land` mode, so `land` will
+        /// run those commands automatically instead of refusing with
+        /// `regeneration_required` (#454). Because the read-only check has not
+        /// executed them, `landable` stays false and `refusal` stays absent.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pending_at_land: bool,
     },
     /// Files whose blobs exceed `max_file_size` (R1).
     OversizeFiles {

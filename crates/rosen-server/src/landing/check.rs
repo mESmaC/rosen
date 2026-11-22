@@ -35,6 +35,22 @@ pub struct GateCheck {
     pub refusal: Option<CheckRefusal>,
 }
 
+impl GateCheck {
+    /// True when the merge gate has a complete registered regeneration plan on
+    /// the top layer in `after-land` mode and the read-only check has not run
+    /// those commands yet (#454).
+    pub fn pending_regeneration(&self) -> bool {
+        self.review == ReviewMode::AfterLand
+            && matches!(
+                self.merge,
+                MergeCheck::Regenerate {
+                    auto_at_land: true,
+                    ..
+                }
+            )
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum MergeCheck {
     /// The merge result of the whole stack.
@@ -50,8 +66,8 @@ pub enum MergeCheck {
         merged_tree: TreeId,
         commands: BTreeMap<String, String>,
         /// True when every reported path has a registered command and no higher
-        /// stack layer remains unmerged, so an after-land request will regenerate
-        /// and land automatically.
+        /// stack layer remains unmerged, so an after-land request will run the
+        /// commands automatically instead of refusing with `regeneration_required`.
         auto_at_land: bool,
     },
     Oversize {

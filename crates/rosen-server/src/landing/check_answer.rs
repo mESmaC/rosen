@@ -28,6 +28,7 @@ pub(super) fn answer(
         MergeCheck::StoredConflicts => stored_conflicts(state, change)?,
         _ => Vec::new(),
     };
+    let pending_regeneration = gates.pending_regeneration();
     let refusal = refusal(engine, change, &gates, &stored, &markers)?;
     let base_ref = engine.config().base_ref.clone();
     Ok(LandCheck {
@@ -41,7 +42,7 @@ pub(super) fn answer(
             UnitsReached::All => LandReach::All(ReachAll::All),
             UnitsReached::Units(units) => LandReach::Units(units),
         },
-        merge: merge_gate(gates.merge, stored, markers),
+        merge: merge_gate(gates.merge, pending_regeneration, stored, markers),
         // The service adds these from the clean merge result it read.
         line_endings: Vec::new(),
         approval: match gates.approval {
@@ -64,7 +65,7 @@ pub(super) fn answer(
                 blocked: blocked.map(|refusal| refusal.code().to_owned()),
             })
             .collect(),
-        landable: refusal.is_none(),
+        landable: refusal.is_none() && !pending_regeneration,
         refusal,
         landed: gates.landed,
         base_ref,
@@ -174,7 +175,12 @@ fn refusal_paths(refusal: Refusal, merge: &MergeCheck, stored: &[StoredConflict]
     }
 }
 
-fn merge_gate(merge: MergeCheck, stored: Vec<StoredConflict>, markers: Vec<String>) -> MergeGate {
+fn merge_gate(
+    merge: MergeCheck,
+    pending_at_land: bool,
+    stored: Vec<StoredConflict>,
+    markers: Vec<String>,
+) -> MergeGate {
     match merge {
         MergeCheck::Clean(_) if !markers.is_empty() => {
             MergeGate::ConflictMarkers { paths: markers }
@@ -193,6 +199,7 @@ fn merge_gate(merge: MergeCheck, stored: Vec<StoredConflict>, markers: Vec<Strin
             paths,
             merged_tree: Some(merged_tree),
             commands,
+            pending_at_land,
         },
         MergeCheck::Oversize { limit, files } => MergeGate::OversizeFiles {
             limit,

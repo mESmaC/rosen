@@ -848,20 +848,27 @@ async fn registered_generated_command_regenerates_at_land() {
     assert!(matches!(base_land.outcome, LandStatus::Landed { .. }));
     state.landing.settle();
 
+    let before_state = state.changes.show(&id).unwrap().change.state;
+    let before_events = state.events.last_seq();
     let Response::LandCheck(check) = call(&state, Request::LandCheck { change: id.clone() }).await
     else {
         panic!()
     };
-    assert!(check.landable);
+    assert_eq!(state.changes.show(&id).unwrap().change.state, before_state);
+    assert_eq!(state.events.last_seq(), before_events);
+    assert!(!check.landable);
+    assert!(check.refusal.is_none());
     let MergeGate::RegenerationRequired {
         paths,
         merged_tree,
         commands,
+        pending_at_land,
         ..
     } = check.merge
     else {
         panic!("{check:?}")
     };
+    assert!(pending_at_land);
     assert_eq!(paths, vec!["artifact.lock"]);
     assert!(merged_tree.is_some());
     assert_eq!(commands.get("artifact.lock").map(String::as_str), Some(cmd));
@@ -915,6 +922,20 @@ async fn failed_generated_command_refuses_with_log() {
     let id = new_change(&state).await;
     write_artifact(&state, &id, b"owner").await;
     let (_, _, base) = land_bytes(&state, "artifact.lock", b"base").await;
+
+    let Response::LandCheck(check) = call(&state, Request::LandCheck { change: id.clone() }).await
+    else {
+        panic!()
+    };
+    assert!(!check.landable);
+    assert!(check.refusal.is_none());
+    assert!(matches!(
+        &check.merge,
+        MergeGate::RegenerationRequired {
+            pending_at_land: true,
+            ..
+        }
+    ));
 
     let Response::Land(answer) = call(&state, Request::Land { change: id }).await else {
         panic!()

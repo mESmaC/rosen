@@ -184,7 +184,11 @@ fn merge_or_stack_step(
                 None,
             ));
         }
-        MergeGate::RegenerationRequired { change: target, .. } => {
+        MergeGate::RegenerationRequired {
+            change: target,
+            pending_at_land: false,
+            ..
+        } => {
             if *target == change.id {
                 return Some(step(
                     "regenerate_files",
@@ -204,7 +208,13 @@ fn merge_or_stack_step(
                 None,
             ));
         }
-        MergeGate::Clean | MergeGate::Conflicts { .. } | MergeGate::NotChecked => {}
+        MergeGate::Clean
+        | MergeGate::Conflicts { .. }
+        | MergeGate::RegenerationRequired {
+            pending_at_land: true,
+            ..
+        }
+        | MergeGate::NotChecked => {}
     }
     if gates
         .refusal
@@ -248,7 +258,16 @@ fn gate_step(record: &ChangeRecord, gates: Option<&LandCheck>, landing_actor: Ac
     let Some(gates) = gates else {
         return step("wait", Some(landing_actor), record.change.head, None);
     };
-    if gates.landable {
+    if gates.landable
+        || (gates.refusal.is_none()
+            && matches!(
+                gates.merge,
+                MergeGate::RegenerationRequired {
+                    pending_at_land: true,
+                    ..
+                }
+            ))
+    {
         return step("land", Some(landing_actor), gates.head, None);
     }
     let action = match gates.refusal.as_ref().map(|r| r.reason.as_str()) {
@@ -405,6 +424,36 @@ mod tests {
         assert_eq!(step.next_action, "unblock_parent");
         assert_eq!(step.actor, Some(Actor::Owner));
         assert_eq!(step.affected_head, oid('f'));
+
+        let pending_regen = gates(
+            MergeGate::RegenerationRequired {
+                change: cid('k'),
+                paths: vec!["artifact.lock".into()],
+                merged_tree: Some(oid('2')),
+                commands: [("artifact.lock".into(), "gen".into())].into(),
+                pending_at_land: true,
+            },
+            None,
+            false,
+        );
+        let step = derive(&named, Some(&pending_regen), Some(&ws(false)), true, None);
+        assert_eq!(step.next_action, "land");
+        assert_eq!(step.actor, Some(Actor::Velocity));
+
+        let manual_regen = gates(
+            MergeGate::RegenerationRequired {
+                change: cid('k'),
+                paths: vec!["artifact.lock".into()],
+                merged_tree: Some(oid('2')),
+                commands: Default::default(),
+                pending_at_land: false,
+            },
+            Some("regeneration_required"),
+            false,
+        );
+        let step = derive(&named, Some(&manual_regen), Some(&ws(false)), true, None);
+        assert_eq!(step.next_action, "regenerate_files");
+        assert_eq!(step.actor, Some(Actor::Agent));
 
         let landed = record(ChangeState::Landed, vec![], vec![]);
         let step = derive(&landed, None, None, true, Some("agent-1"));

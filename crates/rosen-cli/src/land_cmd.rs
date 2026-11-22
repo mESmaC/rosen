@@ -88,9 +88,12 @@ fn print_check(check: &LandCheck) {
             layer.change, layer.state, layer.tier
         );
     }
-    match &check.refusal {
-        None => println!("landable: yes"),
-        Some(refusal) => println!("landable: no ({}): {}", refusal.reason, refusal.message),
+    if check.landable {
+        println!("landable: yes");
+    } else if let Some(refusal) = &check.refusal {
+        println!("landable: no ({}): {}", refusal.reason, refusal.message);
+    } else {
+        println!("landable: pending (registered regeneration runs at land)");
     }
 }
 
@@ -153,6 +156,7 @@ fn merge_text(merge: &MergeGate) -> String {
             paths,
             merged_tree,
             commands,
+            pending_at_land,
         } => {
             let tree = merged_tree
                 .map(|id| format!(" on {id}"))
@@ -166,7 +170,12 @@ fn merge_text(merge: &MergeGate) -> String {
                     .collect();
                 format!(" ({})", list.join("; "))
             };
-            format!("regenerate in {change}{tree}: {}{cmds}", paths.join(", "))
+            let label = if *pending_at_land {
+                "pending regeneration at land in"
+            } else {
+                "regenerate in"
+            };
+            format!("{label} {change}{tree}: {}{cmds}", paths.join(", "))
         }
         MergeGate::OversizeFiles { limit, files } => {
             let listed: Vec<_> = files

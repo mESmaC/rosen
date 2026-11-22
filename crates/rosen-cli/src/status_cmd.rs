@@ -262,8 +262,14 @@ pub(crate) fn print_gates(gates: &LandCheck) {
     for (gate, verdict) in crate::land_cmd::gate_lines(gates) {
         println!("  {gate:<9} {verdict}");
     }
-    match &gates.refusal {
-        None => println!("  landable: yes, on {}", gates.base),
-        Some(refusal) => println!("  landable: no ({})", refusal.reason),
+    if gates.landable {
+        println!("  landable: yes, on {}", gates.base);
+    } else if let Some(refusal) = &gates.refusal {
+        println!("  landable: no ({})", refusal.reason);
+    } else {
+        println!(
+            "  landable: pending (registered regeneration runs at land, on {})",
+            gates.base
+        );
     }
 }

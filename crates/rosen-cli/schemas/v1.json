@@ -4544,6 +4544,9 @@
               "additionalProperties": {
                 "type": "string"
               }
+            },
+            "pending_at_land": {
+              "type": "boolean"
             }
           },
           "required": [
