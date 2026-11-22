@@ -34,3 +34,8 @@ def main : IO Unit := do
     IO.println (inputRow name [0] input)
   for (name, ours, input) in ownershipCases do
     IO.println (inputRow name ours input)
+  for history in [[none, some [0]], [some [1], none], [none, none], [some [0], none]] do
+    let first := history[0]?.join.elim "mirror" cell
+    let second := history[1]?.join.elim "mirror" cell
+    let reusable := Recheck.reusable [0] (Recheck.landedReaches history)
+    IO.println s!"0\t{first}\t{second}\t{if reusable then "1" else "0"}\t"

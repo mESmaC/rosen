@@ -235,3 +235,7 @@ ours	first	second	reuse	case
 0	0		0	configured_unit_names
 0,1	0,1		0	configured_multiple_holders
 0	0,1		0	implicit_workspace_member
+0	mirror	0	0	
+0	1	mirror	1	
+0	mirror	mirror	1	
+0	0	mirror	0	

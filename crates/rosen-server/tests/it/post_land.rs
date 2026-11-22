@@ -165,11 +165,15 @@ async fn batch_green_survives_restart_and_excludes_future_lands() {
 
 // Risk (R12): the executable SQL prefix update must agree with the proven
 // model on first, repeated and out-of-order passes.
-#[test]
-fn sql_prefix_matches_lean_fixtures() {
+#[tokio::test]
+async fn sql_prefix_matches_lean_fixtures() {
     use rosen_server::post_land::store;
     let fixture = include_str!("../../../../proofs/fixtures/batch-green.tsv");
     for line in fixture.lines().skip(1) {
+        if let Some(offer) = line.strip_prefix("offer\t") {
+            check_build_offer(offer).await;
+            continue;
+        }
         let cells: Vec<u32> = line.split('\t').map(|n| n.parse().unwrap()).collect();
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         rosen_server::metadata::ensure_schema(&conn).unwrap();
@@ -194,6 +198,48 @@ fn sql_prefix_matches_lean_fixtures() {
         let pending = store::pending(&conn).unwrap();
         assert_eq!(pending.len(), cells[2] as usize);
     }
+}
+
+// R1/R12: an adoption can be the tip without being eligible for build work.
+async fn check_build_offer(row: &str) {
+    let (mirrors, expected) = row.split_once('\t').unwrap();
+    let (_temp, state) = setup();
+    let path = state.config.metadata_path();
+    let store = LooseObjectStore::open(state.config.objects_dir()).unwrap();
+    let conn = rosen_server::metadata::open(&path).unwrap();
+    let mut tip = current_base(&state);
+    let mut rows = Vec::new();
+    for pos in ["1", "2", "3"] {
+        let mut commit = store.read_commit(&tip).unwrap();
+        commit.parents = vec![tip];
+        commit.message = format!("fixture row {pos}\n").into_bytes();
+        tip = store.put_commit(&commit).unwrap();
+        let (tier, change) = if mirrors.split(',').any(|mirror| mirror == pos) {
+            ("mirror", None)
+        } else {
+            ("normal", Some(format!("change-{pos}")))
+        };
+        conn.execute(
+            "INSERT INTO base_history(ref_name,commit_id,change_id,tier,post_land_done)
+             VALUES ('main',?1,?2,?3,1)",
+            rusqlite::params![tip.to_string(), change, tier],
+        )
+        .unwrap();
+        rows.push((pos, tip));
+    }
+    conn.execute(
+        "UPDATE base_refs SET target=?1 WHERE name='main'",
+        [tip.to_string()],
+    )
+    .unwrap();
+    let Response::PostLand(work) = call(&state, Request::PostLandBuildNext).await else {
+        panic!("expected post-land work");
+    };
+    let expected = rows
+        .iter()
+        .find(|(pos, _)| *pos == expected)
+        .map(|(_, commit)| *commit);
+    assert_eq!(work.job.map(|job| job.commit), expected, "{row}");
 }
 
 // R3/R12 risk: tests must not postpone merge-mode builds or green their prefix;

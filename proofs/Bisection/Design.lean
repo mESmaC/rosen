@@ -7,9 +7,15 @@ def step (lo hi culprit : Nat) : Prod Nat Nat :=
   let mid := midpoint lo hi
   if mid < culprit then (mid, hi) else (lo, mid)
 
+/-- The starting checkpoint is already eligible. The remaining history rows
+carry the commit ID and whether the row represents mirror maintenance. -/
+def landedInterval (checkpoint : Nat) (rows : List (Nat × Bool)) : List Nat :=
+  checkpoint :: (rows.filter fun row => !row.2).map Prod.fst
+
 /-- spec/R12-post-land-verification.md R12: a monotone checker passes exactly before culprit.
 Every split retains that culprit and strictly reduces a non-singleton range;
-a singleton identifies it. Confirmation requires a second failure and parent pass. -/
+a singleton identifies it. Confirmation requires a second failure and parent pass.
+The captured interval excludes mirror maintenance (spec/R1-repository-import-and-git-mirror.md R1). -/
 theorem correct (lo hi culprit : Nat) (hl : lo < culprit) (hh : culprit <= hi) :
     let next := step lo hi culprit
     (hi - lo > 1 → lo <= next.1 ∧ next.1 < culprit ∧ culprit <= next.2 ∧
@@ -17,14 +23,19 @@ theorem correct (lo hi culprit : Nat) (hl : lo < culprit) (hh : culprit <= hi) :
     (hi - lo = 1 → hi = culprit) ∧
     (∀ (firstFail secondFail parentPass : Bool),
       (firstFail && secondFail && parentPass = true) ↔
-      firstFail = true ∧ secondFail = true ∧ parentPass = true) := by
+      firstFail = true ∧ secondFail = true ∧ parentPass = true) ∧
+    (∀ checkpoint rows commit, commit ∈ landedInterval checkpoint rows ↔
+      commit = checkpoint ∨ (commit, false) ∈ rows) := by
   dsimp [step, midpoint]
   constructor
   · intro hw
     by_cases hm : lo + (hi - lo) / 2 < culprit <;> simp [hm] <;> omega
   constructor
   · omega
+  constructor
   · intro a b c; cases a <;> cases b <;> cases c <;> decide
+  · intro checkpoint rows commit
+    simp [landedInterval]
 
 /-- Cost model: each external checker query costs one; measure remaining
 candidates after that query. Balanced bisection leaves at most ceil(n/2).
@@ -47,6 +58,7 @@ theorem optimal (n k : Nat) (hk : k <= n) :
 
 #print axioms midpoint
 #print axioms step
+#print axioms landedInterval
 #print axioms correct
 #print axioms cost_bound
 #print axioms optimal

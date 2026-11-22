@@ -15,18 +15,48 @@ def advance (green tested : Nat) : Nat := max green tested
 def offer (green tip : Nat) : Option Nat :=
   if green < tip then some tip else none
 
+/-- Positions of actual lands use `some`. A mirror history entry is `none`
+because R1 excludes it from landed-change checks. Zero is the empty tip. -/
+def latestLanded : List (Option Nat) → Nat
+  | [] => 0
+  | none :: rest => latestLanded rest
+  | some landed :: rest => max landed (latestLanded rest)
+
 /-- **correct** (spec/R12-post-land-verification.md R12 Batches): a pass makes green exactly the union
 of the existing prefix and the tested prefix, never a later land. Offers
-choose the newest land beyond green. This holds for arbitrary history
-lengths and for stale runs that finish after a newer one. -/
+choose the newest land beyond green, disregarding mirror maintenance
+(spec/R1-repository-import-and-git-mirror.md R1). A stale passing run cannot
+move green back. -/
 -- spec/R12-post-land-verification.md R12
 theorem correct (green tested tip pos : Nat) :
     (pos ≤ advance green tested ↔ pos ≤ green ∨ pos ≤ tested) ∧
     green ≤ advance green tested ∧ tested ≤ advance green tested ∧
     advance (advance green tested) tested = advance green tested ∧
-    (offer green tip = some tip ↔ green < tip) := by
-  simp [advance, offer]
-  omega
+    (offer green tip = some tip ↔ green < tip) ∧
+    (∀ rows bound, latestLanded rows ≤ bound ↔
+      ∀ landed, some landed ∈ rows → landed ≤ bound) := by
+  have covered : pos ≤ advance green tested ↔ pos ≤ green ∨ pos ≤ tested := by
+    unfold advance
+    omega
+  refine ⟨covered, Nat.le_max_left green tested, Nat.le_max_right green tested, ?_, ?_, ?_⟩
+  · unfold advance
+    omega
+  · simp [offer]
+  · intro rows bound
+    induction rows with
+    | nil => simp [latestLanded]
+    | cons row rest ih =>
+      cases row with
+      | none => simpa [latestLanded] using ih
+      | some landed =>
+        rw [latestLanded, Nat.max_le, ih]
+        simp only [List.mem_cons, Option.some.injEq]
+        constructor
+        · rintro ⟨head, tail⟩ n (rfl | hn)
+          · exact head
+          · exact tail n hn
+        · intro all
+          exact ⟨all landed (.inl rfl), fun n hn => all n (.inr hn)⟩
 
 /-- An offering policy: from the green prefix and the history tip at a
 checker's request, the position to run, or none. -/
@@ -118,6 +148,7 @@ theorem optimal (alt : Policy) (landed : Landed alt) (pos : Nat) :
 
 #print axioms advance
 #print axioms offer
+#print axioms latestLanded
 #print axioms ours
 #print axioms serve
 #print axioms requestsUntil

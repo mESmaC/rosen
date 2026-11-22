@@ -20,11 +20,22 @@ def inputReach (all : List Nat) : Input → List Nat
 def reusable (ours : List Nat) (lands : List (List Nat)) : Bool :=
   lands.all fun theirs => !(ours.any fun u => theirs.contains u)
 
-/-- spec/R8-optimistic-landing/README.md R8: reuse exactly when every intervening reach is disjoint. -/
+/-- A mirror adoption advances the base without changing its tree (spec/R1-repository-import-and-git-mirror.md R1), so it has no land reach. -/
+def landedReaches (history : List (Option (List Nat))) : List (List Nat) :=
+  history.filterMap id
+
+/-- spec/R8-optimistic-landing/README.md R8: reuse exactly when every intervening land's reach is disjoint, including when mirror adoption appears in base history. -/
 theorem correct (ours : List Nat) (lands : List (List Nat)) :
-    reusable ours lands = true ↔
-      ∀ theirs ∈ lands, ∀ u ∈ ours, u ∉ theirs := by
-  simp [reusable]
+    (reusable ours lands = true ↔ ∀ theirs ∈ lands, ∀ u ∈ ours, u ∉ theirs) ∧
+    (∀ history, reusable ours (landedReaches history) = true ↔
+      ∀ theirs, some theirs ∈ history → ∀ u ∈ ours, u ∉ theirs) := by
+  have disjoint (reaches : List (List Nat)) :
+      reusable ours reaches = true ↔ ∀ theirs ∈ reaches, ∀ u ∈ ours, u ∉ theirs := by
+    simp [reusable]
+  refine ⟨disjoint lands, ?_⟩
+  intro history
+  rw [disjoint]
+  simp [landedReaches, List.mem_filterMap]
 
 /-- Cost model: one unit equality probe for each candidate pair, without
 early exit. Actual short-circuit scans use at most this many probes. -/
@@ -50,11 +61,12 @@ theorem optimal (policy : List Nat → List (List Nat) → Bool)
     (if reusable ours lands then 0 else 1 : Nat) ≤
       (if policy ours lands then 0 else 1 : Nat) := by
   by_cases hp : policy ours lands = true
-  · have hr := (correct ours lands).mpr (sound ours lands hp)
+  · have hr := (correct ours lands).1.mpr (sound ours lands hp)
     simp [hp, hr]
   · simp [hp]; split <;> omega
 
 #print axioms reusable
+#print axioms landedReaches
 #print axioms inputReach
 #print axioms probeCost
 #print axioms correct

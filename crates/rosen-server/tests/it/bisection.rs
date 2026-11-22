@@ -50,7 +50,11 @@ fn bisection_fixtures() {
                 let temp = tempfile::tempdir().unwrap();
                 let (path, mut conn) = history(temp.path());
                 for row in rows.iter().skip(shard).step_by(SHARDS) {
-                    check_row(&mut conn, &path, row);
+                    if let Some(mirror_row) = row.strip_prefix("mirror\t") {
+                        check_mirror_row(&mut conn, mirror_row);
+                    } else {
+                        check_row(&mut conn, &path, row);
+                    }
                 }
             });
         }
@@ -69,6 +73,45 @@ fn bisection_fixtures() {
     )
     .unwrap();
     assert!(flaky.flaky && flaky.culprit.is_none() && flaky.job.is_none());
+}
+
+// R1/R12: adoption commits must not be offered as potential culprits.
+fn check_mirror_row(conn: &mut rusqlite::Connection, row: &str) {
+    let cells: Vec<_> = row.split('\t').collect();
+    let parse = |ids: &str| {
+        ids.split(',')
+            .map(|id| oid(id.parse().unwrap()))
+            .collect::<Vec<_>>()
+    };
+    let low = oid(cells[0].parse().unwrap());
+    let high = oid(cells[1].parse().unwrap());
+    let mirrors = parse(cells[2]);
+    for mirror in &mirrors {
+        conn.execute(
+            "UPDATE base_history SET tier='mirror' WHERE commit_id=?1",
+            [mirror.to_string()],
+        )
+        .unwrap();
+    }
+    conn.execute("DELETE FROM bisections", []).ok();
+    let state = bisect::begin(conn, "main", low, high, "batch").unwrap();
+    let captured: String = conn
+        .query_row(
+            "SELECT commits FROM bisections WHERE id=?1",
+            [state.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let commits: Vec<(ObjectId, Option<String>)> = serde_json::from_str(&captured).unwrap();
+    let actual: Vec<_> = commits.into_iter().map(|(commit, _)| commit).collect();
+    assert_eq!(actual, parse(cells[3]), "{row}");
+    for mirror in &mirrors {
+        conn.execute(
+            "UPDATE base_history SET tier='normal' WHERE commit_id=?1",
+            [mirror.to_string()],
+        )
+        .unwrap();
+    }
 }
 
 /// Bisects one row's range to its culprit. Each answer is refused when sent
