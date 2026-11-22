@@ -540,3 +540,65 @@ async fn required_platform_without_checker_for_an_hour_is_reported_waiting() {
     assert_eq!(mac_online.waiting_no_checker_since, None);
     drop(guard);
 }
+
+const OVERLAPPING_MACOS_TOML: &str = r#"
+review = "after-land"
+
+[checks.post_land]
+platforms = ["macos", "macos-arm64"]
+commands = ["cargo test --workspace --locked"]
+"#;
+
+/// Risk (R12, #459): overlapping required targets (`macos` and `macos-arm64`)
+/// must both receive work from a single matching `macos-arm64` checker so the
+/// generic target is never starved and aggregate green advances.
+#[tokio::test(flavor = "multi_thread")]
+async fn overlapping_macos_targets_advance_both_checkpoints_without_starvation() {
+    let (_temp, state, _) = setup(OVERLAPPING_MACOS_TOML);
+    let c1 = land(&state, "a.rs", b"1").await;
+
+    let arm_c1 = next_for(&state, "macos-arm64").await.job.unwrap();
+    assert_eq!(
+        (arm_c1.commit, arm_c1.platform.as_deref()),
+        (c1, Some("macos-arm64"))
+    );
+
+    let Response::PostLand(after_arm) = call(&state, Request::PostLandPassed(arm_c1)).await else {
+        panic!()
+    };
+    assert_eq!(after_arm.last_green, None);
+    assert_eq!(
+        after_arm.job.as_ref().and_then(|j| j.platform.as_deref()),
+        Some("macos")
+    );
+
+    let generic_c1 = next_for(&state, "macos-arm64").await.job.unwrap();
+    assert_eq!(
+        (generic_c1.commit, generic_c1.platform.as_deref()),
+        (c1, Some("macos"))
+    );
+    call(&state, Request::PostLandPassed(generic_c1)).await;
+    assert_eq!(
+        post_land_status(&state).await.last_green.map(|c| c.commit),
+        Some(c1)
+    );
+    assert!(next_for(&state, "macos-arm64").await.job.is_none());
+
+    // Passing `macos-arm64` on c2 after c3 lands must offer lagging `macos` next.
+    let c2 = land(&state, "b.rs", b"2").await;
+    let arm_c2 = next_for(&state, "macos-arm64").await.job.unwrap();
+    assert_eq!(arm_c2.platform.as_deref(), Some("macos-arm64"));
+    let c3 = land(&state, "c.rs", b"3").await;
+    call(&state, Request::PostLandPassed(arm_c2)).await;
+
+    let generic_c3 = next_for(&state, "macos-arm64").await.job.unwrap();
+    assert_eq!(
+        (generic_c3.commit, generic_c3.platform.as_deref()),
+        (c3, Some("macos"))
+    );
+    call(&state, Request::PostLandPassed(generic_c3)).await;
+    assert_eq!(
+        post_land_status(&state).await.last_green.map(|c| c.commit),
+        Some(c2)
+    );
+}

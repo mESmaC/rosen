@@ -292,12 +292,26 @@ impl CheckSet {
         all
     }
 
-    /// The configured platform entry in `self.platforms` or `self.platform_commands`
-    /// that `checker` satisfies, preferring required entries over advisory ones and
-    /// architecture-specific matches over OS-only ones.
+    /// All configured platform entries in `self.platforms` and
+    /// `self.platform_commands` that `checker` satisfies, ordered with required
+    /// entries before advisory ones and architecture-specific matches before
+    /// OS-only ones within each tier (R12, #459).
+    pub fn matching_targets(&self, checker: &Platform) -> Vec<&Platform> {
+        let mut matches = Vec::new();
+        Self::push_matches(&mut matches, self.platforms.iter(), checker);
+        Self::push_matches(&mut matches, self.advisory_platforms(), checker);
+        matches
+    }
+
+    /// The highest-priority configured platform entry in `self.platforms` or
+    /// `self.platform_commands` that `checker` satisfies.
     pub fn matching_target(&self, checker: &Platform) -> Option<&Platform> {
-        Self::pick_match(self.platforms.iter(), checker)
-            .or_else(|| Self::pick_match(self.platform_commands.keys(), checker))
+        self.matching_targets(checker).into_iter().next()
+    }
+
+    /// Whether `target` is a required platform that gates green for this check set.
+    pub fn is_required_platform(&self, target: &Platform) -> bool {
+        self.platforms.contains(target)
     }
 
     /// Whether `target` is either a required platform or an advisory
@@ -313,14 +327,23 @@ impl CheckSet {
             .filter(|target| !self.platforms.contains(target))
     }
 
-    fn pick_match<'a>(
-        targets: impl Iterator<Item = &'a Platform> + Clone,
+    fn push_matches<'a>(
+        out: &mut Vec<&'a Platform>,
+        targets: impl Iterator<Item = &'a Platform>,
         checker: &Platform,
-    ) -> Option<&'a Platform> {
-        targets
-            .clone()
-            .find(|target| target.arch().is_some() && checker.matches(target))
-            .or_else(|| targets.into_iter().find(|target| checker.matches(target)))
+    ) {
+        let mut generic = Vec::new();
+        for target in targets {
+            if !checker.matches(target) || out.contains(&target) {
+                continue;
+            }
+            if target.arch().is_some() {
+                out.push(target);
+            } else if !generic.contains(&target) {
+                generic.push(target);
+            }
+        }
+        out.extend(generic);
     }
 
     fn validate(&self, key: &str) -> Result<(), ConfigError> {

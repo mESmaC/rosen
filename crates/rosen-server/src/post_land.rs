@@ -177,43 +177,87 @@ fn offer_next(
         requested,
         checker_platform,
     )?;
-    let target = resolve_target(base_config.as_deref(), kind, checker_platform);
-    let job = match target {
-        OfferTarget::Unsupported => None,
-        OfferTarget::Any => newest_for(conn, name, kind, None)?
-            .map(|commit| job_at(state, commit, kind, None))
-            .transpose()?,
-        OfferTarget::Platform(target) => newest_for(conn, name, kind, Some(target.as_str()))?
-            .map(|commit| job_at(state, commit, kind, Some(&target)))
-            .transpose()?,
-    };
+    let job = next_pending_work(base_config.as_deref(), conn, name, kind, checker_platform)?
+        .map(|(commit, target)| job_at(state, commit, kind, target.as_ref()))
+        .transpose()?;
     Ok(PostLandWork {
         job,
         last_green: last_green(conn, name, kind)?,
     })
 }
 
-enum OfferTarget {
+struct CandidateTarget {
+    platform: Platform,
+    required: bool,
+}
+
+enum OfferTargets {
     Any,
-    Platform(Platform),
+    Platforms(Vec<CandidateTarget>),
     Unsupported,
 }
 
-fn resolve_target(
+fn resolve_targets(
     config: Option<&rosen_core::ProjectConfig>,
     kind: CheckKind,
     checker_platform: Option<&Platform>,
-) -> OfferTarget {
+) -> OfferTargets {
     let Some(config) = config else {
-        return OfferTarget::Any;
+        return OfferTargets::Any;
     };
     let set = check_set_for(config, kind);
     if set.platforms.is_empty() {
-        return OfferTarget::Any;
+        return OfferTargets::Any;
     }
-    match checker_platform.and_then(|checker| set.matching_target(checker)) {
-        Some(target) => OfferTarget::Platform(target.clone()),
-        None => OfferTarget::Unsupported,
+    let Some(checker) = checker_platform else {
+        return OfferTargets::Unsupported;
+    };
+    let targets: Vec<CandidateTarget> = set
+        .matching_targets(checker)
+        .into_iter()
+        .map(|platform| CandidateTarget {
+            required: set.is_required_platform(platform),
+            platform: platform.clone(),
+        })
+        .collect();
+    if targets.is_empty() {
+        OfferTargets::Unsupported
+    } else {
+        OfferTargets::Platforms(targets)
+    }
+}
+
+/// Selects the next pending `(commit, target)` a checker on `checker_platform`
+/// can run. Across overlapping matching targets (for example `macos` and
+/// `macos-arm64`), required targets always precede advisory ones, and within
+/// each tier the target with the lowest covered sequence goes first so neither
+/// checkpoint can starve under continuous lands (R12, #459).
+fn next_pending_work(
+    config: Option<&rosen_core::ProjectConfig>,
+    conn: &Connection,
+    name: &str,
+    kind: CheckKind,
+    checker_platform: Option<&Platform>,
+) -> Result<Option<(rosen_core::ObjectId, Option<Platform>)>, ErrorBody> {
+    match resolve_targets(config, kind, checker_platform) {
+        OfferTargets::Unsupported => Ok(None),
+        OfferTargets::Any => Ok(newest_unscoped(conn, name, kind)?.map(|commit| (commit, None))),
+        OfferTargets::Platforms(targets) => {
+            let mut best: Option<((bool, i64, usize), rosen_core::ObjectId, Platform)> = None;
+            for (index, candidate) in targets.into_iter().enumerate() {
+                let Some((commit, floor)) =
+                    platforms::newest_with_floor(conn, name, candidate.platform.as_str(), kind)
+                        .map_err(internal)?
+                else {
+                    continue;
+                };
+                let key = (!candidate.required, floor, index);
+                if best.as_ref().is_none_or(|(best_key, _, _)| key < *best_key) {
+                    best = Some((key, commit, candidate.platform));
+                }
+            }
+            Ok(best.map(|(_, commit, target)| (commit, Some(target))))
+        }
     }
 }
 
@@ -406,15 +450,11 @@ pub fn last_green_for(
     .map_err(internal)
 }
 
-fn newest_for(
+fn newest_unscoped(
     conn: &Connection,
     name: &str,
     kind: CheckKind,
-    platform: Option<&str>,
 ) -> Result<Option<rosen_core::ObjectId>, ErrorBody> {
-    if let Some(platform) = platform {
-        return platforms::newest(conn, name, platform, kind).map_err(internal);
-    }
     match kind {
         CheckKind::Test => store::newest(conn, name),
         CheckKind::Build => builds::newest(conn, name),
@@ -434,13 +474,8 @@ fn next_kind_for(
     if requested != CheckKind::Test || !merge {
         return Ok(requested);
     }
-    let has_build = match resolve_target(config, CheckKind::Build, checker_platform) {
-        OfferTarget::Any => newest_for(conn, name, CheckKind::Build, None)?.is_some(),
-        OfferTarget::Platform(target) => {
-            newest_for(conn, name, CheckKind::Build, Some(target.as_str()))?.is_some()
-        }
-        OfferTarget::Unsupported => false,
-    };
+    let has_build =
+        next_pending_work(config, conn, name, CheckKind::Build, checker_platform)?.is_some();
     Ok(if has_build {
         CheckKind::Build
     } else {

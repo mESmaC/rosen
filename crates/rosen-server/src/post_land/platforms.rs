@@ -66,50 +66,35 @@ pub fn last_green(
     id.map(parse).transpose()
 }
 
-pub fn newest(
+/// Returns the newest uncovered commit for `(platform, kind)` together with its
+/// current covered sequence floor, so overlapping matching targets can advance
+/// the most lagging checkpoint first instead of starving generic targets (R12, #459).
+pub fn newest_with_floor(
     conn: &Connection,
     name: &str,
     platform: &str,
     kind: CheckKind,
-) -> rusqlite::Result<Option<ObjectId>> {
+) -> rusqlite::Result<Option<(ObjectId, i64)>> {
     ensure_schema(conn)?;
     crate::bisect::ensure_schema(conn)?;
     super::failures::ensure_schema(conn)?;
-    let id: Option<String> = match kind {
-        CheckKind::Test => conn
-            .query_row(
-                "SELECT commit_id FROM base_history WHERE ref_name=?1 AND change_id IS NOT NULL
-                 AND seq > COALESCE((SELECT seq FROM post_land_platform_green
-                     WHERE ref_name=?1 AND platform=?2 AND kind='test'), 0)
-                 AND seq > COALESCE((SELECT MAX(h.seq) FROM post_land_failures f
-                     JOIN bisections b ON b.kind=f.kind AND b.platform=f.platform AND b.phase='done'
-                         AND json_extract(b.commits,'$[' || b.high || '][0]')=f.commit_id
-                     JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
-                     WHERE b.ref_name=?1 AND b.platform=?2 AND f.kind='test' AND f.requires_revert=0), 0)
-                 AND seq > COALESCE((SELECT MAX(h.seq) FROM bisections b
-                     JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
-                     WHERE b.ref_name=?1 AND b.platform=?2 AND b.kind='test' AND b.phase='known'), 0)
-                 ORDER BY seq DESC LIMIT 1",
-                params![name, platform],
-                |r| r.get(0),
-            )
-            .optional()?,
-        CheckKind::Build => conn
-            .query_row(
-                "SELECT commit_id FROM base_history WHERE ref_name=?1 AND tier NOT IN ('initial','mirror')
-                 AND seq > COALESCE((SELECT seq FROM post_land_platform_green
-                     WHERE ref_name=?1 AND platform=?2 AND kind='build'), 0)
-                 AND seq > COALESCE((SELECT MAX(h.seq) FROM bisections b
-                     JOIN base_history h ON h.ref_name=b.ref_name AND h.commit_id=b.failed
-                     WHERE b.ref_name=?1 AND b.platform=?2 AND b.kind='build'
-                         AND b.phase IN ('done','known')), 0)
-                 ORDER BY seq DESC LIMIT 1",
-                params![name, platform],
-                |r| r.get(0),
-            )
-            .optional()?,
+    let floor = covered_seq(conn, name, platform, kind, ReadTables::ALL)?;
+    let filter = match kind {
+        CheckKind::Test => "change_id IS NOT NULL",
+        CheckKind::Build => "tier NOT IN ('initial','mirror')",
     };
-    id.map(parse).transpose()
+    let id: Option<String> = conn
+        .query_row(
+            &format!(
+                "SELECT commit_id FROM base_history
+                 WHERE ref_name=?1 AND {filter} AND seq > ?2
+                 ORDER BY seq DESC LIMIT 1"
+            ),
+            params![name, floor],
+            |r| r.get(0),
+        )
+        .optional()?;
+    id.map(|hex| Ok((parse(hex)?, floor))).transpose()
 }
 
 /// Records one platform's passing run and, when every platform in `required`
@@ -257,6 +242,18 @@ pub(crate) struct ReadTables {
     pub failures: bool,
     pub failures_platform: bool,
     pub events: bool,
+}
+
+impl ReadTables {
+    const ALL: Self = Self {
+        base_history: true,
+        platform_green: true,
+        bisections: true,
+        bisections_platform: true,
+        failures: true,
+        failures_platform: true,
+        events: true,
+    };
 }
 
 /// Timestamp (Unix ms) of the oldest landed commit waiting on `(platform, kind)`,
