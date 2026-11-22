@@ -44,16 +44,18 @@ impl Layout {
     }
 
     pub fn endpoint(&self, machine: Machine) -> Endpoint {
-        let name = format!("{}-{}", self.tag, Self::machine_name(machine));
+        let machine = Self::machine_name(machine);
         if cfg!(windows) {
-            Endpoint::new(name)
+            Endpoint::new(format!("{}-{machine}", self.tag))
         } else {
             // A folder `Listener::bind` creates owner-only itself: the root may be
             // group-writable under a umask such as Ubuntu's 0002, which bind refuses.
+            // Keep the suffix short (`s/<machine>.sock`) because Unix `sun_path` has a
+            // small byte limit and `self.root` already isolates this run from others.
             Endpoint::new(
                 self.root
-                    .join("sockets")
-                    .join(format!("{name}.sock"))
+                    .join("s")
+                    .join(format!("{machine}.sock"))
                     .to_string_lossy(),
             )
         }
