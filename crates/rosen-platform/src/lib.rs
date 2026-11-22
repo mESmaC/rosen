@@ -145,15 +145,25 @@ fn is_zombie(pid: libc::pid_t) -> bool {
 
 #[cfg(target_os = "linux")]
 fn is_zombie(pid: libc::pid_t) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+    // Read raw bytes because `/proc/<pid>/stat` embeds the process's raw
+    // `comm` bytes inside `(...)`, which need not be valid UTF-8 (#458).
+    let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
         return false;
     };
-    let Some((_, rest)) = stat.rsplit_once(')') else {
+    proc_stat_is_zombie(&stat)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn proc_stat_is_zombie(stat: &[u8]) -> bool {
+    let Some(close) = stat.iter().rposition(|&byte| byte == b')') else {
         return false;
     };
+    let rest = &stat[close + 1..];
     matches!(
-        rest.trim_start().as_bytes().first(),
-        Some(b'Z' | b'X' | b'x')
+        rest.trim_ascii_start()
+            .split(u8::is_ascii_whitespace)
+            .next(),
+        Some(b"Z" | b"X" | b"x")
     )
 }
 
@@ -198,5 +208,18 @@ mod tests {
         }
         let status = child.wait().expect("reap child");
         assert!(status.success(), "child failed: {status}");
+    }
+
+    /// Risk (#458, R10): `/proc/<pid>/stat` embeds raw `comm` bytes, so a
+    /// non-UTF-8 process name must still report zombie/dead states while
+    /// malformed records stay conservative.
+    #[test]
+    fn proc_stat_handles_non_utf8_process_name() {
+        assert!(proc_stat_is_zombie(b"496 (rosen-\xff) Z 1 2 3\n"));
+        assert!(proc_stat_is_zombie(b"496 (a)\xff) X 1\n"));
+        assert!(proc_stat_is_zombie(b"496 (rosen-\xff) x 1\n"));
+        assert!(!proc_stat_is_zombie(b"496 (rosen-\xff) Z) S 1\n"));
+        assert!(!proc_stat_is_zombie(b"496 (rosen-\xff)"));
+        assert!(!proc_stat_is_zombie(b"496 (rosen-\xff"));
     }
 }
