@@ -105,33 +105,14 @@ def stackResult (l : Ledger) (layers : List (Input × Nat × Nat)) : Ledger :=
   ⟨((layers.getLast?).map (·.2.2)).getD l.base, layers.reverse.map (·.2) ++ l.landed⟩
 def stackCas (l : Ledger) (expected : Nat) (layers : List (Input × Nat × Nat)) : Option Ledger :=
   if l.base = expected ∧ stackReady l layers then some (stackResult l layers) else none
-def regenerationReady (r : LayerRegeneration) : Bool :=
-  match finishRegeneration r with
-  | .ok _ => true
-  | .error _ => false
-def regeneratedStackCas (l : Ledger) (expected : Nat) (layers : List (Input × Nat × Nat))
-    (regeneration : List LayerRegeneration) : Option Ledger :=
-  if layers.length = regeneration.length ∧ regeneration.all regenerationReady = true then
-    stackCas l expected layers
-  else none
+def regeneratedStackCas (l : Ledger) (expected baseTree : Nat)
+    (writeCommit : Nat → Nat → Nat → Nat) (layers : List (StackLayer Input)) : Option Ledger :=
+  withResolvedStack baseTree layers fun resolved =>
+    stackCas l expected (candidatesOf writeCommit expected resolved)
 private theorem stack_correct (l : Ledger) (expected : Nat) (layers : List (Input × Nat × Nat))
     (result : Ledger) : stackCas l expected layers = some result ↔
       expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers := by
   unfold stackCas; split <;> simp_all [eq_comm]
-
-private theorem finish_correct (commands : List (Option Nat)) (finished : Option (Option Nat))
-    (tree : Nat) :
-    finishRegeneration (.required commands finished) = .ok tree ↔
-      commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true) ∧ finished = some (some tree) := by
-  rw [← and_assoc]
-  by_cases ready : commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true)
-  · rw [and_iff_right ready]
-    cases finished with
-    | none => simp only [finishRegeneration, ite_eq_left ready] <;> simp
-    | some result => cases result <;> simp only [finishRegeneration, ite_eq_left ready] <;> simp
-  · cases finished with
-    | none => simp [finishRegeneration, ready]
-    | some result => cases result <;> simp [finishRegeneration, ready]
 private theorem decideLand_eq_land (i : Input) : decideLand i = .land ↔ Authorized i := by
   obtain ⟨s, p, c, a, v, x, t, r, b, q, m⟩ := i
   cases s <;> cases p <;> cases c <;> cases a <;> cases v <;> cases x <;> cases t <;> cases r <;>
@@ -169,10 +150,11 @@ structure Verification where
 def reportFailure (s : Verification) (review : ReviewMode) (build advisory : Bool)
     (culprit : Nat) (out : String) : Bool × Verification :=
   (failureReverts review build advisory, {s with failures := (culprit, build, out) :: s.failures})
-/-- **correct** (spec/R8-optimistic-landing/README.md R8, clean-merge-and-conflict-markers.md, land-check.md,
-and spec/R12-post-land-verification.md R12): receipts and approvals gate
-before-land projects. Every confirmed failure is recorded. Advisory failures request no inverse.
-An unresolved regeneration blocks the stack CAS, and a complete uncached top plan reads as pending. -/
+/-- **correct** (spec/R8-optimistic-landing/README.md R8, clean-merge-and-conflict-markers.md,
+before-land-mode.md, land-check.md, and spec/R12-post-land-verification.md R12): receipts and
+approvals gate before-land projects. Every confirmed failure is recorded. Advisory failures
+request no inverse. Successful stack publication and preview propagate each layer's completed
+tree into its candidate and the next layer, and an uncached top plan reads as pending. -/
 theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     ((∀ l', landStep l i expected change commit = some l' →
       Authorized i ∧ expected = l.base ∧ l.hasLanded change = false ∧
@@ -188,29 +170,46 @@ theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
       expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers) ∧
     (∀ commands finished tree, finishRegeneration (.required commands finished) = .ok tree ↔
       commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true) ∧ finished = some (some tree)) ∧
-    (∀ expected layers regeneration result,
-      regeneratedStackCas l expected layers regeneration = some result ↔
-      layers.length = regeneration.length ∧ (∀ r ∈ regeneration, regenerationReady r = true) ∧
-      expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers) ∧
+    (∀ baseTree (layers : List (StackLayer Input)) tree,
+      previewStack baseTree layers = some tree ↔
+      ∃ resolved, ResolvedStack baseTree layers resolved ∧
+        resolved.getLast?.map Prod.snd = some tree) ∧
+    (∀ expected baseTree writeCommit layers result,
+      regeneratedStackCas l expected baseTree writeCommit layers = some result ↔
+      ∃ resolved, ResolvedStack baseTree layers resolved ∧ expected = l.base ∧
+        stackReady l (candidatesOf writeCommit expected resolved) ∧
+        result = stackResult l (candidatesOf writeCommit expected resolved)) ∧
+    (∀ expected baseTree writeCommit (commitTree : Nat → Nat) layers result,
+      (∀ c p t, commitTree (writeCommit c p t) = t) →
+      regeneratedStackCas l expected baseTree writeCommit layers = some result →
+      ∃ resolved topTree, ResolvedStack baseTree layers resolved ∧
+        previewStack baseTree layers = some topTree ∧ commitTree result.base = topTree ∧
+        (result.landed.take layers.length).reverse.map (fun x => commitTree x.2) =
+          resolved.map Prod.snd) ∧
     (∀ tree, checkTopRegeneration (.clean tree) = .landable) ∧
     (∀ commands finished, checkTopRegeneration (.required commands finished) =
       if commands ≠ [] ∧ (∀ c ∈ commands, c.isSome = true) then
         if finished.join.isSome then .landable else .pendingAtLand
       else .manual) := by
-  refine ⟨land_correct l i expected change commit, ?_, stack_correct l, finish_correct, ?_,
-    fun _ => rfl, check_top_required⟩
+  have hreg : ∀ expected baseTree writeCommit layers result,
+      regeneratedStackCas l expected baseTree writeCommit layers = some result ↔
+      ∃ resolved, ResolvedStack baseTree layers resolved ∧ expected = l.base ∧
+        stackReady l (candidatesOf writeCommit expected resolved) ∧
+        result = stackResult l (candidatesOf writeCommit expected resolved) := by
+    intro expected baseTree writeCommit layers result
+    simp only [regeneratedStackCas, withResolvedStack_some, stack_correct]
+  refine ⟨land_correct l i expected change commit, ?_, stack_correct l, finish_correct,
+    previewStack_iff, hreg, ?_, fun _ => rfl, check_top_required⟩
   · intro s review build advisory culprit out
     refine ⟨rfl, rfl, ?_⟩
     cases review <;> cases build <;> cases advisory <;> simp [reportFailure, failureReverts]
-  · intro expected layers regeneration result
-    simp only [regeneratedStackCas, List.all_eq_true]
-    split
-    · rename_i ready
-      rw [stack_correct]
-      exact ⟨fun h => ⟨ready.1, ready.2, h⟩, fun h => h.2.2⟩
-    · rename_i blocked
-      simp only [reduceCtorEq, false_iff]
-      exact fun h => blocked ⟨h.1, h.2.1⟩
+  · intro expected baseTree writeCommit commitTree layers result hct h
+    rcases (hreg expected baseTree writeCommit layers result).mp h with
+      ⟨resolved, hres, _, hready, rfl⟩
+    rcases candidatesOf_published_trees writeCommit commitTree hct expected l.base l.landed
+      resolved hready.1 with ⟨topTree, hlast, hbase, htrees⟩
+    exact ⟨resolved, topTree, hres, (previewStack_iff baseTree layers topTree).mpr ⟨resolved, hres, hlast⟩,
+      hbase, by simpa [stackResult, hres.length_eq] using htrees⟩
 /-- `attempts` counts optimistic attempts (merge, write and CAS); each true race lost its swap. -/
 def attempts : Nat → List Bool → Nat
   | 0, _ => 0

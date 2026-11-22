@@ -90,7 +90,10 @@ fn decide_matches_lean_fixture_table() {
     let mut failures_checked = 0;
     for line in table.lines().skip(1) {
         let cells: Vec<&str> = line.split('\t').collect();
-        if matches!(cells[0], "contention" | "regeneration") {
+        if matches!(
+            cells[0],
+            "contention" | "regeneration" | "regeneration_stack"
+        ) {
             continue; // Checked by landing_race.rs and after_land.rs.
         }
         if cells[0] == "failure" {

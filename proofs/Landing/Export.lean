@@ -60,6 +60,43 @@ def regenerationRow (name : String) (commands : List (Option Nat))
   let afterPreview := checkTopRegeneration layer
   s!"regeneration\t{name}\t{verdict}\t{bit checked}\t{initial.code}\t{afterPreview.code}\n"
 
+def stackPassingInput : Input :=
+  ⟨.active, true, false, false, .afterLand, false, .normal, .missing, true, false, true⟩
+def stackTreeCode : Nat → String
+  | 4 => "parent_provisional"
+  | 52 => "parent_regenerated"
+  | 14 => "child_on_provisional"
+  | 62 => "child_on_regenerated"
+  | 64 => "child_provisional"
+  | 72 => "child_regenerated"
+  | _ => "other"
+def stackWriteCommit (_change _parent tree : Nat) : Nat := 100 + tree
+def stackCommitTree (commit : Nat) : Nat := commit - 100
+def stackRefusalCode : RegenerationRefusal → String
+  | .missing => "regeneration_required"
+  | .failed => "regeneration_failed"
+  | .pending => "pending"
+def regenerationStackRow (name : String) (layers : List (StackLayer Input)) : String :=
+  let preview := match previewStack 1 layers with
+    | some tree => stackTreeCode tree
+    | none => "-"
+  let (verdict, parentTree, childTree) :=
+    match regeneratedStackCas ⟨1, []⟩ 1 1 stackWriteCommit layers with
+    | some ledger =>
+      let parentCommit := (ledger.landed.find? (fun (p : Nat × Nat) => p.1 == 10)).map Prod.snd |>.getD 0
+      ("land", stackTreeCode (stackCommitTree parentCommit),
+        stackTreeCode (stackCommitTree ledger.base))
+    | none =>
+      let reason := match resolveStack 1 layers with
+        | .error err => stackRefusalCode err
+        | .ok _ => "refused"
+      (reason, "-", "-")
+  s!"regeneration_stack\t{name}\t{verdict}\t{preview}\t{parentTree}\t{childTree}\n"
+def stackLayers (parent : LayerRegeneration) (childOnRegen : LayerRegeneration) :
+    List (StackLayer Input) :=
+  [ ⟨10, fun _ => stackPassingInput, fun onto => if onto = 1 then parent else .clean 4⟩,
+    ⟨20, fun _ => stackPassingInput, fun onto => if onto = 52 then childOnRegen else .clean 14⟩ ]
+
 def fixtureTable : String :=
   "state\tparent_landed\thas_conflicts\tapproved\treview\trecheck\ttier\treceipt\tbase_moved\t" ++
     "landed_since_all_independent\tmerge_clean\tverdict\n" ++
@@ -72,7 +109,17 @@ def fixtureTable : String :=
       s!"contention\t{cap}\t{cap}\t{contentionAttempts cap cap}\n") ++
     regenerationRow "partial" [some 0, none] none ++
     regenerationRow "failure" [some 0, some 0] (some none) ++
-    regenerationRow "success" [some 0, some 0] (some (some 1))
+    regenerationRow "success" [some 0, some 0] (some (some 1)) ++
+    regenerationStackRow "parent_regenerated_child_clean"
+      (stackLayers (.required [some 7] (some (some 52))) (.clean 62)) ++
+    regenerationStackRow "parent_regenerated_child_regenerated"
+      (stackLayers (.required [some 7] (some (some 52))) (.required [some 8] (some (some 72)))) ++
+    regenerationStackRow "parent_missing_child_clean"
+      (stackLayers (.required [some 7, none] none) (.clean 62)) ++
+    regenerationStackRow "parent_failed_child_clean"
+      (stackLayers (.required [some 7] (some none)) (.clean 62)) ++
+    regenerationStackRow "parent_regenerated_child_failed"
+      (stackLayers (.required [some 7] (some (some 52))) (.required [some 8] (some none)))
 end Landing
 
 def main : IO Unit := IO.print Landing.fixtureTable
