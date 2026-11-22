@@ -69,6 +69,7 @@ fn bisection_fixtures() {
             passed: true,
             output: "flaky".into(),
             submitter: None,
+            durations: None,
         },
     )
     .unwrap();
@@ -128,6 +129,7 @@ fn check_row(conn: &mut rusqlite::Connection, path: &Path, row: &str) {
             job,
             output: "failure".into(),
             submitter: None,
+            durations: None,
         };
         state = bisect::submit(conn, &result).unwrap();
         assert_eq!(

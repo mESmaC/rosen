@@ -55,11 +55,29 @@ pub fn newest(conn: &Connection, name: &str) -> rusqlite::Result<Option<ObjectId
     .transpose()
 }
 
+#[allow(dead_code)]
 pub fn passed(
     conn: &mut Connection,
     name: &str,
     commit: &ObjectId,
     submitted: Option<&Submitted>,
+) -> rusqlite::Result<bool> {
+    let at = submitted.map_or_else(crate::stats::now_millis, |s| s.at);
+    passed_with_timing(
+        conn,
+        name,
+        commit,
+        submitted,
+        crate::stats::store::CheckpointTiming::at(at),
+    )
+}
+
+pub(super) fn passed_with_timing(
+    conn: &mut Connection,
+    name: &str,
+    commit: &ObjectId,
+    submitted: Option<&Submitted>,
+    timing: crate::stats::store::CheckpointTiming<'_>,
 ) -> rusqlite::Result<bool> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let seq: Option<i64> = tx
@@ -73,7 +91,7 @@ pub fn passed(
         tx.commit()?;
         return Ok(false);
     };
-    advance_in(&tx, name, seq, commit, submitted)?;
+    advance_in(&tx, name, seq, commit, submitted, timing)?;
     tx.commit()?;
     Ok(true)
 }
@@ -87,6 +105,7 @@ pub(super) fn advance_in(
     seq: i64,
     commit: &ObjectId,
     submitted: Option<&Submitted>,
+    timing: crate::stats::store::CheckpointTiming<'_>,
 ) -> rusqlite::Result<()> {
     let (by, at) = (submitted.map(|s| &s.by), submitted.map(|s| s.at));
     let prev_seq: i64 = tx.query_row(
@@ -117,7 +136,7 @@ pub(super) fn advance_in(
             None,
             commit,
             batch_size,
-            at.unwrap_or_else(crate::stats::now_millis),
+            timing,
         )?;
         crate::events::stage(
             tx,

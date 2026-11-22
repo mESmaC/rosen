@@ -73,6 +73,20 @@ pub fn begin_for_in(
     platform: Option<&str>,
     opened_by: Option<&Submitted>,
 ) -> Result<BisectState> {
+    begin_for_in_with_timing(conn, name, range, output, kind, platform, opened_by, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn begin_for_in_with_timing(
+    conn: &Connection,
+    name: &str,
+    range: (ObjectId, ObjectId),
+    output: &str,
+    kind: rosen_protocol::CheckKind,
+    platform: Option<&str>,
+    opened_by: Option<&Submitted>,
+    timing: Option<crate::stats::store::CheckpointTiming<'_>>,
+) -> Result<BisectState> {
     let (green, failed) = range;
     let platform_key = platform.unwrap_or("");
     storage::ensure_schema(conn).map_err(internal)?;
@@ -99,10 +113,11 @@ pub fn begin_for_in(
         "search"
     };
     let known_stored = known.to_stored()?;
+    let at_ms = opened_by.map_or_else(crate::stats::now_millis, |s| s.at);
     conn.execute(
         "INSERT INTO bisections
-        (ref_name,failed,commits,low,high,phase,step,output,kind,known_output,platform)
-        VALUES (?1,?2,?3,0,?4,?5,0,?6,?7,?8,?9)",
+        (ref_name,failed,commits,low,high,phase,step,output,kind,known_output,step_offered_at,platform)
+        VALUES (?1,?2,?3,0,?4,?5,0,?6,?7,?8,?9,?10)",
         params![
             name,
             failed.to_string(),
@@ -112,6 +127,7 @@ pub fn begin_for_in(
             output,
             kind.as_str(),
             known_stored,
+            at_ms,
             platform_key
         ],
     )
@@ -123,6 +139,8 @@ pub fn begin_for_in(
     } else {
         "bisecting"
     };
+    let checkpoint_timing =
+        timing.unwrap_or_else(|| crate::stats::store::CheckpointTiming::at(at_ms));
     crate::stats::store::record_checkpoint_bisect_opened(
         conn,
         name,
@@ -132,7 +150,7 @@ pub fn begin_for_in(
         high as u64,
         session.id,
         outcome,
-        opened_by.map_or_else(crate::stats::now_millis, |s| s.at),
+        checkpoint_timing,
     )
     .map_err(internal)?;
     session.state()
@@ -200,6 +218,15 @@ pub fn submit_as(
     result: &BisectResult,
     by: Option<&Submitted>,
 ) -> Result<BisectState> {
+    submit_as_with_offer(conn, result, by, None)
+}
+
+pub(crate) fn submit_as_with_offer(
+    conn: &mut Connection,
+    result: &BisectResult,
+    by: Option<&Submitted>,
+    offered_fallback: Option<i64>,
+) -> Result<BisectState> {
     storage::ensure_schema(conn).map_err(internal)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -211,8 +238,16 @@ pub fn submit_as(
             "stale or mismatched bisection job",
         ));
     }
+    let at_ms = by.map_or_else(crate::stats::now_millis, |s| s.at);
+    let step_durations = crate::stats::resolve_bisect_step_durations(
+        session.kind,
+        result.durations.as_ref(),
+        offered_fallback.or(session.step_offered_at),
+        at_ms,
+    );
     let planned = progress::planned_steps(session.commits.len() - 1);
     session.advance(result.passed, &result.output);
+    session.step_offered_at = Some(at_ms);
     storage::save(&tx, &session)?;
     let state = session.state()?;
     progress::accepted(&tx, &result.job, result.passed, by, &state, planned)?;
@@ -230,12 +265,19 @@ pub fn submit_as(
     } else {
         "bisecting"
     };
+    let recorded = step_durations.as_ref().map(|(durations, estimated)| {
+        crate::stats::store::RecordedDurations {
+            durations,
+            estimated: *estimated,
+        }
+    });
     crate::stats::store::record_checkpoint_bisect_step(
         &tx,
         session.id,
         u64::try_from(steps).unwrap_or(0),
         outcome,
-        by.map_or_else(crate::stats::now_millis, |s| s.at),
+        at_ms,
+        recorded,
     )
     .map_err(internal)?;
     tx.commit().map_err(internal)?;
@@ -257,11 +299,29 @@ pub async fn handle(
         let mut conn = crate::metadata::open(&path).map_err(internal)?;
         let answer = match result {
             Some((result, by)) => {
-                let answer = submit_as(&mut conn, &result, Some(&by))?;
+                let offered = state
+                    .stats
+                    .take_bisect_offer(result.job.session, result.job.step);
+                let answer = submit_as_with_offer(&mut conn, &result, Some(&by), offered)?;
+                if let Some(next_job) = &answer.job {
+                    state
+                        .stats
+                        .record_bisect_offer(next_job.session, next_job.step, by.at);
+                }
                 state.stats.bump();
                 answer
             }
-            None => next(&conn, id)?,
+            None => {
+                let answer = next(&conn, id)?;
+                if let Some(next_job) = &answer.job {
+                    state.stats.record_bisect_offer(
+                        next_job.session,
+                        next_job.step,
+                        crate::stats::now_millis(),
+                    );
+                }
+                answer
+            }
         };
         // The step's event committed with it; a stop before this delivers
         // it at the next start (R9).

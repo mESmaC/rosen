@@ -3,7 +3,7 @@ use rosen_core::{project_config::CheckSet, AgentId, ObjectId};
 use serde::{Deserialize, Serialize};
 
 /// Build includes lint; tests may fail without making an after-land base unbuildable.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CheckKind {
     Build,
@@ -38,6 +38,88 @@ impl CheckPriority {
     }
 }
 
+/// Measured check durations (milliseconds) carried with a post-land batch
+/// or bisection result (R12, #464).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckDurations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lint_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_ms: Option<u64>,
+}
+
+impl CheckDurations {
+    /// True when no duration bucket was recorded.
+    pub fn is_empty(&self) -> bool {
+        self.build_ms.is_none() && self.lint_ms.is_none() && self.test_ms.is_none()
+    }
+
+    /// Total milliseconds across all populated buckets, or `None` when empty.
+    pub fn total_ms(&self) -> Option<u64> {
+        if self.is_empty() {
+            return None;
+        }
+        Some(
+            self.build_ms
+                .unwrap_or(0)
+                .saturating_add(self.lint_ms.unwrap_or(0))
+                .saturating_add(self.test_ms.unwrap_or(0)),
+        )
+    }
+
+    /// Adds one executed command's elapsed time into the build, lint or test bucket.
+    pub fn record_command(&mut self, kind: CheckKind, command: &str, elapsed: std::time::Duration) {
+        let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        let slot = if is_lint_command(command) {
+            &mut self.lint_ms
+        } else if kind == CheckKind::Build || is_build_command(command) {
+            &mut self.build_ms
+        } else {
+            &mut self.test_ms
+        };
+        *slot = Some(slot.unwrap_or(0).saturating_add(ms));
+    }
+
+    /// Fallback durations from one elapsed check wall-clock interval when a
+    /// checker did not report per-command timings.
+    pub fn from_elapsed(kind: CheckKind, commands: &[String], elapsed_ms: u64) -> Self {
+        if kind == CheckKind::Build
+            && !commands.is_empty()
+            && commands.iter().all(|cmd| is_lint_command(cmd))
+        {
+            Self {
+                lint_ms: Some(elapsed_ms),
+                ..Self::default()
+            }
+        } else if kind == CheckKind::Build {
+            Self {
+                build_ms: Some(elapsed_ms),
+                ..Self::default()
+            }
+        } else {
+            Self {
+                test_ms: Some(elapsed_ms),
+                ..Self::default()
+            }
+        }
+    }
+}
+
+fn is_lint_command(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    lower.contains("clippy")
+        || lower.contains("fmt")
+        || lower.contains("lint")
+        || lower.contains("audit")
+}
+
+fn is_build_command(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    lower.contains(" build") || lower.contains(" check") || lower.starts_with("lake build")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostLandJob {
     pub commit: ObjectId,
@@ -63,6 +145,24 @@ pub struct PostLandJob {
     /// request (R14), so it may not hold `@`. An offered job carries none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submitter: Option<AgentId>,
+    /// Server timestamp (Unix milliseconds) when this job was offered. Echoed
+    /// by external checkers so the server can record elapsed duration even when
+    /// the checker omits explicit `durations` (R12, #464).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offered_at_ms: Option<i64>,
+    /// Measured check durations carried with `post_land_passed` or
+    /// `post_land_failed` (R12, #464). Absent on an offered job.
+    /// Boxed to keep `PostLandJob` (and `Request`/`Response`) compact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durations: Option<Box<CheckDurations>>,
+}
+
+impl PostLandJob {
+    /// Attaches measured check durations before submitting this job's result.
+    pub fn with_durations(mut self, durations: CheckDurations) -> Self {
+        self.durations = (!durations.is_empty()).then(|| Box::new(durations));
+        self
+    }
 }
 
 /// A confirmed failure stays attached to its exact land even after repair or revert.

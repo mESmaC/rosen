@@ -11,7 +11,7 @@
 use rosen_client::{Client, Endpoint, Error};
 use rosen_core::ObjectId;
 use rosen_protocol::{
-    BisectCulprit, BisectResult, BisectState, ErrorCode, ReadAnswer, ReadRequest,
+    BisectCulprit, BisectResult, BisectState, CheckDurations, ErrorCode, ReadAnswer, ReadRequest,
 };
 use serde::Serialize;
 use std::future::Future;
@@ -61,7 +61,12 @@ where
             last_green: work.last_green,
         });
     };
-    match test(job.commit).await? {
+    let started = Instant::now();
+    let outcome = test(job.commit).await?;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let durations = CheckDurations::from_elapsed(job.kind, &job.check_set.commands, elapsed_ms);
+    let job = job.with_durations(durations);
+    match outcome {
         None => {
             client.post_land_passed(job).await?;
             log.passed += 1;
@@ -87,13 +92,17 @@ where
     Fut: Future<Output = anyhow::Result<Option<String>>>,
 {
     while let Some(job) = state.job.clone() {
+        let started = Instant::now();
         let failed = test(job.commit).await?;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         log.bisect_steps += 1;
+        let kind = job.kind;
         let result = BisectResult {
             job,
             passed: failed.is_none(),
             output: failed.unwrap_or_default(),
             submitter: None,
+            durations: Some(CheckDurations::from_elapsed(kind, &[], elapsed_ms)),
         };
         state = client.bisect_submit(result).await?;
     }

@@ -12,6 +12,7 @@ pub(crate) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         phase TEXT NOT NULL, step INTEGER NOT NULL, output TEXT NOT NULL,
         kind TEXT NOT NULL DEFAULT 'test' CHECK(kind IN ('build','test')),
         known_output TEXT, opened_by TEXT, opened_at INTEGER,
+        step_offered_at INTEGER,
         platform TEXT NOT NULL DEFAULT '',
         UNIQUE(ref_name,failed,kind,platform));",
     )?;
@@ -24,13 +25,27 @@ pub(crate) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
 pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {
     let has_platform = crate::post_land::submitter::has_column(conn, "bisections", "platform")
         .map_err(super::internal)?;
-    let sql = if has_platform {
-        "SELECT commits,low,high,phase,step,output,kind,known_output,platform FROM bisections WHERE id=?1"
+    let has_step_offered =
+        crate::post_land::submitter::has_column(conn, "bisections", "step_offered_at")
+            .map_err(super::internal)?;
+    let has_opened_at = crate::post_land::submitter::has_column(conn, "bisections", "opened_at")
+        .map_err(super::internal)?;
+    let platform_expr = if has_platform { "platform" } else { "''" };
+    let offered_expr = if has_step_offered && has_opened_at {
+        "COALESCE(step_offered_at, opened_at)"
+    } else if has_step_offered {
+        "step_offered_at"
+    } else if has_opened_at {
+        "opened_at"
     } else {
-        "SELECT commits,low,high,phase,step,output,kind,known_output,'' FROM bisections WHERE id=?1"
+        "NULL"
     };
+    let sql = format!(
+        "SELECT commits,low,high,phase,step,output,kind,known_output,{platform_expr},{offered_expr}
+         FROM bisections WHERE id=?1"
+    );
     let row = conn
-        .query_row(sql, [id], |r| {
+        .query_row(&sql, [id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get(1)?,
@@ -41,6 +56,7 @@ pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {
                 r.get::<_, String>(6)?,
                 r.get::<_, Option<String>>(7)?,
                 r.get::<_, String>(8)?,
+                r.get::<_, Option<i64>>(9)?,
             ))
         })
         .optional()
@@ -61,19 +77,21 @@ pub(super) fn load(conn: &Connection, id: i64) -> Result<Session, ErrorBody> {
             rosen_protocol::CheckKind::Test
         },
         platform: (!row.8.is_empty()).then_some(row.8),
+        step_offered_at: row.9,
     })
 }
 
 pub(super) fn save(conn: &Connection, session: &Session) -> Result<(), ErrorBody> {
     conn.execute(
-        "UPDATE bisections SET low=?2,high=?3,phase=?4,step=?5,output=?6 WHERE id=?1",
+        "UPDATE bisections SET low=?2,high=?3,phase=?4,step=?5,output=?6,step_offered_at=?7 WHERE id=?1",
         params![
             session.id,
             session.low,
             session.high,
             session.phase,
             session.step,
-            session.output
+            session.output,
+            session.step_offered_at,
         ],
     )
     .map_err(super::internal)?;
@@ -150,11 +168,12 @@ fn migrate_platform(conn: &Connection) -> rusqlite::Result<()> {
         phase TEXT NOT NULL, step INTEGER NOT NULL, output TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('build','test')),
         known_output TEXT, opened_by TEXT, opened_at INTEGER,
+        step_offered_at INTEGER,
         platform TEXT NOT NULL DEFAULT '',
         UNIQUE(ref_name,failed,kind,platform));
         INSERT INTO bisections
-        (id,ref_name,failed,commits,low,high,phase,step,output,kind,known_output,opened_by,opened_at,platform)
-        SELECT id,ref_name,failed,commits,low,high,phase,step,output,kind,known_output,opened_by,opened_at,''
+        (id,ref_name,failed,commits,low,high,phase,step,output,kind,known_output,opened_by,opened_at,step_offered_at,platform)
+        SELECT id,ref_name,failed,commits,low,high,phase,step,output,kind,known_output,opened_by,opened_at,step_offered_at,''
         FROM bisections_pre_platform;
         DROP TABLE bisections_pre_platform;",
     )

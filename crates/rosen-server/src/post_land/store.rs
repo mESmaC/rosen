@@ -91,8 +91,15 @@ pub fn passed_by(
     commit: &ObjectId,
     submitted: Option<&Submitted>,
 ) -> rusqlite::Result<bool> {
+    let at = submitted.map_or_else(crate::stats::now_millis, |s| s.at);
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let advanced = advance_green(&tx, name, commit, submitted)?;
+    let advanced = advance_green(
+        &tx,
+        name,
+        commit,
+        submitted,
+        crate::stats::store::CheckpointTiming::at(at),
+    )?;
     tx.commit()?;
     Ok(advanced.is_some())
 }
@@ -104,6 +111,7 @@ pub(super) fn passed_by_with(
     name: &str,
     commit: &ObjectId,
     submitted: Option<&Submitted>,
+    timing: crate::stats::store::CheckpointTiming<'_>,
     on_advance: impl FnOnce(&Connection, i64, i64) -> Result<(), rosen_protocol::ErrorBody>,
 ) -> Result<bool, rosen_protocol::ErrorBody> {
     let sql_err = |e: rusqlite::Error| {
@@ -112,7 +120,7 @@ pub(super) fn passed_by_with(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_err)?;
-    let Some(range) = advance_green(&tx, name, commit, submitted).map_err(sql_err)? else {
+    let Some(range) = advance_green(&tx, name, commit, submitted, timing).map_err(sql_err)? else {
         return Ok(false);
     };
     if let Some((start, end)) = range {
@@ -127,6 +135,7 @@ fn advance_green(
     name: &str,
     commit: &ObjectId,
     submitted: Option<&Submitted>,
+    timing: crate::stats::store::CheckpointTiming<'_>,
 ) -> rusqlite::Result<Option<Option<(i64, i64)>>> {
     let end: Option<i64> = tx
         .query_row(
@@ -137,7 +146,7 @@ fn advance_green(
         )
         .optional()?;
     let Some(end) = end else { return Ok(None) };
-    Ok(Some(advance_in(tx, name, end, commit, submitted)?))
+    Ok(Some(advance_in(tx, name, end, commit, submitted, timing)?))
 }
 
 /// Advances the overall test green checkpoint and stages green deliveries in an
@@ -149,6 +158,7 @@ pub(super) fn advance_in(
     end: i64,
     commit: &ObjectId,
     submitted: Option<&Submitted>,
+    timing: crate::stats::store::CheckpointTiming<'_>,
 ) -> rusqlite::Result<Option<(i64, i64)>> {
     let (by, at) = (submitted.map(|s| &s.by), submitted.map(|s| s.at));
     let start: i64 = tx.query_row(
@@ -185,7 +195,7 @@ pub(super) fn advance_in(
             None,
             commit,
             batch_size,
-            at.unwrap_or_else(crate::stats::now_millis),
+            timing,
         )?;
         return Ok(Some((start, end)));
     }

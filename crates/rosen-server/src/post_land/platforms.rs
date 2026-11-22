@@ -110,6 +110,7 @@ pub fn passed_with(
     commit: &ObjectId,
     required: &[Platform],
     submitted: Option<&Submitted>,
+    timing: crate::stats::store::CheckpointTiming<'_>,
     on_green: impl FnOnce(&Connection, i64, i64, &ObjectId) -> Result<(), rosen_protocol::ErrorBody>,
 ) -> Result<bool, rosen_protocol::ErrorBody> {
     let sql_err = |e: rusqlite::Error| {
@@ -152,25 +153,43 @@ pub fn passed_with(
             Some(platform),
             commit,
             batch_size,
-            at.unwrap_or_else(crate::stats::now_millis),
+            timing,
         )
         .map_err(sql_err)?;
     }
     if let Some((overall_seq, overall_commit)) =
         aggregate_green(&tx, name, kind, required).map_err(sql_err)?
     {
+        let aggregate_timing = if overall_commit == *commit {
+            timing
+        } else {
+            crate::stats::store::CheckpointTiming::at(timing.finished_at_ms)
+        };
         match kind {
             CheckKind::Test => {
-                if let Some((prev, end)) =
-                    super::store::advance_in(&tx, name, overall_seq, &overall_commit, submitted)
-                        .map_err(sql_err)?
+                if let Some((prev, end)) = super::store::advance_in(
+                    &tx,
+                    name,
+                    overall_seq,
+                    &overall_commit,
+                    submitted,
+                    aggregate_timing,
+                )
+                .map_err(sql_err)?
                 {
                     on_green(&tx, prev, end, &overall_commit)?;
                 }
             }
             CheckKind::Build => {
-                super::builds::advance_in(&tx, name, overall_seq, &overall_commit, submitted)
-                    .map_err(sql_err)?;
+                super::builds::advance_in(
+                    &tx,
+                    name,
+                    overall_seq,
+                    &overall_commit,
+                    submitted,
+                    aggregate_timing,
+                )
+                .map_err(sql_err)?;
             }
         }
     }

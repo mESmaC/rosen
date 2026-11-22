@@ -35,6 +35,7 @@ fn main() {
                 passed: index < 7,
                 output: "injected failure".into(),
                 submitter: None,
+                durations: None,
             },
         )
         .unwrap();

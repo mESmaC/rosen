@@ -72,8 +72,8 @@ pub use objects::{
 };
 pub use pool::{LandedProseQuery, PooledWorkspace};
 pub use post_land::{
-    CheckKind, CheckPriority, Checkpoint, ConnectedChecker, PendingInverse, PlatformStatus,
-    PostLandFailure, PostLandJob, PostLandStatus, PostLandWork,
+    CheckDurations, CheckKind, CheckPriority, Checkpoint, ConnectedChecker, PendingInverse,
+    PlatformStatus, PostLandFailure, PostLandJob, PostLandStatus, PostLandWork,
 };
 pub use receipt::{ReceiptRecord, ReceiptSignature, SubmitReceipt};
 pub use relay::{RelayKind, RelaySetting, COLLAPSE_MACHINE};

@@ -222,6 +222,7 @@ async fn macos_only_failure_bisects_and_records_platform_culprit() {
                     "macOS only failure".into()
                 },
                 submitter: None,
+                durations: None,
             }),
         )
         .await
@@ -440,6 +441,7 @@ async fn advisory_platforms_report_results_and_failures_without_gating_green() {
                     "linux proof failed".into()
                 },
                 submitter: None,
+                durations: None,
             }),
         )
         .await

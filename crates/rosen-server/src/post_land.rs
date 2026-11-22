@@ -86,6 +86,15 @@ fn record_pass(
     job: &PostLandJob,
     submitted: &submitter::Submitted,
 ) -> Result<(), ErrorBody> {
+    let offered = state
+        .stats
+        .take_post_land_offer(job.kind, job.platform.as_deref(), job.commit);
+    let (started_at, durations) = crate::stats::resolve_job_timing(job, offered, submitted.at);
+    let timing = crate::stats::store::CheckpointTiming::from_resolved(
+        started_at,
+        submitted.at,
+        durations.as_ref(),
+    );
     let accepted = match job.platform.as_deref() {
         Some(target) => {
             let required = required_platforms(state, job.kind, &job.commit)?;
@@ -98,6 +107,7 @@ fn record_pass(
                 &job.commit,
                 &required,
                 Some(submitted),
+                timing,
                 |tx, prev, end, green_commit| {
                     let resolved = state
                         .project_config
@@ -119,7 +129,7 @@ fn record_pass(
             }
             ok
         }
-        None => passed_job(state, conn, name, job, submitted)?,
+        None => passed_job(state, conn, name, job, submitted, timing)?,
     };
     if !accepted {
         return Err(ErrorBody::new(
@@ -179,7 +189,18 @@ fn offer_next(
         checker_platform,
     )?;
     let job = next_pending_work(base_config.as_deref(), conn, name, kind, checker_platform)?
-        .map(|(commit, target)| job_at(state, commit, kind, target.as_ref(), checker_platform))
+        .map(|(commit, target)| {
+            let mut job = job_at(state, commit, kind, target.as_ref(), checker_platform)?;
+            let offered_at = crate::stats::now_millis();
+            job.offered_at_ms = Some(offered_at);
+            state.stats.record_post_land_offer(
+                job.kind,
+                job.platform.as_deref(),
+                job.commit,
+                offered_at,
+            );
+            Ok::<_, ErrorBody>(job)
+        })
         .transpose()?;
     Ok(PostLandWork {
         job,
@@ -286,6 +307,8 @@ fn job_at(
         platform: target.map(|p| p.as_str().to_owned()),
         checker_platform: checker_platform.map(|p| p.as_str().to_owned()),
         submitter: None,
+        offered_at_ms: None,
+        durations: None,
     })
 }
 
@@ -429,6 +452,7 @@ fn passed_job(
     name: &str,
     job: &PostLandJob,
     submitted: &submitter::Submitted,
+    timing: crate::stats::store::CheckpointTiming<'_>,
 ) -> Result<bool, ErrorBody> {
     match job.kind {
         CheckKind::Test => {
@@ -437,20 +461,28 @@ fn passed_job(
                 .at_commit(&job.commit)
                 .map_err(internal)?;
             let objects = state.config.objects_dir();
-            store::passed_by_with(conn, name, &job.commit, Some(submitted), |tx, prev, end| {
-                deploy::on_green_range(
-                    tx,
-                    &objects,
-                    name,
-                    prev,
-                    end,
-                    &job.commit,
-                    &resolved.config.deploy,
-                )
-            })
+            store::passed_by_with(
+                conn,
+                name,
+                &job.commit,
+                Some(submitted),
+                timing,
+                |tx, prev, end| {
+                    deploy::on_green_range(
+                        tx,
+                        &objects,
+                        name,
+                        prev,
+                        end,
+                        &job.commit,
+                        &resolved.config.deploy,
+                    )
+                },
+            )
         }
         CheckKind::Build => {
-            builds::passed(conn, name, &job.commit, Some(submitted)).map_err(internal)
+            builds::passed_with_timing(conn, name, &job.commit, Some(submitted), timing)
+                .map_err(internal)
         }
     }
 }

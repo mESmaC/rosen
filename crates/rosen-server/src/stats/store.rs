@@ -2,8 +2,54 @@
 //! timings (counts and durations only, #449).
 
 use rosen_core::{ChangeId, ObjectId};
-use rosen_protocol::{CheckKind, LandPhaseTimings, RecordPostLandTiming, RecordRunTiming};
+use rosen_protocol::{
+    CheckDurations, CheckKind, LandPhaseTimings, RecordPostLandTiming, RecordRunTiming,
+};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+
+/// Check durations attached to a post-land checkpoint write (#464).
+#[derive(Debug, Clone, Copy)]
+pub struct RecordedDurations<'a> {
+    pub durations: &'a CheckDurations,
+    /// True when derived from offer-to-submit elapsed wall-clock time instead
+    /// of explicit checker measurements. A subsequent legacy
+    /// `RecordPostLandTiming` replaces an estimated value instead of
+    /// double-counting it.
+    pub estimated: bool,
+}
+
+/// Start/finish timestamps and optional durations for a post-land checkpoint.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointTiming<'a> {
+    pub started_at_ms: i64,
+    pub finished_at_ms: i64,
+    pub durations: Option<RecordedDurations<'a>>,
+}
+
+impl<'a> CheckpointTiming<'a> {
+    pub fn at(at_ms: i64) -> Self {
+        Self {
+            started_at_ms: at_ms,
+            finished_at_ms: at_ms,
+            durations: None,
+        }
+    }
+
+    pub fn from_resolved(
+        started_at_ms: i64,
+        finished_at_ms: i64,
+        durations: Option<&'a (CheckDurations, bool)>,
+    ) -> Self {
+        Self {
+            started_at_ms,
+            finished_at_ms,
+            durations: durations.map(|(durations, estimated)| RecordedDurations {
+                durations,
+                estimated: *estimated,
+            }),
+        }
+    }
+}
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS run_timings (
@@ -23,20 +69,21 @@ CREATE INDEX IF NOT EXISTS run_timings_by_change ON run_timings (change_id);
 CREATE INDEX IF NOT EXISTS run_timings_by_label ON run_timings (label, queued_at);
 
 CREATE TABLE IF NOT EXISTS post_land_checkpoints (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    ref_name       TEXT    NOT NULL,
-    kind           TEXT    NOT NULL CHECK (kind IN ('build', 'test')),
-    platform       TEXT    NOT NULL DEFAULT '',
-    commit_id      TEXT    NOT NULL,
-    batch_size     INTEGER NOT NULL,
-    build_ms       INTEGER,
-    lint_ms        INTEGER,
-    test_ms        INTEGER,
-    bisect_session INTEGER UNIQUE,
-    bisect_steps   INTEGER NOT NULL DEFAULT 0,
-    outcome        TEXT    NOT NULL CHECK (outcome IN ('passed', 'bisecting', 'culprit', 'flaky', 'known')),
-    started_at     INTEGER NOT NULL,
-    finished_at    INTEGER
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref_name            TEXT    NOT NULL,
+    kind                TEXT    NOT NULL CHECK (kind IN ('build', 'test')),
+    platform            TEXT    NOT NULL DEFAULT '',
+    commit_id           TEXT    NOT NULL,
+    batch_size          INTEGER NOT NULL,
+    build_ms            INTEGER,
+    lint_ms             INTEGER,
+    test_ms             INTEGER,
+    durations_estimated INTEGER NOT NULL DEFAULT 0 CHECK (durations_estimated IN (0, 1)),
+    bisect_session      INTEGER UNIQUE,
+    bisect_steps        INTEGER NOT NULL DEFAULT 0,
+    outcome             TEXT    NOT NULL CHECK (outcome IN ('passed', 'bisecting', 'culprit', 'flaky', 'known')),
+    started_at          INTEGER NOT NULL,
+    finished_at         INTEGER
 );
 CREATE INDEX IF NOT EXISTS post_land_checkpoints_by_time ON post_land_checkpoints (started_at);
 CREATE INDEX IF NOT EXISTS post_land_checkpoints_by_commit
@@ -80,7 +127,13 @@ CREATE INDEX IF NOT EXISTS land_timing_layers_by_change
 
 /// Creates the timing tables if they are missing. Safe to call on every open.
 pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    crate::post_land::submitter::add_column(
+        conn,
+        "post_land_checkpoints",
+        "durations_estimated",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
 }
 
 /// Persists one run-queue timing row.
@@ -217,21 +270,29 @@ pub fn record_checkpoint_passed(
     platform: Option<&str>,
     commit: &ObjectId,
     batch_size: u64,
-    at_ms: i64,
+    timing: CheckpointTiming<'_>,
 ) -> rusqlite::Result<()> {
     ensure_schema(conn)?;
     let platform = platform.unwrap_or("");
+    let (build_ms, lint_ms, test_ms, estimated) = duration_columns(timing.durations);
     conn.execute(
         "INSERT INTO post_land_checkpoints
-         (ref_name, kind, platform, commit_id, batch_size, bisect_steps, outcome, started_at, finished_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, 'passed', ?6, ?6)",
+         (ref_name, kind, platform, commit_id, batch_size,
+          build_ms, lint_ms, test_ms, durations_estimated,
+          bisect_steps, outcome, started_at, finished_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 'passed', ?10, ?11)",
         params![
             ref_name,
             kind.as_str(),
             platform,
             commit.to_hex(),
             to_i64(batch_size),
-            at_ms,
+            build_ms,
+            lint_ms,
+            test_ms,
+            estimated,
+            timing.started_at_ms,
+            timing.finished_at_ms,
         ],
     )?;
     Ok(())
@@ -248,83 +309,120 @@ pub fn record_checkpoint_bisect_opened(
     batch_size: u64,
     session_id: i64,
     outcome: &str,
-    at_ms: i64,
+    timing: CheckpointTiming<'_>,
 ) -> rusqlite::Result<()> {
     ensure_schema(conn)?;
     let platform = platform.unwrap_or("");
-    let finished = (outcome != "bisecting").then_some(at_ms);
+    let finished = (outcome != "bisecting").then_some(timing.finished_at_ms);
+    let (build_ms, lint_ms, test_ms, estimated) = duration_columns(timing.durations);
     conn.execute(
         "INSERT OR IGNORE INTO post_land_checkpoints
-         (ref_name, kind, platform, commit_id, batch_size, bisect_session, bisect_steps,
-          outcome, started_at, finished_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9)",
+         (ref_name, kind, platform, commit_id, batch_size,
+          build_ms, lint_ms, test_ms, durations_estimated,
+          bisect_session, bisect_steps, outcome, started_at, finished_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?13)",
         params![
             ref_name,
             kind.as_str(),
             platform,
             commit.to_hex(),
             to_i64(batch_size),
+            build_ms,
+            lint_ms,
+            test_ms,
+            estimated,
             session_id,
             outcome,
-            at_ms,
+            timing.started_at_ms,
             finished,
         ],
     )?;
     Ok(())
 }
 
-/// Updates a bisection checkpoint's step count and outcome when a step is accepted.
+/// Updates a bisection checkpoint's step count, outcome and accumulated durations
+/// when a step is accepted.
 pub fn record_checkpoint_bisect_step(
     conn: &Connection,
     session_id: i64,
     steps: u64,
     outcome: &str,
     at_ms: i64,
+    durations: Option<RecordedDurations<'_>>,
 ) -> rusqlite::Result<()> {
     ensure_schema(conn)?;
     let finished = (outcome != "bisecting").then_some(at_ms);
+    let (build_ms, lint_ms, test_ms, _) = duration_columns(durations);
+    let explicit = i64::from(durations.is_some_and(|d| !d.estimated));
     conn.execute(
         "UPDATE post_land_checkpoints
-         SET bisect_steps = ?2, outcome = ?3, finished_at = COALESCE(?4, finished_at)
+         SET bisect_steps = ?2,
+             outcome = ?3,
+             finished_at = COALESCE(?4, finished_at),
+             build_ms = CASE WHEN ?5 IS NULL THEN build_ms ELSE COALESCE(build_ms, 0) + ?5 END,
+             lint_ms  = CASE WHEN ?6 IS NULL THEN lint_ms  ELSE COALESCE(lint_ms, 0)  + ?6 END,
+             test_ms  = CASE WHEN ?7 IS NULL THEN test_ms  ELSE COALESCE(test_ms, 0)  + ?7 END,
+             durations_estimated = CASE WHEN ?8 = 1 THEN 0 ELSE durations_estimated END
          WHERE bisect_session = ?1",
-        params![session_id, to_i64(steps), outcome, finished],
+        params![
+            session_id,
+            to_i64(steps),
+            outcome,
+            finished,
+            build_ms,
+            lint_ms,
+            test_ms,
+            explicit,
+        ],
     )?;
     Ok(())
 }
 
 /// Attaches or accumulates check durations on the matching post-land checkpoint.
+/// When the checkpoint holds only server-estimated fallback durations, an
+/// explicit `RecordPostLandTiming` replaces them instead of double-counting.
 pub fn record_post_land_durations(
     conn: &Connection,
     record: &RecordPostLandTiming,
 ) -> rusqlite::Result<()> {
     ensure_schema(conn)?;
-    let target_id: Option<i64> = if let Some(session) = record.bisect_session {
+    let target: Option<(i64, i64)> = if let Some(session) = record.bisect_session {
         conn.query_row(
-            "SELECT id FROM post_land_checkpoints WHERE bisect_session = ?1",
+            "SELECT id, durations_estimated FROM post_land_checkpoints WHERE bisect_session = ?1",
             [session],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?
     } else {
         let platform = record.platform.as_deref().unwrap_or("");
         conn.query_row(
-            "SELECT id FROM post_land_checkpoints
+            "SELECT id, durations_estimated FROM post_land_checkpoints
              WHERE commit_id = ?1 AND kind = ?2 AND platform = ?3
              ORDER BY id DESC LIMIT 1",
             params![record.commit.to_hex(), record.kind.as_str(), platform],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?
     };
-    let Some(id) = target_id else {
+    let Some((id, estimated)) = target else {
         return Ok(());
     };
-    conn.execute(
+    let sql = if estimated != 0 {
+        "UPDATE post_land_checkpoints SET
+             build_ms = ?2,
+             lint_ms  = ?3,
+             test_ms  = ?4,
+             durations_estimated = 0
+         WHERE id = ?1"
+    } else {
         "UPDATE post_land_checkpoints SET
              build_ms = CASE WHEN ?2 IS NULL THEN build_ms ELSE COALESCE(build_ms, 0) + ?2 END,
              lint_ms  = CASE WHEN ?3 IS NULL THEN lint_ms  ELSE COALESCE(lint_ms, 0)  + ?3 END,
              test_ms  = CASE WHEN ?4 IS NULL THEN test_ms  ELSE COALESCE(test_ms, 0)  + ?4 END
-         WHERE id = ?1",
+         WHERE id = ?1"
+    };
+    conn.execute(
+        sql,
         params![
             id,
             record.build_ms.map(to_i64),
@@ -333,6 +431,20 @@ pub fn record_post_land_durations(
         ],
     )?;
     Ok(())
+}
+
+fn duration_columns(
+    durations: Option<RecordedDurations<'_>>,
+) -> (Option<i64>, Option<i64>, Option<i64>, i64) {
+    match durations {
+        Some(recorded) => (
+            recorded.durations.build_ms.map(to_i64),
+            recorded.durations.lint_ms.map(to_i64),
+            recorded.durations.test_ms.map(to_i64),
+            i64::from(recorded.estimated),
+        ),
+        None => (None, None, None, 0),
+    }
 }
 
 /// Counts landed commits in `(prev_seq, end_seq]` for a checkpoint's batch size.

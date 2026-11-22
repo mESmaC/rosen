@@ -48,7 +48,14 @@ pub fn start(
         .map_err(super::internal)?;
     let boundary = search_boundary(&tx, &name, job)?;
     let range = (boundary, job.commit);
-    let answer = super::begin_for_in(
+    let at_ms = by.map_or_else(crate::stats::now_millis, |s| s.at);
+    let offered = state
+        .stats
+        .take_post_land_offer(job.kind, job.platform.as_deref(), job.commit);
+    let (started_at, durations) = crate::stats::resolve_job_timing(job, offered, at_ms);
+    let timing =
+        crate::stats::store::CheckpointTiming::from_resolved(started_at, at_ms, durations.as_ref());
+    let answer = super::begin_for_in_with_timing(
         &tx,
         &name,
         range,
@@ -56,8 +63,14 @@ pub fn start(
         job.kind,
         job.platform.as_deref(),
         by,
+        Some(timing),
     )?;
     tx.commit().map_err(super::internal)?;
+    if let Some(next_job) = &answer.job {
+        state
+            .stats
+            .record_bisect_offer(next_job.session, next_job.step, at_ms);
+    }
     Ok(answer)
 }
 

@@ -17,7 +17,8 @@ pub(super) fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         PRIMARY KEY(session, step));",
     )?;
     submitter::add_column(conn, "bisections", "opened_by", "TEXT")?;
-    submitter::add_column(conn, "bisections", "opened_at", "INTEGER")
+    submitter::add_column(conn, "bisections", "opened_at", "INTEGER")?;
+    submitter::add_column(conn, "bisections", "step_offered_at", "INTEGER")
 }
 
 /// The halving steps for `interval` candidate commits, plus the second

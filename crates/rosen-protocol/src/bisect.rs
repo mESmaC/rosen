@@ -23,6 +23,9 @@ pub struct BisectResult {
     /// The checker's nick; the server appends the connection's machine (R14).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submitter: Option<AgentId>,
+    /// Measured check durations for this bisection step (R12, #464).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durations: Option<crate::CheckDurations>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

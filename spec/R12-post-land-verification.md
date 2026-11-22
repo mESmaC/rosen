@@ -50,10 +50,11 @@
     The inverse land, reopened change and durable failure output commit atomically.
     Repeating a confirmed culprit returns the same revert, and its reopened change can land again under the same change ID after repair.
 - **Who ran each result.**
-  `post_land_passed`, `post_land_failed` and `bisect_submit` record their submitter and time, as receipts do (R8 step 1, R14 "Agents").
+  `post_land_passed`, `post_land_failed` and `bisect_submit` record their submitter, time and check durations (`build_ms`, `lint_ms`, `test_ms`), as receipts do (R8 step 1, R14 "Agents").
   The request names only the checker's nick, without `@`; the server appends the machine from the connection's credential, or `server` on the local transport.
   A request with no nick records the machine alone.
-  Last built, last green, each accepted bisection step and each confirmed failure carry it, as do the `built`, `green` and `post-land-failure` events.
+  Checkers attach measured `durations` to the accepted `PostLandJob` or `BisectResult` so durations commit atomically with the checkpoint or bisection step; when an external checker omits explicit durations for an offered non-empty check set or bisection step, the server records offer-to-submit elapsed duration in that kind's bucket.
+  Last built, last green, each accepted bisection step and each confirmed failure carry the submitter and time, as do the `built`, `green` and `post-land-failure` events.
   Results submitted before this was recorded show no submitter.
 - **Status.**
   `post_land_status` and `review status [--json]` (schema `rosen.post_land_status/v1`) read post-land progress without changing it, on the read-only connections.

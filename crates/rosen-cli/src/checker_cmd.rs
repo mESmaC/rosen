@@ -10,8 +10,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rosen_client::protocol::{
-    BisectJob, BisectResult, BisectState, CheckKind, CheckPriority, EventKind, PostLandJob,
-    RecordPostLandTiming, StepState,
+    BisectJob, BisectResult, BisectState, CheckDurations, CheckKind, CheckPriority, EventKind,
+    PostLandJob, StepState,
 };
 use rosen_client::{Client, Endpoint, Error};
 use rosen_core::{AgentId, ObjectId, Platform, RecheckMode, ReviewMode};
@@ -196,13 +196,13 @@ async fn run_post_land_job(
     )
     .await?;
     job.submitter = cfg.nick.clone();
+    job = job.with_durations(timings);
     match outcome {
         Ok(()) => {
             let commit = job.commit;
             let kind = job.kind;
             let platform = job.platform.clone();
             client.post_land_passed(job).await?;
-            record_post_land_timings(client, commit, kind, platform.clone(), None, &timings).await;
             log_status(
                 cfg,
                 "passed",
@@ -219,8 +219,6 @@ async fn run_post_land_job(
                 json!({ "commit": commit, "kind": kind, "platform": platform }),
             );
             let state = client.post_land_failed(job, output).await?;
-            record_post_land_timings(client, commit, kind, platform, Some(state.id), &timings)
-                .await;
             drive_bisection(client, cfg, state).await?;
         }
     }
@@ -255,18 +253,14 @@ async fn drive_bisection(
             Ok(()) => (true, String::new()),
             Err(output) => (false, output),
         };
-        let session = job.session;
-        let commit = job.commit;
-        let kind = job.kind;
-        let platform = job.platform.clone();
         let result = BisectResult {
             job,
             passed,
             output,
             submitter: cfg.nick.clone(),
+            durations: (!timings.is_empty()).then_some(timings),
         };
         state = client.bisect_submit(result).await?;
-        record_post_land_timings(client, commit, kind, platform, Some(session), &timings).await;
     }
     if let Some(culprit) = &state.culprit {
         let mut detail = json!({
@@ -316,60 +310,6 @@ fn bisect_commands_for(
     set.commands_for(Some(checker_platform))
 }
 
-#[derive(Default)]
-struct CheckTimings {
-    build_ms: Option<u64>,
-    lint_ms: Option<u64>,
-    test_ms: Option<u64>,
-}
-
-impl CheckTimings {
-    fn record(&mut self, kind: CheckKind, command: &str, elapsed: Duration) {
-        let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-        let lower = command.to_ascii_lowercase();
-        let slot = if lower.contains("clippy")
-            || lower.contains("fmt")
-            || lower.contains("lint")
-            || lower.contains("audit")
-        {
-            &mut self.lint_ms
-        } else if kind == CheckKind::Build
-            || lower.contains(" build")
-            || lower.contains(" check")
-            || lower.starts_with("lake build")
-        {
-            &mut self.build_ms
-        } else {
-            &mut self.test_ms
-        };
-        *slot = Some(slot.unwrap_or(0).saturating_add(ms));
-    }
-}
-
-async fn record_post_land_timings(
-    client: &Client,
-    commit: ObjectId,
-    kind: CheckKind,
-    platform: Option<String>,
-    bisect_session: Option<i64>,
-    timings: &CheckTimings,
-) {
-    if timings.build_ms.is_none() && timings.lint_ms.is_none() && timings.test_ms.is_none() {
-        return;
-    }
-    let _ = client
-        .record_post_land_timing(RecordPostLandTiming {
-            commit,
-            kind,
-            platform,
-            bisect_session,
-            build_ms: timings.build_ms,
-            lint_ms: timings.lint_ms,
-            test_ms: timings.test_ms,
-        })
-        .await;
-}
-
 async fn execute_commands(
     client: &Client,
     cfg: &CheckerConfig,
@@ -377,8 +317,8 @@ async fn execute_commands(
     kind: CheckKind,
     priority: CheckPriority,
     commands: &[String],
-) -> Result<(Result<(), String>, CheckTimings), Error> {
-    let mut timings = CheckTimings::default();
+) -> Result<(Result<(), String>, CheckDurations), Error> {
+    let mut timings = CheckDurations::default();
     if commands.is_empty() {
         return Ok((Ok(()), timings));
     }
@@ -394,7 +334,7 @@ async fn execute_commands(
     for command in commands {
         let started = Instant::now();
         let res = run_via_rosen_run(&checkout_dir, &target_dir, priority, command).await?;
-        timings.record(kind, command, started.elapsed());
+        timings.record_command(kind, command, started.elapsed());
         if let Err(output) = res {
             return Ok((
                 Err(format!("command `{command}` failed:\n{output}")),

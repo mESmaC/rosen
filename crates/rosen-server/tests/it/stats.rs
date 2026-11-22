@@ -360,3 +360,195 @@ async fn atomic_stack_land_records_phases_for_all_layers_with_one_latency_sample
     assert_eq!(only_lower.changes.len(), 1);
     assert_eq!(only_lower.changes[0].land_phases, upper_stats.land_phases);
 }
+
+/// Risk (#464, R12): explicit `CheckDurations` carried on `PostLandJob` and
+/// `BisectResult` must persist atomically with each accepted result, accumulate
+/// across bisection steps, ignore refused duplicate steps, and survive restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn post_land_and_bisect_results_carry_explicit_durations_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _base) = init_server(dir.path());
+
+    let id_a = new_change(&state, "alice").await;
+    write_and_name(&state, id_a, "a.txt", b"alice\n", "Change A").await;
+    let commit_a = land(&state, id_a).await;
+
+    let Response::PostLand(work) = call(&state, Request::PostLandNext).await else {
+        panic!("expected PostLand")
+    };
+    let job_a = work.job.unwrap().with_durations(CheckDurations {
+        build_ms: Some(40),
+        lint_ms: Some(15),
+        test_ms: Some(210),
+    });
+    call(&state, Request::PostLandPassed(job_a)).await;
+
+    let id_b = new_change(&state, "bob").await;
+    write_and_name(&state, id_b, "b.txt", b"bob\n", "Change B").await;
+    let commit_b = land(&state, id_b).await;
+
+    let Response::PostLand(work) = call(&state, Request::PostLandNext).await else {
+        panic!("expected PostLand")
+    };
+    let failed_job = work.job.unwrap().with_durations(CheckDurations {
+        build_ms: None,
+        lint_ms: None,
+        test_ms: Some(120),
+    });
+    let Response::Bisection(mut bisect) = call(
+        &state,
+        Request::PostLandFailed {
+            job: failed_job,
+            output: "test_b failed".into(),
+        },
+    )
+    .await
+    else {
+        panic!("expected Bisection")
+    };
+
+    let first_step = bisect.job.clone().expect("confirm step");
+    let first_result = BisectResult {
+        job: first_step,
+        passed: false,
+        output: "test_b failed".into(),
+        submitter: None,
+        durations: Some(CheckDurations {
+            build_ms: None,
+            lint_ms: None,
+            test_ms: Some(80),
+        }),
+    };
+    let Response::Bisection(next) = call(&state, Request::BisectSubmit(first_result.clone())).await
+    else {
+        panic!("expected Bisection")
+    };
+    // A refused duplicate bisection step must not inflate recorded durations.
+    assert!(matches!(
+        dispatch(&state, Request::BisectSubmit(first_result)).await,
+        Outcome::Error(err) if err.code == ErrorCode::Refused
+    ));
+    bisect = next;
+
+    let parent_step = bisect.job.clone().expect("parent confirmation step");
+    let parent_result = BisectResult {
+        job: parent_step,
+        passed: true,
+        output: String::new(),
+        submitter: None,
+        durations: Some(CheckDurations {
+            build_ms: None,
+            lint_ms: None,
+            test_ms: Some(50),
+        }),
+    };
+    let Response::Bisection(done) = call(&state, Request::BisectSubmit(parent_result)).await else {
+        panic!("expected Bisection")
+    };
+    assert_eq!(done.culprit.as_ref().map(|c| c.commit), Some(commit_b));
+
+    let Response::Stats(report) = call(&state, Request::Stats(StatsQuery::default())).await else {
+        panic!("expected Stats")
+    };
+    assert_eq!(report.checkpoints.len(), 2);
+    assert_eq!(report.checkpoints[0].commit, commit_a);
+    assert_eq!(report.checkpoints[0].build_ms, Some(40));
+    assert_eq!(report.checkpoints[0].lint_ms, Some(15));
+    assert_eq!(report.checkpoints[0].test_ms, Some(210));
+    assert_eq!(report.checkpoints[1].commit, commit_b);
+    assert_eq!(report.checkpoints[1].outcome, "culprit");
+    assert_eq!(report.checkpoints[1].bisect_steps, 2);
+    assert_eq!(report.checkpoints[1].test_ms, Some(250));
+}
+
+/// Risk (#464, R12): external checkers (including Velocity's `batch_passed`,
+/// `batch_failed` and `step_result` path whose older wire types omit
+/// `offered_at_ms` and `durations`) must still record non-null check durations
+/// for passed checkpoints and bisection steps.
+#[tokio::test(flavor = "multi_thread")]
+async fn external_checker_without_explicit_durations_records_checkpoint_and_bisect_timings() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _base) = init_server(dir.path());
+
+    let id_a = new_change(&state, "alice").await;
+    write_and_name(&state, id_a, "a.txt", b"alice\n", "Change A").await;
+    let commit_a = land(&state, id_a).await;
+
+    // Simulate an older compiled Velocity client that strips `offered_at_ms`
+    // when deserializing `PostLandJob` and submits without `durations`.
+    let Response::PostLand(work) = call(&state, Request::PostLandNext).await else {
+        panic!("expected PostLand")
+    };
+    let mut job_a = work.job.unwrap();
+    assert!(job_a.offered_at_ms.is_some());
+    job_a.offered_at_ms = None;
+    job_a.durations = None;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    call(&state, Request::PostLandPassed(job_a)).await;
+
+    let id_b = new_change(&state, "bob").await;
+    write_and_name(&state, id_b, "b.txt", b"bob\n", "Change B").await;
+    let commit_b = land(&state, id_b).await;
+
+    let Response::PostLand(work) = call(&state, Request::PostLandNext).await else {
+        panic!("expected PostLand")
+    };
+    let mut job_b = work.job.unwrap();
+    job_b.offered_at_ms = None;
+    job_b.durations = None;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let Response::Bisection(mut bisect) = call(
+        &state,
+        Request::PostLandFailed {
+            job: job_b,
+            output: "broken".into(),
+        },
+    )
+    .await
+    else {
+        panic!("expected Bisection")
+    };
+
+    while let Some(step) = bisect.job.clone() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let passed = step.commit == commit_a;
+        let Response::Bisection(next) = call(
+            &state,
+            Request::BisectSubmit(BisectResult {
+                job: step,
+                passed,
+                output: if passed {
+                    String::new()
+                } else {
+                    "broken".into()
+                },
+                submitter: Some(AgentId::new("velocity-checker").unwrap()),
+                durations: None,
+            }),
+        )
+        .await
+        else {
+            panic!("expected Bisection")
+        };
+        bisect = next;
+    }
+    assert_eq!(bisect.culprit.as_ref().map(|c| c.commit), Some(commit_b));
+
+    let Response::Stats(report) = call(&state, Request::Stats(StatsQuery::default())).await else {
+        panic!("expected Stats")
+    };
+    assert_eq!(report.checkpoints.len(), 2);
+    assert_eq!(report.checkpoints[0].commit, commit_a);
+    assert!(
+        report.checkpoints[0].test_ms.is_some_and(|ms| ms > 0),
+        "{:?}",
+        report.checkpoints[0]
+    );
+    assert_eq!(report.checkpoints[1].commit, commit_b);
+    assert_eq!(report.checkpoints[1].bisect_steps, 2);
+    assert!(
+        report.checkpoints[1].test_ms.is_some_and(|ms| ms >= 20),
+        "{:?}",
+        report.checkpoints[1]
+    );
+}

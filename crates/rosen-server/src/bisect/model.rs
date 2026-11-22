@@ -13,6 +13,7 @@ pub(super) struct Session {
     pub step: u64,
     pub output: String,
     pub known: KnownFailures,
+    pub step_offered_at: Option<i64>,
 }
 
 /// Balanced split of the remaining possible first failures.

@@ -152,6 +152,7 @@ async fn confirm(
             job,
             output: "confirmed failure".into(),
             submitter: None,
+            durations: None,
         };
         let Response::Bisection(next) = call(state, Request::BisectSubmit(result)).await else {
             panic!()
@@ -398,6 +399,7 @@ async fn confirm_with_output(
             job,
             output: failure_output.into(),
             submitter: None,
+            durations: None,
         };
         let Response::Bisection(next) = call(state, Request::BisectSubmit(result)).await else {
             panic!()
@@ -457,6 +459,7 @@ async fn drive_test_bisect(
                 passed,
                 output,
                 submitter: None,
+                durations: None,
             }),
         )
         .await
@@ -683,6 +686,7 @@ async fn confirm_with_known_build_failure(
                 passed: false,
                 output: output.into(),
                 submitter: None,
+                durations: None,
             }),
         )
         .await
@@ -1297,6 +1301,7 @@ async fn bisection_status_events_and_submitters() {
             output: "confirmed failure".into(),
             // The request cannot name another machine.
             submitter: Some(AgentId::new("test-3@elsewhere").unwrap()),
+            durations: None,
         };
         let refused = remote(Request::BisectSubmit(result.clone())).await;
         assert!(matches!(refused, Outcome::Error(e) if e.code == ErrorCode::InvalidArgument));
