@@ -65,8 +65,9 @@ def fixtureTable : String :=
     "landed_since_all_independent\tmerge_clean\tverdict\n" ++
     String.join (allInputs.map (fixtureRow · ++ "\n")) ++
     String.join ([ReviewMode.beforeLand, .afterLand].flatMap fun review =>
-      [false, true].map fun build =>
-        "failure\t" ++ review.code ++ "\t" ++ bit build ++ "\t" ++ bit (failureReverts review build) ++ "\n") ++
+      [false, true].flatMap fun build =>
+        [("unscoped", false), ("required", false), ("advisory", true)].map fun (role, advisory) =>
+          s!"failure\t{review.code}\t{bit build}\t{role}\t{bit (failureReverts review build advisory)}\n") ++
     String.join ([0, 1, 12].map fun cap =>
       s!"contention\t{cap}\t{cap}\t{contentionAttempts cap cap}\n") ++
     regenerationRow "partial" [some 0, none] none ++

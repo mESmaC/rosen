@@ -159,32 +159,31 @@ private theorem land_correct (l : Ledger) (i : Input) (expected change commit : 
   · intro ha hb hl
     have hv := (decideLand_eq_land i).mpr ha
     simp [landStep, hv, cas, hl, hb]
-/-- R12: both kinds record a failure; only this action also requests an inverse. -/
-def failureReverts (review : ReviewMode) (build : Bool) : Bool :=
-  review == .beforeLand || build
+/-- R12 Platforms: a confirmed failure on an advisory target cannot request an inverse. -/
+def failureReverts (review : ReviewMode) (build advisory : Bool) : Bool :=
+  !advisory && (review == .beforeLand || build)
 structure Verification where
   ledger : Ledger
   failures : List (Nat × Bool × String)
 /-- Recording precedes any requested inverse: the record itself never moves the base. -/
-def reportFailure (s : Verification) (review : ReviewMode) (build : Bool)
+def reportFailure (s : Verification) (review : ReviewMode) (build advisory : Bool)
     (culprit : Nat) (out : String) : Bool × Verification :=
-  (failureReverts review build, {s with failures := (culprit, build, out) :: s.failures})
+  (failureReverts review build advisory, {s with failures := (culprit, build, out) :: s.failures})
 /-- **correct** (spec/R8-optimistic-landing/README.md R8, clean-merge-and-conflict-markers.md, land-check.md,
 and spec/R12-post-land-verification.md R12): receipts and approvals gate
-before-land projects, failures are recorded, and only builds request a revert
-after land. A required layer supplies a final tree only after successful
-regeneration. An unresolved layer prevents the entire stack's CAS. A read-only
-after-land check of the top layer reports a complete uncached plan as pending. -/
+before-land projects. Every confirmed failure is recorded. Advisory failures request no inverse.
+An unresolved regeneration blocks the stack CAS, and a complete uncached top plan reads as pending. -/
 theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     ((∀ l', landStep l i expected change commit = some l' →
       Authorized i ∧ expected = l.base ∧ l.hasLanded change = false ∧
       l' = ⟨commit, (change, commit) :: l.landed⟩) ∧
     (Authorized i → expected = l.base → l.hasLanded change = false →
       landStep l i expected change commit = some ⟨commit, (change, commit) :: l.landed⟩)) ∧
-    (∀ s review build culprit out,
-      (reportFailure s review build culprit out).2.ledger = s.ledger ∧
-      (reportFailure s review build culprit out).2.failures = (culprit, build, out) :: s.failures ∧
-      ((reportFailure s review build culprit out).1 = true ↔ review = .beforeLand ∨ build = true)) ∧
+    (∀ s review build advisory culprit out,
+      (reportFailure s review build advisory culprit out).2.ledger = s.ledger ∧
+      (reportFailure s review build advisory culprit out).2.failures = (culprit, build, out) :: s.failures ∧
+      ((reportFailure s review build advisory culprit out).1 = true ↔
+        advisory = false ∧ (review = .beforeLand ∨ build = true))) ∧
     (∀ expected layers result, stackCas l expected layers = some result ↔
       expected = l.base ∧ stackReady l layers ∧ result = stackResult l layers) ∧
     (∀ commands finished tree, finishRegeneration (.required commands finished) = .ok tree ↔
@@ -200,9 +199,9 @@ theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
       else .manual) := by
   refine ⟨land_correct l i expected change commit, ?_, stack_correct l, finish_correct, ?_,
     fun _ => rfl, check_top_required⟩
-  · intro s review build culprit out
+  · intro s review build advisory culprit out
     refine ⟨rfl, rfl, ?_⟩
-    cases review <;> cases build <;> simp [reportFailure, failureReverts]
+    cases review <;> cases build <;> cases advisory <;> simp [reportFailure, failureReverts]
   · intro expected layers regeneration result
     simp only [regeneratedStackCas, List.all_eq_true]
     split
@@ -212,20 +211,18 @@ theorem correct (l : Ledger) (i : Input) (expected change commit : Nat) :
     · rename_i blocked
       simp only [reduceCtorEq, false_iff]
       exact fun h => blocked ⟨h.1, h.2.1⟩
-/-- Cost model: an attempt merges and writes each layer, and performs one
-compare-and-swap; `attempts` counts optimistic attempts. `races[j]` is true
-when a competing land moved the base during attempt `j`, so its swap lost.
-`cap` is `max_attempts`; exhausted requests then take an exclusive turn. -/
+/-- `attempts` counts optimistic attempts (merge, write and CAS); each true race lost its swap. -/
 def attempts : Nat → List Bool → Nat
   | 0, _ => 0
   | _ + 1, [] => 1
   | _ + 1, false :: _ => 1
   | n + 1, true :: rest => 1 + attempts n rest
-/-- **cost_bound**: under the cost model of `attempts`, the optimistic phase
-never costs more than `cap` attempts, nor more than one attempt per competing
-land that beat it plus one. -/
+/-- **cost_bound**: optimistic attempts are bounded by the cap and lost races;
+R12 inverse cost charges one request per confirmed failure that requires it. -/
 theorem cost_bound (cap : Nat) (races : List Bool) :
-    attempts cap races ≤ cap ∧ attempts cap races ≤ races.count true + 1 := by
+    (attempts cap races ≤ cap ∧ attempts cap races ≤ races.count true + 1) ∧
+    (∀ review build advisory, (failureReverts review build advisory).toNat ≤ 1) := by
+  refine ⟨?_, fun review build advisory => by cases failureReverts review build advisory <;> decide⟩
   induction cap generalizing races with
   | zero => simp [attempts]
   | succ n ih =>
@@ -270,12 +267,19 @@ private theorem countP_le_of_imp (p q : Input → Bool) (hpq : ∀ i, p i = true
     · simp [hp, hpq x hp]; omega
     · simp only [List.countP_cons, Bool.not_eq_true] at hp ⊢
       simp [hp]; split <;> omega
-/-- **optimal**: our re-check policy is sound, and no sound policy asks for
-fewer new receipts on any history of land requests. -/
+/-- **optimal**: minimal new receipts among sound re-check policies, and minimal
+inverse requests among dispositions that must request each R12-required inverse. -/
 theorem optimal :
-    SoundPolicy oursRecheck ∧
-    ∀ policy, SoundPolicy policy → ∀ requests : List Input,
-      recheckCost oursRecheck requests ≤ recheckCost policy requests := by
+    (∀ (policy : ReviewMode → Bool → Bool → Bool),
+      (∀ review build, review = .beforeLand ∨ build = true → policy review build false = true) →
+      ∀ review build advisory,
+        (failureReverts review build advisory).toNat ≤ (policy review build advisory).toNat) ∧
+    (SoundPolicy oursRecheck ∧ ∀ policy, SoundPolicy policy → ∀ requests : List Input,
+      recheckCost oursRecheck requests ≤ recheckCost policy requests) := by
+  refine ⟨?_, ?_⟩
+  · intro policy required review build advisory
+    cases advisory <;> cases review <;> cases build <;> simp [failureReverts, required]
+    exact Nat.zero_le _
   constructor
   · intro i hg hm hv hx ht hb hq hr
     obtain ⟨s, p, c, a, v, x, t, r, b, q, m⟩ := i

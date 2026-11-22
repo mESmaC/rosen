@@ -1,9 +1,9 @@
 //! Risk: the Rust land decision drifting from the proven Lean model would let
-//! the server bypass configured gates or revert an after-land test failure
-//! (SPEC R7, R8, R12). Every row of the
-//! table exported from `proofs/Landing/Design.lean` must match `decide`.
+//! the server bypass configured gates or revert an advisory or after-land test
+//! failure (SPEC R7, R8, R12). Replay the fixture exported from the Lean model.
 
-use rosen_core::ReviewMode;
+use rosen_core::{Platform, ProjectConfig, ReviewMode};
+use rosen_protocol::CheckKind;
 
 use rosen_server::landing::rules::{decide, LandInput, ReceiptCheck};
 use rosen_server::landing::{ChangeState, Tier};
@@ -44,6 +44,41 @@ fn receipt(cell: &str) -> ReceiptCheck {
     }
 }
 
+fn check_failure(cells: &[&str]) {
+    let kind = if bit(cells[2]) {
+        CheckKind::Build
+    } else {
+        CheckKind::Test
+    };
+    let mut config = ProjectConfig {
+        review: review(cells[1]),
+        ..ProjectConfig::default()
+    };
+    let set = match kind {
+        CheckKind::Build => &mut config.checks.pre_land,
+        CheckKind::Test => &mut config.checks.post_land,
+    };
+    let platform = match cells[3] {
+        "unscoped" => None,
+        "required" | "advisory" => {
+            set.platforms.push(Platform::parse("windows").unwrap());
+            set.platform_commands
+                .insert(Platform::parse("linux").unwrap(), vec!["check".into()]);
+            Some(if cells[3] == "required" {
+                "windows"
+            } else {
+                "linux"
+            })
+        }
+        other => panic!("bad platform role {other}"),
+    };
+    assert_eq!(
+        rosen_server::post_land::failures::confirmed_failure_reverts(&config, kind, platform),
+        bit(cells[4]),
+        "row {cells:?}"
+    );
+}
+
 #[test]
 fn decide_matches_lean_fixture_table() {
     let path = concat!(
@@ -60,15 +95,7 @@ fn decide_matches_lean_fixture_table() {
         }
         if cells[0] == "failure" {
             failures_checked += 1;
-            let kind = if bit(cells[2]) {
-                rosen_protocol::CheckKind::Build
-            } else {
-                rosen_protocol::CheckKind::Test
-            };
-            assert_eq!(
-                rosen_server::post_land::failures::failure_reverts(review(cells[1]), kind),
-                bit(cells[3])
-            );
+            check_failure(&cells);
             continue;
         }
         assert_eq!(cells.len(), 12, "row {line}");
@@ -94,6 +121,6 @@ fn decide_matches_lean_fixture_table() {
             checked += 1;
         }
     }
-    assert_eq!(failures_checked, 4);
+    assert_eq!(failures_checked, 12);
     assert!(checked > 1000, "fixture table too small: {checked}");
 }

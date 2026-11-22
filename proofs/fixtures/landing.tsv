@@ -6911,10 +6911,18 @@ abandoned	1	1	1	after-land	merge	sensitive	same_tree	1	0	0	abandoned
 abandoned	1	1	1	after-land	merge	sensitive	same_tree	1	0	1	abandoned
 abandoned	1	1	1	after-land	merge	sensitive	same_tree	1	1	0	abandoned
 abandoned	1	1	1	after-land	merge	sensitive	same_tree	1	1	1	abandoned
-failure	before-land	0	1
-failure	before-land	1	1
-failure	after-land	0	0
-failure	after-land	1	1
+failure	before-land	0	unscoped	1
+failure	before-land	0	required	1
+failure	before-land	0	advisory	0
+failure	before-land	1	unscoped	1
+failure	before-land	1	required	1
+failure	before-land	1	advisory	0
+failure	after-land	0	unscoped	0
+failure	after-land	0	required	0
+failure	after-land	0	advisory	0
+failure	after-land	1	unscoped	1
+failure	after-land	1	required	1
+failure	after-land	1	advisory	0
 contention	0	0	1
 contention	1	1	2
 contention	12	12	13

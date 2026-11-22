@@ -106,8 +106,7 @@ pub fn apply(
         .project_config
         .at_commit(&culprit.commit)
         .map_err(internal)?;
-    let is_advisory = is_advisory_platform(&resolved.config, kind, platform);
-    let must_revert = !is_advisory && failure_reverts(resolved.config.review, kind);
+    let must_revert = confirmed_failure_reverts(&resolved.config, kind, platform);
     let mut conn = crate::metadata::open(&state.config.metadata_path()).map_err(internal)?;
     ensure_schema(&conn).map_err(internal)?;
     crate::bisect::ensure_schema(&conn).map_err(internal)?;
@@ -324,6 +323,15 @@ fn list(conn: &Connection, change: Option<&str>) -> Result<Vec<PostLandFailure>>
 /// R12 disposition, also checked against the landing model fixture.
 pub fn failure_reverts(review: ReviewMode, kind: CheckKind) -> bool {
     review == ReviewMode::BeforeLand || kind == CheckKind::Build
+}
+
+/// R12 confirmed failure disposition under the culprit's landed config.
+pub fn confirmed_failure_reverts(
+    config: &rosen_core::ProjectConfig,
+    kind: CheckKind,
+    platform: Option<&str>,
+) -> bool {
+    !is_advisory_platform(config, kind, platform) && failure_reverts(config.review, kind)
 }
 
 /// Advisory platforms declared only in `platform_commands` record failures
