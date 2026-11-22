@@ -213,7 +213,7 @@ fn waiting_no_checker(
     tables: super::platforms::ReadTables,
     now_ms: i64,
 ) -> Result<Option<i64>> {
-    let fallback = state.checkers.started_at_ms();
+    let started_at = state.checkers.started_at_ms();
     let mut oldest_waiting: Option<i64> = None;
     for (required, kind) in [
         (required_build, CheckKind::Build),
@@ -222,9 +222,15 @@ fn waiting_no_checker(
         if !required {
             continue;
         }
-        if let Some(at) =
-            super::platforms::oldest_waiting_at(conn, name, target.as_str(), kind, tables, fallback)
-                .map_err(internal)?
+        if let Some(at) = super::platforms::oldest_waiting_at(
+            conn,
+            name,
+            target.as_str(),
+            kind,
+            tables,
+            started_at,
+        )
+        .map_err(internal)?
         {
             oldest_waiting = Some(oldest_waiting.map_or(at, |cur| cur.min(at)));
         }
@@ -240,10 +246,13 @@ fn waiting_no_checker(
     .into_iter()
     .flatten()
     .max();
+    // Live checker presence is in-memory only, so before `started_at` a
+    // matching checker may have been connected across a server restart (#470).
+    let no_checker_since = last_online.unwrap_or(waiting_at).max(started_at);
     let wait_elapsed = now_ms.saturating_sub(waiting_at);
-    let offline_elapsed = last_online.map_or(wait_elapsed, |at| now_ms.saturating_sub(at));
+    let offline_elapsed = now_ms.saturating_sub(no_checker_since);
     if wait_elapsed >= NO_CHECKER_WAIT_MS && offline_elapsed >= NO_CHECKER_WAIT_MS {
-        Ok(Some(last_online.unwrap_or(waiting_at)))
+        Ok(Some(no_checker_since))
     } else {
         Ok(None)
     }

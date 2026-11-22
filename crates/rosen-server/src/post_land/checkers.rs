@@ -8,6 +8,7 @@
 use rosen_core::Platform;
 use rosen_protocol::ConnectedChecker;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 #[derive(Default)]
@@ -21,14 +22,14 @@ struct RegistryState {
 
 /// Live checker connections on the server, keyed by connection registration ID.
 pub struct CheckerRegistry {
-    started_at_ms: i64,
+    started_at_ms: AtomicI64,
     inner: Mutex<RegistryState>,
 }
 
 impl Default for CheckerRegistry {
     fn default() -> Self {
         Self {
-            started_at_ms: super::submitter::now_millis(),
+            started_at_ms: AtomicI64::new(super::submitter::now_millis()),
             inner: Mutex::default(),
         }
     }
@@ -96,7 +97,12 @@ impl CheckerRegistry {
 
     /// Unix milliseconds when this registry (and server) started.
     pub fn started_at_ms(&self) -> i64 {
-        self.started_at_ms
+        self.started_at_ms.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn set_started_at_ms(&self, started_at_ms: i64) {
+        self.started_at_ms.store(started_at_ms, Ordering::Relaxed);
     }
 
     /// Most recent disconnect timestamp (Unix ms) of any checker matching `target`.

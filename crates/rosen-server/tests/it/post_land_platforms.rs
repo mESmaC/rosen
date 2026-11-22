@@ -465,7 +465,7 @@ async fn advisory_platforms_report_results_and_failures_without_gating_green() {
 /// checkpoints wait on it must be reported loudly in status and the state feed.
 #[tokio::test(flavor = "multi_thread")]
 async fn required_platform_without_checker_for_an_hour_is_reported_waiting() {
-    let (_temp, state, _) = setup(MULTI_PLATFORM_TOML);
+    let (temp, state, _) = setup(MULTI_PLATFORM_TOML);
     let c1 = land(&state, "a.rs", b"1").await;
 
     // Pass on Windows so only macOS is still waiting on c1.
@@ -482,15 +482,25 @@ async fn required_platform_without_checker_for_an_hour_is_reported_waiting() {
         .unwrap();
     assert_eq!(mac_fresh.waiting_no_checker_since, None);
 
-    // Backdate the landed event by 2 hours so checkpoints have waited > 1 hour.
+    // Backdate the landed event by 2 hours; a freshly started server has not yet
+    // observed an hour without a matching checker, so it must stay silent (#470).
     let two_hours_ago = rosen_server::post_land::submitter::now_millis() - 2 * 60 * 60 * 1000;
     {
         let conn = rosen_server::metadata::open(&state.config.metadata_path()).unwrap();
         conn.execute("UPDATE events SET created_at = ?1", [two_hours_ago])
             .unwrap();
     }
+    let just_started = post_land_status(&state).await;
+    let mac_just_started = just_started
+        .platforms
+        .iter()
+        .find(|p| p.platform == "macos")
+        .unwrap();
+    assert_eq!(mac_just_started.waiting_no_checker_since, None);
 
-    // PostLandStatus reports macOS as waiting with the exact loud message; Windows is covered.
+    // Once the server itself has run for 2 hours without a macOS checker,
+    // PostLandStatus reports macOS as waiting with the exact loud message.
+    state.checkers.set_started_at_ms(two_hours_ago);
     let waited = post_land_status(&state).await;
     let win = waited
         .platforms
@@ -541,6 +551,20 @@ async fn required_platform_without_checker_for_an_hour_is_reported_waiting() {
         .unwrap();
     assert_eq!(mac_online.waiting_no_checker_since, None);
     drop(guard);
+
+    // Restarting the server right after disconnect must not re-emit the 1-hour alert (#470).
+    let restarted = ServerState::new(ServerConfig {
+        data_dir: temp.path().into(),
+        endpoint: Endpoint::new("platforms-contract-restarted"),
+        warm_pool_dir: None,
+    });
+    let after_restart = post_land_status(&restarted).await;
+    let mac_restarted = after_restart
+        .platforms
+        .iter()
+        .find(|p| p.platform == "macos")
+        .unwrap();
+    assert_eq!(mac_restarted.waiting_no_checker_since, None);
 }
 
 const OVERLAPPING_MACOS_TOML: &str = r#"
