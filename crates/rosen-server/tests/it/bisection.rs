@@ -47,6 +47,13 @@ fn bisection_fixtures() {
         rows.iter().any(|r| r.starts_with("platform\t")),
         "expected platform rows in bisection.tsv"
     );
+    assert!(
+        rows.iter().any(|r| {
+            r.strip_prefix("platform\t")
+                .is_some_and(|rest| rest.split('\t').nth(9).is_some_and(|pos| pos != "0"))
+        }),
+        "expected known-batch platform rows in bisection.tsv"
+    );
     std::thread::scope(|scope| {
         for shard in 0..SHARDS {
             let rows = &rows;
@@ -168,19 +175,82 @@ fn parse_kind(cell: &str) -> rosen_protocol::CheckKind {
     }
 }
 
-fn seed_prior_failure(conn: &rusqlite::Connection, pos: usize, kind: &str, plat: &str) {
-    rosen_server::post_land::failures::ensure_schema(conn).unwrap();
-    conn.execute("DELETE FROM bisections", []).ok();
-    conn.execute("DELETE FROM post_land_failures", []).ok();
-    if pos > 0 {
-        let req_rev = i32::from(kind == "build");
+fn seed_known_batch(
+    conn: &rusqlite::Connection,
+    cp: usize,
+    culprit: (usize, &str, &str),
+    known: (usize, &str, &str),
+    row: &str,
+) {
+    let (rec_pos, rec_kind, rec_plat) = culprit;
+    let (known_pos, known_kind, known_plat) = known;
+    if known_pos == 0 {
+        return;
+    }
+    let k_kind = parse_kind(known_kind);
+    let k_plat = (!known_plat.is_empty()).then_some(known_plat);
+    if rec_pos > 0 && (known_kind, known_plat) == (rec_kind, rec_plat) {
+        let covered = bisect::begin_for_in(
+            conn,
+            "main",
+            (oid(cp), oid(known_pos)),
+            "prior failure",
+            k_kind,
+            k_plat,
+            None,
+        )
+        .unwrap();
+        let phase: String = conn
+            .query_row(
+                "SELECT phase FROM bisections WHERE id=?1",
+                [covered.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, "known", "{row}");
+        assert!(covered.job.is_none() && covered.culprit.is_none(), "{row}");
+    } else {
+        // Cross-kind/platform covered batch control without a matching culprit in `s1`'s scope.
+        let _ = bisect::next(conn, -1);
+        let commits =
+            serde_json::to_string(&vec![(oid(cp), None::<String>), (oid(known_pos), None)])
+                .unwrap();
         conn.execute(
-            "INSERT INTO post_land_failures(session,change_id,commit_id,kind,platform,output,requires_revert)
-             VALUES (999,?1,?2,?3,?4,'prior failure',?5)",
-            rusqlite::params![format!("change-{pos}"), oid(pos).to_hex(), kind, plat, req_rev],
+            "INSERT INTO bisections(ref_name,failed,commits,low,high,phase,step,output,kind,platform)
+             VALUES ('main',?1,?2,0,1,'known',0,'prior failure',?3,?4)",
+            rusqlite::params![oid(known_pos).to_hex(), commits, known_kind, known_plat],
         )
         .unwrap();
     }
+}
+
+fn seed_prior_records(
+    conn: &rusqlite::Connection,
+    cp: usize,
+    culprit: (usize, &str, &str),
+    known: (usize, &str, &str),
+    row: &str,
+) {
+    let (rec_pos, rec_kind, rec_plat) = culprit;
+    rosen_server::post_land::failures::ensure_schema(conn).unwrap();
+    conn.execute("DELETE FROM bisections", []).ok();
+    conn.execute("DELETE FROM post_land_failures", []).ok();
+    if rec_pos > 0 {
+        let req_rev = i32::from(rec_kind == "build");
+        conn.execute(
+            "INSERT INTO post_land_failures(session,change_id,commit_id,kind,platform,output,requires_revert)
+             VALUES (999,?1,?2,?3,?4,'prior failure',?5)",
+            rusqlite::params![
+                format!("change-{rec_pos}"),
+                oid(rec_pos).to_hex(),
+                rec_kind,
+                rec_plat,
+                req_rev
+            ],
+        )
+        .unwrap();
+    }
+    seed_known_batch(conn, cp, culprit, known, row);
 }
 
 fn drive_platform_session(
@@ -220,48 +290,43 @@ fn drive_platform_session(
     assert_eq!(culprit.parent, oid(culprit_pos - 1), "{row}");
 }
 
-// R12 (#440, #461): bisection sessions are keyed by (failed, kind, platform),
-// isolate culprit boundaries per scope, and refuse mismatched job scopes.
+fn assert_wrong_scope_refused(
+    conn: &mut rusqlite::Connection,
+    job: &rosen_protocol::BisectJob,
+    kind2: rosen_protocol::CheckKind,
+    plat2: Option<&str>,
+    row: &str,
+) {
+    let mut wrong = job.clone();
+    wrong.kind = kind2;
+    wrong.platform = plat2.map(str::to_owned);
+    let rejected = bisect::submit(
+        conn,
+        &BisectResult {
+            job: wrong,
+            passed: false,
+            output: "wrong scope".into(),
+            submitter: None,
+            durations: None,
+        },
+    );
+    assert_eq!(rejected.unwrap_err().code, ErrorCode::Refused, "{row}");
+}
+
+// R12 (#440, #461, #473): bisection sessions are keyed by (failed, kind, platform),
+// isolate culprit and known-batch boundaries per scope, and refuse mismatched job scopes.
 fn check_platform_row(conn: &mut rusqlite::Connection, path: &Path, row: &str) {
     let c: Vec<&str> = row.split('\t').collect();
-    assert_eq!(c.len(), 16, "bad platform row: {row}");
+    assert_eq!(c.len(), 19, "bad platform row: {row}");
     let (kind1, plat1) = (parse_kind(c[0]), (!c[1].is_empty()).then_some(c[1]));
     let (kind2, plat2) = (parse_kind(c[2]), (!c[3].is_empty()).then_some(c[3]));
-    let (cp, failed, rec_pos): (usize, usize, usize) = (
-        c[4].parse().unwrap(),
-        c[5].parse().unwrap(),
-        c[6].parse().unwrap(),
-    );
-    let culprit_pos: usize = c[9].parse().unwrap();
-    let (same_session, accept_other) = (c[10] == "1", c[11] == "1");
-    let (bound, mid, next_low, next_high): (usize, usize, usize, usize) = (
-        c[12].parse().unwrap(),
-        c[13].parse().unwrap(),
-        c[14].parse().unwrap(),
-        c[15].parse().unwrap(),
-    );
-    seed_prior_failure(conn, rec_pos, c[7], c[8]);
-    let s1 = bisect::begin_for_in(
-        conn,
-        "main",
-        (oid(cp), oid(failed)),
-        "batch",
-        kind1,
-        plat1,
-        None,
-    )
-    .unwrap();
-    let s2 = bisect::begin_for_in(
-        conn,
-        "main",
-        (oid(cp), oid(failed)),
-        "batch",
-        kind2,
-        plat2,
-        None,
-    )
-    .unwrap();
-    assert_eq!(s1.id == s2.id, same_session, "{row}");
+    let n = |i: usize| c[i].parse::<usize>().unwrap();
+    let (cp, failed) = (n(4), n(5));
+    seed_prior_records(conn, cp, (n(6), c[7], c[8]), (n(9), c[10], c[11]), row);
+    let range = (oid(cp), oid(failed));
+    let s1 = bisect::begin_for_in(conn, "main", range, "batch", kind1, plat1, None).unwrap();
+    let s2 = bisect::begin_for_in(conn, "main", range, "batch", kind2, plat2, None).unwrap();
+    assert_eq!(s1.id == s2.id, c[13] == "1", "{row}");
     assert_eq!((s1.kind, s1.platform.as_deref()), (kind1, plat1), "{row}");
     let captured: String = conn
         .query_row("SELECT commits FROM bisections WHERE id=?1", [s1.id], |r| {
@@ -269,30 +334,12 @@ fn check_platform_row(conn: &mut rusqlite::Connection, path: &Path, row: &str) {
         })
         .unwrap();
     let commits: Vec<(ObjectId, Option<String>)> = serde_json::from_str(&captured).unwrap();
+    let (bound, mid, next_low, next_high) = (n(15), n(16), n(17), n(18));
     assert_eq!(commits[0].0, oid(bound), "{row}");
     assert_eq!(s1.job.as_ref().unwrap().commit, oid(mid), "{row}");
-    if !accept_other {
-        let mut wrong = s1.job.clone().unwrap();
-        wrong.kind = kind2;
-        wrong.platform = plat2.map(str::to_owned);
-        let rejected = bisect::submit(
-            conn,
-            &BisectResult {
-                job: wrong,
-                passed: false,
-                output: "wrong scope".into(),
-                submitter: None,
-                durations: None,
-            },
-        );
-        assert_eq!(rejected.unwrap_err().code, ErrorCode::Refused, "{row}");
+    if c[14] != "1" {
+        assert_wrong_scope_refused(conn, s1.job.as_ref().unwrap(), kind2, plat2, row);
     }
-    drive_platform_session(
-        conn,
-        path,
-        s1,
-        (bound, culprit_pos, next_low, next_high),
-        row,
-    );
+    drive_platform_session(conn, path, s1, (bound, n(12), next_low, next_high), row);
     conn.execute("DELETE FROM post_land_failures", []).ok();
 }
