@@ -327,9 +327,19 @@ impl Client {
             }
             Err(err) => return Err(err),
         }
+        self.cleanup_staged(change, staged).await?;
+        Ok(true)
+    }
+
+    /// Finishes deleting a `.rosen-delete-*` directory for `change`. When an
+    /// earlier pass was interrupted after deleting `.rosen/workspace.json`,
+    /// removes only an empty shell (or empty `.rosen`), preserving any
+    /// nonempty markerless directory (R4 / #455).
+    async fn cleanup_staged(&self, change: ChangeId, staged: &Path) -> Result<(), Error> {
+        reject_symlink(staged)?;
+        self.check_workspace_boundary(staged).await?;
         if !WorkspaceMarker::path(staged).try_exists()? {
-            remove_empty_staged_shell(staged)?;
-            return Ok(true);
+            return remove_empty_staged_shell(staged);
         }
         if WorkspaceMarker::read(staged)?.change != change {
             return Err(kept(format!(
@@ -337,10 +347,9 @@ impl Client {
                 staged.display()
             )));
         }
-        self.check_workspace_boundary(staged).await?;
         let staged_lease = self.verify_workspace_durable(staged, true).await?;
         remove_verified_blocking(staged_lease).await?;
-        Ok(true)
+        Ok(())
     }
 
     async fn cleanup_workspace(&self, record: &WorkspaceRecord) -> Result<bool, Error> {
@@ -368,10 +377,7 @@ impl Client {
             } else {
                 self.check_workspace_boundary(&record.path).await?;
             }
-            verify_registration(&staged, record)?;
-            self.check_workspace_boundary(&staged).await?;
-            let staged_lease = self.verify_workspace_durable(&staged, true).await?;
-            remove_verified_blocking(staged_lease).await?;
+            self.cleanup_staged(record.change, &staged).await?;
             self.unregister_workspace(record).await?;
             return Ok(true);
         }
@@ -434,7 +440,7 @@ fn remove_empty_staged_shell(staged: &Path) -> Result<(), Error> {
     for entry in std::fs::read_dir(staged)? {
         let entry = entry?;
         if entry.file_name() == OsStr::new(crate::snapshot::STATE_DIR)
-            && entry.file_type()?.is_dir()
+            && is_plain_dir(&entry.path())?
         {
             if std::fs::read_dir(entry.path())?.next().is_some() {
                 return Err(kept("staged directory has no workspace marker"));
@@ -449,6 +455,11 @@ fn remove_empty_staged_shell(staged: &Path) -> Result<(), Error> {
     }
     rosen_platform::remove_dir(staged)?;
     Ok(())
+}
+
+fn is_plain_dir(path: &Path) -> std::io::Result<bool> {
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok(meta.is_dir() && !is_link_or_reparse(&meta))
 }
 
 fn staging_path(record: &WorkspaceRecord) -> Result<PathBuf, Error> {
@@ -472,10 +483,23 @@ fn verify_registration(root: &Path, record: &WorkspaceRecord) -> Result<(), Erro
 }
 
 fn reject_symlink(root: &Path) -> Result<(), Error> {
-    if std::fs::symlink_metadata(root)?.file_type().is_symlink() {
+    if is_link_or_reparse(&std::fs::symlink_metadata(root)?) {
         return Err(kept("root is a symlink"));
     }
     Ok(())
+}
+
+fn is_link_or_reparse(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const REPARSE_POINT: u32 = 0x400;
+        meta.file_type().is_symlink() || meta.file_attributes() & REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
 }
 
 /// Opens the workspace, holds it for deletion and checks that every file is
@@ -547,5 +571,25 @@ mod tests {
         assert!(!retries.is_deferred(&refused, first));
         let second = CleanupRetry::after_refusal(retries.pending.remove(&refused), first);
         assert_eq!(second.at, first + Duration::from_secs(2));
+    }
+
+    #[test]
+    fn empty_staged_shell_preserves_nonempty_markerless_dirs() {
+        // R4 / #455: markerless staged recovery must finish an empty shell or
+        // empty `.rosen`, and keep any directory with remaining files.
+        let dir = tempfile::tempdir().unwrap();
+        let shell = dir.path().join("empty-shell");
+        std::fs::create_dir_all(shell.join(".rosen")).unwrap();
+        remove_empty_staged_shell(&shell).unwrap();
+        assert!(!shell.exists());
+
+        let nonempty = dir.path().join("nonempty");
+        std::fs::create_dir_all(nonempty.join(".rosen")).unwrap();
+        std::fs::write(nonempty.join("keep.txt"), b"unstored").unwrap();
+        assert!(remove_empty_staged_shell(&nonempty).is_err());
+        assert_eq!(
+            std::fs::read(nonempty.join("keep.txt")).unwrap(),
+            b"unstored"
+        );
     }
 }
