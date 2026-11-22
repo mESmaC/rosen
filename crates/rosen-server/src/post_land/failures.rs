@@ -335,7 +335,7 @@ pub fn confirmed_failure_reverts(
 }
 
 /// Advisory platforms declared only in `platform_commands` record failures
-/// without reverting the base (R12, #457).
+/// without reverting the base, including when `platforms` is omitted (R12, #457, #469).
 fn is_advisory_platform(
     config: &rosen_core::ProjectConfig,
     kind: CheckKind,
@@ -348,8 +348,7 @@ fn is_advisory_platform(
         CheckKind::Test => &config.checks.post_land,
         CheckKind::Build => &config.checks.pre_land,
     };
-    !set.platforms.is_empty()
-        && rosen_core::Platform::parse(raw).is_ok_and(|parsed| !set.platforms.contains(&parsed))
+    rosen_core::Platform::parse(raw).is_ok_and(|parsed| !set.is_required_platform(&parsed))
 }
 
 fn revert_recorded(

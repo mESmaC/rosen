@@ -228,11 +228,12 @@ fn resolve_targets(
         return OfferTargets::Any;
     };
     let set = check_set_for(config, kind);
-    if set.platforms.is_empty() {
-        return OfferTargets::Any;
-    }
     let Some(checker) = checker_platform else {
-        return OfferTargets::Unsupported;
+        return if set.platforms.is_empty() {
+            OfferTargets::Any
+        } else {
+            OfferTargets::Unsupported
+        };
     };
     let targets: Vec<CandidateTarget> = set
         .matching_targets(checker)
@@ -242,16 +243,20 @@ fn resolve_targets(
             platform: platform.clone(),
         })
         .collect();
-    if targets.is_empty() {
-        OfferTargets::Unsupported
-    } else {
+    if !targets.is_empty() {
         OfferTargets::Platforms(targets)
+    } else if set.platforms.is_empty() {
+        OfferTargets::Any
+    } else {
+        OfferTargets::Unsupported
     }
 }
 
 /// Selects the next pending `(commit, target)` a checker on `checker_platform`
-/// can run. Across overlapping matching targets (for example `macos` and
-/// `macos-arm64`), required targets always precede advisory ones, and within
+/// can run. When `platforms` is omitted, the default any-platform stream gates
+/// aggregate green and runs before any matching advisory `platform_commands`
+/// targets (R12, #469). Across overlapping matching targets (for example `macos`
+/// and `macos-arm64`), required targets always precede advisory ones, and within
 /// each tier the target with the lowest covered sequence goes first so neither
 /// checkpoint can starve under continuous lands (R12, #459).
 fn next_pending_work(
@@ -261,10 +266,16 @@ fn next_pending_work(
     kind: CheckKind,
     checker_platform: Option<&Platform>,
 ) -> Result<Option<(rosen_core::ObjectId, Option<Platform>)>, ErrorBody> {
+    let includes_any = config.is_none_or(|c| check_set_for(c, kind).platforms.is_empty());
     match resolve_targets(config, kind, checker_platform) {
         OfferTargets::Unsupported => Ok(None),
         OfferTargets::Any => Ok(newest_unscoped(conn, name, kind)?.map(|commit| (commit, None))),
         OfferTargets::Platforms(targets) => {
+            if includes_any {
+                if let Some(commit) = newest_unscoped(conn, name, kind)? {
+                    return Ok(Some((commit, None)));
+                }
+            }
             let mut best: Option<((bool, i64, usize), rosen_core::ObjectId, Platform)> = None;
             for (index, candidate) in targets.into_iter().enumerate() {
                 let Some((commit, floor)) =
@@ -292,7 +303,10 @@ fn job_at(
 ) -> Result<PostLandJob, ErrorBody> {
     let config = state.project_config.at_commit(&commit).map_err(internal)?;
     let mut check_set = check_set_for(&config.config, kind).clone();
-    check_set.commands = check_set.commands_for(checker_platform.or(target));
+    // Unscoped jobs run only shared commands so advisory `platform_commands`
+    // stay isolated to their own advisory target checkpoints (R12, #469).
+    let expand_for = target.map(|target| checker_platform.unwrap_or(target));
+    check_set.commands = check_set.commands_for(expand_for);
     Ok(PostLandJob {
         commit,
         kind,
@@ -379,16 +393,10 @@ fn validate_platform(
     configured: &rosen_core::project_config::CheckSet,
     platform: Option<&str>,
 ) -> Result<Option<Platform>, ErrorBody> {
-    if configured.platforms.is_empty() {
-        if platform.is_some() {
-            return Err(ErrorBody::new(
-                ErrorCode::InvalidArgument,
-                "check set does not configure per-platform jobs",
-            ));
-        }
-        return Ok(None);
-    }
     let Some(raw) = platform else {
+        if configured.platforms.is_empty() {
+            return Ok(None);
+        }
         return Err(ErrorBody::new(
             ErrorCode::InvalidArgument,
             "job must name a configured platform",
@@ -397,10 +405,13 @@ fn validate_platform(
     let parsed =
         Platform::parse(raw).map_err(|err| ErrorBody::new(ErrorCode::InvalidArgument, err))?;
     if !configured.accepts_platform(&parsed) {
-        return Err(ErrorBody::new(
-            ErrorCode::InvalidArgument,
-            format!("platform {raw:?} is not configured for this check set"),
-        ));
+        let message = if configured.platforms.is_empty() && configured.platform_commands.is_empty()
+        {
+            "check set does not configure per-platform jobs".to_owned()
+        } else {
+            format!("platform {raw:?} is not configured for this check set")
+        };
+        return Err(ErrorBody::new(ErrorCode::InvalidArgument, message));
     }
     Ok(Some(parsed))
 }

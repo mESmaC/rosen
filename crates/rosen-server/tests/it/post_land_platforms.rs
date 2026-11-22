@@ -664,3 +664,114 @@ async fn generic_macos_job_expands_arm64_commands_and_preserves_checkpoint() {
     };
     assert_eq!(bisect.platform.as_deref(), Some("macos"));
 }
+
+/// Risk (R12, #469): omitting `platforms` while declaring `platform_commands`
+/// must run shared checks on the default any-platform stream and still offer,
+/// record and bisect separate non-reverting advisory jobs for matching checkers.
+#[tokio::test(flavor = "multi_thread")]
+async fn advisory_only_platform_commands_run_separate_from_default_stream() {
+    let toml = "review = \"after-land\"\n\
+                [checks.post_land]\ncommands = [\"shared tests\"]\n\
+                [checks.post_land.platform_commands]\nlinux = [\"linux tests\"]\n";
+    let (_temp, state, _) = setup(toml);
+    let c1 = land(&state, "a.rs", b"1").await;
+
+    let shared = next_for(&state, "linux-x86_64").await.job.unwrap();
+    assert_eq!((shared.commit, shared.platform.as_deref()), (c1, None));
+    assert_eq!(shared.check_set.commands, vec!["shared tests"]);
+    let mut tampered = shared.clone();
+    tampered.check_set.commands.push("linux tests".into());
+    assert!(matches!(
+        dispatch(&state, Request::PostLandPassed(tampered)).await,
+        Outcome::Error(_)
+    ));
+
+    let Response::PostLand(after_shared) = call(&state, Request::PostLandPassed(shared)).await
+    else {
+        panic!()
+    };
+    assert_eq!(after_shared.last_green, Some(c1));
+    let linux = after_shared.job.expect("separate Linux advisory job");
+    assert_eq!(
+        (linux.commit, linux.platform.as_deref()),
+        (c1, Some("linux"))
+    );
+    assert_eq!(
+        linux.check_set.commands,
+        vec!["shared tests", "linux tests"]
+    );
+    call(&state, Request::PostLandPassed(linux)).await;
+
+    let st = post_land_status(&state).await;
+    assert_eq!(st.last_green.as_ref().map(|c| c.commit), Some(c1));
+    assert_eq!(st.platforms.len(), 1);
+    assert_eq!(st.platforms[0].platform, "linux");
+    assert!(!st.platforms[0].is_required());
+    assert_eq!(
+        st.platforms[0].last_green.as_ref().map(|c| c.commit),
+        Some(c1)
+    );
+    assert!(next_for(&state, "linux-x86_64").await.job.is_none());
+
+    let c2 = land(&state, "b.rs", b"2").await;
+    let win = next_for(&state, "windows-x86_64").await.job.unwrap();
+    assert_eq!((win.commit, win.platform.as_deref()), (c2, None));
+    call(&state, Request::PostLandPassed(win)).await;
+    bisect_advisory_linux_failure(&state, c1, c2).await;
+}
+
+async fn bisect_advisory_linux_failure(state: &Arc<ServerState>, c1: ObjectId, c2: ObjectId) {
+    let linux_c2 = next_for(state, "linux-x86_64").await.job.unwrap();
+    assert_eq!(
+        (linux_c2.commit, linux_c2.platform.as_deref()),
+        (c2, Some("linux"))
+    );
+    let fail = Request::PostLandFailed {
+        job: linux_c2,
+        output: "linux advisory failed".into(),
+    };
+    let Response::Bisection(mut bisect) = call(state, fail).await else {
+        panic!()
+    };
+    assert_eq!(bisect.platform.as_deref(), Some("linux"));
+    while let Some(job) = bisect.job.clone() {
+        let passed = job.commit == c1;
+        let result = BisectResult {
+            job,
+            passed,
+            output: if passed {
+                String::new()
+            } else {
+                "linux advisory failed".into()
+            },
+            submitter: None,
+            durations: None,
+        };
+        let Response::Bisection(next) = call(state, Request::BisectSubmit(result)).await else {
+            panic!()
+        };
+        bisect = next;
+    }
+    assert_eq!(bisect.culprit.as_ref().map(|c| c.commit), Some(c2));
+    assert!(next_for(state, "linux-x86_64").await.job.is_none());
+    let cfg = rosen_core::ProjectConfig::parse(
+        "review = \"before-land\"\n\
+         [checks.pre_land.platform_commands]\nlinux = [\"linux build\"]\n\
+         [checks.post_land.platform_commands]\nlinux = [\"linux test\"]\n",
+    )
+    .unwrap();
+    assert!(
+        !rosen_server::post_land::failures::confirmed_failure_reverts(
+            &cfg,
+            CheckKind::Test,
+            Some("linux")
+        )
+    );
+    assert!(
+        !rosen_server::post_land::failures::confirmed_failure_reverts(
+            &cfg,
+            CheckKind::Build,
+            Some("linux")
+        )
+    );
+}

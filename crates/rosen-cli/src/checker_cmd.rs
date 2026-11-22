@@ -294,6 +294,7 @@ async fn bisect_commands(
     Ok(bisect_commands_for(
         &record.config,
         job.kind,
+        job.platform.as_deref(),
         checker_platform,
     ))
 }
@@ -301,13 +302,14 @@ async fn bisect_commands(
 fn bisect_commands_for(
     config: &rosen_core::ProjectConfig,
     kind: CheckKind,
+    target_platform: Option<&str>,
     checker_platform: &Platform,
 ) -> Vec<String> {
     let set = match kind {
         CheckKind::Build => &config.checks.pre_land,
         CheckKind::Test => &config.checks.post_land,
     };
-    set.commands_for(Some(checker_platform))
+    set.commands_for(target_platform.map(|_| checker_platform))
 }
 
 async fn execute_commands(
@@ -474,8 +476,8 @@ impl Drop for TempDirGuard {
 mod tests {
     use super::*;
 
-    /// Risk (R12, #460): bisection on a generic target must expand commands
-    /// against the checker platform so arch-specific checks are not omitted.
+    /// Risk (R12, #460, #469): bisection on a scoped target must expand commands
+    /// against the checker platform, while an unscoped bisection runs only shared commands.
     #[test]
     fn bisect_commands_use_checker_platform_for_generic_target() {
         let cfg = rosen_core::ProjectConfig::parse(
@@ -486,9 +488,24 @@ mod tests {
         let arm = Platform::parse("macos-arm64").unwrap();
         let x64 = Platform::parse("macos-x86_64").unwrap();
         assert_eq!(
-            bisect_commands_for(&cfg, CheckKind::Test, &arm),
+            bisect_commands_for(&cfg, CheckKind::Test, Some("macos"), &arm),
             vec!["echo arm check"]
         );
-        assert!(bisect_commands_for(&cfg, CheckKind::Test, &x64).is_empty());
+        assert!(bisect_commands_for(&cfg, CheckKind::Test, Some("macos"), &x64).is_empty());
+
+        let advisory = rosen_core::ProjectConfig::parse(
+            "[checks.post_land]\ncommands = [\"shared\"]\n\
+             [checks.post_land.platform_commands]\nlinux = [\"linux check\"]\n",
+        )
+        .unwrap();
+        let linux = Platform::parse("linux-x86_64").unwrap();
+        assert_eq!(
+            bisect_commands_for(&advisory, CheckKind::Test, None, &linux),
+            vec!["shared"]
+        );
+        assert_eq!(
+            bisect_commands_for(&advisory, CheckKind::Test, Some("linux"), &linux),
+            vec!["shared", "linux check"]
+        );
     }
 }
