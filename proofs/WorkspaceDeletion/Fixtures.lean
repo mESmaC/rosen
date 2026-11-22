@@ -35,6 +35,9 @@ def stagedRow (scratch : Bool) : String :=
     (· == "main.rs") (fun _ => none) (· == "proofs/.lake/output.bin")
   "\t".intercalate ["staged", bit scratch, bit (pending disk []).isEmpty]
 
+def markerlessRow (name : String) (boundaryClear : Bool) (entries : List ShellEntry) : String :=
+  "\t".intercalate ["markerless", name, bit (markerlessFinished boundaryClear entries true)]
+
 def table : String :=
   "dirty\tjournal\tmismatch\tignored\tdelete\n" ++
     "#375 regression: a durable Unix workspace (0 0 0 0) must be removable\n" ++
@@ -48,13 +51,20 @@ def table : String :=
     "#413 regression: report rows give the scratch count and exact refusal text\n" ++
     reportRow 12 ++ "\n" ++
     "#430 regression: staged retry with a removed tracked file and stored ignore rules\n" ++
-    stagedRow false ++ "\n" ++ stagedRow true ++ "\n"
+    stagedRow false ++ "\n" ++ stagedRow true ++ "\n" ++
+    "#455 regression: registered staged retry after removing the marker\n" ++
+    markerlessRow "empty" true [] ++ "\n" ++
+    markerlessRow "empty-state" true [.stateDir true] ++ "\n" ++
+    markerlessRow "root-file" true [.stateDir true, .other] ++ "\n" ++
+    markerlessRow "state-file" true [.stateDir false] ++ "\n" ++
+    markerlessRow "nested" false [] ++ "\n"
 
 #print axioms bit
 #print axioms evidence
 #print axioms row
 #print axioms reportRow
 #print axioms stagedRow
+#print axioms markerlessRow
 #print axioms table
 
 end WorkspaceDeletion.Fixtures

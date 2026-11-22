@@ -26,3 +26,9 @@ report	12	unstored files (12): e.g. scratch/edit-00, scratch/edit-01, scratch/ed
 #430 regression: staged retry with a removed tracked file and stored ignore rules
 staged	0	1
 staged	1	0
+#455 regression: registered staged retry after removing the marker
+markerless	empty	1
+markerless	empty-state	1
+markerless	root-file	0
+markerless	state-file	0
+markerless	nested	0

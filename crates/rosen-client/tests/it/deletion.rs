@@ -11,6 +11,8 @@ use rosen_server::landing::Ledger;
 use rosen_server::{ServerConfig, ServerState};
 use rosen_store::{LooseObjectStore, ObjectStore};
 use std::path::Path;
+#[cfg(any(windows, unix))]
+use std::path::PathBuf;
 use std::time::Duration;
 
 const DELETION_FIXTURES: &str = include_str!("../../../../proofs/fixtures/workspace-deletion.tsv");
@@ -38,6 +40,8 @@ async fn deletion_stores_edits_or_keeps_and_names_them() {
     interrupted_cleanup_finishes(&client, &data, &dir.path().join("interrupted")).await;
     #[cfg(any(windows, unix))]
     orphaned_staged_folders_finish_in_one_pass(&client, &data, dir.path()).await;
+    #[cfg(any(windows, unix))]
+    registered_markerless_fixtures(&client, &data, dir.path()).await;
     daemon_cleans_closed_workspace(&client, &endpoint, &data, &dir.path().join("automatic")).await;
 }
 
@@ -366,6 +370,28 @@ async fn check_staged_fixture(
 async fn interrupted_cleanup_finishes(client: &Client, data: &Path, workspace: &Path) {
     let change = new_workspace(client, workspace).await;
     close_without_snapshot(client, &change).await;
+    let (staged, _) = registered_deletion_paths(data, workspace, &change);
+    std::fs::rename(workspace, &staged).unwrap();
+    std::fs::remove_file(staged.join("main.rs")).unwrap();
+    // Earlier scenarios' kept workspaces are refused in the same pass.
+    let reports = client.cleanup_workspaces().await.unwrap();
+    let report = reports
+        .iter()
+        .find(|report| report.path.ends_with(workspace.file_name().unwrap()))
+        .expect("interrupted cleanup was not attempted");
+    assert!(
+        report.error.is_none(),
+        "interrupted cleanup was refused: {report:?}"
+    );
+    assert!(!staged.exists(), "staged workspace was kept");
+}
+
+#[cfg(any(windows, unix))]
+fn registered_deletion_paths(
+    data: &Path,
+    workspace: &Path,
+    change: &ChangeRecord,
+) -> (PathBuf, PathBuf) {
     // The registration file's name is the identity that names the staging
     // directory beside the workspace.
     let identity = std::fs::read_dir(data.join("workspaces"))
@@ -383,19 +409,58 @@ async fn interrupted_cleanup_finishes(client: &Client, data: &Path, workspace: &
         change.change.id,
         identity.file_stem().unwrap().to_string_lossy()
     ));
-    std::fs::rename(workspace, &staged).unwrap();
-    std::fs::remove_file(staged.join("main.rs")).unwrap();
-    // Earlier scenarios' kept workspaces are refused in the same pass.
-    let reports = client.cleanup_workspaces().await.unwrap();
-    let report = reports
-        .iter()
-        .find(|report| report.path.ends_with(workspace.file_name().unwrap()))
-        .expect("interrupted cleanup was not attempted");
-    assert!(
-        report.error.is_none(),
-        "interrupted cleanup was refused: {report:?}"
-    );
-    assert!(!staged.exists(), "staged workspace was kept");
+    (staged, identity)
+}
+
+#[cfg(any(windows, unix))]
+async fn registered_markerless_fixtures(client: &Client, data: &Path, root: &Path) {
+    for row in DELETION_FIXTURES
+        .lines()
+        .filter_map(|line| line.strip_prefix("markerless\t"))
+    {
+        let (case, delete) = row.split_once('\t').unwrap();
+        let parent = root.join(format!("markerless-{case}"));
+        std::fs::create_dir(&parent).unwrap();
+        let workspace = parent.join("original");
+        let change = new_workspace(client, &workspace).await;
+        close_without_snapshot(client, &change).await;
+        let (staged, registration) = registered_deletion_paths(data, &workspace, &change);
+        // R4 / #455: simulate interruption after marker removal. A retry
+        // could strand the registration or discard work added to the shell.
+        std::fs::rename(&workspace, parent.join("saved")).unwrap();
+        std::fs::create_dir(&staged).unwrap();
+        let state = staged.join(".rosen");
+        if matches!(case, "empty-state" | "root-file" | "state-file") {
+            std::fs::create_dir(&state).unwrap();
+        }
+        let payload = match case {
+            "empty" | "empty-state" => None,
+            "root-file" => Some(staged.join("keep.txt")),
+            "state-file" => Some(state.join("keep.txt")),
+            "nested" => {
+                // Boundary validation checks for an enclosing marker.
+                std::fs::create_dir(parent.join(".rosen")).unwrap();
+                std::fs::write(parent.join(".rosen/workspace.json"), b"{}").unwrap();
+                None
+            }
+            _ => panic!("unknown markerless fixture: {case}"),
+        };
+        if let Some(path) = &payload {
+            std::fs::write(path, b"unstored").unwrap();
+        }
+        let reports = client.cleanup_workspaces().await.unwrap();
+        let report = reports
+            .iter()
+            .find(|report| report.path.ends_with(workspace.strip_prefix(root).unwrap()))
+            .unwrap_or_else(|| panic!("markerless retry was not attempted: {case}"));
+        let delete = delete == "1";
+        assert_eq!(report.error.is_none(), delete, "{case}: {report:?}");
+        assert_eq!(staged.exists(), !delete, "{case}: staged shell");
+        assert_eq!(registration.exists(), !delete, "{case}: registration");
+        if let Some(path) = payload {
+            assert_eq!(std::fs::read(path).unwrap(), b"unstored", "{case}");
+        }
+    }
 }
 
 async fn daemon_cleans_closed_workspace(
@@ -444,6 +509,7 @@ fn check_design_fixtures() {
             || line.starts_with("dirty")
             || line.starts_with("report\t")
             || line.starts_with("staged\t")
+            || line.starts_with("markerless\t")
         {
             continue;
         }

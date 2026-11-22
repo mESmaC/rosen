@@ -60,6 +60,25 @@ def remaining [DecidableEq Edit] (e : Evidence Edit)
     originals.filter (fun edit => decide (edit ∉ removed)) ++ later
   else originals ++ later
 
+/-- Classify a markerless staged root's entries without following links.
+`stateDir` is reserved for a plain `.rosen` directory. Its flag records
+whether it is empty. All other entries, including links, are `other`. -/
+inductive ShellEntry where
+  | stateDir (empty : Bool)
+  | other
+
+def removableShell : List ShellEntry → Bool
+  | [] | [.stateDir true] => true
+  | _ => false
+
+/-- A registration can be cleared once the boundary has been checked, the
+scan accepts the shell, and nonrecursive removal of the root has succeeded.
+The last observation can fail even after an accepted scan, for example if a
+concurrent write makes the directory nonempty. -/
+def markerlessFinished (boundaryClear : Bool) (entries : List ShellEntry)
+    (rootRemoved : Bool) : Bool :=
+  boundaryClear && removableShell entries && rootRemoved
+
 /-- spec/R4-workspace-lifecycle-and-deletion.md R4: for any prefix of removals of verified object versions,
 every relevant original or later concurrent version stays server-stored or
 local. Only observed objects may enter that prefix; unobserved objects and
@@ -68,7 +87,9 @@ is required for full cleanup, but not for safety of partial cleanup.
 The refusal reports the full count and the first five pending versions, or
 all of them if there are fewer. Every example is relevant and unstored.
 A staged retry requires durability for the tracked or unignored versions
-still on disk, with live ignore rules taking precedence over stored rules. -/
+still on disk, with live ignore rules taking precedence over stored rules.
+After marker removal, registered cleanup can finish only after boundary
+validation and successful nonrecursive removal of an empty shell. -/
 theorem correct [DecidableEq Edit] (e : Evidence Edit)
     (server originals removed later : List Edit)
     (verified : ∀ edit ∈ removed, edit ∈ observations e) :
@@ -83,8 +104,12 @@ theorem correct [DecidableEq Edit] (e : Evidence Edit)
     (∀ present tracked live stored edit,
       edit ∈ pending (stagedDisk e.disk present tracked live stored) server ↔
       edit ∈ e.disk ∧ present edit = true ∧
-        (tracked edit = true ∨ (live edit).getD (stored edit) = false) ∧ edit ∉ server) := by
-  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+        (tracked edit = true ∨ (live edit).getD (stored edit) = false) ∧ edit ∉ server) ∧
+    (∀ boundaryClear entries rootRemoved,
+      markerlessFinished boundaryClear entries rootRemoved = true ↔
+      boundaryClear = true ∧ (entries = [] ∨ entries = [.stateDir true]) ∧
+        rootRemoved = true) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro edit held hi
     rcases List.mem_append.mp held with original | added
     · by_cases accepted : pending e server = []
@@ -107,6 +132,17 @@ theorem correct [DecidableEq Edit] (e : Evidence Edit)
   · intro present tracked live stored edit
     simp [pending, observations, stagedDisk, List.mem_filter, Bool.and_eq_true,
       Bool.or_eq_true, and_left_comm, and_comm]
+  · intro boundaryClear entries rootRemoved
+    cases entries with
+    | nil => simp [markerlessFinished, removableShell]
+    | cons entry tail =>
+      cases tail with
+      | nil =>
+        cases entry with
+        | other => simp [markerlessFinished, removableShell]
+        | stateDir empty => cases empty <;> simp [markerlessFinished, removableShell]
+      | cons next rest =>
+        cases entry <;> simp [markerlessFinished, removableShell]
 /-- One unit per dirty/journal record checked; one unit plus its bytes per
 hash-scanned file, for one evidence-validation pass. This primitive model
 excludes set/list lookup, traversal, OS metadata/handle operations, actual
@@ -194,6 +230,9 @@ theorem optimal :
 #print axioms stagedDisk
 #print axioms refusalSummary
 #print axioms remaining
+#print axioms ShellEntry
+#print axioms removableShell
+#print axioms markerlessFinished
 #print axioms correct
 #print axioms scanCost
 #print axioms hash_cost_le
