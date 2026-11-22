@@ -15,3 +15,18 @@ already	moved	clean	recovered	land
 1	1	0	1	0
 1	1	1	0	0
 1	1	1	1	0
+mode	before-land	test	0	1
+mode	before-land	test	1	0
+mode	before-land	build	0	1
+mode	before-land	build	1	0
+mode	after-land	test	0	0
+mode	after-land	test	1	0
+mode	after-land	build	0	1
+mode	after-land	build	1	0
+platform	after-land	build	windows	0	build	macos	0	2	1	1	1	1
+platform	after-land	build	windows	0	build	windows	0	1	1	1	1	1
+platform	after-land	build	windows	0	build	linux	1	2	1	0	1	0
+platform	after-land	build	linux	1	build	windows	0	2	1	0	0	1
+platform	after-land	test	windows	0	test	macos	0	2	0	0	0	0
+platform	before-land	test	windows	0	test	macos	0	2	1	1	1	1
+platform	after-land	test	windows	0	build	macos	0	2	1	0	0	1

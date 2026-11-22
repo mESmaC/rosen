@@ -109,6 +109,9 @@ fn inverse_gate_matches_proved_fixtures() {
         .lines()
         .skip(1)
     {
+        if row.starts_with("mode\t") || row.starts_with("platform\t") {
+            continue; // Checked by tests/it/auto_revert.rs.
+        }
         let bits: Vec<bool> = row.split('\t').map(|s| s == "1").collect();
         assert_eq!(eligible(bits[0], bits[1], bits[2], bits[3]), bits[4]);
     }

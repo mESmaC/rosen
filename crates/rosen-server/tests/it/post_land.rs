@@ -169,9 +169,15 @@ async fn batch_green_survives_restart_and_excludes_future_lands() {
 async fn sql_prefix_matches_lean_fixtures() {
     use rosen_server::post_land::store;
     let fixture = include_str!("../../../../proofs/fixtures/batch-green.tsv");
+    let mut platform_rows = 0usize;
     for line in fixture.lines().skip(1) {
         if let Some(offer) = line.strip_prefix("offer\t") {
             check_build_offer(offer).await;
+            continue;
+        }
+        if let Some(platform) = line.strip_prefix("platform\t") {
+            check_platform_prefix(platform).await;
+            platform_rows += 1;
             continue;
         }
         let cells: Vec<u32> = line.split('\t').map(|n| n.parse().unwrap()).collect();
@@ -197,6 +203,95 @@ async fn sql_prefix_matches_lean_fixtures() {
         );
         let pending = store::pending(&conn).unwrap();
         assert_eq!(pending.len(), cells[2] as usize);
+    }
+    assert!(
+        platform_rows > 0,
+        "expected platform rows in batch-green.tsv"
+    );
+}
+
+fn platform_config(required: &[&str]) -> String {
+    let req_toml = required
+        .iter()
+        .map(|p| format!("\"{p}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut toml = format!(
+        "review = \"after-land\"\n[checks.post_land]\nplatforms = [{req_toml}]\n\
+         commands = [\"test\"]\n[checks.post_land.platform_commands]\n"
+    );
+    for plat in ["windows", "macos", "linux"] {
+        if !required.contains(&plat) {
+            toml.push_str(&format!("{plat} = [\"advisory-{plat}\"]\n"));
+        }
+    }
+    toml
+}
+
+async fn platform_job_templates(
+    state: &Arc<ServerState>,
+) -> std::collections::BTreeMap<&'static str, PostLandJob> {
+    let mut templates = std::collections::BTreeMap::new();
+    for (plat, checker) in [
+        ("windows", "windows-x86_64"),
+        ("macos", "macos-arm64"),
+        ("linux", "linux-x86_64"),
+    ] {
+        let Response::PostLand(work) = call(
+            state,
+            Request::PostLandNextFor {
+                platform: checker.into(),
+                kind: CheckKind::Test,
+            },
+        )
+        .await
+        else {
+            panic!("expected post-land work for {plat}");
+        };
+        templates.insert(plat, work.job.expect("pending job"));
+    }
+    templates
+}
+
+// R12 (#440, #461): aggregate base green advances only to the minimum passing
+// commit across all required platforms; advisory platforms never gate it.
+async fn check_platform_prefix(row: &str) {
+    let cells: Vec<&str> = row.split('\t').collect();
+    assert_eq!(cells.len(), 4, "bad platform row: {row}");
+    let required: Vec<&str> = cells[0].split(',').collect();
+    let toml = platform_config(&required);
+    let (_temp, state) = setup_files(&[("rosen.toml", toml.as_bytes())]);
+    let commits = [
+        land(&state, 1).await,
+        land(&state, 2).await,
+        land(&state, 3).await,
+    ];
+    let templates = platform_job_templates(&state).await;
+    for entry in cells[1].split(',') {
+        let (plat, pos) = entry.split_once(':').unwrap();
+        let idx: usize = pos.parse().unwrap();
+        let mut job = templates[plat].clone();
+        job.commit = commits[idx - 1];
+        call(&state, Request::PostLandPassed(job)).await;
+    }
+    let expected = |pos: usize| (pos > 0).then(|| commits[pos - 1]);
+    let expected_agg: usize = cells[2].parse().unwrap();
+    let Response::PostLandStatus(status) = call(&state, Request::PostLandStatus).await else {
+        panic!("expected post-land status");
+    };
+    assert_eq!(
+        status.last_green.map(|c| c.commit),
+        expected(expected_agg),
+        "aggregate mismatch for {row}"
+    );
+    let conn = rosen_server::metadata::open(&state.config.metadata_path()).unwrap();
+    for entry in cells[3].split(',') {
+        let (plat, pos) = entry.split_once(':').unwrap();
+        let idx: usize = pos.parse().unwrap();
+        let actual =
+            rosen_server::post_land::last_green_for(&conn, "main", CheckKind::Test, Some(plat))
+                .unwrap();
+        assert_eq!(actual, expected(idx), "platform {plat} mismatch for {row}");
     }
 }
 
