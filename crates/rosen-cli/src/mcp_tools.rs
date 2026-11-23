@@ -312,13 +312,7 @@ impl Input {
         Ok(match &self.option {
             Some(name) => texts
                 .iter()
-                .map(|text| {
-                    if text.is_empty() {
-                        format!("--{name}")
-                    } else {
-                        format!("--{name}={text}")
-                    }
-                })
+                .map(|text| format!("--{name}={text}"))
                 .collect(),
             None => texts,
         })
