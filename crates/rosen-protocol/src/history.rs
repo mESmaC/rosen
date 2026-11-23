@@ -179,6 +179,41 @@ pub struct Diff {
     pub files: Vec<FileDiff>,
 }
 
+/// Parameters of [`crate::Request::DiffSummary`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffSummaryRequest {
+    /// The old side. `None` is the new side's parent: a change's parent, or a
+    /// commit's first parent.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// The new side.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Only these files, or files under these directories.
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// Compact per-file diff summary without line text or hunks (R10, R11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSummary {
+    pub path: String,
+    pub status: FileStatus,
+    pub binary: bool,
+    pub lines_added: u64,
+    pub lines_removed: u64,
+}
+
+/// The answer to [`crate::Request::DiffSummary`]: changed files in path order
+/// with line counts, without transmitting hunk text (R10, R11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffSummary {
+    /// The two trees compared.
+    pub from: ObjectId,
+    pub to: ObjectId,
+    pub files: Vec<FileSummary>,
+}
+
 /// The answer to [`crate::Request::MergeBase`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeBaseAnswer {

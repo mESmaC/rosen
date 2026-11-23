@@ -2,24 +2,16 @@
 //! automatic snapshots of a local workspace.
 
 use crate::server::Succeeded;
-use rosen_client::protocol::{DiffRequest, FileDiff, FileStatus, LandCheck, LineKind};
+use rosen_client::protocol::{
+    DiffRequest, DiffSummaryRequest, ErrorCode, FileDiff, FileStatus, FileSummary, LandCheck,
+    LineKind,
+};
 use rosen_client::snapshot::{SnapshotError, SnapshotReport, WatchEvent, WorkspaceMarker};
 use rosen_client::{Client, Endpoint, Error};
-use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
 use crate::output::SNAPSHOT_SCHEMA;
-
-/// Compact per-file summary of a change against its parent after `commit`.
-#[derive(Serialize)]
-struct FileSummary {
-    path: String,
-    status: FileStatus,
-    binary: bool,
-    lines_added: usize,
-    lines_removed: usize,
-}
 
 /// Post-commit details returned in the same response as `rosen commit`.
 struct CommitSummary {
@@ -40,7 +32,7 @@ pub async fn commit(
     let report = client
         .snapshot_workspace(&root, Some(message.to_owned()))
         .await?;
-    let summary = fetch_commit_summary(&client, &report.change.to_string()).await;
+    let summary = fetch_commit_summary(endpoint, &client, &report.change.to_string()).await;
     // Offline snapshots replayed ahead of this one get a line each.
     for earlier in &report.replayed {
         print_report(json, earlier, None);
@@ -49,23 +41,46 @@ pub async fn commit(
     Ok(true)
 }
 
-async fn fetch_commit_summary(client: &Client, change: &str) -> CommitSummary {
-    let request = DiffRequest {
-        to: Some(change.to_owned()),
-        context: Some(0),
-        ..DiffRequest::default()
-    };
-    let files = client
-        .diff(request)
-        .await
-        .ok()
-        .map(|diff| diff.files.iter().map(summarize_file).collect());
+async fn fetch_commit_summary(endpoint: &Endpoint, client: &Client, change: &str) -> CommitSummary {
+    // Check land gates first so a failure while summarizing files cannot lose
+    // the land check on the same connection (#484).
     let land_check = client.land_check(change).await.ok();
+    let files = match fetch_file_summary(client, change).await {
+        Ok(files) => Some(files),
+        Err(Error::Disconnected | Error::Io(_)) if land_check.is_none() => {
+            match rosen_client::connect_or_start(endpoint).await {
+                Ok(fresh) => fetch_file_summary(&fresh, change).await.ok(),
+                Err(_) => None,
+            }
+        }
+        Err(_) => None,
+    };
     CommitSummary { files, land_check }
 }
 
+async fn fetch_file_summary(client: &Client, change: &str) -> Result<Vec<FileSummary>, Error> {
+    let request = DiffSummaryRequest {
+        to: Some(change.to_owned()),
+        ..DiffSummaryRequest::default()
+    };
+    match client.diff_summary(request).await {
+        Ok(summary) => Ok(summary.files),
+        // Older servers predate `diff_summary`; fall back to full `diff`.
+        Err(Error::Server(err)) if err.code == ErrorCode::UnknownRequest => {
+            let fallback = DiffRequest {
+                to: Some(change.to_owned()),
+                context: Some(0),
+                ..DiffRequest::default()
+            };
+            let diff = client.diff(fallback).await?;
+            Ok(diff.files.iter().map(summarize_file).collect())
+        }
+        Err(err) => Err(err),
+    }
+}
+
 fn summarize_file(file: &FileDiff) -> FileSummary {
-    let (mut added, mut removed) = (0, 0);
+    let (mut added, mut removed) = (0u64, 0u64);
     for hunk in &file.hunks {
         for line in &hunk.lines {
             match line.kind {

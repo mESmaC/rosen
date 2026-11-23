@@ -15,8 +15,8 @@ use crate::claim::{
 };
 use crate::config::{ConfigQuery, ConfigRecord};
 use crate::history::{
-    Blame, BlameRequest, Diff, DiffRequest, Log, LogRequest, MergeBaseAnswer, MergeResultAnswer,
-    ReadAnswer, ReadRequest,
+    Blame, BlameRequest, Diff, DiffRequest, DiffSummary, DiffSummaryRequest, Log, LogRequest,
+    MergeBaseAnswer, MergeResultAnswer, ReadAnswer, ReadRequest,
 };
 use crate::land::{LandAnswer, LandCheck};
 use crate::objects::{
@@ -334,6 +334,9 @@ pub enum Request {
     Blame(BlameRequest),
     /// A line diff between two revisions, or a revision and its parent (R11).
     Diff(DiffRequest),
+    /// Compact per-file line counts between two revisions, or a revision and
+    /// its parent, without transmitting hunk text (R10, R11).
+    DiffSummary(DiffSummaryRequest),
     /// The merge base of two revisions (R11).
     MergeBase {
         a: String,
@@ -451,6 +454,7 @@ pub enum Response {
     Log(Log),
     Blame(Blame),
     Diff(Diff),
+    DiffSummary(DiffSummary),
     MergeBase(MergeBaseAnswer),
     File(ReadAnswer),
     /// The answer to `ReadFile` for a file too large for one frame.

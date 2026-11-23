@@ -8,9 +8,9 @@ use crate::connection::{unexpected, Client};
 use crate::Error;
 use rosen_core::ObjectId;
 use rosen_protocol::{
-    Blame, BlameRequest, Diff, DiffRequest, LargeFile, Log, LogRequest, MergeBaseAnswer,
-    MergeResultAnswer, ObjectChunkQuery, ReadAnswer, ReadRequest, Request, Response, WireKind,
-    OBJECT_CHUNK_BYTES,
+    Blame, BlameRequest, Diff, DiffRequest, DiffSummary, DiffSummaryRequest, LargeFile, Log,
+    LogRequest, MergeBaseAnswer, MergeResultAnswer, ObjectChunkQuery, ReadAnswer, ReadRequest,
+    Request, Response, WireKind, OBJECT_CHUNK_BYTES,
 };
 
 impl Client {
@@ -35,6 +35,15 @@ impl Client {
     pub async fn diff(&self, request: DiffRequest) -> Result<Diff, Error> {
         match self.request(Request::Diff(request)).await? {
             Response::Diff(diff) => Ok(diff),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Compact per-file line counts; with no `from`, against the new side's
+    /// parent, without transmitting hunk text (R10, R11).
+    pub async fn diff_summary(&self, request: DiffSummaryRequest) -> Result<DiffSummary, Error> {
+        match self.request(Request::DiffSummary(request)).await? {
+            Response::DiffSummary(summary) => Ok(summary),
             other => Err(unexpected(other)),
         }
     }

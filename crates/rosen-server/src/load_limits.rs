@@ -88,6 +88,7 @@ pub(crate) fn large_request(request: &Request) -> bool {
             | Request::WorkspaceWriteBlob(_)
             | Request::ReadFile(_)
             | Request::Diff(_)
+            | Request::DiffSummary(_)
             | Request::Blame(_)
             | Request::Log(_)
             | Request::MergeBase { .. }

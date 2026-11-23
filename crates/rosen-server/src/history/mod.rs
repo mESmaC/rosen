@@ -25,8 +25,8 @@ use crate::ServerState;
 use index::Index;
 use revision::Revision;
 use rosen_protocol::{
-    BlameRequest, DiffRequest, ErrorBody, ErrorCode, LogRequest, MergeBaseAnswer, Outcome,
-    ReadRequest, Response,
+    BlameRequest, DiffRequest, DiffSummaryRequest, ErrorBody, ErrorCode, LogRequest,
+    MergeBaseAnswer, Outcome, ReadRequest, Response,
 };
 use rosen_store::{LooseObjectStore, StoreError};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,6 +78,7 @@ pub enum HistoryCall {
     Log(LogRequest),
     Blame(BlameRequest),
     Diff(DiffRequest),
+    DiffSummary(DiffSummaryRequest),
     MergeBase { a: String, b: String },
     ReadFile(ReadRequest),
     MergeResult { change: String },
@@ -134,6 +135,7 @@ fn run(state: &ServerState, call: HistoryCall) -> HistoryResult<Response> {
         HistoryCall::Log(req) => Response::Log(log::log(&ctx, &req)?),
         HistoryCall::Blame(req) => Response::Blame(blame::blame(&ctx, &req)?),
         HistoryCall::Diff(req) => Response::Diff(diff::diff(&ctx, &req)?),
+        HistoryCall::DiffSummary(req) => Response::DiffSummary(diff::diff_summary(&ctx, &req)?),
         HistoryCall::MergeBase { a, b } => Response::MergeBase(merge_base(&ctx, &a, &b)?),
         HistoryCall::ReadFile(req) => {
             let tree = Revision::resolve(&ctx, req.at.as_deref())?.tree(&ctx)?;

@@ -56,9 +56,10 @@ pub use conflict::{ConflictsResolved, ResolveConflicts, ResolvedPath};
 pub use deploy::{DeployRecord, DeployStatus, SubmitDeployResult};
 pub use edits::{EditRegions, EditSpan, PathEdit, Regions};
 pub use history::{
-    Blame, BlameRange, BlameRequest, Diff, DiffHunk, DiffLine, DiffRequest, DirEntry, FileDiff,
-    FileStatus, FileVersion, LargeFile, LineKind, Log, LogEntry, LogRequest, MergeBaseAnswer,
-    MergeResultAnswer, ReadAnswer, ReadRequest,
+    Blame, BlameRange, BlameRequest, Diff, DiffHunk, DiffLine, DiffRequest, DiffSummary,
+    DiffSummaryRequest, DirEntry, FileDiff, FileStatus, FileSummary, FileVersion, LargeFile,
+    LineKind, Log, LogEntry, LogRequest, MergeBaseAnswer, MergeResultAnswer, ReadAnswer,
+    ReadRequest,
 };
 pub use land::{
     ApprovalGate, LandAnswer, LandCheck, LandReach, LandRefusal, LandStatus, LandedSince,

@@ -9,7 +9,7 @@ use crate::events::{EventError, Page};
 use crate::load_limits::{large_request, Charged, TransferLimits, TRANSFER_TIMEOUT};
 use crate::{rpc, ServerState, SERVER_NAME};
 use rosen_core::AgentId;
-use rosen_protocol::frame::{decode_body, write_frame};
+use rosen_protocol::frame::{decode_body, write_frame, write_frame_body, MAX_FRAME_LEN};
 use rosen_protocol::{
     negotiate_version, BoxStream, ClientFrame, ErrorBody, ErrorCode, Outcome, Request,
     RequestEnvelope, ServerFrame, SUPPORTED_VERSIONS,
@@ -183,13 +183,39 @@ async fn write_frames(
     mut inbox: mpsc::Receiver<Charged<ServerFrame>>,
 ) {
     while let Some(frame) = inbox.recv().await {
-        let written =
-            tokio::time::timeout(TRANSFER_TIMEOUT, write_frame(&mut writer, &frame.value));
+        let Some(body) = encode_outgoing(&frame.value) else {
+            return;
+        };
+        let written = tokio::time::timeout(TRANSFER_TIMEOUT, write_frame_body(&mut writer, &body));
         if !matches!(written.await, Ok(Ok(()))) {
             // The client is gone; dropping the receiver fails every pending send.
             return;
         }
     }
+}
+
+/// Serializes one outgoing frame if it fits within `MAX_FRAME_LEN`, or
+/// replaces an oversized response with an error frame so the connection stays
+/// open for subsequent requests (#484).
+fn encode_outgoing(frame: &ServerFrame) -> Option<Vec<u8>> {
+    let err = match serde_json::to_vec(frame) {
+        Ok(body) if body.len() <= MAX_FRAME_LEN as usize => return Some(body),
+        Ok(body) => format!(
+            "frame of {} bytes exceeds the {MAX_FRAME_LEN}-byte limit",
+            body.len()
+        ),
+        Err(err) => err.to_string(),
+    };
+    let ServerFrame::Response { id, .. } = frame else {
+        return None;
+    };
+    let reply = ServerFrame::Response {
+        id: *id,
+        outcome: Outcome::Error(ErrorBody::new(ErrorCode::Internal, err)),
+    };
+    serde_json::to_vec(&reply)
+        .ok()
+        .filter(|body| body.len() <= MAX_FRAME_LEN as usize)
 }
 
 struct Session {
@@ -618,5 +644,34 @@ async fn retrying<T>(
             Err(join) => eprintln!("rosen-server: retrying an event read: {join}"),
         }
         tokio::time::sleep(READ_RETRY).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Risk (SPEC R10, issue #484): an oversized response frame must return an
+    // error under the same request id instead of dropping the connection and
+    // breaking follow-up requests such as land_check.
+    #[test]
+    fn oversized_response_becomes_error_frame() {
+        let huge = "x".repeat(MAX_FRAME_LEN as usize + 1);
+        let frame = ServerFrame::Response {
+            id: 42,
+            outcome: Outcome::Error(ErrorBody::new(ErrorCode::Internal, huge)),
+        };
+        let encoded = encode_outgoing(&frame).expect("oversized response yields error frame");
+        let decoded: ServerFrame = decode_body(&encoded).expect("valid error frame");
+        match decoded {
+            ServerFrame::Response {
+                id: 42,
+                outcome: Outcome::Error(err),
+            } => {
+                assert_eq!(err.code, ErrorCode::Internal);
+                assert!(err.message.contains("exceeds"), "{err}");
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
     }
 }

@@ -371,6 +371,9 @@ async fn dispatch_objects(state: &Arc<ServerState>, request: Request) -> Outcome
         Request::Log(req) => crate::history::handle(state, HistoryCall::Log(req)).await,
         Request::Blame(req) => crate::history::handle(state, HistoryCall::Blame(req)).await,
         Request::Diff(req) => crate::history::handle(state, HistoryCall::Diff(req)).await,
+        Request::DiffSummary(req) => {
+            crate::history::handle(state, HistoryCall::DiffSummary(req)).await
+        }
         Request::MergeBase { a, b } => {
             crate::history::handle(state, HistoryCall::MergeBase { a, b }).await
         }
