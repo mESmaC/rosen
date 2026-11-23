@@ -34,11 +34,17 @@ impl Snapshotter {
     /// Names files added, changed or removed on disk since the newest
     /// captured snapshot: the stored one, or the last offline journal record
     /// when records wait. With [`Snapshotter::unuploaded_paths`] it names
-    /// everything the server does not hold yet (`rosen status`, R10). Like
-    /// [`Snapshotter::unstored_paths`] it rereads every file and changes
-    /// nothing; call it on a freshly opened snapshotter.
+    /// everything the server does not hold yet (`rosen status`, `rosen diff`,
+    /// R10). Like [`Snapshotter::unstored_paths`] it rereads every file and
+    /// changes nothing; call it on a freshly opened snapshotter.
+    ///
+    /// When [`Snapshotter::defer_unreadable`] is set, a held or busy file is
+    /// included in the returned paths instead of failing the scan.
     pub fn uncaptured_paths(&mut self) -> Result<Vec<String>, SnapshotError> {
-        Ok(self.scan_differences()?.into_keys().collect())
+        Ok(self
+            .scan_differences(self.defer_unreadable)?
+            .into_keys()
+            .collect())
     }
 
     /// Each differing path, and whether a file exists on disk at it.
@@ -49,12 +55,19 @@ impl Snapshotter {
                 "reopen the stored snapshot before deletion",
             ));
         }
-        self.scan_differences()
+        // Deletion and rebase must see every file's content; a held or busy
+        // one fails them.
+        self.scan_differences(false)
     }
 
-    /// Each path where the disk differs from the index, and whether a file
-    /// exists on disk at it. The index is left as it was.
-    fn scan_differences(&mut self) -> Result<BTreeMap<String, bool>, SnapshotError> {
+    /// Each path where the disk differs from the index (or, with
+    /// `defer_unreadable`, could not be read because another process holds
+    /// it), and whether a file exists on disk at it. The index is left as it
+    /// was.
+    fn scan_differences(
+        &mut self,
+        defer_unreadable: bool,
+    ) -> Result<BTreeMap<String, bool>, SnapshotError> {
         let mut scanned = Index {
             files: self.index.files.clone(),
             gitlinks: self.index.gitlinks.clone(),
@@ -70,28 +83,35 @@ impl Snapshotter {
             .retain(|path, _| !self.sparse.includes(path.as_bytes()) || candidates.contains(path));
         // Read one file at a time so verification does not retain a second
         // in-memory copy of the entire workspace's contents.
+        let mut unreadable = BTreeSet::new();
         for path in &candidates {
-            upload::read_candidates(
+            let outcome = upload::read_candidates(
                 &self.root,
                 &mut scanned,
                 &BTreeSet::from([path.clone()]),
                 &BTreeSet::new(),
                 &upload::Fallback::new(),
-                // Deletion must see every file's content; a held or busy
-                // one fails it.
-                false,
+                defer_unreadable,
             )?;
+            unreadable.extend(outcome.unreadable);
         }
         let paths: BTreeSet<_> = self
             .index
             .files
             .keys()
             .chain(scanned.files.keys())
+            .chain(unreadable.iter())
             .collect();
         Ok(paths
             .into_iter()
-            .filter(|path| file_identity(&self.index, path) != file_identity(&scanned, path))
-            .map(|path| (path.clone(), scanned.files.contains_key(path)))
+            .filter(|path| {
+                unreadable.contains(*path)
+                    || file_identity(&self.index, path) != file_identity(&scanned, path)
+            })
+            .map(|path| {
+                let on_disk = unreadable.contains(path) || scanned.files.contains_key(path);
+                (path.clone(), on_disk)
+            })
             .collect())
     }
 }

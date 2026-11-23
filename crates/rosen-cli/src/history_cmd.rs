@@ -3,7 +3,9 @@
 
 use crate::server::Succeeded;
 use rosen_client::protocol::{Diff, DiffRequest, FileDiff, LineKind, Log, LogEntry, LogRequest};
-use rosen_client::snapshot::{pending_journal, SnapshotError, WorkspaceMarker};
+use rosen_client::snapshot::{
+    pending_journal, take_snapshot, Dirty, SnapshotError, WorkspaceMarker,
+};
 use rosen_client::{Client, Endpoint, Error};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -43,7 +45,7 @@ pub async fn diff(
     };
     let client = rosen_client::connect_or_start(endpoint).await?;
     let unsnapshotted = match matching_workspace(normalized)? {
-        Some(root) => flush_workspace(&client, &root).await,
+        Some(root) => flush_workspace(&client, &root).await?,
         None => Vec::new(),
     };
     print_diff(json, &client.diff(request).await?, &unsnapshotted);
@@ -67,17 +69,26 @@ fn matching_workspace(target: &str) -> Result<Option<PathBuf>, Error> {
 }
 
 /// Flushes pending edits in `root` so `rosen diff` sees writes from the last
-/// 2 s. If a flush cannot complete (for example a closed change or held file),
-/// returns the paths not yet stored on the server so they can be warned on.
-async fn flush_workspace(client: &Client, root: &Path) -> Vec<String> {
-    match client.snapshot_workspace(root, None).await {
-        Ok(report) => report.unreadable,
-        Err(_) => scan_unsnapshotted(client, root).await.unwrap_or_default(),
+/// 2 s. Held or busy files are deferred and reported as unsnapshotted rather
+/// than blocking other pending edits. If the flush itself cannot complete (for
+/// example a closed change), falls back to scanning the workspace for paths
+/// not yet stored on the server, surfacing any non-held scan failure instead
+/// of reporting a clean result.
+async fn flush_workspace(client: &Client, root: &Path) -> Result<Vec<String>, Error> {
+    let mut snapshotter = client.open_snapshotter(root).await?;
+    snapshotter.defer_unreadable();
+    let result = take_snapshot(client, snapshotter, Dirty::Full, None)
+        .await
+        .1;
+    match result {
+        Ok(report) => Ok(report.unreadable),
+        Err(_) => scan_unsnapshotted(client, root).await,
     }
 }
 
 async fn scan_unsnapshotted(client: &Client, root: &Path) -> Result<Vec<String>, Error> {
     let mut snapshotter = client.open_snapshotter(root).await?;
+    snapshotter.defer_unreadable();
     let pending = pending_journal(root)?;
     tokio::task::spawn_blocking(move || {
         let mut paths = snapshotter.uncaptured_paths()?;

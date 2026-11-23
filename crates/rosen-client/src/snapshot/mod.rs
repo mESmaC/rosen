@@ -217,8 +217,9 @@ impl Snapshotter {
         self.marker.tree
     }
 
-    /// Makes later snapshots skip, and report, a file another process holds
-    /// open instead of failing, so one held file never delays the others.
+    /// Makes later snapshots and [`Snapshotter::uncaptured_paths`] skip, and
+    /// report, a file another process holds open instead of failing, so one
+    /// held file never delays or hides the others.
     pub fn defer_unreadable(&mut self) {
         self.defer_unreadable = true;
     }
