@@ -35,13 +35,14 @@ pub async fn diff(
     paths: &[PathBuf],
 ) -> Result<Succeeded, Error> {
     let target = change_of(change)?;
+    let normalized = target.trim();
     let request = DiffRequest {
-        to: Some(target.clone()),
+        to: Some(normalized.to_owned()),
         paths: repository_paths(paths)?,
         ..DiffRequest::default()
     };
     let client = rosen_client::connect_or_start(endpoint).await?;
-    let unsnapshotted = match matching_workspace(&target)? {
+    let unsnapshotted = match matching_workspace(normalized)? {
         Some(root) => flush_workspace(&client, &root).await,
         None => Vec::new(),
     };
@@ -49,15 +50,20 @@ pub async fn diff(
     Ok(true)
 }
 
-/// The current workspace root when its change matches `target`.
+/// The current workspace root when its change matches `target` after the same
+/// whitespace trimming `Revision::resolve` applies.
 fn matching_workspace(target: &str) -> Result<Option<PathBuf>, Error> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Ok(None);
+    }
     let cwd = std::env::current_dir()?;
     let Some(root) = WorkspaceMarker::find_root(&cwd) else {
         return Ok(None);
     };
     let marker = WorkspaceMarker::read(&root)?;
     let id = marker.change.to_string();
-    Ok((!target.is_empty() && (id == target || id.starts_with(target))).then_some(root))
+    Ok(id.starts_with(target).then_some(root))
 }
 
 /// Flushes pending edits in `root` so `rosen diff` sees writes from the last
