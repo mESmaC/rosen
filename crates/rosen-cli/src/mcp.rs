@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use crate::commands::McpArgs;
 use crate::mcp_tools::{self, Tool};
-use crate::output::RUN_SCHEMA;
+use crate::output::{ERROR_SCHEMA, RUN_SCHEMA};
 
 /// The protocol revision answered when the client names none.
 /// `2025-06-18` is the revision that defines `structuredContent` on tool calls.
@@ -118,21 +118,11 @@ impl Server {
                 (INVALID_PARAMS, format!("no tool `{name}`"))
             })?;
         let arguments = params.get("arguments").unwrap_or(&Value::Null);
+        let command = tool.command_path();
         let outcome = match tool.command_line(arguments) {
-            Ok(words) if tool.is_run() => self.run_queued(&words),
-            Ok(words) => self.run_json(&words),
-            Err(why) => {
-                let structured = json!({
-                    "schema": crate::output::ERROR_SCHEMA,
-                    "command": tool.command_path(),
-                    "error": why,
-                });
-                ToolOutput {
-                    text: structured.to_string(),
-                    structured: Some(structured),
-                    failed: true,
-                }
-            }
+            Ok(words) if tool.is_run() => self.run_queued(&command, &words),
+            Ok(words) => self.run_json(&command, &words),
+            Err(why) => error_output(&command, &why),
         };
         let mut reply = json!({
             "content": [{ "type": "text", "text": outcome.text }],
@@ -146,30 +136,39 @@ impl Server {
 
     /// Runs `rosen --json <words>` and parses its versioned JSON line(s) into
     /// `structuredContent`.
-    fn run_json(&self, words: &[String]) -> ToolOutput {
+    fn run_json(&self, command_path: &str, words: &[String]) -> ToolOutput {
         let mut command = self.child_command(true, words);
         let output = match command.output() {
             Ok(output) => output,
-            Err(error) => return spawn_failed(&self.program, &error),
+            Err(error) => return spawn_failed(command_path, &self.program, &error),
         };
         let printed = String::from_utf8_lossy(&output.stdout);
         let errors = String::from_utf8_lossy(&output.stderr);
         let structured = parse_structured(&printed);
         let text = join_streams(&printed, &errors);
+        let failed = !output.status.success();
+        if failed && structured.is_none() {
+            let reason = if text.is_empty() {
+                format!("command exited with {}", output.status)
+            } else {
+                text
+            };
+            return error_output(command_path, &reason);
+        }
         ToolOutput {
             text,
             structured,
-            failed: !output.status.success(),
+            failed,
         }
     }
 
     /// Runs `rosen run ...` without `--json` so `run` keeps its log file and
     /// diagnostic summary (R3), then wraps the result in `rosen.run/v1`.
-    fn run_queued(&self, words: &[String]) -> ToolOutput {
+    fn run_queued(&self, command_path: &str, words: &[String]) -> ToolOutput {
         let mut command = self.child_command(false, words);
         let output = match command.output() {
             Ok(output) => output,
-            Err(error) => return spawn_failed(&self.program, &error),
+            Err(error) => return spawn_failed(command_path, &self.program, &error),
         };
         let printed = String::from_utf8_lossy(&output.stdout);
         let errors = String::from_utf8_lossy(&output.stderr);
@@ -211,10 +210,20 @@ impl Server {
     }
 }
 
-fn spawn_failed(program: &std::path::Path, error: &std::io::Error) -> ToolOutput {
+fn spawn_failed(command: &str, program: &std::path::Path, error: &std::io::Error) -> ToolOutput {
+    let reason = format!("could not run {}: {error}", program.display());
+    error_output(command, &reason)
+}
+
+fn error_output(command: &str, error: &str) -> ToolOutput {
+    let structured = json!({
+        "schema": ERROR_SCHEMA,
+        "command": command,
+        "error": error,
+    });
     ToolOutput {
-        text: format!("could not run {}: {error}", program.display()),
-        structured: None,
+        text: structured.to_string(),
+        structured: Some(structured),
         failed: true,
     }
 }
