@@ -163,6 +163,31 @@ fn merge_or_stack_step(
     change_actor: Actor,
 ) -> Option<NextStep> {
     let change = &record.change;
+    let parent_unlanded = gates
+        .refusal
+        .as_ref()
+        .is_some_and(|r| r.reason == "parent_unlanded");
+    // A blocked ancestor fails before any merge or regeneration step in a
+    // same-base land, so point to it first; lower-layer merge conflicts have
+    // no blocked stack entry and fall through to merge routing below (#474).
+    if parent_unlanded {
+        let next = gates
+            .stack
+            .iter()
+            .find(|layer| layer.blocked.is_some())
+            .map(|layer| step("unblock_parent", Some(Actor::Owner), layer.head, None))
+            .or_else(|| merge_gate_step(change, gates, change_actor))
+            .unwrap_or_else(|| step("unblock_parent", Some(Actor::Owner), change.head, None));
+        return Some(next);
+    }
+    merge_gate_step(change, gates, change_actor)
+}
+
+fn merge_gate_step(
+    change: &rosen_core::Change,
+    gates: &LandCheck,
+    change_actor: Actor,
+) -> Option<NextStep> {
     match &gates.merge {
         MergeGate::MergeConflict { change: target, .. } => {
             if *target == change.id {
@@ -174,16 +199,14 @@ fn merge_or_stack_step(
                 ));
             }
             let head = ancestor_head(gates, *target, change.head);
-            return Some(step("unblock_parent", Some(Actor::Owner), head, None));
+            Some(step("unblock_parent", Some(Actor::Owner), head, None))
         }
-        MergeGate::ConflictMarkers { .. } => {
-            return Some(step(
-                "remove_conflict_markers",
-                Some(change_actor),
-                change.head,
-                None,
-            ));
-        }
+        MergeGate::ConflictMarkers { .. } => Some(step(
+            "remove_conflict_markers",
+            Some(change_actor),
+            change.head,
+            None,
+        )),
         MergeGate::RegenerationRequired {
             change: target,
             pending_at_land: false,
@@ -198,37 +221,22 @@ fn merge_or_stack_step(
                 ));
             }
             let head = ancestor_head(gates, *target, change.head);
-            return Some(step("unblock_parent", Some(Actor::Owner), head, None));
+            Some(step("unblock_parent", Some(Actor::Owner), head, None))
         }
-        MergeGate::OversizeFiles { .. } => {
-            return Some(step(
-                "fix_oversize_files",
-                Some(change_actor),
-                change.head,
-                None,
-            ));
-        }
+        MergeGate::OversizeFiles { .. } => Some(step(
+            "fix_oversize_files",
+            Some(change_actor),
+            change.head,
+            None,
+        )),
         MergeGate::Clean
         | MergeGate::Conflicts { .. }
         | MergeGate::RegenerationRequired {
             pending_at_land: true,
             ..
         }
-        | MergeGate::NotChecked => {}
+        | MergeGate::NotChecked => None,
     }
-    if gates
-        .refusal
-        .as_ref()
-        .is_some_and(|r| r.reason == "parent_unlanded")
-    {
-        let head = gates
-            .stack
-            .iter()
-            .find(|layer| layer.blocked.is_some())
-            .map_or(change.head, |layer| layer.head);
-        return Some(step("unblock_parent", Some(Actor::Owner), head, None));
-    }
-    None
 }
 
 fn unnamed_or_dirty_step(
@@ -493,6 +501,56 @@ mod tests {
         assert_eq!(info.paths, vec!["src/lib.rs"]);
         assert_eq!(info.base_applied, Some(false));
         assert!(info.needs_naming_again);
+    }
+
+    // Risk (R10): a blocked ancestor refuses a same-base land before child
+    // regeneration, while a lower-layer merge conflict without a blocked stack
+    // entry still routes to that conflicting ancestor's head (#474).
+    #[test]
+    fn honors_blocked_parent_before_merge_and_keeps_lower_conflict_routing() {
+        let named = named_record();
+        let mut blocked_with_regen = gates(
+            MergeGate::RegenerationRequired {
+                change: cid('k'),
+                paths: vec!["artifact.lock".into()],
+                merged_tree: Some(oid('2')),
+                commands: [("artifact.lock".into(), "gen".into())].into(),
+                pending_at_land: false,
+            },
+            Some("parent_unlanded"),
+            false,
+        );
+        blocked_with_regen.stack.push(StackLayer {
+            change: cid('m'),
+            head: oid('f'),
+            state: ChangeState::Abandoned,
+            tier: "normal".into(),
+            blocked: Some("abandoned".into()),
+        });
+        let step = derive(&named, Some(&blocked_with_regen), None, true, None);
+        assert_eq!(step.next_action, "unblock_parent");
+        assert_eq!(step.actor, Some(Actor::Owner));
+        assert_eq!(step.affected_head, oid('f'));
+
+        let mut lower_conflict = gates(
+            MergeGate::MergeConflict {
+                change: cid('m'),
+                paths: vec!["src/lib.rs".into()],
+            },
+            Some("parent_unlanded"),
+            false,
+        );
+        lower_conflict.stack.push(StackLayer {
+            change: cid('m'),
+            head: oid('e'),
+            state: ChangeState::Ready,
+            tier: "normal".into(),
+            blocked: None,
+        });
+        let step = derive(&named, Some(&lower_conflict), None, true, None);
+        assert_eq!(step.next_action, "unblock_parent");
+        assert_eq!(step.actor, Some(Actor::Owner));
+        assert_eq!(step.affected_head, oid('e'));
     }
 
     fn named_record() -> ChangeRecord {
