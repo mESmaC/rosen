@@ -31,8 +31,18 @@ pub(crate) struct WorkspaceState {
     pub(crate) rebase_waiting: bool,
 }
 
+struct StatusView<'a> {
+    record: &'a ChangeRecord,
+    claims: &'a [PathClaim],
+    gates: Option<&'a LandCheck>,
+    local: Option<&'a WorkspaceState>,
+    next: &'a crate::status_next::NextStep,
+    post_land_waiting: &'a [String],
+}
+
 pub async fn run(json: bool, endpoint: &Endpoint, args: &StatusArgs) -> Result<Succeeded, Error> {
-    let workspace = workspace_root(args)?;
+    let cwd = std::env::current_dir()?;
+    let workspace = workspace_root(args, &cwd)?;
     let change = match (&args.change, &workspace) {
         (Some(change), _) => change.clone(),
         (None, Some(root)) => WorkspaceMarker::read(root)?.change.to_string(),
@@ -73,25 +83,18 @@ pub async fn run(json: bool, endpoint: &Endpoint, args: &StatusArgs) -> Result<S
         managed,
         current_agent.as_deref(),
     );
+    let view = StatusView {
+        record: &record,
+        claims: &claims,
+        gates: gates.as_ref(),
+        local: local.as_ref(),
+        next: &next,
+        post_land_waiting: &post_land_waiting,
+    };
     if json {
-        print_json(
-            &record,
-            &claims,
-            gates.as_ref(),
-            local.as_ref(),
-            &next,
-            &post_land_waiting,
-        );
+        print_json(&view);
     } else {
-        print_text(
-            &record,
-            &claims,
-            gates.as_ref(),
-            local.as_ref(),
-            &next,
-            &post_land_waiting,
-            managed,
-        );
+        print_text(&view, managed, &cwd);
     }
     Ok(true)
 }
@@ -111,34 +114,27 @@ async fn post_land_waiting(client: &Client) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn print_json(
-    record: &ChangeRecord,
-    claims: &[PathClaim],
-    gates: Option<&LandCheck>,
-    local: Option<&WorkspaceState>,
-    next: &crate::status_next::NextStep,
-    post_land_waiting: &[String],
-) {
+fn print_json(view: &StatusView<'_>) {
     let mut body = json!({
         "schema": STATUS_SCHEMA,
-        "change": record,
-        "claims": claims,
-        "workspace": local,
-        "land_check": gates,
-        "next_action": next.next_action,
-        "actor": next.actor,
-        "affected_head": next.affected_head,
-        "conflict": next.conflict,
+        "change": view.record,
+        "claims": view.claims,
+        "workspace": view.local,
+        "land_check": view.gates,
+        "next_action": view.next.next_action,
+        "actor": view.next.actor,
+        "affected_head": view.next.affected_head,
+        "conflict": view.next.conflict,
     });
-    if !post_land_waiting.is_empty() {
-        body["post_land_waiting"] = json!(post_land_waiting);
+    if !view.post_land_waiting.is_empty() {
+        body["post_land_waiting"] = json!(view.post_land_waiting);
     }
     println!("{body}");
 }
 
 /// The workspace to scan: `--workspace`, else the one holding the current
 /// directory unless `--change` names a change without one.
-fn workspace_root(args: &StatusArgs) -> Result<Option<PathBuf>, Error> {
+fn workspace_root(args: &StatusArgs, cwd: &Path) -> Result<Option<PathBuf>, Error> {
     if let Some(dir) = &args.workspace {
         return WorkspaceMarker::find_root(dir)
             .map(Some)
@@ -147,7 +143,7 @@ fn workspace_root(args: &StatusArgs) -> Result<Option<PathBuf>, Error> {
     if args.change.is_some() {
         return Ok(None);
     }
-    Ok(WorkspaceMarker::find_root(&std::env::current_dir()?))
+    Ok(WorkspaceMarker::find_root(cwd))
 }
 
 async fn scan_workspace(
@@ -197,16 +193,8 @@ fn rebased_past(record: &ChangeRecord, local: ObjectId) -> bool {
     change.head != local && change.snapshots.last().map(|s| s.tree) != Some(change.head)
 }
 
-fn print_text(
-    record: &ChangeRecord,
-    claims: &[PathClaim],
-    gates: Option<&LandCheck>,
-    local: Option<&WorkspaceState>,
-    next: &crate::status_next::NextStep,
-    post_land_waiting: &[String],
-    managed: bool,
-) {
-    let change = &record.change;
+fn print_text(view: &StatusView<'_>, managed: bool, cwd: &Path) {
+    let change = &view.record.change;
     println!("change:    {}", change.id);
     println!("owner:     {}", change.owner);
     println!("state:     {}", change.state);
@@ -220,15 +208,16 @@ fn print_text(
     for conflict in &change.conflicts {
         println!("  {conflict}");
     }
-    print_next(record, next, managed);
-    if let Some(gates) = gates {
+    let workspace_cwd = view.local.map(|ws| (ws.path.as_path(), cwd));
+    print_next(view.record, view.next, managed, workspace_cwd);
+    if let Some(gates) = view.gates {
         print_gates(gates);
     }
-    for line in post_land_waiting {
+    for line in view.post_land_waiting {
         println!("{line}");
     }
-    println!("claims:    {}", claims.len());
-    for claim in claims {
+    println!("claims:    {}", view.claims.len());
+    for claim in view.claims {
         let kind = if claim.exclusive {
             "exclusive claim".to_owned()
         } else {
@@ -236,10 +225,15 @@ fn print_text(
         };
         println!("  {kind} {}", claim.path);
     }
-    print_workspace(local);
+    print_workspace(view.local);
 }
 
-fn print_next(record: &ChangeRecord, next: &crate::status_next::NextStep, managed: bool) {
+fn print_next(
+    record: &ChangeRecord,
+    next: &crate::status_next::NextStep,
+    managed: bool,
+    workspace_cwd: Option<(&Path, &Path)>,
+) {
     let actor = next.actor.map_or("none", crate::status_next::Actor::as_str);
     println!(
         "next:      {} (actor: {actor}, head: {})",
@@ -270,6 +264,7 @@ fn print_next(record: &ChangeRecord, next: &crate::status_next::NextStep, manage
         conflict.needs_naming_again,
         &record.change.id.to_string(),
         managed,
+        workspace_cwd,
     );
     println!("commands:");
     for cmd in commands {

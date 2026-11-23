@@ -24,7 +24,7 @@ pub async fn run(
         let client = rosen_client::connect_or_start(endpoint).await?;
         let record = client.rebase_change(&change).await?;
         let conflicts = conflict_paths(&client, &record).await;
-        print_answer(json, &record, None, &conflicts);
+        print_answer(json, &record, None, &cwd, &conflicts);
         return Ok(true);
     };
     let owner = crate::change_cmd::resolve_owner(None)?;
@@ -35,7 +35,7 @@ pub async fn run(
     let record = client.rebase_change(&report.change.to_string()).await?;
     client.apply_rebase(&root, &owner).await?;
     let conflicts = conflict_paths(&client, &record).await;
-    print_answer(json, &record, Some(&root), &conflicts);
+    print_answer(json, &record, Some(&root), &cwd, &conflicts);
     Ok(true)
 }
 
@@ -51,6 +51,7 @@ fn print_answer(
     json: bool,
     record: &ChangeRecord,
     workspace: Option<&Path>,
+    cwd: &Path,
     conflict_paths: &[String],
 ) {
     let change = &record.change;
@@ -64,6 +65,7 @@ fn print_answer(
             crate::status_next::was_named(record),
             &change.id.to_string(),
             managed,
+            workspace.map(|root| (root, cwd)),
         )
     };
     if json {

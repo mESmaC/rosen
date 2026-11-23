@@ -18,7 +18,7 @@ pub async fn run(
 ) -> Result<Succeeded, Error> {
     let cwd = std::env::current_dir()?;
     let workspace = WorkspaceMarker::find_root(&cwd).filter(|_| change.is_none());
-    let (client, change, paths) = match workspace {
+    let (client, change, paths) = match &workspace {
         // Checked before connecting, so a bad command line never starts a server.
         None => {
             let (change, paths) = (crate::claim_cmd::change_of(change)?, from_root(paths)?);
@@ -30,12 +30,13 @@ pub async fn run(
         }
         Some(root) => {
             let client = rosen_client::connect_or_start(endpoint).await?;
-            let (change, paths) = in_workspace(&client, &root, &cwd, paths).await?;
+            let (change, paths) = in_workspace(&client, root, &cwd, paths).await?;
             (client, change, paths)
         }
     };
     let answer = client.resolve_conflicts(&change, paths).await?;
-    print_answer(json, &answer);
+    let invocation = workspace.as_deref().map(|root| (root, cwd.as_path()));
+    print_answer(json, &answer, invocation);
     Ok(true)
 }
 
@@ -104,7 +105,7 @@ fn slashed(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn print_answer(json: bool, answer: &ConflictsResolved) {
+fn print_answer(json: bool, answer: &ConflictsResolved, invocation: Option<(&Path, &Path)>) {
     if json {
         println!("{}", json!({ "schema": RESOLVE_SCHEMA, "resolve": answer }));
         return;
@@ -126,7 +127,7 @@ fn print_answer(json: bool, answer: &ConflictsResolved) {
         let quoted: Vec<String> = answer
             .open_paths
             .iter()
-            .map(|p| crate::managed::shell_quote(p))
+            .map(|p| crate::managed::resolve_arg(p, invocation))
             .collect();
         println!(
             "next: resolve them, then run `rosen resolve {}`",

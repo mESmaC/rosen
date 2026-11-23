@@ -2,6 +2,9 @@
 //! owns the workspace lifecycle, watcher, checks, review and landing, CLI help
 //! and MCP tools hide host-owned commands and tailor conflict instructions.
 
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
+
 use clap::Command;
 
 /// Environment variable naming the agent's active change.
@@ -126,6 +129,57 @@ pub fn shell_quote(path: &str) -> String {
     }
 }
 
+/// Formats a repository-relative path as a `rosen resolve` argument runnable
+/// from `cwd` when invoked inside `root`, quoted for a shell only when needed.
+pub fn resolve_arg(repo_path: &str, workspace_cwd: Option<(&Path, &Path)>) -> String {
+    let path = match workspace_cwd.and_then(|(root, cwd)| relative_to_cwd(repo_path, root, cwd)) {
+        Some(rel) if rel.starts_with('-') => format!("./{rel}"),
+        Some(rel) => rel,
+        None => repo_path.to_owned(),
+    };
+    shell_quote(&path)
+}
+
+/// Expresses a repository-relative POSIX path relative to `cwd` inside `root`,
+/// using forward slashes so the argument parses cleanly on every platform.
+fn relative_to_cwd(repo_path: &str, root: &Path, cwd: &Path) -> Option<String> {
+    let rel_cwd = workspace_subpath(root, cwd)?;
+    let cwd_parts: Vec<&OsStr> = rel_cwd
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect();
+    let target_parts: Vec<&str> = repo_path
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    let common = cwd_parts
+        .iter()
+        .zip(target_parts.iter())
+        .take_while(|(a, b)| a.to_str() == Some(**b))
+        .count();
+    let ups = cwd_parts.len() - common;
+    let mut parts = Vec::with_capacity(ups + (target_parts.len() - common));
+    parts.extend(std::iter::repeat_n("..", ups));
+    parts.extend_from_slice(&target_parts[common..]);
+    if parts.is_empty() {
+        Some(".".to_owned())
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn workspace_subpath(root: &Path, cwd: &Path) -> Option<PathBuf> {
+    if let Ok(rel) = cwd.strip_prefix(root) {
+        return Some(rel.to_path_buf());
+    }
+    let abs_root = std::path::absolute(root).ok()?;
+    let abs_cwd = std::path::absolute(cwd).ok()?;
+    abs_cwd.strip_prefix(&abs_root).ok().map(Path::to_path_buf)
+}
+
 /// Exact commands to resolve open conflicts on a change.
 pub fn conflict_commands(
     paths: &[String],
@@ -133,6 +187,7 @@ pub fn conflict_commands(
     needs_naming_again: bool,
     change_id: &str,
     managed: bool,
+    workspace_cwd: Option<(&Path, &Path)>,
 ) -> Vec<String> {
     let mut commands = Vec::new();
     if base_applied == Some(false) {
@@ -143,7 +198,7 @@ pub fn conflict_commands(
     } else {
         paths
             .iter()
-            .map(|p| shell_quote(p))
+            .map(|p| resolve_arg(p, workspace_cwd))
             .collect::<Vec<_>>()
             .join(" ")
     };
@@ -156,4 +211,46 @@ pub fn conflict_commands(
         commands.push(format!("rosen land {change_id}"));
     }
     commands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Risk (R10, #480): a resolve command printed from a workspace subdirectory
+    // fails if it keeps repository-relative paths instead of cwd-relative ones.
+    #[test]
+    fn conflict_commands_relativize_resolve_paths_to_cwd() {
+        let root = Path::new("/ws");
+        let paths = vec![
+            "src/tracked.txt".into(),
+            "README.md".into(),
+            "src/-dash.txt".into(),
+            "other/with space.txt".into(),
+        ];
+        let from_src = conflict_commands(
+            &paths,
+            Some(true),
+            true,
+            "k",
+            true,
+            Some((root, Path::new("/ws/src"))),
+        );
+        assert_eq!(
+            from_src,
+            vec![
+                "rosen resolve tracked.txt ../README.md ./-dash.txt \"../other/with space.txt\"",
+                "rosen commit -m \"<message>\"",
+            ]
+        );
+        let outside = conflict_commands(
+            &paths[..1],
+            Some(true),
+            false,
+            "k",
+            true,
+            Some((root, Path::new("/elsewhere"))),
+        );
+        assert_eq!(outside, vec!["rosen resolve src/tracked.txt"]);
+    }
 }
