@@ -1232,6 +1232,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "platform": {
+          "type": "string"
         }
       },
       "required": [

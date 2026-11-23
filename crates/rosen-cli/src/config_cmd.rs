@@ -156,6 +156,9 @@ fn print_deploy(config: &ProjectConfig) {
         if !step.secrets.is_empty() {
             println!("    secrets: {}", step.secrets.join(", "));
         }
+        if let Some(platform) = &step.platform {
+            println!("    platform: {platform}");
+        }
         if !step.platforms.is_empty() {
             println!("    platforms: {}", step.platforms.join(", "));
         }

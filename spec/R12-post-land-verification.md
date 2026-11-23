@@ -76,7 +76,7 @@
   `post_land_status`, `rosen server status`, `rosen review status` and the Collapse state feed (`platforms`) show each required platform's checkpoint and report when no matching checker is connected (for example `macOS: no checker`).
   When a required platform has had no checker online for an hour while checkpoints wait on it, `rosen status`, `rosen server status`, `rosen review status` and the `platforms` state feed report `post-land waiting on <platform>: no checker online since <time>`.
 - **Deploy steps.**
-  `rosen.toml` may declare `[deploy.<name>]` steps, each with a single-line `command`, optional `paths` globs, `secrets` (names only, never values) and `platforms`.
+  `rosen.toml` may declare `[deploy.<name>]` steps, each with a single-line `command`, optional `paths` globs, `secrets` (names only, never values), `platform` (the deploy target platform) and `platforms` (the checker host filter).
   When a full-test green checkpoint advances across a landed range touching a step's `paths` (or any range when `paths` is empty), the server queues the matching steps from the configuration at that green commit in declaration order, atomically with the checkpoint.
   Steps for one project run one at a time and in order: the server publishes `deploy_due` for the next pending step only when none is running, and marks any pending older run of a step skipped when a newer green already covers it (or removes the step).
   External checkers report each step's outcome (`passed`, `failed` or `skipped`) through `deploy_result`, which records the submitter and time, publishes a `deploy_result` event and dispatches the next pending step.

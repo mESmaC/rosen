@@ -408,6 +408,8 @@ pub struct Mirror {
 /// Steps run in declaration order, one at a time, after a post-land full-test
 /// green checkpoint covers a landed range touching `paths` (or any green range
 /// when `paths` is empty). `secrets` carries names only, never values.
+/// `platform` names the deploy target platform (such as `linux`), while
+/// `platforms` filters which checker hosts may run the step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeployStep {
@@ -419,6 +421,8 @@ pub struct DeployStep {
     pub secrets: Vec<String>,
     #[serde(default)]
     pub platforms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 impl DeployStep {
@@ -442,6 +446,8 @@ struct WrittenDeployStep {
     secrets: Vec<String>,
     #[serde(default)]
     platforms: Vec<String>,
+    #[serde(default)]
+    platform: Option<String>,
 }
 
 /// `[deploy]` as written in `rosen.toml`: named step tables, kept in their
@@ -474,6 +480,7 @@ impl<'de> Deserialize<'de> for WrittenDeploy {
                             paths: step.paths,
                             secrets: step.secrets,
                             platforms: step.platforms,
+                            platform: step.platform,
                         },
                     ));
                 }
@@ -794,7 +801,10 @@ impl ProjectConfig {
                 secret_name(&step.name, secret)?;
             }
             for platform in &step.platforms {
-                platform_name(&step.name, platform)?;
+                platform_name(&format!("deploy.{}.platforms entry", step.name), platform)?;
+            }
+            if let Some(platform) = &step.platform {
+                platform_name(&format!("deploy.{}.platform", step.name), platform)?;
             }
         }
         Ok(())
@@ -881,7 +891,7 @@ fn secret_name(step: &str, entry: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn platform_name(step: &str, platform: &str) -> Result<(), ConfigError> {
+fn platform_name(key: &str, platform: &str) -> Result<(), ConfigError> {
     let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/');
     if platform.is_empty()
         || platform.len() > MAX_PLATFORM_LEN
@@ -889,7 +899,7 @@ fn platform_name(step: &str, platform: &str) -> Result<(), ConfigError> {
         || !platform.chars().all(allowed)
     {
         return Err(ConfigError(format!(
-            "deploy.{step}.platforms entry {platform:?} must be a non-empty platform name with no spaces or control characters"
+            "{key} {platform:?} must be a non-empty platform name with no spaces or control characters"
         )));
     }
     Ok(())
@@ -1259,6 +1269,7 @@ mod tests {
              command = \"deploy-zeta\"\n\
              paths = [\"server/\"]\n\
              secrets = [\"DEPLOY_TOKEN\", \"fly-key\"]\n\
+             platform = \"linux\"\n\
              platforms = [\"linux\", \"linux/amd64\"]\n\
              [deploy.alpha]\n\
              command = \"deploy-alpha\"\n",
@@ -1266,6 +1277,10 @@ mod tests {
         .unwrap();
         let names: Vec<&str> = cfg.deploy.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["zeta", "alpha"]);
+        assert_eq!(cfg.deploy[0].platform.as_deref(), Some("linux"));
+        assert_eq!(cfg.deploy[1].platform, None);
+        let alpha_toml = toml::to_string(&cfg.deploy[1]).unwrap();
+        assert!(!alpha_toml.contains("platform ="));
         assert_eq!(
             cfg.deploy[0].paths,
             vec![PathPattern::new("server/**").unwrap()]
@@ -1281,6 +1296,10 @@ mod tests {
             "[deploy.server]\ncommand = \"ok\"\nsecrets = [\"TOKEN=supersecret\"]\n",
             "[deploy.server]\ncommand = \"ok\"\nsecrets = [\"Bearer secret\"]\n",
             "[deploy.server]\ncommand = \"ok\"\n[deploy.server.secrets]\nTOKEN = \"val\"\n",
+            "[deploy.server]\ncommand = \"ok\"\nplatform = \"\"\n",
+            "[deploy.server]\ncommand = \"ok\"\nplatform = \"-flag\"\n",
+            "[deploy.server]\ncommand = \"ok\"\nplatform = \"linux macos\"\n",
+            "[deploy.server]\ncommand = \"ok\"\nplatform = \"linux\\nmacos\"\n",
             "[deploy.server]\ncommand = \"ok\"\nplatforms = [\"-flag\"]\n",
             "[deploy.server]\ncommand = \"ok\"\nplatforms = [\"linux macos\"]\n",
             "[deploy.server]\ncommand = \"ok\"\nextra = 1\n",

@@ -383,10 +383,10 @@ async fn merge_mode_prioritizes_builds_and_starts_from_last_built() {
 #[tokio::test(flavor = "multi_thread")]
 async fn deploy_steps_gate_on_paths_serialize_and_skip_superseded() {
     let config = b"[deploy.server]\ncommand = \"deploy-server\"\npaths = [\"server/**\"]\n\
-        secrets = [\"DEPLOY_TOKEN\"]\nplatforms = [\"linux\"]\n\
+        secrets = [\"DEPLOY_TOKEN\"]\nplatform = \"linux\"\nplatforms = [\"linux\"]\n\
         [deploy.web]\ncommand = \"deploy-web\"\npaths = [\"web/**\"]\n";
     let (_temp, state) = setup_files(&[("rosen.toml", config)]);
-    assert_deploy_config(&state, &["server", "web"]).await;
+    assert_deploy_config(&state, &[("server", Some("linux")), ("web", None)]).await;
 
     // Docs-only land goes green: no deploy_due.
     let docs_commit = land_path(&state, "docs/readme.md", b"hello").await;
@@ -400,6 +400,7 @@ async fn deploy_steps_gate_on_paths_serialize_and_skip_superseded() {
     assert_eq!(dues.len(), 1);
     assert_eq!(dues[0].detail["step"], "server");
     assert_eq!(dues[0].detail["commit"], c1.to_string());
+    assert_eq!(dues[0].detail["platform"], "linux");
     assert_eq!(
         dues[0].detail["secrets"],
         serde_json::json!(["DEPLOY_TOKEN"])
@@ -434,20 +435,21 @@ async fn deploy_steps_gate_on_paths_serialize_and_skip_superseded() {
     assert_eq!(dues[1].detail["step"], "web");
     assert_eq!(dues[1].detail["commit"], c2.to_string());
     assert_eq!(dues[1].detail["from"], docs_commit.to_string());
+    assert!(dues[1].detail.get("platform").is_none());
 }
 
-async fn assert_deploy_config(state: &Arc<ServerState>, expected: &[&str]) {
+async fn assert_deploy_config(state: &Arc<ServerState>, expected: &[(&str, Option<&str>)]) {
     let Response::Config(shown) = call(state, Request::ConfigShow(ConfigQuery::default())).await
     else {
         panic!()
     };
-    let names: Vec<&str> = shown
+    let got: Vec<(&str, Option<&str>)> = shown
         .config
         .deploy
         .iter()
-        .map(|s| s.name.as_str())
+        .map(|s| (s.name.as_str(), s.platform.as_deref()))
         .collect();
-    assert_eq!(names, expected);
+    assert_eq!(got, expected);
 }
 
 async fn pass_next(state: &Arc<ServerState>, expected_commit: ObjectId) {

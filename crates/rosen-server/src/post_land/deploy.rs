@@ -39,6 +39,7 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
              paths         TEXT    NOT NULL,
              secrets       TEXT    NOT NULL,
              platforms     TEXT    NOT NULL,
+             platform      TEXT,
              state         TEXT    NOT NULL CHECK(state IN ('pending','running','passed','failed','skipped')),
              superseded_by TEXT,
              output        TEXT    NOT NULL DEFAULT '',
@@ -48,7 +49,17 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
          );
          CREATE INDEX IF NOT EXISTS deploy_runs_queue
              ON deploy_runs(ref_name, state, green_seq, step_index, id);",
-    )
+    )?;
+    let has_platform = conn
+        .prepare("PRAGMA table_info(deploy_runs)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "platform");
+    if !has_platform {
+        conn.execute_batch("ALTER TABLE deploy_runs ADD COLUMN platform TEXT;")?;
+    }
+    Ok(())
 }
 
 /// Queues due deploy steps for the newly green range `(prev_seq, end_seq]` and
@@ -302,8 +313,8 @@ fn insert_pending(
     let platforms = serde_json::to_string(&step.platforms).map_err(internal)?;
     tx.execute(
         "INSERT OR IGNORE INTO deploy_runs
-         (ref_name,green_seq,step_index,step,commit_id,from_commit,command,paths,secrets,platforms,state)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'pending')",
+         (ref_name,green_seq,step_index,step,commit_id,from_commit,command,paths,secrets,platforms,platform,state)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending')",
         params![
             ref_name,
             green_seq,
@@ -315,6 +326,7 @@ fn insert_pending(
             paths,
             secrets,
             platforms,
+            step.platform,
         ],
     )
     .map_err(internal)?;
@@ -415,6 +427,7 @@ struct DeployRow {
     paths: String,
     secrets: String,
     platforms: String,
+    platform: Option<String>,
     state: String,
     superseded_by: Option<String>,
     output: String,
@@ -439,7 +452,7 @@ impl DeployRow {
 }
 
 const SELECT_ROW: &str = "SELECT id,ref_name,step,commit_id,from_commit,command,paths,secrets,\
-     platforms,state,superseded_by,output,submitter,submitted_at FROM deploy_runs";
+     platforms,platform,state,superseded_by,output,submitter,submitted_at FROM deploy_runs";
 
 fn load_run(conn: &Connection, id: i64) -> Result<Option<DeployRow>> {
     let sql = format!("{SELECT_ROW} WHERE id=?1");
@@ -485,11 +498,12 @@ fn read_row(r: &rusqlite::Row) -> rusqlite::Result<DeployRow> {
         paths: r.get(6)?,
         secrets: r.get(7)?,
         platforms: r.get(8)?,
-        state: r.get(9)?,
-        superseded_by: r.get(10)?,
-        output: r.get(11)?,
-        submitter: r.get(12)?,
-        submitted_at: r.get(13)?,
+        platform: r.get(9)?,
+        state: r.get(10)?,
+        superseded_by: r.get(11)?,
+        output: r.get(12)?,
+        submitter: r.get(13)?,
+        submitted_at: r.get(14)?,
     })
 }
 
@@ -497,7 +511,7 @@ fn due_detail(row: &DeployRow) -> Result<serde_json::Value> {
     let paths: serde_json::Value = serde_json::from_str(&row.paths).map_err(internal)?;
     let secrets: serde_json::Value = serde_json::from_str(&row.secrets).map_err(internal)?;
     let platforms: serde_json::Value = serde_json::from_str(&row.platforms).map_err(internal)?;
-    Ok(serde_json::json!({
+    let mut detail = serde_json::json!({
         "id": row.id,
         "step": row.step,
         "commit": row.commit,
@@ -506,7 +520,11 @@ fn due_detail(row: &DeployRow) -> Result<serde_json::Value> {
         "paths": paths,
         "secrets": secrets,
         "platforms": platforms,
-    }))
+    });
+    if let Some(platform) = &row.platform {
+        detail["platform"] = serde_json::json!(platform);
+    }
+    Ok(detail)
 }
 
 fn result_detail(record: &DeployRecord) -> serde_json::Value {
