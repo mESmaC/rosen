@@ -90,7 +90,11 @@ fn print_status(json: bool, status: &ServerStatus) {
 }
 
 fn print_status_json(status: &ServerStatus) {
-    let body = json!({
+    println!("{}", status_json(status));
+}
+
+fn status_json(status: &ServerStatus) -> serde_json::Value {
+    json!({
         "schema": STATUS_SCHEMA,
         "running": true,
         "server": status.server,
@@ -111,8 +115,7 @@ fn print_status_json(status: &ServerStatus) {
         "platforms": status.platforms,
         "commit": status.commit,
         "executable": status.executable,
-    });
-    println!("{body}");
+    })
 }
 
 fn print_status_text(status: &ServerStatus) {
@@ -708,5 +711,57 @@ mod tests {
             platform_status_line(&advisory),
             "Linux (advisory): green 111111111111"
         );
+    }
+
+    /// Risk (R10, #477): `print_status_json` always emits `mirror_owner` (bool
+    /// on an authority server, null on a cache daemon); if the catalog omits it
+    /// under `additionalProperties: false`, schema validation rejects all output.
+    #[test]
+    fn status_json_keys_match_running_schema() {
+        let catalog: serde_json::Value = serde_json::from_str(crate::output::CATALOG).unwrap();
+        let running = catalog["$defs"][STATUS_SCHEMA]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["properties"]["running"]["const"] == serde_json::json!(true))
+            .expect("running variant in rosen.server.status/v1");
+        let props = running["properties"].as_object().unwrap();
+        for mirror_owner in [Some(true), Some(false), None] {
+            let status = ServerStatus {
+                server: "rosen-server 0.1.0".into(),
+                protocol_version: 1,
+                pid: 42,
+                endpoint: "ep".into(),
+                data_dir: "data".into(),
+                uptime_ms: 10,
+                open_connections: 1,
+                last_event: 0,
+                listen: None,
+                fingerprint: None,
+                upstream: None,
+                mirror_owner,
+                mirror_proactive_auth: mirror_owner.map(|_| false),
+                relay: None,
+                collapse: None,
+                platforms: Vec::new(),
+                commit: Some("deadbeef".into()),
+                executable: Some("/bin/rosen-server".into()),
+            };
+            let emitted = status_json(&status);
+            for key in emitted.as_object().unwrap().keys() {
+                assert!(props.contains_key(key), "undeclared field {key}");
+            }
+            for req in running["required"].as_array().unwrap() {
+                let name = req.as_str().unwrap();
+                assert!(emitted.get(name).is_some(), "missing required field {name}");
+            }
+        }
+        let allowed_types: Vec<&str> = props["mirror_owner"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect();
+        assert_eq!(allowed_types, ["boolean", "null"]);
     }
 }

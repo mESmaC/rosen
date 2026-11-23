@@ -2515,6 +2515,17 @@
                 }
               ]
             },
+            "mirror_owner": {
+              "description": "Whether this server pushes the project's mirror; null on a cache daemon.",
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "mirror_proactive_auth": {
               "description": "Whether HTTPS mirror reads use proactive basic auth after a not-found fallback succeeded; null on a cache daemon.",
               "anyOf": [
