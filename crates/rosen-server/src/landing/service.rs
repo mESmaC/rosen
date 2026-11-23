@@ -230,7 +230,13 @@ impl LandingService {
             )) => Some(*attempts),
             _ => None,
         };
-        let phases = collector.finish(attempts);
+        let phases = match &result {
+            Ok((answer, ancestors)) => {
+                let ancestor_ids: Vec<ChangeId> = ancestors.iter().map(|(id, _)| *id).collect();
+                collector.finish_for_layers(attempts, &answer.change, &ancestor_ids)
+            }
+            Err(_) => collector.finish(attempts),
+        };
         if let Ok((answer, ancestors)) = &result {
             persist_land_timing(state, answer, ancestors, &phases);
         }
