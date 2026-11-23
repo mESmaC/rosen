@@ -8,6 +8,7 @@ mod after_land;
 mod atomic_transactions;
 mod auto_revert;
 mod bisection;
+mod cache_shutdown;
 mod change_ids;
 mod channel_events;
 mod channel_quarantine;

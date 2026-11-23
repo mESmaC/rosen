@@ -19,10 +19,14 @@ use crate::{ServerConfig, SERVER_NAME};
 use rosen_protocol::{Listener, ServerStatus, PROTOCOL_VERSION};
 use rosen_store::LooseObjectStore;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
+
+/// How long a stopping cache daemon waits for already-queued replies to reach
+/// their clients once every admitted request has been answered (R10).
+const FLUSH_LIMIT: Duration = Duration::from_secs(2);
 
 /// State shared by every local connection of a cache daemon.
 pub struct CacheState {
@@ -40,6 +44,9 @@ pub struct CacheState {
     signing_key: std::sync::Mutex<Option<Arc<crate::machines::signing::MachineKey>>>,
     started: Instant,
     open_connections: AtomicU64,
+    /// Requests admitted and not yet answered, which shutdown waits for (R10).
+    requests_in_flight: AtomicU64,
+    stopping: AtomicBool,
     shutdown: watch::Sender<bool>,
 }
 
@@ -81,7 +88,12 @@ impl CacheState {
     }
 
     fn request_shutdown(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
         self.shutdown.send_replace(true);
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
 
     async fn shutdown_requested(&self) {
@@ -93,6 +105,43 @@ impl CacheState {
         self.open_connections.fetch_add(1, Ordering::SeqCst);
         ConnectionGuard(Arc::clone(self))
     }
+
+    /// Reserves an in-flight slot before checking `stopping` with `SeqCst`
+    /// ordering so `drain_requests` never sees zero while a newly admitted
+    /// request is still starting.
+    pub(crate) fn admit_request(self: &Arc<Self>) -> Option<RequestGuard> {
+        let guard = self.track_request();
+        if self.stopping.load(Ordering::SeqCst) {
+            drop(guard);
+            return None;
+        }
+        Some(guard)
+    }
+
+    fn track_request(self: &Arc<Self>) -> RequestGuard {
+        self.requests_in_flight.fetch_add(1, Ordering::SeqCst);
+        RequestGuard(Arc::clone(self))
+    }
+
+    /// Waits until every request this cache admitted has its answer queued.
+    /// There is no limit: a forwarded land cut off part-way leaves its client
+    /// unable to tell whether the base moved (R10, #476).
+    async fn drain_requests(&self) {
+        let running = self.requests_in_flight.load(Ordering::SeqCst);
+        if running > 0 {
+            eprintln!("rosen-server: stopping once {running} running request(s) are answered");
+        }
+        while self.requests_in_flight.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn drain_connections(&self, limit: Duration) {
+        let deadline = Instant::now() + limit;
+        while self.open_connections.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 struct ConnectionGuard(Arc<CacheState>);
@@ -100,6 +149,16 @@ struct ConnectionGuard(Arc<CacheState>);
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.0.open_connections.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Counts one admitted request as in flight until its answer is queued, or the
+/// client connection closes.
+pub(crate) struct RequestGuard(Arc<CacheState>);
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.0.requests_in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -118,7 +177,7 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
         }
     });
     let _renewal = RenewalTask(renewal);
-    let mut listener = Listener::bind(&config.endpoint)?;
+    let listener = Listener::bind(&config.endpoint)?;
     // A crash may tear unsynced slice copies; clear them only after winning
     // the endpoint so a losing daemon cannot remove the winner's copies.
     crate::object_slices::clear(&config.slices_dir());
@@ -136,13 +195,25 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
         signing_key: std::sync::Mutex::new(None),
         started: Instant::now(),
         open_connections: AtomicU64::new(0),
+        requests_in_flight: AtomicU64::new(0),
+        stopping: AtomicBool::new(false),
         shutdown: watch::Sender::new(false),
     });
     let pool_worker = state.pool.start(config.endpoint.clone());
+    accept_loop(listener, Arc::clone(&state)).await;
+    // The listener is dropped when `accept_loop` returns, so new local clients
+    // are refused while already-admitted requests finish (R10).
+    pool_worker.abort();
+    state.drain_requests().await;
+    state.drain_connections(FLUSH_LIMIT).await;
+    Ok(())
+}
+
+async fn accept_loop(mut listener: Listener, state: Arc<CacheState>) {
     loop {
         let accepted = tokio::select! {
             accepted = listener.accept() => accepted,
-            _ = state.shutdown_requested() => break,
+            _ = state.shutdown_requested() => return,
         };
         match accepted {
             Ok(stream) => {
@@ -154,13 +225,6 @@ pub async fn serve(config: &ServerConfig, upstream: UpstreamConfig) -> io::Resul
             }
         }
     }
-    pool_worker.abort();
-    // Let queued answers, such as the one to `shutdown`, reach their clients.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while state.open_connections.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    Ok(())
 }
 
 struct RenewalTask(tokio::task::JoinHandle<()>);

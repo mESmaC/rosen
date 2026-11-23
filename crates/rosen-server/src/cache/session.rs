@@ -10,7 +10,7 @@ use super::fill;
 use super::partial::CompleteView;
 use super::read;
 use super::upstream::{self, error_response, Relay, UpstreamLink};
-use super::CacheState;
+use super::{CacheState, RequestGuard};
 use crate::connection::handshake;
 use crate::load_limits::{Charged, TransferLimits};
 use crate::network::UpstreamConfig;
@@ -22,7 +22,7 @@ use rosen_protocol::{
 };
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::io::ReadHalf;
+use tokio::io::{AsyncReadExt, ReadHalf};
 use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit};
 
 /// Frames queued for the local client, as the server bounds its own.
@@ -31,14 +31,20 @@ const OUTBOX_CAPACITY: usize = 16;
 /// Serves one local client until it disconnects, the daemon stops, or its
 /// event stream's upstream link is lost.
 pub async fn serve(stream: BoxStream, state: Arc<CacheState>) {
+    if state.is_shutting_down() {
+        return;
+    }
     let _open = state.track_connection();
     let (mut reader, mut writer) = tokio::io::split(stream);
     // The local transport is already limited to the OS user.
-    match handshake(&mut reader, &mut writer, &state.transfers, |_| async {
-        true
-    })
-    .await
-    {
+    let accepted = tokio::select! {
+        biased;
+        _ = state.shutdown_requested() => return,
+        accepted = handshake(&mut reader, &mut writer, &state.transfers, |_| async { true }) => {
+            accepted
+        }
+    };
+    match accepted {
         Ok(true) => {}
         Ok(false) => return,
         Err(err) => {
@@ -57,14 +63,39 @@ pub async fn serve(stream: BoxStream, state: Arc<CacheState>) {
         state,
         outbox,
     };
-    tokio::select! {
-        _ = session.read_frames(&mut reader) => {}
-        _ = &mut writer_task => return,
-    }
+    let exit = tokio::select! {
+        exit = session.read_frames(&mut reader) => exit,
+        _ = &mut writer_task => ReadExit::Closed,
+    };
     drop(session);
+    if exit == ReadExit::Closed {
+        writer_task.abort();
+        return;
+    }
     // The writer ends once every queued frame is written and every sender
-    // (in-flight requests and the upstream link's router) is gone.
-    let _ = writer_task.await;
+    // (in-flight requests and the upstream link's router) is gone, unless the
+    // local client disconnects first.
+    tokio::select! {
+        _ = &mut writer_task => {}
+        _ = wait_eof(&mut reader) => writer_task.abort(),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadExit {
+    /// Keep the writer open to flush queued and in-flight replies.
+    Drain,
+    /// The local client is already gone; drop pending upstream work at once.
+    Closed,
+}
+
+async fn wait_eof(reader: &mut ReadHalf<BoxStream>) {
+    let mut buf = [0u8; 64];
+    while let Ok(read) = reader.read(&mut buf).await {
+        if read == 0 {
+            return;
+        }
+    }
 }
 
 /// The connection's upstream link, made on first use and remade after a
@@ -130,24 +161,25 @@ struct Session {
 }
 
 impl Session {
-    async fn read_frames(&self, reader: &mut ReadHalf<BoxStream>) {
+    async fn read_frames(&self, reader: &mut ReadHalf<BoxStream>) -> ReadExit {
         let mut lost = self.links.lost.subscribe();
         loop {
             let read = tokio::select! {
+                biased;
+                _ = self.state.shutdown_requested() => return ReadExit::Drain,
+                _ = lost.wait_for(|lost| *lost) => return ReadExit::Drain,
                 read = self.state.transfers.read_body(reader) => read,
-                _ = self.state.shutdown_requested() => return,
-                _ = lost.wait_for(|lost| *lost) => return,
             };
             match read {
                 Ok(Some(body)) => {
                     if !self.handle(body).await {
-                        return;
+                        return ReadExit::Drain;
                     }
                 }
-                Ok(None) => return,
+                Ok(None) => return ReadExit::Closed,
                 Err(err) => {
                     eprintln!("rosen-server: dropping client after read error: {err}");
-                    return;
+                    return ReadExit::Closed;
                 }
             }
         }
@@ -157,50 +189,86 @@ impl Session {
     async fn handle(&self, body: Charged<Vec<u8>>) -> bool {
         match decode_body::<ClientFrame>(&body.value) {
             Ok(ClientFrame::Request { id, request }) => {
-                self.request(id, request, body).await;
-                true
-            }
-            Ok(ClientFrame::Subscribe { .. }) => {
-                let subscribed = match self.links.get().await {
-                    Ok(link) => link.subscribe(body).await,
-                    Err(_) => false,
+                let Some(in_flight) = self.state.admit_request() else {
+                    self.refuse_shutting_down(id).await;
+                    return false;
                 };
-                if !subscribed {
-                    // A subscribe has no answer, so closing is the only signal.
-                    self.links.mark_lost();
-                }
+                self.request(id, request, body, in_flight).await;
                 true
             }
+            Ok(ClientFrame::Subscribe { .. }) => self.handle_subscribe(body).await,
             Ok(ClientFrame::Hello { .. }) => false,
             // A request from a newer client goes to the server, which knows
             // whether it can answer it.
-            Err(_) => match decode_body::<Value>(&body.value) {
-                Ok(frame) if frame["type"] == "request" => match frame["id"].as_u64() {
-                    Some(id) => {
-                        self.forward(
-                            id,
-                            Charged {
-                                value: frame,
-                                permit: body.permit,
-                            },
-                        )
-                        .await;
-                        true
-                    }
-                    None => false,
-                },
-                _ => false,
-            },
+            Err(_) => self.handle_unknown(body).await,
         }
     }
 
-    async fn request(&self, id: u64, request: Request, body: Charged<Vec<u8>>) {
+    async fn handle_subscribe(&self, body: Charged<Vec<u8>>) -> bool {
+        if self.state.is_shutting_down() {
+            return false;
+        }
+        let link = tokio::select! {
+            biased;
+            _ = self.state.shutdown_requested() => return false,
+            link = self.links.get() => link,
+        };
+        let subscribed = match link {
+            Ok(link) => link.subscribe(body).await,
+            Err(_) => false,
+        };
+        if !subscribed {
+            // A subscribe has no answer, so closing is the only signal.
+            self.links.mark_lost();
+        }
+        true
+    }
+
+    async fn handle_unknown(&self, body: Charged<Vec<u8>>) -> bool {
+        let Ok(frame) = decode_body::<Value>(&body.value) else {
+            return false;
+        };
+        if frame["type"] != "request" {
+            return false;
+        }
+        let Some(id) = frame["id"].as_u64() else {
+            return false;
+        };
+        let Some(in_flight) = self.state.admit_request() else {
+            self.refuse_shutting_down(id).await;
+            return false;
+        };
+        self.forward(
+            id,
+            Charged {
+                value: frame,
+                permit: body.permit,
+            },
+            in_flight,
+        )
+        .await;
+        true
+    }
+
+    async fn refuse_shutting_down(&self, id: u64) {
+        let error = ErrorBody::new(ErrorCode::ShuttingDown, "the server is shutting down");
+        self.reply(id, Outcome::Error(error)).await;
+    }
+
+    async fn request(
+        &self,
+        id: u64,
+        request: Request,
+        body: Charged<Vec<u8>>,
+        in_flight: RequestGuard,
+    ) {
         match request {
             Request::PoolSize { size } => {
                 self.reply(id, self.state.pool.set_size(size).await).await;
+                drop(in_flight);
             }
             Request::PoolTake { tree, dest } => {
-                self.spawn(id, body.permit, move |state, _| async move {
+                self.spawn(id, body.permit, in_flight, move |state, _| async move {
                     match state.pool.take(tree, dest).await {
                         Outcome::Ok(response) => Ok(response),
                         Outcome::Error(error) => Err(error),
@@ -208,34 +276,66 @@ impl Session {
                 })
                 .await
             }
-            Request::Ping => self.reply(id, Outcome::Ok(Response::Pong)).await,
+            Request::Ping => {
+                self.reply(id, Outcome::Ok(Response::Pong)).await;
+                drop(in_flight);
+            }
             Request::Status => {
                 let status = Response::Status(Box::new(self.state.status()));
                 self.reply(id, Outcome::Ok(status)).await;
+                drop(in_flight);
             }
             Request::Shutdown => {
                 // Stops this machine's daemon, never the project's server.
                 self.state.request_shutdown();
                 self.reply(id, Outcome::Ok(Response::ShuttingDown)).await;
+                drop(in_flight);
             }
+            Request::GetObjects(_) | Request::GetObjectChunk(_) | Request::EnsureObjects(_) => {
+                self.spawn_object_read(id, request, body.permit, in_flight)
+                    .await;
+            }
+            Request::PutObjects(upload) => match self.keep_uploaded(upload, body).await {
+                Ok(body) => self.forward_body(id, body, in_flight).await,
+                Err(error) => {
+                    self.reply(id, Outcome::Error(error)).await;
+                    drop(in_flight);
+                }
+            },
+            Request::ReceiptSubmit(submit) => {
+                self.forward_signed(id, submit, body.permit, in_flight)
+                    .await
+            }
+            _ => self.forward_body(id, body, in_flight).await,
+        }
+    }
+
+    async fn spawn_object_read(
+        &self,
+        id: u64,
+        request: Request,
+        permit: Option<OwnedSemaphorePermit>,
+        in_flight: RequestGuard,
+    ) {
+        match request {
             Request::GetObjects(query) => {
-                self.spawn(id, body.permit, move |state, links| async move {
+                self.spawn(id, permit, in_flight, move |state, links| async move {
                     fill::get_objects(&state.store, &state.partial, &links, query)
                         .await
                         .map(Response::Objects)
                 })
-                .await
+                .await;
             }
             Request::GetObjectChunk(query) => {
-                self.spawn(id, body.permit, move |state, links| async move {
+                self.spawn(id, permit, in_flight, move |state, links| async move {
                     read::get_chunk(&state, &links, query)
                         .await
                         .map(Response::ObjectChunk)
                 })
-                .await
+                .await;
             }
             Request::EnsureObjects(ensure) => {
-                self.spawn(id, body.permit, move |state, links| async move {
+                self.spawn(id, permit, in_flight, move |state, links| async move {
                     fill::ensure(
                         &state.store,
                         &state.partial,
@@ -246,14 +346,9 @@ impl Session {
                     .await
                     .map(|fetched| Response::ObjectsLocal(rosen_protocol::ObjectsLocal { fetched }))
                 })
-                .await
+                .await;
             }
-            Request::PutObjects(upload) => match self.keep_uploaded(upload, body).await {
-                Ok(body) => self.forward_body(id, body).await,
-                Err(error) => self.reply(id, Outcome::Error(error)).await,
-            },
-            Request::ReceiptSubmit(submit) => self.forward_signed(id, submit, body.permit).await,
-            _ => self.forward_body(id, body).await,
+            _ => unreachable!("spawn_object_read only handles object reads"),
         }
     }
 
@@ -265,18 +360,21 @@ impl Session {
         id: u64,
         mut submit: SubmitReceipt,
         permit: Option<OwnedSemaphorePermit>,
+        in_flight: RequestGuard,
     ) {
         if let Err(error) = self.sign_receipt(&mut submit).await {
             let _ = self.outbox.send(error_response(id, error).into()).await;
+            drop(in_flight);
             return;
         }
         let request = Request::ReceiptSubmit(submit);
         let frame = ClientFrame::Request { id, request };
         match serde_json::to_value(&frame) {
-            Ok(value) => self.forward(id, Charged { value, permit }).await,
+            Ok(value) => self.forward(id, Charged { value, permit }, in_flight).await,
             Err(err) => {
                 let error = ErrorBody::new(ErrorCode::Internal, err.to_string());
                 let _ = self.outbox.send(error_response(id, error).into()).await;
+                drop(in_flight);
             }
         }
     }
@@ -328,19 +426,27 @@ impl Session {
 
     /// Runs a locally answered request on its own task, so a long fill never
     /// delays the client's other requests.
-    async fn spawn<F, Fut>(&self, id: u64, input: Option<OwnedSemaphorePermit>, work: F)
-    where
+    async fn spawn<F, Fut>(
+        &self,
+        id: u64,
+        input: Option<OwnedSemaphorePermit>,
+        in_flight: RequestGuard,
+        work: F,
+    ) where
         F: FnOnce(Arc<CacheState>, Arc<LinkSlot>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<Response, ErrorBody>> + Send + 'static,
     {
-        let permit = self
-            .state
-            .transfers
-            .large_requests
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("transfer limits stay open");
+        let permit = tokio::select! {
+            biased;
+            permit = self.state.transfers.large_requests.clone().acquire_owned() => {
+                permit.expect("transfer limits stay open")
+            }
+            _ = self.state.shutdown_requested() => {
+                self.refuse_shutting_down(id).await;
+                drop(in_flight);
+                return;
+            }
+        };
         let task = work(Arc::clone(&self.state), Arc::clone(&self.links));
         let outbox = self.outbox.clone();
         tokio::spawn(async move {
@@ -355,6 +461,7 @@ impl Session {
                     permit: Some(permit),
                 })
                 .await;
+            drop(in_flight);
         });
     }
 
@@ -382,28 +489,32 @@ impl Session {
         .map_err(|error| ErrorBody::new(ErrorCode::Internal, error.to_string()))
     }
 
-    async fn forward_body(&self, id: u64, body: Charged<Vec<u8>>) {
+    async fn forward_body(&self, id: u64, body: Charged<Vec<u8>>, in_flight: RequestGuard) {
         let Charged { value, permit } = body;
         let frame = decode_body::<Value>(&value);
         drop(value);
         match frame {
-            Ok(value) => self.forward(id, Charged { value, permit }).await,
+            Ok(value) => self.forward(id, Charged { value, permit }, in_flight).await,
             Err(err) => {
                 let error = ErrorBody::new(ErrorCode::BadFrame, err.to_string());
                 let _ = self.outbox.send(error_response(id, error).into()).await;
+                drop(in_flight);
             }
         }
     }
 
     /// Forwards in the read loop, not on a task, so frames reach the server
     /// in the order the client sent them.
-    async fn forward(&self, id: u64, frame: Charged<Value>) {
-        let error = match self.links.get().await {
-            Ok(link) if link.forward(id, frame).await => return,
-            Ok(_) => upstream::unavailable(),
-            Err(error) => error,
+    async fn forward(&self, id: u64, frame: Charged<Value>, in_flight: RequestGuard) {
+        let (error, in_flight) = match self.links.get().await {
+            Ok(link) => match link.forward(id, frame, in_flight).await {
+                Ok(()) => return,
+                Err(in_flight) => (upstream::unavailable(), in_flight),
+            },
+            Err(error) => (error, in_flight),
         };
         let _ = self.outbox.send(error_response(id, error).into()).await;
+        drop(in_flight);
     }
 
     async fn reply(&self, id: u64, outcome: Outcome) {

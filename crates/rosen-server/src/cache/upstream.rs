@@ -5,6 +5,7 @@
 //! event stream is the server's stream for that client. Requests the cache
 //! makes itself (object fetches) share the link under their own IDs.
 
+use super::RequestGuard;
 use crate::load_limits::{Charged, TransferLimits, TRANSFER_TIMEOUT};
 use crate::network::{tls, UpstreamConfig};
 use crate::SERVER_NAME;
@@ -19,7 +20,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinHandle;
 
 /// Encoded frame bodies bound for the local client.
 pub type Relay = mpsc::Sender<Charged<Vec<u8>>>;
@@ -31,8 +31,9 @@ const OUTBOX_CAPACITY: usize = 16;
 enum Waiter {
     /// The cache itself.
     Internal(oneshot::Sender<Outcome>),
-    /// The local client, under the ID it chose.
-    Relay(u64),
+    /// The local client, under the ID it chose, keeping shutdown waiting until
+    /// its reply is queued (R10).
+    Relay(u64, RequestGuard),
 }
 
 /// `None` once the link has closed, so no new waiter can be stranded.
@@ -45,7 +46,9 @@ pub struct UpstreamLink {
     next_id: AtomicU64,
     subscribed: Arc<AtomicBool>,
     closed: watch::Receiver<bool>,
-    task: JoinHandle<()>,
+    /// Signalled on drop so the router keeps reading until every forwarded
+    /// request is answered, then closes without dropping replies (R10).
+    drain: watch::Sender<bool>,
 }
 
 impl UpstreamLink {
@@ -76,6 +79,7 @@ impl UpstreamLink {
         let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
         let subscribed = Arc::new(AtomicBool::new(false));
         let (closed_tx, closed) = watch::channel(false);
+        let (drain, drain_rx) = watch::channel(false);
         let (frames, outbox) = mpsc::channel(OUTBOX_CAPACITY);
         let route = Router {
             pending: Arc::clone(&pending),
@@ -85,13 +89,7 @@ impl UpstreamLink {
             lost,
             closed: closed_tx,
         };
-        let task = tokio::spawn(async move {
-            tokio::select! {
-                _ = write_bodies(writer, outbox) => {}
-                _ = route.read_bodies(reader) => {}
-            }
-            route.close().await;
-        });
+        tokio::spawn(run_link(reader, writer, outbox, route, drain_rx));
         Ok(Self {
             frames,
             pending,
@@ -99,7 +97,7 @@ impl UpstreamLink {
             next_id: AtomicU64::new(1),
             subscribed,
             closed,
-            task,
+            drain,
         })
     }
 
@@ -110,9 +108,8 @@ impl UpstreamLink {
     /// Sends a request on the cache's own behalf and waits for its answer.
     pub async fn request(&self, request: Request) -> Outcome {
         let (sender, answer) = oneshot::channel();
-        let id = match self.register(Waiter::Internal(sender)).await {
-            Some(id) => id,
-            None => return unavailable_outcome(),
+        let Ok(id) = self.register(Waiter::Internal(sender)).await else {
+            return unavailable_outcome();
         };
         let frame = ClientFrame::Request { id, request };
         let body = serde_json::to_vec(&frame).expect("a request always serialises");
@@ -123,11 +120,18 @@ impl UpstreamLink {
     }
 
     /// Forwards a client's request frame as it arrived, under a link ID; the
-    /// answer goes back to the client under `client_id`. Returns false when
-    /// the link is closed and the client has not been answered.
-    pub async fn forward(&self, client_id: u64, mut frame: Charged<Value>) -> bool {
-        let Some(id) = self.register(Waiter::Relay(client_id)).await else {
-            return false;
+    /// answer goes back to the client under `client_id`. Returns `Err(in_flight)`
+    /// when the link is closed and the client has not been answered.
+    pub async fn forward(
+        &self,
+        client_id: u64,
+        mut frame: Charged<Value>,
+        in_flight: RequestGuard,
+    ) -> Result<(), RequestGuard> {
+        let id = match self.register(Waiter::Relay(client_id, in_flight)).await {
+            Ok(id) => id,
+            Err(Waiter::Relay(_, in_flight)) => return Err(in_flight),
+            Err(Waiter::Internal(_)) => unreachable!("registered a relay waiter"),
         };
         frame.value["id"] = Value::from(id);
         let value = serde_json::to_vec(&frame.value).expect("a JSON value always serialises");
@@ -140,14 +144,16 @@ impl UpstreamLink {
             .await
             .is_ok()
         {
-            return true;
+            return Ok(());
         }
         // If the closing router already took the waiter, it answered the client.
-        let still_waiting = lock(&self.pending)
+        let removed = lock(&self.pending)
             .as_mut()
-            .and_then(|waiting| waiting.remove(&id))
-            .is_some();
-        !still_waiting
+            .and_then(|waiting| waiting.remove(&id));
+        match removed {
+            Some((Waiter::Relay(_, in_flight), _)) => Err(in_flight),
+            _ => Ok(()),
+        }
     }
 
     /// Forwards the client's subscribe frame; events then flow to the relay.
@@ -156,18 +162,53 @@ impl UpstreamLink {
         self.frames.send(body).await.is_ok()
     }
 
-    async fn register(&self, waiter: Waiter) -> Option<u64> {
-        let slot = self.slots.clone().acquire_owned().await.ok()?;
+    async fn register(&self, waiter: Waiter) -> Result<u64, Waiter> {
+        let Ok(slot) = self.slots.clone().acquire_owned().await else {
+            return Err(waiter);
+        };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        lock(&self.pending).as_mut()?.insert(id, (waiter, slot));
-        Some(id)
+        let mut pending = lock(&self.pending);
+        let Some(waiting) = pending.as_mut() else {
+            return Err(waiter);
+        };
+        waiting.insert(id, (waiter, slot));
+        Ok(id)
     }
 }
 
 impl Drop for UpstreamLink {
     fn drop(&mut self) {
-        self.task.abort();
+        // Tell the router no new requests will be registered; it stays open
+        // until every pending reply arrives or the local client closes.
+        self.drain.send_replace(true);
     }
+}
+
+async fn run_link(
+    reader: ReadHalf<BoxStream>,
+    writer: WriteHalf<BoxStream>,
+    outbox: mpsc::Receiver<Charged<Vec<u8>>>,
+    route: Router,
+    drain: watch::Receiver<bool>,
+) {
+    {
+        let mut write_done = false;
+        let mut write = std::pin::pin!(write_upstream(writer, outbox));
+        let mut read = std::pin::pin!(route.read_bodies(reader, drain));
+        loop {
+            tokio::select! {
+                ok = &mut write, if !write_done => {
+                    if !ok {
+                        break;
+                    }
+                    // All queued frames were flushed; keep reading replies.
+                    write_done = true;
+                }
+                _ = &mut read => break,
+            }
+        }
+    }
+    route.close().await;
 }
 
 async fn hello(
@@ -196,16 +237,26 @@ async fn hello(
 }
 
 pub(super) async fn write_bodies(
+    writer: WriteHalf<BoxStream>,
+    outbox: mpsc::Receiver<Charged<Vec<u8>>>,
+) {
+    let _ = write_upstream(writer, outbox).await;
+}
+
+/// Writes queued frames to the peer. Returns true when `outbox` closed after
+/// every queued frame was sent, and false on a write error or timeout.
+async fn write_upstream(
     mut writer: WriteHalf<BoxStream>,
     mut outbox: mpsc::Receiver<Charged<Vec<u8>>>,
-) {
+) -> bool {
     while let Some(body) = outbox.recv().await {
         let written =
             tokio::time::timeout(TRANSFER_TIMEOUT, write_frame_body(&mut writer, &body.value));
         if !matches!(written.await, Ok(Ok(()))) {
-            return;
+            return false;
         }
     }
+    true
 }
 
 /// Routes the server's frames: answers to their waiters, events to the client.
@@ -219,9 +270,34 @@ struct Router {
 }
 
 impl Router {
-    async fn read_bodies(&self, mut reader: ReadHalf<BoxStream>) {
-        while let Ok(Some(body)) = self.replies.read_body(&mut reader).await {
-            self.route(body).await;
+    fn is_idle(&self) -> bool {
+        lock(&self.pending).as_ref().is_none_or(HashMap::is_empty)
+    }
+
+    async fn read_bodies(&self, mut reader: ReadHalf<BoxStream>, mut drain: watch::Receiver<bool>) {
+        loop {
+            let draining = *drain.borrow_and_update();
+            if draining && self.is_idle() {
+                return;
+            }
+            let read = tokio::select! {
+                biased;
+                _ = self.relay.closed() => return,
+                changed = drain.changed(), if !draining => {
+                    if (changed.is_err() || *drain.borrow_and_update()) && self.is_idle() {
+                        return;
+                    }
+                    continue;
+                }
+                read = self.replies.read_body(&mut reader) => read,
+            };
+            match read {
+                Ok(Some(body)) => {
+                    let draining = *drain.borrow();
+                    self.route(body, draining).await;
+                }
+                Ok(None) | Err(_) => return,
+            }
         }
     }
 
@@ -229,11 +305,12 @@ impl Router {
         let stranded = lock(&self.pending).take().unwrap_or_default();
         for (waiter, _) in stranded.into_values() {
             // Internal waiters wake when their sender drops here.
-            if let Waiter::Relay(client_id) = waiter {
+            if let Waiter::Relay(client_id, in_flight) = waiter {
                 let _ = self
                     .relay
                     .send(unavailable_response(client_id).into())
                     .await;
+                drop(in_flight);
             }
         }
         self.closed.send_replace(true);
@@ -242,7 +319,7 @@ impl Router {
         }
     }
 
-    async fn route(&self, body: Charged<Vec<u8>>) {
+    async fn route(&self, body: Charged<Vec<u8>>, draining: bool) {
         let Ok(mut frame) = decode_body::<Value>(&body.value) else {
             return;
         };
@@ -258,7 +335,7 @@ impl Router {
                     Some((Waiter::Internal(sender), _slot)) => {
                         let _ = sender.send(internal_outcome(&body.value));
                     }
-                    Some((Waiter::Relay(client_id), _slot)) => {
+                    Some((Waiter::Relay(client_id, in_flight), _slot)) => {
                         frame["id"] = Value::from(client_id);
                         let value = serde_json::to_vec(&frame).expect("JSON always serialises");
                         let _ = self
@@ -268,12 +345,15 @@ impl Router {
                                 permit: body.permit,
                             })
                             .await;
+                        drop(in_flight);
                     }
                     None => {}
                 }
             }
-            // Events, and frame types newer than this build, pass through.
+            // Events, and frame types newer than this build, pass through
+            // until the link is draining for shutdown.
             Some("welcome") | Some("reject") => {}
+            _ if draining => {}
             _ => {
                 let _ = self.relay.send(body).await;
             }
