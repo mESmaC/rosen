@@ -567,6 +567,41 @@ async fn copied_data_dir_sends_nothing_to_collapse_and_runs_no_relay() {
         panic!()
     };
     assert_eq!(changes.len(), 1);
+    assert_same_path_copy_is_not_owner(&root, &paths).await;
+}
+
+/// Risk (R1, #486): moving an independent copy onto the original canonical
+/// path must still fail the mirror-owner gate and send nothing to Collapse.
+async fn assert_same_path_copy_is_not_owner(root: &str, paths: &Arc<Mutex<Vec<String>>>) {
+    let temp = tempfile::tempdir().unwrap();
+    let orig_dir = temp.path().join("project");
+    let staged_copy = temp.path().join("copy");
+    let saved_orig = temp.path().join("saved");
+    std::fs::create_dir(&orig_dir).unwrap();
+    std::fs::create_dir(&staged_copy).unwrap();
+    drop(copy_owner_project(&orig_dir, &staged_copy, root).await);
+    std::fs::rename(&orig_dir, &saved_orig).unwrap();
+    std::fs::rename(&staged_copy, &orig_dir).unwrap();
+
+    let state = ServerState::new(ServerConfig {
+        data_dir: orig_dir,
+        endpoint: Endpoint::new("state-push-same-path-copy"),
+        warm_pool_dir: None,
+    });
+    let status = status_of(&state).await;
+    assert_eq!(status.mirror_owner, Some(false));
+    let collapse = status.collapse.expect("collapse health reported");
+    assert_eq!(collapse.state_feed.state, FeedState::NotOwner);
+    assert_eq!(collapse.ledger_push.state, FeedState::NotOwner);
+    assert_eq!(collapse.relay.state, FeedState::NotOwner);
+    let mut session = rosen_server::ledger_push::Session::default();
+    assert_eq!(
+        rosen_server::ledger_push::push_once(&state, &mut session)
+            .await
+            .unwrap(),
+        rosen_server::ledger_push::Pushed::NotOwner
+    );
+    assert!(paths.lock().unwrap().is_empty());
 }
 
 async fn status_of(state: &Arc<ServerState>) -> ServerStatus {

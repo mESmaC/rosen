@@ -84,6 +84,8 @@ pub mod run_tree;
 #[allow(unsafe_code)]
 pub mod security;
 
+pub mod file_id;
+
 pub mod owner_only;
 
 pub mod memory;

@@ -57,7 +57,7 @@
   Only the project's authoritative server pushes its mirror.
   A server pushes only when it is marked as the mirror owner; Velocity marks the one it starts for each project.
   `rosen-server --mirror-owner` sets the mark, `--not-mirror-owner` removes it, and a daemon a client starts is marked when `ROSEN_MIRROR_OWNER` names its data directory.
-  The mark is kept in the data directory with that directory's own path, so it survives restarts and a copied data directory is not an owner.
+  The mark is kept in the data directory bound to that directory's path, filesystem identity and machine identity, so it survives restarts and a copied data directory is not an owner even at the same path.
   Any other server, including a second machine's server for the same project or one an agent starts for a test, keeps the mirror setting but never pushes.
   The same mirror-owner mark gates the Collapse state feed (R9), ledger push (R13) and action relay (R14), so a server that is not the owner sends nothing to Collapse and runs no relayed action.
   It publishes one `mirror` event with status `not_owner` per run when its base is ahead of the mirror, and `rosen server status` says whether the server pushes and reports `not the mirror owner; Collapse state not sent` when it is not the owner.

@@ -23,7 +23,8 @@ tempfile.workspace = true
 # creation, installed and available memory (including system commit on
 # Windows), and pointing
 # standard error at a log file (with dup2 on Unix), Unix directory-relative
-# removal, atomic no-replace publication, and signal-zero process liveness.
+# removal, atomic no-replace publication, signal-zero process liveness,
+# file and directory identity, and host UUID on macOS.
 # All consumers continue to inherit the workspace's unsafe_code = forbid policy.
 [lints.rust]
 unsafe_code = "deny"
