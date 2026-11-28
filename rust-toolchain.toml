@@ -6,6 +6,6 @@
 # Move the pin in its own change, which fixes the new version's lints in the
 # same land. Dependabot proposes the bump (.github/dependabot.yml).
 [toolchain]
-channel = "1.100.0"
+channel = "1.100.1"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
